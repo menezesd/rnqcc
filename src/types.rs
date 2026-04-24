@@ -795,8 +795,12 @@ pub struct TackyProgram {
     pub top_level: Vec<TackyTopLevel>,
     pub global_vars: std::collections::HashSet<String>,
     pub symbol_types: std::collections::HashMap<String, CType>,
-    /// Array storage sizes: maps "__array_storage_X" → total bytes
+    /// Array/struct storage sizes
     pub array_sizes: std::collections::HashMap<String, usize>,
+    /// Struct definitions for ABI classification
+    pub struct_defs: std::collections::HashMap<String, StructDef>,
+    /// Map from variable name to struct tag
+    pub var_struct_tags: std::collections::HashMap<String, String>,
 }
 
 // ============================================================

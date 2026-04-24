@@ -2462,9 +2462,13 @@ impl TackyGen {
                                 if mem.member_full_type.is_array() {
                                     let scalar_t = { let mut t = &mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
                                     let elem_sizes = Self::compute_elem_sizes(&mem.member_full_type);
+                                    let before_len: usize = init_values.iter().map(|v| Self::static_init_size(v)).sum();
                                     Self::flatten_static_init(elem, scalar_t, &elem_sizes, &mut init_values);
-                                    // Pad to member size
-                                    let written: usize = init_values.iter().map(|v| Self::static_init_size(v)).sum::<usize>() - (mem.offset + (bytes_written.max(mem.offset) - mem.offset));
+                                    let after_len: usize = init_values.iter().map(|v| Self::static_init_size(v)).sum();
+                                    let array_bytes = after_len - before_len;
+                                    if array_bytes < mem.size {
+                                        init_values.push(StaticInit::ZeroInit(mem.size - array_bytes));
+                                    }
                                 } else if let FullType::Struct(ref inner_tag) = mem.member_full_type {
                                     // Nested struct compound init in static context
                                     let inner_def = self.struct_defs.get(inner_tag).cloned().unwrap();
@@ -3165,9 +3169,15 @@ pub fn generate(program: Program) -> TackyProgram {
                                     init_values.push(StaticInit::ZeroInit(mem.offset - bytes_written));
                                 }
                                 if mem.member_full_type.is_array() {
+                                    let before_len: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
                                     let scalar_t = { let mut t = &mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
                                     let elem_sizes = TackyGen::compute_elem_sizes(&mem.member_full_type);
                                     TackyGen::flatten_static_init(elem, scalar_t, &elem_sizes, &mut init_values);
+                                    let after_len: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
+                                    let array_bytes_written = after_len - before_len;
+                                    if array_bytes_written < mem.size {
+                                        init_values.push(StaticInit::ZeroInit(mem.size - array_bytes_written));
+                                    }
                                 } else if mem.member_full_type.is_struct() {
                                     // Nested struct init — flatten recursively
                                     // TODO: proper nested struct static init

@@ -639,31 +639,9 @@ impl TackyGen {
                         let struct_size = self.struct_defs.get(tag).map(|d| d.size).unwrap_or(0);
                         let (rhs, rhs_type) = self.emit_exp(*right);
                         let src_addr = if rhs_type == CType::Pointer {
-                            // RHS is a pointer to struct data (from Dot/Arrow)
-                            rhs
-                        } else if rhs_type == CType::Struct {
-                            // RHS is a struct var or deref result
-                            // Check if it's a deref result (which holds a pointer, not struct data)
-                            let rhs_ft = self.val_full_type(&rhs);
-                            if let TackyVal::Var(ref rhs_name) = rhs {
-                                if self.array_sizes.contains_key(rhs_name) {
-                                    // It's a proper struct variable — take its address
-                                    let addr = self.fresh_tmp(CType::Pointer);
-                                    self.emit(TackyInstr::GetAddress { src: rhs, dst: addr.clone() });
-                                    addr
-                                } else {
-                                    // It's a deref temp — the value IS the address
-                                    rhs
-                                }
-                            } else {
-                                let addr = self.fresh_tmp(CType::Pointer);
-                                self.emit(TackyInstr::GetAddress { src: rhs, dst: addr.clone() });
-                                addr
-                            }
+                            rhs // Already a pointer (from Dot/Arrow)
                         } else {
-                            let addr = self.fresh_tmp(CType::Pointer);
-                            self.emit(TackyInstr::GetAddress { src: rhs, dst: addr.clone() });
-                            addr
+                            self.get_struct_addr(rhs)
                         };
                         self.emit_struct_copy_to(src_addr, lhs_name, struct_size);
                         return (TackyVal::Var(lhs_name.clone()), CType::Struct);
@@ -1487,6 +1465,20 @@ impl TackyGen {
             self.emit(TackyInstr::Load { src_ptr: mem_ptr, dst: result.clone() });
             (result, mem_type)
         }
+    }
+
+    /// Get the address of a struct value, handling deref temps correctly
+    fn get_struct_addr(&mut self, val: TackyVal) -> TackyVal {
+        if let TackyVal::Var(ref n) = val {
+            if self.array_sizes.contains_key(n) {
+                // Proper struct variable — take its address
+                let a = self.fresh_tmp(CType::Pointer);
+                self.emit(TackyInstr::GetAddress { src: val, dst: a.clone() });
+                return a;
+            }
+        }
+        // Deref temp or pointer — use directly
+        val
     }
 
     /// Emit a word-by-word struct copy from src address to dst name

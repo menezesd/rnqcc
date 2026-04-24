@@ -1093,12 +1093,48 @@ impl TackyGen {
                     result
                 } else {
                     let (val, _) = self.emit_exp((**inner).clone());
-                    let addr = self.fresh_tmp(CType::Pointer);
-                    self.emit(TackyInstr::GetAddress { src: val, dst: addr.clone() });
-                    addr
+                    let val_ft = self.val_full_type(&val);
+                    match &val_ft {
+                        FullType::Struct(_) => {
+                            let addr = self.fresh_tmp(CType::Pointer);
+                            self.emit(TackyInstr::GetAddress { src: val, dst: addr.clone() });
+                            addr
+                        }
+                        FullType::Pointer(_) => val,
+                        _ => {
+                            let addr = self.fresh_tmp(CType::Pointer);
+                            self.emit(TackyInstr::GetAddress { src: val, dst: addr.clone() });
+                            addr
+                        }
+                    }
                 };
-                // Get the struct tag from the inner expression's type
-                let tag = self.dot_inner_tag(inner);
+                // Get the struct tag — try dot_inner_tag first, fall back to evaluating
+                let tag = match self.try_dot_inner_tag(inner) {
+                    Some(t) => t,
+                    None => {
+                        // Evaluate inner expression to get its type
+                        // (The expression was already evaluated above for base_addr,
+                        //  but we need the tag. Look at the base_addr's FullType.)
+                        // This is a fallback — if base_addr came from eval, check its ft
+                        let base_ft = self.val_full_type(&base_addr);
+                        match &base_ft {
+                            FullType::Pointer(inner) => match inner.as_ref() {
+                                FullType::Struct(t) => t.clone(),
+                                _ => panic!("emit_dot_address: cannot determine struct tag for {:?}", inner),
+                            },
+                            FullType::Struct(t) => t.clone(),
+                            _ => {
+                                // Last resort: find any struct that has this member
+                                for (tag, def) in &self.struct_defs {
+                                    if def.find_member(member).is_some() {
+                                        return tag.clone();
+                                    }
+                                }
+                                panic!("emit_dot_address: cannot determine struct tag, ft={:?}", base_ft)
+                            }
+                        }
+                    }
+                };
                 let def = self.struct_defs.get(&tag).cloned().unwrap();
                 let mem = def.find_member(member).unwrap();
                 let result = self.fresh_tmp(CType::Pointer);
@@ -1144,6 +1180,38 @@ impl TackyGen {
         }
     }
 
+    fn try_dot_inner_tag(&self, exp: &Exp) -> Option<String> {
+        match exp {
+            Exp::Var(n) => {
+                let ft = self.get_full_type(n);
+                match ft {
+                    FullType::Struct(t) => Some(t),
+                    FullType::Pointer(inner) => match *inner { FullType::Struct(t) => Some(t), _ => None },
+                    _ => None,
+                }
+            }
+            Exp::Dot(inner, member) => {
+                let parent_tag = self.try_dot_inner_tag(inner)?;
+                let def = self.struct_defs.get(&parent_tag)?;
+                let mem = def.find_member(member)?;
+                match &mem.member_full_type { FullType::Struct(t) => Some(t.clone()), _ => None }
+            }
+            Exp::Arrow(inner, member) => {
+                if let Exp::Var(n) = inner.as_ref() {
+                    let ft = self.get_full_type(n);
+                    if let FullType::Pointer(inner_ft) = ft {
+                        if let FullType::Struct(t) = inner_ft.as_ref() {
+                            let def = self.struct_defs.get(t)?;
+                            let mem = def.find_member(member)?;
+                            match &mem.member_full_type { FullType::Struct(t) => Some(t.clone()), _ => None }
+                        } else { None }
+                    } else { None }
+                } else { None }
+            }
+            _ => None,
+        }
+    }
+
     fn dot_inner_tag(&self, exp: &Exp) -> String {
         match exp {
             Exp::Var(n) => {
@@ -1171,6 +1239,63 @@ impl TackyGen {
                         } else { panic!("") }
                     } else { panic!("") }
                 } else { panic!("") }
+            }
+            Exp::Subscript(arr, _) => {
+                // arr[i].member — arr should be pointer to struct
+                if let Exp::Var(n) = arr.as_ref() {
+                    let ft = self.get_full_type(n);
+                    match &ft {
+                        FullType::Pointer(inner) | FullType::Array { elem: inner, .. } => {
+                            match inner.as_ref() {
+                                FullType::Struct(t) => return t.clone(),
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                // Try evaluating the subscript's inner expression
+                // For Arrow(...)[i], recursively find the struct tag
+                if let Exp::Arrow(inner, mem) = arr.as_ref() {
+                    if let Exp::Var(n) = inner.as_ref() {
+                        let ft = self.get_full_type(n);
+                        if let FullType::Pointer(inner_ft) = &ft {
+                            if let FullType::Struct(t) = inner_ft.as_ref() {
+                                let def = self.struct_defs.get(t).unwrap();
+                                if let Some(m) = def.find_member(mem) {
+                                    // The subscript element type
+                                    match &m.member_full_type {
+                                        FullType::Array { elem, .. } => {
+                                            match elem.as_ref() {
+                                                FullType::Struct(t) => return t.clone(),
+                                                _ => {}
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // General fallback: try to find any struct that matches
+                for (tag, def) in &self.struct_defs {
+                    // Heuristic: find a struct that contains the member we're looking for
+                    // This is set by the caller context
+                }
+                panic!("dot_inner_tag: cannot determine struct for subscript: {:?}", exp)
+            }
+            Exp::Unary(UnaryOp::Deref, inner) => {
+                // (*ptr).member
+                if let Exp::Var(n) = inner.as_ref() {
+                    let ft = self.get_full_type(n);
+                    if let FullType::Pointer(inner_ft) = &ft {
+                        if let FullType::Struct(t) = inner_ft.as_ref() {
+                            return t.clone();
+                        }
+                    }
+                }
+                panic!("dot_inner_tag: cannot determine struct for deref: {:?}", exp)
             }
             other => panic!("dot_inner_tag on non-struct expression: {:?}", other),
         }

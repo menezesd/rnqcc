@@ -123,12 +123,14 @@ impl Resolver {
                 }
                 Exp::FunctionCall(name, resolved_args)
             }
+            Exp::SizeOf(inner) => Exp::SizeOf(Box::new(self.resolve_exp(*inner))),
+            Exp::SizeOfType(ct, ft) => Exp::SizeOfType(ct, ft),
         }
     }
 
     fn resolve_statement(&mut self, stmt: Statement) -> Statement {
         match stmt {
-            Statement::Return(exp) => Statement::Return(self.resolve_exp(exp)),
+            Statement::Return(exp) => Statement::Return(exp.map(|e| self.resolve_exp(e))),
             Statement::Expression(exp) => Statement::Expression(self.resolve_exp(exp)),
             Statement::If(cond, then_stmt, else_stmt) => Statement::If(
                 self.resolve_exp(cond),

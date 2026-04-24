@@ -146,6 +146,100 @@ impl TackyGen {
         self.instructions.push(instr);
     }
 
+    /// Get the byte size of an expression's type (for sizeof) without evaluating it
+    fn sizeof_exp(&self, exp: &Exp) -> usize {
+        match exp {
+            Exp::Constant(_) => 4, // int
+            Exp::LongConstant(_) => 8,
+            Exp::UIntConstant(_) => 4,
+            Exp::ULongConstant(_) => 8,
+            Exp::DoubleConstant(_) => 8,
+            Exp::StringLiteral(s) => s.len() + 1, // char array including null
+            Exp::Var(name) => {
+                // Don't decay arrays for sizeof
+                let ft = self.get_full_type(name);
+                ft.byte_size()
+            }
+            Exp::Cast(ct, ft, _) => {
+                if let Some(ref full) = ft {
+                    full.byte_size()
+                } else {
+                    ct.size() as usize
+                }
+            }
+            Exp::Unary(UnaryOp::Deref, inner) => {
+                // *ptr: need to figure out what ptr points to
+                let inner_size = self.sizeof_exp(inner);
+                // The type of *ptr is the pointee type
+                // For sizeof, we need to compute the expression type
+                match inner.as_ref() {
+                    Exp::Var(name) => {
+                        let ft = self.get_full_type(name);
+                        match ft {
+                            FullType::Pointer(inner_ft) => inner_ft.byte_size(),
+                            _ => 4, // fallback
+                        }
+                    }
+                    _ => 8, // fallback to pointer size
+                }
+            }
+            Exp::Subscript(arr, _) => {
+                // arr[i]: element type
+                match arr.as_ref() {
+                    Exp::Var(name) => {
+                        let ft = self.get_full_type(name);
+                        match ft {
+                            FullType::Array { elem, .. } => elem.byte_size(),
+                            FullType::Pointer(inner) => inner.byte_size(),
+                            _ => 4,
+                        }
+                    }
+                    _ => 4,
+                }
+            }
+            Exp::FunctionCall(name, _) => {
+                let ret_type = self.func_types.get(name)
+                    .map(|(rt, _, _)| *rt).unwrap_or(CType::Int);
+                std::cmp::max(ret_type.size() as usize, 1)
+            }
+            Exp::SizeOf(_) | Exp::SizeOfType(_, _) => 8, // sizeof returns unsigned long
+            Exp::Unary(UnaryOp::AddrOf, _) => 8, // &x is a pointer
+            Exp::Unary(UnaryOp::PreIncrement | UnaryOp::PreDecrement | UnaryOp::PostIncrement | UnaryOp::PostDecrement, inner) => {
+                self.sizeof_exp(inner)
+            }
+            Exp::Unary(UnaryOp::Negate | UnaryOp::Complement, inner) => {
+                // promoted result
+                std::cmp::max(self.sizeof_exp(inner), 4)
+            }
+            Exp::Unary(UnaryOp::LogicalNot, _) => 4, // !x is always int
+            Exp::Binary(op, left, right) => {
+                if matches!(op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr |
+                    BinaryOp::Equal | BinaryOp::NotEqual |
+                    BinaryOp::LessThan | BinaryOp::GreaterThan |
+                    BinaryOp::LessEqual | BinaryOp::GreaterEqual) {
+                    4 // comparisons return int
+                } else if matches!(op, BinaryOp::ShiftLeft | BinaryOp::ShiftRight) {
+                    // Shift result type is promoted left operand type
+                    std::cmp::max(self.sizeof_exp(left), 4) // promoted to at least int
+                } else {
+                    // Common type of both operands (promoted)
+                    let l = std::cmp::max(self.sizeof_exp(left), 4);
+                    let r = std::cmp::max(self.sizeof_exp(right), 4);
+                    std::cmp::max(l, r)
+                }
+            }
+            Exp::Assign(left, _) => self.sizeof_exp(left),
+            Exp::CompoundAssign(_, left, _) => self.sizeof_exp(left),
+            Exp::Conditional(_, then_e, else_e) => {
+                // Result type is common type of both branches
+                let t_size = self.sizeof_exp(then_e);
+                let e_size = self.sizeof_exp(else_e);
+                std::cmp::max(t_size, e_size)
+            }
+            _ => 4, // default to int
+        }
+    }
+
     fn static_init_size(v: &StaticInit) -> usize {
         match v {
             StaticInit::CharInit(_) | StaticInit::UCharInit(_) => 1,
@@ -206,6 +300,14 @@ impl TackyGen {
     /// Insert a cast if needed, returns the (possibly converted) value and its type
     fn convert_to(&mut self, val: TackyVal, from: CType, to: CType) -> TackyVal {
         if from == to {
+            return val;
+        }
+        // Cast to void: no conversion needed, just discard
+        if to == CType::Void {
+            return val;
+        }
+        // Cast from void: shouldn't happen in valid code, but treat as no-op
+        if from == CType::Void {
             return val;
         }
         let dst = self.fresh_tmp(to);
@@ -275,6 +377,19 @@ impl TackyGen {
                 self.emit(TackyInstr::Copy { src: TackyVal::DoubleConstant(val), dst: dst.clone() });
                 (dst, CType::Double)
             }
+            Exp::SizeOfType(_ct, ft) => {
+                let size = ft.byte_size() as i64;
+                let dst = self.fresh_tmp(CType::ULong);
+                self.emit(TackyInstr::Copy { src: TackyVal::Constant(size), dst: dst.clone() });
+                (dst, CType::ULong)
+            }
+            Exp::SizeOf(inner) => {
+                // sizeof does NOT evaluate the expression — just gets its type's size
+                let size = self.sizeof_exp(&inner) as i64;
+                let dst = self.fresh_tmp(CType::ULong);
+                self.emit(TackyInstr::Copy { src: TackyVal::Constant(size), dst: dst.clone() });
+                (dst, CType::ULong)
+            }
             Exp::StringLiteral(s) => {
                 // String literal in expression context: create constant string, decay to pointer
                 let label = self.make_string_constant(&s);
@@ -307,13 +422,23 @@ impl TackyGen {
                 let converted = self.convert_to(val, from_type, target_type);
                 // Propagate FullType from cast (e.g. (char *) preserves pointer-to-char info)
                 if let Some(ft) = cast_ft {
-                    if let TackyVal::Var(ref name) = converted {
-                        self.full_types.insert(name.clone(), ft.clone());
-                        if let FullType::Pointer(ref inner_ft) = ft {
-                            let (base, depth) = Self::ptr_info_from_full(inner_ft);
-                            self.ptr_info.insert(name.clone(), (base, depth));
+                    // If convert_to returned the same value (no actual conversion),
+                    // create a copy to avoid overwriting the source variable's type
+                    let result = if from_type == target_type {
+                        let copy = self.fresh_tmp_full(&ft);
+                        self.emit(TackyInstr::Copy { src: converted, dst: copy.clone() });
+                        copy
+                    } else {
+                        if let TackyVal::Var(ref name) = converted {
+                            self.full_types.insert(name.clone(), ft.clone());
+                            if let FullType::Pointer(ref inner_ft) = ft {
+                                let (base, depth) = Self::ptr_info_from_full(inner_ft);
+                                self.ptr_info.insert(name.clone(), (base, depth));
+                            }
                         }
-                    }
+                        converted
+                    };
+                    return (result, target_type);
                 }
                 (converted, target_type)
             }
@@ -484,10 +609,14 @@ impl TackyGen {
                 let end_label = self.fresh_label("cond_end");
                 self.emit(TackyInstr::JumpIfZero(cond_val, else_label.clone()));
                 let (then_val, then_type) = self.emit_exp(*then_exp);
-                // We need to know both types to determine common type
-                // Save then value, emit else, then figure out common type
-                // Actually, we need to process both branches first to know the common type.
-                // Let's process then, save it, then process else.
+                // Handle void ternary
+                if then_type == CType::Void {
+                    self.emit(TackyInstr::Jump(end_label.clone()));
+                    self.emit(TackyInstr::Label(else_label));
+                    let (_else_val, _else_type) = self.emit_exp(*else_exp);
+                    self.emit(TackyInstr::Label(end_label));
+                    return (TackyVal::Constant(0), CType::Void);
+                }
                 let then_tmp = self.fresh_tmp(then_type);
                 self.emit(TackyInstr::Copy { src: then_val, dst: then_tmp.clone() });
                 self.emit(TackyInstr::Jump(end_label.clone()));
@@ -1052,9 +1181,19 @@ impl TackyGen {
             Statement::Return(exp) => {
                 let ret_type = self.func_types.get(&self.current_function)
                     .map(|(rt, _, _)| *rt).unwrap_or(CType::Int);
-                let (val, val_type) = self.emit_exp(exp);
-                let val_conv = self.convert_to(val, val_type, ret_type);
-                self.emit(TackyInstr::Return(val_conv));
+                if let Some(exp) = exp {
+                    let (val, val_type) = self.emit_exp(exp);
+                    if ret_type == CType::Void {
+                        // void return — just emit return with dummy value
+                        self.emit(TackyInstr::Return(TackyVal::Constant(0)));
+                    } else {
+                        let val_conv = self.convert_to(val, val_type, ret_type);
+                        self.emit(TackyInstr::Return(val_conv));
+                    }
+                } else {
+                    // return; (no expression) — for void functions
+                    self.emit(TackyInstr::Return(TackyVal::Constant(0)));
+                }
             }
             Statement::Expression(exp) => {
                 self.emit_exp(exp);

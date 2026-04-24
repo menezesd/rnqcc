@@ -525,21 +525,63 @@ impl TackyGen {
                     return (rhs_conv, mem_type);
                 }
                 // Check if LHS is ptr->member = value
-                if let Exp::Arrow(ref inner_exp, ref member) = *left {
-                    let member_addr = self.emit_dot_address(&left);
-                    let mem_type = self.lvalue_type(&left);
-                    let mem_ft = self.dot_member_full_type(&left);
-                    let (rhs, rhs_type) = self.emit_exp(*right);
-                    if mem_ft.is_struct() {
-                        let struct_size = mem_ft.byte_size_with(&self.struct_defs);
-                        let src_addr = self.fresh_tmp(CType::Pointer);
-                        self.emit(TackyInstr::GetAddress { src: rhs, dst: src_addr.clone() });
-                        self.emit_struct_copy_ptr_to_ptr(src_addr, member_addr, struct_size);
-                        return (TackyVal::Constant(0), CType::Struct);
+                if let Exp::Arrow(ref _inner_exp, ref _member) = *left {
+                    // Evaluate the inner ptr expression to get the struct pointer
+                    if let Exp::Arrow(inner_exp, member) = *left {
+                        let (ptr_val, _) = self.emit_exp(*inner_exp);
+                        let ptr_ft = self.val_full_type(&ptr_val);
+                        // Try to get struct tag from FullType
+                        let tag_opt = match &ptr_ft {
+                            FullType::Pointer(inner) => match inner.as_ref() {
+                                FullType::Struct(t) => Some(t.clone()),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if let Some(tag) = tag_opt {
+                            let def = self.struct_defs.get(&tag).cloned().unwrap();
+                            let mem = def.find_member(&member).unwrap();
+                            let mem_type = mem.member_type;
+                            let mem_offset = mem.offset;
+                            let mem_ft = mem.member_full_type.clone();
+                            let mem_ptr = self.fresh_tmp(CType::Pointer);
+                            if mem_offset > 0 {
+                                self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: ptr_val, right: TackyVal::Constant(mem_offset as i64), dst: mem_ptr.clone() });
+                            } else {
+                                self.emit(TackyInstr::Copy { src: ptr_val, dst: mem_ptr.clone() });
+                            }
+                            let (rhs, rhs_type) = self.emit_exp(*right);
+                            if mem_ft.is_struct() {
+                                let struct_size = mem_ft.byte_size_with(&self.struct_defs);
+                                let rhs_ft = self.val_full_type(&rhs);
+                                let src_addr = if rhs_ft.is_struct() { let a = self.fresh_tmp(CType::Pointer); self.emit(TackyInstr::GetAddress { src: rhs, dst: a.clone() }); a } else { rhs };
+                                self.emit_struct_copy_ptr_to_ptr(src_addr, mem_ptr, struct_size);
+                                return (TackyVal::Constant(0), CType::Struct);
+                            }
+                            let rhs_conv = self.convert_to(rhs, rhs_type, mem_type);
+                            self.emit(TackyInstr::Store { src: rhs_conv.clone(), dst_ptr: mem_ptr });
+                            return (rhs_conv, mem_type);
+                        }
+                        // Fallback: try to find struct from any struct_def that has this member
+                        for (tag, def) in &self.struct_defs {
+                            if let Some(mem) = def.find_member(&member) {
+                                let mem_type = mem.member_type;
+                                let mem_offset = mem.offset;
+                                let mem_ptr = self.fresh_tmp(CType::Pointer);
+                                if mem_offset > 0 {
+                                    self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: ptr_val, right: TackyVal::Constant(mem_offset as i64), dst: mem_ptr.clone() });
+                                } else {
+                                    self.emit(TackyInstr::Copy { src: ptr_val, dst: mem_ptr.clone() });
+                                }
+                                let (rhs, rhs_type) = self.emit_exp(*right);
+                                let rhs_conv = self.convert_to(rhs, rhs_type, mem_type);
+                                self.emit(TackyInstr::Store { src: rhs_conv.clone(), dst_ptr: mem_ptr });
+                                return (rhs_conv, mem_type);
+                            }
+                        }
+                        panic!("Arrow assignment: cannot find struct for member {}", member);
                     }
-                    let rhs_conv = self.convert_to(rhs, rhs_type, mem_type);
-                    self.emit(TackyInstr::Store { src: rhs_conv.clone(), dst_ptr: member_addr });
-                    return (rhs_conv, mem_type);
+                    unreachable!();
                 }
                 // Check if LHS is a dereference: *ptr = value
                 if let Exp::Unary(UnaryOp::Deref, ptr_exp) = *left {
@@ -978,13 +1020,23 @@ impl TackyGen {
                 }
             }
             Exp::Dot(inner, member) => {
-                if let Exp::Var(name) = inner.as_ref() {
-                    let ft = self.get_full_type(name);
-                    if let FullType::Struct(tag) = &ft {
-                        if let Some(def) = self.struct_defs.get(tag) {
-                            if let Some(mem) = def.find_member(member) {
-                                return mem.member_type;
-                            }
+                // Try to find the struct tag from the inner expression
+                let tag_opt = match inner.as_ref() {
+                    Exp::Var(name) => {
+                        let ft = self.get_full_type(name);
+                        match ft { FullType::Struct(t) => Some(t), _ => None }
+                    }
+                    Exp::Dot(_, _) | Exp::Arrow(_, _) => {
+                        // For nested Dot/Arrow, get the member's full type from the parent
+                        let parent_ft = self.dot_member_full_type(inner);
+                        match parent_ft { FullType::Struct(t) => Some(t), _ => None }
+                    }
+                    _ => None,
+                };
+                if let Some(tag) = tag_opt {
+                    if let Some(def) = self.struct_defs.get(&tag) {
+                        if let Some(mem) = def.find_member(member) {
+                            return mem.member_type;
                         }
                     }
                 }
@@ -1096,7 +1148,11 @@ impl TackyGen {
         match exp {
             Exp::Var(n) => {
                 let ft = self.get_full_type(n);
-                match ft { FullType::Struct(t) => t, _ => panic!("Dot on non-struct var") }
+                match ft {
+                    FullType::Struct(t) => t,
+                    FullType::Pointer(inner) => match *inner { FullType::Struct(t) => t, _ => panic!("Dot on non-struct ptr var: {:?}", inner) },
+                    _ => panic!("Dot on non-struct var: {:?}", ft)
+                }
             }
             Exp::Dot(inner, member) => {
                 let parent_tag = self.dot_inner_tag(inner);
@@ -1116,7 +1172,7 @@ impl TackyGen {
                     } else { panic!("") }
                 } else { panic!("") }
             }
-            _ => panic!("dot_inner_tag on non-struct expression"),
+            other => panic!("dot_inner_tag on non-struct expression: {:?}", other),
         }
     }
 
@@ -1444,14 +1500,31 @@ impl TackyGen {
                         _ => { let (v, _) = self.emit_exp(*inner_exp); if let TackyVal::Var(n) = v { n } else { panic!("Dot on non-var") } }
                     };
                     let struct_ft = self.get_full_type(&struct_name);
-                    let tag = match &struct_ft { FullType::Struct(t) => t.clone(), _ => panic!("Dot on non-struct") };
+                    let tag = match &struct_ft {
+                        FullType::Struct(t) => t.clone(),
+                        FullType::Pointer(inner) => match inner.as_ref() {
+                            FullType::Struct(t) => t.clone(),
+                            _ => panic!("Dot on non-struct result: {:?}", struct_ft),
+                        },
+                        _ => panic!("Dot on non-struct: {:?}", struct_ft)
+                    };
                     let def = self.struct_defs.get(&tag).cloned().unwrap();
                     let mem = def.find_member(&member).unwrap();
                     let mem_offset = mem.offset;
-                    let struct_addr = self.fresh_tmp(CType::Pointer);
-                    self.emit(TackyInstr::GetAddress { src: TackyVal::Var(struct_name), dst: struct_addr.clone() });
+                    let struct_addr = if struct_ft.is_pointer() {
+                        // Already a pointer (from nested Dot)
+                        TackyVal::Var(struct_name)
+                    } else {
+                        let addr = self.fresh_tmp(CType::Pointer);
+                        self.emit(TackyInstr::GetAddress { src: TackyVal::Var(struct_name), dst: addr.clone() });
+                        addr
+                    };
                     let result = self.fresh_tmp(CType::Pointer);
-                    self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: struct_addr, right: TackyVal::Constant(mem_offset as i64), dst: result.clone() });
+                    if mem_offset > 0 {
+                        self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: struct_addr, right: TackyVal::Constant(mem_offset as i64), dst: result.clone() });
+                    } else {
+                        self.emit(TackyInstr::Copy { src: struct_addr, dst: result.clone() });
+                    }
                     return (result, CType::Pointer);
                 }
                 // &(p->member) — address of member through pointer

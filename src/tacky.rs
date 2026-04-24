@@ -162,7 +162,7 @@ impl TackyGen {
             Exp::Var(name) => {
                 // Don't decay arrays for sizeof
                 let ft = self.get_full_type(name);
-                ft.byte_size()
+                ft.byte_size_with(&self.struct_defs)
             }
             Exp::Cast(ct, ft, _) => {
                 if let Some(ref full) = ft {
@@ -232,6 +232,21 @@ impl TackyGen {
                     std::cmp::max(l, r)
                 }
             }
+            Exp::Dot(inner, member) => {
+                // sizeof(x.member) — get member's type size
+                if let Exp::Var(name) = inner.as_ref() {
+                    let ft = self.get_full_type(name);
+                    if let FullType::Struct(tag) = &ft {
+                        if let Some(def) = self.struct_defs.get(tag) {
+                            if let Some(mem) = def.find_member(&member) {
+                                return mem.member_full_type.byte_size_with(&self.struct_defs);
+                            }
+                        }
+                    }
+                }
+                4 // fallback
+            }
+            Exp::Arrow(_, member) => 4, // fallback
             Exp::Assign(left, _) => self.sizeof_exp(left),
             Exp::CompoundAssign(_, left, _) => self.sizeof_exp(left),
             Exp::Conditional(_, then_e, else_e) => {
@@ -382,7 +397,7 @@ impl TackyGen {
                 (dst, CType::Double)
             }
             Exp::SizeOfType(_ct, ft) => {
-                let size = ft.byte_size() as i64;
+                let size = ft.byte_size_with(&self.struct_defs) as i64;
                 let dst = self.fresh_tmp(CType::ULong);
                 self.emit(TackyInstr::Copy { src: TackyVal::Constant(size), dst: dst.clone() });
                 (dst, CType::ULong)

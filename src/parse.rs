@@ -1249,6 +1249,11 @@ impl Parser {
                     self.advance(); // consume '('
                     let base_type = self.parse_type();
                     let full_type = self.parse_abstract_declarator_type(base_type);
+                    let full_type = if base_type == CType::Struct {
+                        if let Some(ref tag) = self.last_struct_tag {
+                            Self::replace_scalar_struct(&full_type, tag)
+                        } else { full_type }
+                    } else { full_type };
                     self.expect(Token::CloseParen);
                     let ctype = full_type.to_ctype();
                     Exp::SizeOfType(ctype, full_type)

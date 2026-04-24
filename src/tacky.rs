@@ -852,18 +852,29 @@ impl TackyGen {
                                 // Decompose into eightbytes
                                 for (eb_idx, class) in classes.iter().enumerate() {
                                     let eb_offset = (eb_idx * 8) as i64;
+                                    let remaining = def.size as i64 - eb_offset;
+                                    let eb_size = std::cmp::min(remaining, 8);
                                     match class {
                                         ParamClass::Sse => {
                                             let tmp = self.fresh_tmp(CType::Double);
                                             let ptr = self.fresh_tmp(CType::Pointer);
-                                            self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: struct_addr.clone(), right: TackyVal::Constant(eb_offset), dst: ptr.clone() });
+                                            if eb_offset > 0 {
+                                                self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: struct_addr.clone(), right: TackyVal::Constant(eb_offset), dst: ptr.clone() });
+                                            } else {
+                                                self.emit(TackyInstr::Copy { src: struct_addr.clone(), dst: ptr.clone() });
+                                            }
                                             self.emit(TackyInstr::Load { src_ptr: ptr, dst: tmp.clone() });
                                             tacky_args.push(tmp);
                                         }
                                         ParamClass::Integer => {
-                                            let tmp = self.fresh_tmp(CType::Long);
+                                            let load_type = if eb_size >= 8 { CType::Long } else { CType::Int };
+                                            let tmp = self.fresh_tmp(load_type);
                                             let ptr = self.fresh_tmp(CType::Pointer);
-                                            self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: struct_addr.clone(), right: TackyVal::Constant(eb_offset), dst: ptr.clone() });
+                                            if eb_offset > 0 {
+                                                self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: struct_addr.clone(), right: TackyVal::Constant(eb_offset), dst: ptr.clone() });
+                                            } else {
+                                                self.emit(TackyInstr::Copy { src: struct_addr.clone(), dst: ptr.clone() });
+                                            }
                                             self.emit(TackyInstr::Load { src_ptr: ptr, dst: tmp.clone() });
                                             tacky_args.push(tmp);
                                         }
@@ -2856,9 +2867,10 @@ impl TackyGen {
                         // Decompose into eightbyte params
                         for (eb_idx, class) in classes.iter().enumerate() {
                             let param_name = format!("{}_eb{}", name, eb_idx);
+                            let remaining = def.size as i64 - (eb_idx * 8) as i64;
                             let param_type = match class {
                                 ParamClass::Sse => CType::Double,
-                                _ => CType::Long,
+                                _ => if remaining >= 8 { CType::Long } else { CType::Int },
                             };
                             self.var_types.insert(param_name.clone(), param_type);
                             self.symbol_types.insert(param_name.clone(), param_type);

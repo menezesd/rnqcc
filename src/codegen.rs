@@ -83,12 +83,18 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
             if let TackyVal::Var(ref name) = val {
                 if types.get(name).copied() == Some(CType::Struct) {
                     if let Some(classes) = get_struct_classes(name, var_struct_tags, struct_defs) {
+                        let struct_size = arr_sizes.get(name).copied()
+                            .or_else(|| var_struct_tags.get(name).and_then(|t| struct_defs.get(t)).map(|d| d.size))
+                            .unwrap_or(8);
                         let mut int_ret_idx = 0;
                         let mut sse_ret_idx = 0;
                         let int_ret_regs = [Reg::AX, Reg::DX];
                         let sse_ret_regs = [XmmReg::XMM0, XmmReg::XMM1];
                         for (eb_idx, class) in classes.iter().enumerate() {
                             let eb_offset = (eb_idx * 8) as i32;
+                            // Determine bytes remaining in this eightbyte
+                            let remaining = struct_size as i32 - eb_offset;
+                            let eb_size = std::cmp::min(remaining, 8);
                             match class {
                                 ParamClass::Sse => {
                                     if sse_ret_idx < 2 {
@@ -100,7 +106,8 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
                                 }
                                 ParamClass::Integer => {
                                     if int_ret_idx < 2 {
-                                        out.push(AsmInstr::Mov(AsmType::Quadword,
+                                        let mov_type = if eb_size >= 8 { AsmType::Quadword } else { AsmType::Longword };
+                                        out.push(AsmInstr::Mov(mov_type,
                                             AsmOperand::PseudoMem(name.clone(), eb_offset),
                                             AsmOperand::Reg(int_ret_regs[int_ret_idx].clone())));
                                         int_ret_idx += 1;
@@ -497,12 +504,17 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
             if let TackyVal::Var(ref dst_name) = dst {
                 if types.get(dst_name).copied() == Some(CType::Struct) {
                     if let Some(classes) = get_struct_classes(dst_name, var_struct_tags, struct_defs) {
+                        let struct_size = arr_sizes.get(dst_name).copied()
+                            .or_else(|| var_struct_tags.get(dst_name).and_then(|t| struct_defs.get(t)).map(|d| d.size))
+                            .unwrap_or(8);
                         let mut int_ret_idx = 0;
                         let mut sse_ret_idx = 0;
                         let int_ret_regs = [Reg::AX, Reg::DX];
                         let sse_ret_regs = [XmmReg::XMM0, XmmReg::XMM1];
                         for (eb_idx, class) in classes.iter().enumerate() {
                             let eb_offset = (eb_idx * 8) as i32;
+                            let remaining = struct_size as i32 - eb_offset;
+                            let eb_size = std::cmp::min(remaining, 8);
                             match class {
                                 ParamClass::Sse => {
                                     if sse_ret_idx < 2 {
@@ -514,7 +526,8 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
                                 }
                                 ParamClass::Integer => {
                                     if int_ret_idx < 2 {
-                                        out.push(AsmInstr::Mov(AsmType::Quadword,
+                                        let mov_type = if eb_size >= 8 { AsmType::Quadword } else { AsmType::Longword };
+                                        out.push(AsmInstr::Mov(mov_type,
                                             AsmOperand::Reg(int_ret_regs[int_ret_idx].clone()),
                                             AsmOperand::PseudoMem(dst_name.clone(), eb_offset)));
                                         int_ret_idx += 1;

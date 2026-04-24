@@ -540,9 +540,23 @@ impl TackyGen {
                     let lhs_ft = self.get_full_type(lhs_name);
                     if let FullType::Struct(ref tag) = lhs_ft {
                         let struct_size = self.struct_defs.get(tag).map(|d| d.size).unwrap_or(0);
-                        let (rhs, _) = self.emit_exp(*right);
-                        let src_addr = self.fresh_tmp(CType::Pointer);
-                        self.emit(TackyInstr::GetAddress { src: rhs, dst: src_addr.clone() });
+                        let (rhs, rhs_type) = self.emit_exp(*right);
+                        let src_addr = if rhs_type == CType::Pointer || rhs_type == CType::Struct {
+                            // RHS is already a pointer (from Dot/Arrow/Deref) or a struct var
+                            let rhs_ft = self.val_full_type(&rhs);
+                            if rhs_ft.is_struct() {
+                                let addr = self.fresh_tmp(CType::Pointer);
+                                self.emit(TackyInstr::GetAddress { src: rhs, dst: addr.clone() });
+                                addr
+                            } else {
+                                // Already a pointer to struct data
+                                rhs
+                            }
+                        } else {
+                            let addr = self.fresh_tmp(CType::Pointer);
+                            self.emit(TackyInstr::GetAddress { src: rhs, dst: addr.clone() });
+                            addr
+                        };
                         self.emit_struct_copy_to(src_addr, lhs_name, struct_size);
                         return (TackyVal::Var(lhs_name.clone()), CType::Struct);
                     }
@@ -2086,13 +2100,33 @@ impl TackyGen {
                     // Handle nested struct/array member init
                     if mem_ft.is_array() || mem_ft.is_struct() {
                         if let Exp::ArrayInit(ref sub_elems) = elem {
-                            // Nested compound init for array/struct member
                             if mem_ft.is_array() {
                                 let elem_sizes = Self::compute_elem_sizes(mem_ft);
                                 let scalar_t = { let mut t = mem_ft; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
                                 self.emit_array_init_flat(&vd.name, elem, scalar_t, member.offset as i64, &elem_sizes);
+                            } else if let FullType::Struct(ref inner_tag) = mem_ft {
+                                // Nested struct compound init
+                                let inner_def = self.struct_defs.get(inner_tag).cloned()
+                                    .unwrap_or_else(|| panic!("Undefined struct: {}", inner_tag));
+                                for (j, sub_elem) in sub_elems.iter().enumerate() {
+                                    if j >= inner_def.members.len() { break; }
+                                    let inner_mem = &inner_def.members[j];
+                                    if inner_mem.member_full_type.is_array() {
+                                        let elem_sizes = Self::compute_elem_sizes(&inner_mem.member_full_type);
+                                        let scalar_t = { let mut t = &inner_mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
+                                        self.emit_array_init_flat(&vd.name, sub_elem, scalar_t, (member.offset + inner_mem.offset) as i64, &elem_sizes);
+                                    } else {
+                                        let (val, val_type) = self.emit_exp(sub_elem.clone());
+                                        let target_type = inner_mem.member_type;
+                                        let val_conv = self.convert_to(val, val_type, target_type);
+                                        self.emit(TackyInstr::CopyToOffset {
+                                            src: val_conv,
+                                            dst_name: vd.name.clone(),
+                                            offset: (member.offset + inner_mem.offset) as i64,
+                                        });
+                                    }
+                                }
                             }
-                            // TODO: nested struct init
                         }
                     } else {
                         let (val, val_type) = self.emit_exp(elem.clone());

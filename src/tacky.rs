@@ -547,11 +547,11 @@ impl TackyGen {
                             if let Some(&info) = self.ptr_info.get(rhs_name) {
                                 self.ptr_info.insert(lhs_name.clone(), info);
                             }
-                            // Only propagate FullType if LHS doesn't have a pointer-to-array type
-                            let lhs_has_array = self.full_types.get(lhs_name)
-                                .map(|ft| matches!(ft, FullType::Pointer(inner) if inner.is_array()))
+                            // Only propagate FullType if LHS doesn't have a specific declared type
+                            let lhs_has_specific = self.full_types.get(lhs_name)
+                                .map(|ft| matches!(ft, FullType::Pointer(inner) if inner.is_array() || inner.is_struct()))
                                 .unwrap_or(false);
-                            if !lhs_has_array {
+                            if !lhs_has_specific {
                                 if let Some(ft) = self.full_types.get(rhs_name).cloned() {
                                     self.full_types.insert(lhs_name.clone(), ft);
                                 }
@@ -938,7 +938,7 @@ impl TackyGen {
             Exp::Arrow(inner, member) => {
                 let (ptr, _) = self.emit_exp((**inner).clone());
                 let ptr_ft = self.val_full_type(&ptr);
-                let tag = match &ptr_ft { FullType::Pointer(inner) => match inner.as_ref() { FullType::Struct(t) => t.clone(), _ => panic!("") }, _ => panic!("") };
+                let tag = match &ptr_ft { FullType::Pointer(inner) => match inner.as_ref() { FullType::Struct(t) => t.clone(), _ => panic!("emit_dot_address Arrow: inner is {:?}, expected Struct", inner) }, _ => panic!("emit_dot_address Arrow: ft is {:?}, expected Pointer", ptr_ft) };
                 let def = self.struct_defs.get(&tag).cloned().unwrap();
                 let mem = def.find_member(member).unwrap();
                 let result = self.fresh_tmp(CType::Pointer);

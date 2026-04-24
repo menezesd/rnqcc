@@ -1966,8 +1966,47 @@ impl TackyGen {
             // Static struct: emit as static data
             if vd.storage_class == Some(StorageClass::Static) {
                 self.register_var(&vd.name, ft);
-                let mut init_values = vec![StaticInit::ZeroInit(struct_size)];
-                // TODO: handle static struct initializers
+                let mut init_values: Vec<StaticInit> = Vec::new();
+                if let Some(Exp::ArrayInit(ref elems)) = vd.init {
+                    // Flatten compound initializer for static struct
+                    let mut bytes_written = 0usize;
+                    for (i, elem) in elems.iter().enumerate() {
+                        if i >= def.members.len() { break; }
+                        let mem = &def.members[i];
+                        // Pad to member offset
+                        if bytes_written < mem.offset {
+                            init_values.push(StaticInit::ZeroInit(mem.offset - bytes_written));
+                        }
+                        if mem.member_full_type.is_array() || mem.member_full_type.is_struct() {
+                            // Nested array/struct member in static init
+                            if let Exp::ArrayInit(_) = elem {
+                                let scalar_t = if mem.member_full_type.is_array() {
+                                    let mut t = &mem.member_full_type;
+                                    while let FullType::Array { elem: e, .. } = t { t = e; }
+                                    t.to_ctype()
+                                } else { CType::Int };
+                                let elem_sizes = Self::compute_elem_sizes(&mem.member_full_type);
+                                Self::flatten_static_init(elem, scalar_t, &elem_sizes, &mut init_values);
+                            } else if let Exp::StringLiteral(s) = elem {
+                                let null_term = s.len() < mem.size;
+                                init_values.push(StaticInit::StringInit(s.clone(), null_term));
+                            }
+                            let written_here: usize = init_values.iter().skip(init_values.len().saturating_sub(10)).map(|v| Self::static_init_size(v)).sum();
+                            bytes_written = mem.offset + mem.size;
+                        } else {
+                            let (v, is_dbl, is_uns) = eval_constant_init(&Some(elem.clone()));
+                            let cv = convert_init_value(v, mem.member_type, is_dbl, is_uns);
+                            init_values.push(make_static_init(cv, mem.member_type));
+                            bytes_written = mem.offset + mem.member_type.size() as usize;
+                        }
+                    }
+                    // Trailing padding
+                    if bytes_written < struct_size {
+                        init_values.push(StaticInit::ZeroInit(struct_size - bytes_written));
+                    }
+                } else {
+                    init_values.push(StaticInit::ZeroInit(struct_size));
+                }
                 self.static_vars.push(TackyStaticVar {
                     name: vd.name.clone(), global: false, alignment: struct_align, init_values,
                 });

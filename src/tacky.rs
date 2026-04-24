@@ -561,8 +561,13 @@ impl TackyGen {
                             let (rhs, rhs_type) = self.emit_exp(*right);
                             if mem_ft.is_struct() {
                                 let struct_size = mem_ft.byte_size_with(&self.struct_defs);
-                                let rhs_ft = self.val_full_type(&rhs);
-                                let src_addr = if rhs_ft.is_struct() { let a = self.fresh_tmp(CType::Pointer); self.emit(TackyInstr::GetAddress { src: rhs, dst: a.clone() }); a } else { rhs };
+                                let src_addr = if let TackyVal::Var(ref n) = rhs {
+                                    if self.array_sizes.contains_key(n) {
+                                        let a = self.fresh_tmp(CType::Pointer);
+                                        self.emit(TackyInstr::GetAddress { src: rhs, dst: a.clone() });
+                                        a
+                                    } else { rhs }
+                                } else { rhs };
                                 self.emit_struct_copy_ptr_to_ptr(src_addr, mem_ptr, struct_size);
                                 return (TackyVal::Constant(0), CType::Struct);
                             }

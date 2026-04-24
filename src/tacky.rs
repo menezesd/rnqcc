@@ -2016,6 +2016,19 @@ impl TackyGen {
                             }
                             let written_here: usize = init_values.iter().skip(init_values.len().saturating_sub(10)).map(|v| Self::static_init_size(v)).sum();
                             bytes_written = mem.offset + mem.size;
+                        } else if let Exp::StringLiteral(ref s) = elem {
+                            if mem.member_type == CType::Pointer {
+                                let str_label = self.make_string_constant(s);
+                                init_values.push(StaticInit::PointerInit(str_label));
+                            } else {
+                                let null_term = s.len() < mem.size;
+                                init_values.push(StaticInit::StringInit(s.clone(), null_term));
+                                let str_bytes = s.len() + if null_term { 1 } else { 0 };
+                                if str_bytes < mem.size {
+                                    init_values.push(StaticInit::ZeroInit(mem.size - str_bytes));
+                                }
+                            }
+                            bytes_written = mem.offset + mem.size;
                         } else {
                             let (v, is_dbl, is_uns) = eval_constant_init(&Some(elem.clone()));
                             let cv = convert_init_value(v, mem.member_type, is_dbl, is_uns);
@@ -2582,6 +2595,20 @@ pub fn generate(program: Program) -> TackyProgram {
                                     // Nested struct init — flatten recursively
                                     // TODO: proper nested struct static init
                                     init_values.push(StaticInit::ZeroInit(mem.size));
+                                } else if let Exp::StringLiteral(ref s) = elem {
+                                    // String literal member → create string constant and pointer
+                                    if mem.member_type == CType::Pointer {
+                                        let str_label = gen.make_string_constant(s);
+                                        init_values.push(StaticInit::PointerInit(str_label));
+                                    } else {
+                                        // char array member initialized with string
+                                        let null_term = s.len() < mem.size;
+                                        init_values.push(StaticInit::StringInit(s.clone(), null_term));
+                                        let str_bytes = s.len() + if null_term { 1 } else { 0 };
+                                        if str_bytes < mem.size {
+                                            init_values.push(StaticInit::ZeroInit(mem.size - str_bytes));
+                                        }
+                                    }
                                 } else {
                                     let (v, is_dbl, is_uns) = eval_constant_init(&Some(elem.clone()));
                                     let cv = convert_init_value(v, mem.member_type, is_dbl, is_uns);

@@ -232,6 +232,7 @@ pub enum Token {
     StringLiteral(String),
     // Keywords
     KWChar,
+    KWSizeOf,
     KWInt,
     KWLong,
     KWUnsigned,
@@ -360,6 +361,8 @@ pub enum Exp {
     FunctionCall(String, Vec<Exp>),
     Subscript(Box<Exp>, Box<Exp>), // arr[index]
     ArrayInit(Vec<Exp>),           // {1, 2, 3} or {{1,2}, {3,4}}
+    SizeOf(Box<Exp>),              // sizeof expr
+    SizeOfType(CType, FullType),   // sizeof(type)
 }
 
 #[derive(Debug)]
@@ -370,7 +373,7 @@ pub enum ForInit {
 
 #[derive(Debug)]
 pub enum Statement {
-    Return(Exp),
+    Return(Option<Exp>),
     Expression(Exp),
     If(Exp, Box<Statement>, Option<Box<Statement>>),
     Block(Block),

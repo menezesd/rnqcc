@@ -525,7 +525,9 @@ fn replace_pseudos(
                             arr_size as i32
                         } else {
                             let ct = types.get(&name).copied().unwrap_or(CType::Int);
-                            std::cmp::max(ct.size(), 1)
+                            // Void function results get stored as Longword (movl %eax, ...)
+                            // so ensure at least 4 bytes
+                            if ct == CType::Void { 4 } else { std::cmp::max(ct.size(), 1) }
                         };
                         let align = if let Some(&arr_size) = arr_sizes.get(&name) {
                             if arr_size >= 16 { 16 } else { std::cmp::max(size.min(16), 1) }

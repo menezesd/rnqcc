@@ -1,5 +1,12 @@
 use crate::types::*;
 
+#[derive(Debug)]
+enum AbstractDecl {
+    Base,
+    Pointer(Box<AbstractDecl>),
+    Array(Box<AbstractDecl>, usize),
+}
+
 /// Parsed declarator tree
 #[derive(Debug)]
 enum Declarator {
@@ -165,6 +172,7 @@ impl Parser {
     }
 
     fn parse_type(&mut self) -> CType {
+        if self.at(&Token::KWVoid) { self.advance(); return CType::Void; }
         if self.at(&Token::KWDouble) { self.advance(); return CType::Double; }
         if self.at(&Token::KWFloat) { self.advance(); return CType::Double; }
         let mut has_int = false;
@@ -322,54 +330,59 @@ impl Parser {
 
     /// Parse abstract declarator into a FullType derivation from base type.
     /// Handles: *, (**), (*)[3], (*(*))[N], etc.
+    /// Parse an abstract declarator and apply it to the base type.
+    /// Uses the same inside-out approach as concrete declarator trees.
     fn parse_abstract_declarator_type(&mut self, base: CType) -> FullType {
+        // Parse into a tree, then process
+        let tree = self.parse_abstract_decl_tree();
+        Self::process_abstract_tree(&tree, FullType::Scalar(base))
+    }
+
+    /// Abstract declarator tree (mirrors Declarator but without names)
+    fn parse_abstract_decl_tree(&mut self) -> AbstractDecl {
         let mut stars = 0;
         while self.eat(&Token::Star) { stars += 1; }
 
-        // Check for parenthesized abstract declarator
-        let inner_type = if self.eat(&Token::OpenParen) {
-            let inner = self.parse_abstract_declarator_type(base);
+        let mut decl = if self.eat(&Token::OpenParen) {
+            let inner = self.parse_abstract_decl_tree();
             self.expect(Token::CloseParen);
-            Some(inner)
+            inner
         } else {
-            None
+            AbstractDecl::Base
         };
 
-        // Check for array dimensions [N]
-        let mut dims = Vec::new();
+        // Trailing array dims
         while self.eat(&Token::OpenBracket) {
-            match self.peek().cloned() {
-                Some(Token::IntLiteral(n)) => { self.advance(); dims.push(n as usize); }
-                Some(Token::UIntLiteral(n)) => { self.advance(); dims.push(n as usize); }
-                Some(Token::LongLiteral(n)) => { self.advance(); dims.push(n as usize); }
-                Some(Token::ULongLiteral(n)) => { self.advance(); dims.push(n as usize); }
-                _ => {}
-            }
+            let size = match self.peek().cloned() {
+                Some(Token::IntLiteral(n)) => { self.advance(); n as usize }
+                Some(Token::UIntLiteral(n)) => { self.advance(); n as usize }
+                Some(Token::LongLiteral(n)) => { self.advance(); n as usize }
+                Some(Token::ULongLiteral(n)) => { self.advance(); n as usize }
+                Some(Token::CharLiteral(n)) => { self.advance(); n as usize }
+                _ => 0,
+            };
             self.expect(Token::CloseBracket);
+            decl = AbstractDecl::Array(Box::new(decl), size);
         }
 
-        // Build type from outside in
-        if let Some(inner) = inner_type {
-            // The inner type was parsed recursively
-            // Apply array dims to it, then pointer stars
-            let mut t = inner;
-            for &dim in dims.iter().rev() {
-                t = FullType::Array { elem: Box::new(t), size: dim };
+        for _ in 0..stars {
+            decl = AbstractDecl::Pointer(Box::new(decl));
+        }
+
+        decl
+    }
+
+    fn process_abstract_tree(tree: &AbstractDecl, current_type: FullType) -> FullType {
+        match tree {
+            AbstractDecl::Base => current_type,
+            AbstractDecl::Pointer(inner) => {
+                let derived = FullType::Pointer(Box::new(current_type));
+                Self::process_abstract_tree(inner, derived)
             }
-            for _ in 0..stars {
-                t = FullType::Pointer(Box::new(t));
+            AbstractDecl::Array(inner, size) => {
+                let derived = FullType::Array { elem: Box::new(current_type), size: *size };
+                Self::process_abstract_tree(inner, derived)
             }
-            t
-        } else {
-            // No parens — build from base type
-            let mut t = FullType::Scalar(base);
-            for &dim in dims.iter().rev() {
-                t = FullType::Array { elem: Box::new(t), size: dim };
-            }
-            for _ in 0..stars {
-                t = FullType::Pointer(Box::new(t));
-            }
-            t
         }
     }
 
@@ -719,9 +732,14 @@ impl Parser {
         match self.peek() {
             Some(Token::KWReturn) => {
                 self.advance();
-                let exp = self.parse_expression();
-                self.expect(Token::Semicolon);
-                Statement::Return(exp)
+                if self.at(&Token::Semicolon) {
+                    self.advance();
+                    Statement::Return(None)
+                } else {
+                    let exp = self.parse_expression();
+                    self.expect(Token::Semicolon);
+                    Statement::Return(Some(exp))
+                }
             }
             Some(Token::KWIf) => {
                 self.advance();
@@ -1114,6 +1132,26 @@ impl Parser {
             Some(Token::Ampersand) => {
                 self.advance();
                 Exp::Unary(UnaryOp::AddrOf, Box::new(self.parse_unary()))
+            }
+            // sizeof expression or sizeof(type)
+            Some(Token::KWSizeOf) => {
+                self.advance();
+                // sizeof(type) — check for ( followed by type keyword
+                if self.at(&Token::OpenParen)
+                    && self.pos + 1 < self.tokens.len()
+                    && Self::is_type_keyword(&self.tokens[self.pos + 1])
+                {
+                    self.advance(); // consume '('
+                    let base_type = self.parse_type();
+                    let full_type = self.parse_abstract_declarator_type(base_type);
+                    self.expect(Token::CloseParen);
+                    let ctype = full_type.to_ctype();
+                    Exp::SizeOfType(ctype, full_type)
+                } else {
+                    // sizeof <unary-exp> (not a cast expression)
+                    let operand = self.parse_unary();
+                    Exp::SizeOf(Box::new(operand))
+                }
             }
             // Cast expression: (type) unary or (type *) unary
             Some(Token::OpenParen)

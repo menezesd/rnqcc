@@ -267,6 +267,7 @@ impl Lexer {
             "static" => Token::KWStatic,
             "extern" => Token::KWExtern,
             "char" => Token::KWChar,
+            "sizeof" => Token::KWSizeOf,
             _ => Token::Identifier(word),
         }
     }

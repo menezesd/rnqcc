@@ -268,6 +268,7 @@ impl Lexer {
             "extern" => Token::KWExtern,
             "char" => Token::KWChar,
             "sizeof" => Token::KWSizeOf,
+            "struct" => Token::KWStruct,
             _ => Token::Identifier(word),
         }
     }
@@ -321,6 +322,9 @@ impl Lexer {
                     if self.peek() == Some('-') {
                         self.advance();
                         Token::Decrement
+                    } else if self.peek() == Some('>') {
+                        self.advance();
+                        Token::Arrow
                     } else if self.peek() == Some('=') {
                         self.advance();
                         Token::MinusAssign
@@ -390,6 +394,7 @@ impl Lexer {
                     self.pos -= 1; // unget the '.'
                     self.read_number()
                 }
+                '.' => Token::Dot,
                 _ if c.is_ascii_digit() => {
                     self.pos -= 1; // unget
                     self.read_number()

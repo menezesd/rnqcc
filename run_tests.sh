@@ -147,17 +147,13 @@ for ch in $chapters; do
         [ $PASS -gt $old_pass ] && ch_pass=$((ch_pass + 1))
     done
 
-    for subdir in "$valid_dir"/*/; do
-        [ -d "$subdir" ] || continue
-        for f in "$subdir"*.c; do
-            [ -f "$f" ] || continue
-            old_pass=$PASS
-            run_test "$f"
-            [ $? -eq 1 ] && continue
-            count=$((count + 1))
-            [ $PASS -gt $old_pass ] && ch_pass=$((ch_pass + 1))
-        done
-    done
+    while IFS= read -r -d '' f; do
+        old_pass=$PASS
+        run_test "$f"
+        [ $? -eq 1 ] && continue
+        count=$((count + 1))
+        [ $PASS -gt $old_pass ] && ch_pass=$((ch_pass + 1))
+    done < <(find "$valid_dir" -mindepth 2 -name "*.c" -print0 | sort -z)
 
     echo "$ch_pass/$count passed"
 done

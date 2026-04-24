@@ -27,6 +27,7 @@ fn ptr_info_from_full(ft: &FullType) -> (CType, usize) {
             let base_ct = elem.to_ctype();
             (base_ct, 1)
         }
+        FullType::Struct(_) => (CType::Struct, 1),
     }
 }
 
@@ -37,11 +38,12 @@ fn ptr_info_from_full(ft: &FullType) -> (CType, usize) {
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    last_struct_tag: Option<String>,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, pos: 0 }
+        Parser { tokens, pos: 0, last_struct_tag: None }
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -147,6 +149,11 @@ impl Parser {
         }
 
         if !has_int && !has_long && !has_void && !has_unsigned && !has_signed && !has_char {
+            // Check for struct
+            if self.at(&Token::KWStruct) {
+                let ct_ft = self.parse_struct_type_specifier();
+                return (sc, ct_ft.0);
+            }
             panic!("Expected type specifier");
         }
 
@@ -173,6 +180,10 @@ impl Parser {
 
     fn parse_type(&mut self) -> CType {
         if self.at(&Token::KWVoid) { self.advance(); return CType::Void; }
+        if self.at(&Token::KWStruct) {
+            let (ct, _) = self.parse_struct_type_specifier();
+            return ct;
+        }
         if self.at(&Token::KWDouble) { self.advance(); return CType::Double; }
         if self.at(&Token::KWFloat) { self.advance(); return CType::Double; }
         let mut has_int = false;
@@ -200,7 +211,7 @@ impl Parser {
     }
 
     fn is_type_keyword(tok: &Token) -> bool {
-        matches!(tok, Token::KWInt | Token::KWLong | Token::KWVoid | Token::KWUnsigned | Token::KWSigned | Token::KWDouble | Token::KWFloat | Token::KWChar)
+        matches!(tok, Token::KWInt | Token::KWLong | Token::KWVoid | Token::KWUnsigned | Token::KWSigned | Token::KWDouble | Token::KWFloat | Token::KWChar | Token::KWStruct)
     }
 
     /// Process a declarator tree to extract name, derived type, and params
@@ -457,11 +468,81 @@ impl Parser {
         }
     }
 
+    /// Parse `struct tag` as a type specifier
+    fn replace_scalar_struct(ft: &FullType, tag: &str) -> FullType {
+        match ft {
+            FullType::Scalar(CType::Struct) => FullType::Struct(tag.to_string()),
+            FullType::Pointer(inner) => FullType::Pointer(Box::new(Self::replace_scalar_struct(inner, tag))),
+            FullType::Array { elem, size } => FullType::Array { elem: Box::new(Self::replace_scalar_struct(elem, tag)), size: *size },
+            other => other.clone(),
+        }
+    }
+
+    fn parse_struct_members(&mut self) -> Vec<MemberDeclaration> {
+        self.expect(Token::OpenBrace);
+        let mut members = Vec::new();
+        while !self.at(&Token::CloseBrace) {
+            let base_type = self.parse_type();
+            let (name, full_type, _) = self.parse_declarator_full(base_type);
+            let member_type = full_type.to_ctype();
+            // Handle struct tag in specifier — need to propagate tag info
+            let member_full_type = if member_type == CType::Struct {
+                full_type.clone()
+            } else {
+                full_type
+            };
+            members.push(MemberDeclaration {
+                name,
+                member_type,
+                member_full_type,
+            });
+            self.expect(Token::Semicolon);
+        }
+        self.expect(Token::CloseBrace);
+        members
+    }
+
+    fn parse_struct_type_specifier(&mut self) -> (CType, String) {
+        self.expect(Token::KWStruct);
+        let tag = self.parse_identifier();
+        self.last_struct_tag = Some(tag.clone());
+        (CType::Struct, tag)
+    }
+
     fn parse_declaration(&mut self) -> Declaration {
+        // Check for struct declaration: struct tag { members };
+        if self.at(&Token::KWStruct) {
+            // Peek ahead: if it's struct tag { ... }, it's a struct declaration
+            // If it's struct tag identifier, it's a variable declaration with struct type
+            let save_pos = self.pos;
+            self.advance(); // consume 'struct'
+            let tag = self.parse_identifier();
+            if self.at(&Token::OpenBrace) {
+                // struct tag { members };
+                let members = self.parse_struct_members();
+                self.expect(Token::Semicolon);
+                return Declaration::StructDecl(StructDeclaration { tag, members });
+            } else if self.at(&Token::Semicolon) {
+                // struct tag; (forward declaration)
+                self.advance();
+                return Declaration::StructDecl(StructDeclaration { tag, members: vec![] });
+            } else {
+                // struct tag variable_name... — it's a variable/function with struct type
+                // Put back and let normal parsing handle it
+                self.pos = save_pos;
+            }
+        }
         let (sc, base_type) = self.parse_specifiers();
 
         let decl_tree = self.parse_declarator_tree();
         let (name, full_type, decl_params) = Self::process_declarator(&decl_tree, base_type);
+
+        // Replace Scalar(Struct) with FullType::Struct(tag) if applicable
+        let full_type = if base_type == CType::Struct {
+            if let Some(ref tag) = self.last_struct_tag {
+                Self::replace_scalar_struct(&full_type, tag)
+            } else { full_type }
+        } else { full_type };
 
         // Extract backward-compat fields from FullType
         let ctype = full_type.to_ctype();
@@ -650,6 +731,7 @@ impl Parser {
                 | Some(Token::KWFloat)
                 | Some(Token::KWVoid)
                 | Some(Token::KWChar)
+                | Some(Token::KWStruct)
                 | Some(Token::KWStatic)
                 | Some(Token::KWExtern)
         )
@@ -657,8 +739,31 @@ impl Parser {
 
     fn parse_block_item(&mut self) -> BlockItem {
         if self.is_declaration_start() {
+            // Check for struct declaration
+            if self.at(&Token::KWStruct) {
+                let save_pos = self.pos;
+                self.advance(); // consume 'struct'
+                let tag = self.parse_identifier();
+                if self.at(&Token::OpenBrace) {
+                    let members = self.parse_struct_members();
+                    self.expect(Token::Semicolon);
+                    return BlockItem::Declaration(Declaration::StructDecl(StructDeclaration { tag, members }));
+                } else if self.at(&Token::Semicolon) {
+                    self.advance();
+                    return BlockItem::Declaration(Declaration::StructDecl(StructDeclaration { tag, members: vec![] }));
+                } else {
+                    // struct tag var; — put back
+                    self.pos = save_pos;
+                }
+            }
             let (sc, base_type) = self.parse_specifiers();
             let (name, full_type, decl_params) = self.parse_declarator_full(base_type);
+            // Replace Scalar(Struct) with FullType::Struct(tag)
+            let full_type = if base_type == CType::Struct {
+                if let Some(ref tag) = self.last_struct_tag {
+                    Self::replace_scalar_struct(&full_type, tag)
+                } else { full_type }
+            } else { full_type };
             let ctype = full_type.to_ctype();
             let pi = match &full_type {
                 FullType::Pointer(inner) => Some(ptr_info_from_full(inner)),
@@ -1188,6 +1293,16 @@ impl Parser {
                     let index = self.parse_expression();
                     self.expect(Token::CloseBracket);
                     expr = Exp::Subscript(Box::new(expr), Box::new(index));
+                }
+                Some(Token::Dot) => {
+                    self.advance();
+                    let member = self.parse_identifier();
+                    expr = Exp::Dot(Box::new(expr), member);
+                }
+                Some(Token::Arrow) => {
+                    self.advance();
+                    let member = self.parse_identifier();
+                    expr = Exp::Arrow(Box::new(expr), member);
                 }
                 _ => break,
             }

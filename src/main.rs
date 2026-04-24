@@ -5,6 +5,8 @@ mod compile;
 mod emit;
 mod lex;
 mod parse;
+mod resolve;
+mod tacky;
 mod types;
 
 use crate::types::*;
@@ -27,8 +29,7 @@ fn validate_extension(filename: &str) {
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("");
-    if ext == "c" || ext == "h" {
-    } else {
+    if ext != "c" && ext != "h" {
         panic!("Expected C source file with .c or .h extension");
     }
 }
@@ -56,58 +57,70 @@ fn preprocess(src: &str) -> String {
     output
 }
 
-fn compile(stage: &Stage, preprocessed_src: &str, target: &Platform) -> String {
-    // Compile code
-    // Assume Compile::compile(stage, preprocessed_src) is handled elsewhere
-    //let _ = run_command(&format!("compile {} {}", stage, preprocessed_src));
+fn do_compile(stage: &Stage, preprocessed_src: &str, target: &Platform) -> String {
     compile::compile(stage, preprocessed_src, target);
-
-    // Remove preprocessed source
-    let cleanup_preprocessed = format!("rm {}", preprocessed_src);
-    run_command(&cleanup_preprocessed);
-
+    let _ = std::fs::remove_file(preprocessed_src);
     replace_extension(preprocessed_src, "s")
 }
 
-fn assemble_and_link(src: &str, cleanup: bool) {
-    let assembly_file = replace_extension(src, "s");
-    let output_file = Path::new(src)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    let assemble_cmd = format!("gcc {} -o {}", assembly_file, output_file);
+fn assemble_and_link(asm_files: &[String], output: &str, target: &Platform, cleanup: bool) {
+    let arch_flag = match target {
+        Platform::OsX => " -arch x86_64",
+        Platform::Linux => "",
+    };
+    let files = asm_files.join(" ");
+    let assemble_cmd = format!("gcc{} {} -o {}", arch_flag, files, output);
     run_command(&assemble_cmd);
 
-    // Cleanup .s files
     if cleanup {
-        let cleanup_cmd = format!("rm {}", assembly_file);
-        run_command(&cleanup_cmd);
+        for f in asm_files {
+            let _ = std::fs::remove_file(f);
+        }
     }
 }
 
-fn driver(target: Platform, debug: bool, stage: Stage, src: &str) {
-    let preprocessed_name = preprocess(src);
-    let assembly_name = compile(&stage, &preprocessed_name, &target);
+fn driver(target: Platform, debug: bool, stage: Stage, sources: &[&str]) {
+    let mut asm_files = Vec::new();
+
+    for src in sources {
+        let preprocessed_name = preprocess(src);
+        let assembly_name = do_compile(&stage, &preprocessed_name, &target);
+        asm_files.push(assembly_name);
+    }
 
     if stage == Stage::Executable {
-        assemble_and_link(&assembly_name, !debug);
+        // Output name is based on the first source file
+        let output_file = Path::new(sources[0])
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("a.out");
+        assemble_and_link(&asm_files, output_file, &target, !debug);
     }
 }
 
-// Command-line options
-
 fn main() {
-    let matches = App::new("nqcc")
-        .version("1.0")
+    let matches = App::new("rnqcc")
+        .version("0.2.0")
         .author("Dean Menezes")
         .about("A not-quite-C compiler")
         .arg(
             Arg::with_name("stage")
-                .short('s')
                 .long("stage")
                 .takes_value(true)
-                .possible_values(["lex", "parse", "codegen", "s"])
+                .possible_values(["lex", "parse", "validate", "tacky", "codegen", "s"])
                 .help("Run the specified compiler stage"),
+        )
+        .arg(
+            Arg::with_name("emit_asm")
+                .short('S')
+                .takes_value(false)
+                .help("Emit assembly (like gcc -S)"),
+        )
+        .arg(
+            Arg::with_name("compile_only")
+                .short('c')
+                .takes_value(false)
+                .help("Compile to object file (like gcc -c)"),
         )
         .arg(
             Arg::with_name("target")
@@ -125,30 +138,38 @@ fn main() {
                 .help("Write out debug information"),
         )
         .arg(
-            Arg::with_name("src_file")
+            Arg::with_name("src_files")
                 .index(1)
                 .required(true)
-                .help("Input file"),
+                .multiple(true)
+                .help("Input file(s)"),
         )
         .get_matches();
 
-    let stage = match matches.value_of("stage") {
-        Some("lex") => Stage::Lex,
-        Some("parse") => Stage::Parse,
-        Some("codegen") => Stage::Codegen,
-        Some("s") => Stage::Assembly,
-        _ => Stage::Executable, // Set a default value here
+    let stage = if matches.is_present("emit_asm") {
+        Stage::Assembly
+    } else if matches.is_present("compile_only") {
+        Stage::Assembly // compile to .s, then assemble to .o
+    } else {
+        match matches.value_of("stage") {
+            Some("lex") => Stage::Lex,
+            Some("parse") => Stage::Parse,
+            Some("validate") => Stage::Validate,
+            Some("tacky") => Stage::Tacky,
+            Some("codegen") => Stage::Codegen,
+            Some("s") => Stage::Assembly,
+            _ => Stage::Executable,
+        }
     };
 
     let target = match matches.value_of("target") {
         Some("linux") => Platform::Linux,
         Some("osx") => Platform::OsX,
-        _ => current_platform(), // You can define this function to determine default
+        _ => current_platform(),
     };
 
     let debug = matches.is_present("debug");
-    let src_file = matches.value_of("src_file").unwrap(); // Safe unwrap due to 'required' attribute
+    let src_files: Vec<&str> = matches.values_of("src_files").unwrap().collect();
 
-    // Call the driver function with parsed arguments
-    driver(target, debug, stage, src_file);
+    driver(target, debug, stage, &src_files);
 }

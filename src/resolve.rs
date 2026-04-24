@@ -3,6 +3,8 @@ use std::collections::HashMap;
 
 struct Resolver {
     scopes: Vec<HashMap<String, String>>,
+    tag_scopes: Vec<HashMap<String, String>>,
+    tag_counter: usize,
     var_counter: usize,
     loop_counter: usize,
     break_labels: Vec<String>,
@@ -18,6 +20,8 @@ impl Resolver {
     fn new() -> Self {
         Resolver {
             scopes: vec![HashMap::new()],
+            tag_scopes: vec![HashMap::new()],
+            tag_counter: 0,
             var_counter: 0,
             loop_counter: 0,
             break_labels: Vec::new(),
@@ -32,10 +36,33 @@ impl Resolver {
 
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
+        self.tag_scopes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
+        self.tag_scopes.pop();
+    }
+
+    fn declare_tag(&mut self, tag: &str) -> String {
+        let current = self.tag_scopes.last_mut().unwrap();
+        if let Some(existing) = current.get(tag) {
+            return existing.clone(); // Redeclaration in same scope reuses ID
+        }
+        let unique = format!("{}.tag.{}", tag, self.tag_counter);
+        self.tag_counter += 1;
+        current.insert(tag.to_string(), unique.clone());
+        unique
+    }
+
+    fn resolve_tag(&self, tag: &str) -> String {
+        for scope in self.tag_scopes.iter().rev() {
+            if let Some(unique) = scope.get(tag) {
+                return unique.clone();
+            }
+        }
+        // Not found — return as-is (will be caught later)
+        tag.to_string()
     }
 
     fn declare_var(&mut self, name: &str) -> String {
@@ -84,6 +111,15 @@ impl Resolver {
         label
     }
 
+    fn resolve_struct_tags_in_ft(&self, ft: FullType) -> FullType {
+        match ft {
+            FullType::Struct(tag) => FullType::Struct(self.resolve_tag(&tag)),
+            FullType::Pointer(inner) => FullType::Pointer(Box::new(self.resolve_struct_tags_in_ft(*inner))),
+            FullType::Array { elem, size } => FullType::Array { elem: Box::new(self.resolve_struct_tags_in_ft(*elem)), size },
+            other => other,
+        }
+    }
+
     fn resolve_exp(&self, exp: Exp) -> Exp {
         match exp {
             Exp::Constant(_) | Exp::LongConstant(_) | Exp::UIntConstant(_) | Exp::ULongConstant(_) | Exp::DoubleConstant(_) | Exp::StringLiteral(_) => exp,
@@ -95,7 +131,10 @@ impl Resolver {
                 elems.into_iter().map(|e| self.resolve_exp(e)).collect(),
             ),
             Exp::Var(name) => Exp::Var(self.resolve_var(&name)),
-            Exp::Cast(t, ft, inner) => Exp::Cast(t, ft, Box::new(self.resolve_exp(*inner))),
+            Exp::Cast(t, ft, inner) => {
+                let resolved_ft = ft.map(|f| self.resolve_struct_tags_in_ft(f));
+                Exp::Cast(t, resolved_ft, Box::new(self.resolve_exp(*inner)))
+            }
             Exp::Unary(op, inner) => Exp::Unary(op, Box::new(self.resolve_exp(*inner))),
             Exp::Binary(op, left, right) => Exp::Binary(
                 op,
@@ -124,7 +163,7 @@ impl Resolver {
                 Exp::FunctionCall(name, resolved_args)
             }
             Exp::SizeOf(inner) => Exp::SizeOf(Box::new(self.resolve_exp(*inner))),
-            Exp::SizeOfType(ct, ft) => Exp::SizeOfType(ct, ft),
+            Exp::SizeOfType(ct, ft) => Exp::SizeOfType(ct, self.resolve_struct_tags_in_ft(ft)),
             Exp::Dot(inner, member) => Exp::Dot(Box::new(self.resolve_exp(*inner)), member),
             Exp::Arrow(inner, member) => Exp::Arrow(Box::new(self.resolve_exp(*inner)), member),
         }
@@ -265,12 +304,13 @@ impl Resolver {
         }
         let unique_name = self.declare_var(&vd.name);
         let init = vd.init.map(|e| self.resolve_exp(e));
+        let resolved_dft = vd.decl_full_type.map(|ft| self.resolve_struct_tags_in_ft(ft));
         VarDeclaration {
             name: unique_name,
             var_type: vd.var_type,
             ptr_info: vd.ptr_info,
             array_dims: vd.array_dims,
-            decl_full_type: vd.decl_full_type,
+            decl_full_type: resolved_dft,
             init,
             storage_class: vd.storage_class,
         }
@@ -293,7 +333,13 @@ impl Resolver {
                     BlockItem::Declaration(Declaration::FunDecl(fd))
                 }
                 BlockItem::Declaration(Declaration::StructDecl(sd)) => {
-                    BlockItem::Declaration(Declaration::StructDecl(sd))
+                    let unique_tag = self.declare_tag(&sd.tag);
+                    // Resolve member types (for struct members that reference other structs)
+                    let resolved_members: Vec<MemberDeclaration> = sd.members.into_iter().map(|m| {
+                        let resolved_ft = self.resolve_struct_tags_in_ft(m.member_full_type);
+                        MemberDeclaration { name: m.name, member_type: m.member_type, member_full_type: resolved_ft }
+                    }).collect();
+                    BlockItem::Declaration(Declaration::StructDecl(StructDeclaration { tag: unique_tag, members: resolved_members }))
                 }
                 BlockItem::Statement(stmt) => {
                     BlockItem::Statement(self.resolve_statement(stmt))
@@ -304,7 +350,17 @@ impl Resolver {
 
     fn resolve_function(&mut self, func: FunctionDeclaration) -> FunctionDeclaration {
         match func.body {
-            None => func,
+            None => {
+                // Resolve struct tags in prototypes too
+                let resolved_rft = func.return_full_type.map(|ft| self.resolve_struct_tags_in_ft(ft));
+                let resolved_pfts: Vec<FullType> = func.param_full_types.into_iter()
+                    .map(|ft| self.resolve_struct_tags_in_ft(ft)).collect();
+                FunctionDeclaration {
+                    return_full_type: resolved_rft,
+                    param_full_types: resolved_pfts,
+                    ..func
+                }
+            }
             Some(body) => {
                 self.push_scope();
                 self.defined_labels.clear();
@@ -320,14 +376,17 @@ impl Resolver {
                         panic!("goto references undefined label: '{}'", target);
                     }
                 }
+                let resolved_rft = func.return_full_type.map(|ft| self.resolve_struct_tags_in_ft(ft));
+                let resolved_pfts: Vec<FullType> = func.param_full_types.into_iter()
+                    .map(|ft| self.resolve_struct_tags_in_ft(ft)).collect();
                 FunctionDeclaration {
                     name: func.name,
                     return_type: func.return_type,
-                    return_ptr_info: func.return_ptr_info, return_full_type: func.return_full_type,
+                    return_ptr_info: func.return_ptr_info, return_full_type: resolved_rft,
                     params: resolved_params,
                     body: Some(resolved_body),
                     storage_class: func.storage_class,
-                    param_full_types: func.param_full_types,
+                    param_full_types: resolved_pfts,
                 }
             }
         }
@@ -386,7 +445,9 @@ pub fn resolve(program: Program) -> Program {
                 let global_scope = resolver.scopes.first_mut().unwrap();
                 global_scope.insert(vd.name.clone(), vd.name.clone());
             }
-            Declaration::StructDecl(_) => {}
+            Declaration::StructDecl(sd) => {
+                resolver.declare_tag(&sd.tag);
+            }
         }
     }
 
@@ -399,17 +460,25 @@ pub fn resolve(program: Program) -> Program {
             }
             Declaration::VarDecl(vd) => {
                 let init = vd.init.map(|e| resolver.resolve_exp(e));
+                let resolved_dft = vd.decl_full_type.map(|ft| resolver.resolve_struct_tags_in_ft(ft));
                 Declaration::VarDecl(VarDeclaration {
                     name: vd.name,
                     var_type: vd.var_type,
                     ptr_info: vd.ptr_info,
                     array_dims: vd.array_dims,
-                    decl_full_type: vd.decl_full_type,
+                    decl_full_type: resolved_dft,
                     init,
                     storage_class: vd.storage_class,
                 })
             }
-            Declaration::StructDecl(sd) => Declaration::StructDecl(sd),
+            Declaration::StructDecl(sd) => {
+                let unique_tag = resolver.resolve_tag(&sd.tag);
+                let resolved_members: Vec<MemberDeclaration> = sd.members.into_iter().map(|m| {
+                    let resolved_ft = resolver.resolve_struct_tags_in_ft(m.member_full_type);
+                    MemberDeclaration { name: m.name, member_type: m.member_type, member_full_type: resolved_ft }
+                }).collect();
+                Declaration::StructDecl(StructDeclaration { tag: unique_tag, members: resolved_members })
+            }
         })
         .collect();
 

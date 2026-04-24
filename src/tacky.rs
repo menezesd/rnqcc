@@ -3175,14 +3175,25 @@ pub fn generate(program: Program) -> TackyProgram {
                                     init_values.push(StaticInit::ZeroInit(mem.offset - bytes_written));
                                 }
                                 if mem.member_full_type.is_array() {
-                                    let before_len: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
-                                    let scalar_t = { let mut t = &mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
-                                    let elem_sizes = TackyGen::compute_elem_sizes(&mem.member_full_type);
-                                    TackyGen::flatten_static_init(elem, scalar_t, &elem_sizes, &mut init_values);
-                                    let after_len: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
-                                    let array_bytes_written = after_len - before_len;
-                                    if array_bytes_written < mem.size {
-                                        init_values.push(StaticInit::ZeroInit(mem.size - array_bytes_written));
+                                    // Handle string literal for array members directly
+                                    if let Exp::StringLiteral(ref s) = elem {
+                                        let null_term = s.len() < mem.size;
+                                        let str_to_write = if s.len() <= mem.size { s.clone() } else { s[..mem.size].to_string() };
+                                        init_values.push(StaticInit::StringInit(str_to_write, null_term));
+                                        let str_bytes = s.len() + if null_term { 1 } else { 0 };
+                                        if str_bytes < mem.size {
+                                            init_values.push(StaticInit::ZeroInit(mem.size - str_bytes));
+                                        }
+                                    } else {
+                                        let before_len: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
+                                        let scalar_t = { let mut t = &mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
+                                        let elem_sizes = TackyGen::compute_elem_sizes(&mem.member_full_type);
+                                        TackyGen::flatten_static_init(elem, scalar_t, &elem_sizes, &mut init_values);
+                                        let after_len: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
+                                        let array_bytes_written = after_len - before_len;
+                                        if array_bytes_written < mem.size {
+                                            init_values.push(StaticInit::ZeroInit(mem.size - array_bytes_written));
+                                        }
                                     }
                                 } else if mem.member_full_type.is_struct() {
                                     if let Exp::ArrayInit(ref sub_elems) = elem {

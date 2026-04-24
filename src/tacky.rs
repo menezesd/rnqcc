@@ -424,7 +424,6 @@ impl TackyGen {
                 let ft = self.get_full_type(&name);
                 // Array-to-pointer decay: arrays decay to pointer to first element
                 if ft.is_array() {
-                    eprintln!("DECAY: name={} ft={:?}", name, ft);
                     let decayed = ft.decay(); // FullType::Pointer(elem)
                     let ptr = self.fresh_tmp_full(&decayed);
                     self.emit(TackyInstr::GetAddress {
@@ -521,6 +520,18 @@ impl TackyGen {
                     let rhs_conv = self.convert_to(rhs, rhs_type, pointee_type);
                     self.emit(TackyInstr::Store { src: rhs_conv.clone(), dst_ptr: ptr });
                     return (rhs_conv, pointee_type);
+                }
+                // Check for struct assignment: struct_var = other_struct
+                if let Exp::Var(ref lhs_name) = *left {
+                    let lhs_ft = self.get_full_type(lhs_name);
+                    if let FullType::Struct(ref tag) = lhs_ft {
+                        let struct_size = self.struct_defs.get(tag).map(|d| d.size).unwrap_or(0);
+                        let (rhs, _) = self.emit_exp(*right);
+                        let src_addr = self.fresh_tmp(CType::Pointer);
+                        self.emit(TackyInstr::GetAddress { src: rhs, dst: src_addr.clone() });
+                        self.emit_struct_copy_to(src_addr, lhs_name, struct_size);
+                        return (TackyVal::Var(lhs_name.clone()), CType::Struct);
+                    }
                 }
                 let lhs_type = self.lvalue_type(&left);
                 let (rhs, rhs_type) = self.emit_exp(*right);
@@ -726,7 +737,6 @@ impl TackyGen {
                     let second_full = self.val_full_type(&second_val);
                     (second_val, first_val, first_ctype, second_full)
                 };
-                eprintln!("SUBSCRIPT: arr_full={:?}", arr_full);
                 let (elem_full, scale) = match &arr_full {
                     FullType::Pointer(inner) => (inner.as_ref().clone(), inner.byte_size() as i64),
                     _ => (FullType::Scalar(CType::Int), 4), // fallback
@@ -757,7 +767,6 @@ impl TackyGen {
 
                 // For scalar/pointer elements, load the value
                 let elem_ctype = elem_full.to_ctype();
-                eprintln!("SUBSCRIPT LOAD: elem_full={:?}", elem_full);
                 let result = self.fresh_tmp_full(&elem_full);
                 self.emit(TackyInstr::Load { src_ptr: ptr, dst: result.clone() });
                 (result, elem_ctype)
@@ -799,7 +808,7 @@ impl TackyGen {
                     self.emit(TackyInstr::GetAddress { src: TackyVal::Var(struct_name), dst: struct_addr.clone() });
                     let mem_ptr = self.fresh_tmp(CType::Pointer);
                     self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: struct_addr, right: TackyVal::Constant(mem_offset as i64), dst: mem_ptr.clone() });
-                    let result = self.fresh_tmp(mem_type);
+                    let result = self.fresh_tmp_full(&mem_ft);
                     self.emit(TackyInstr::Load { src_ptr: mem_ptr, dst: result.clone() });
                     (result, mem_type)
                 }
@@ -831,7 +840,7 @@ impl TackyGen {
                     self.emit(TackyInstr::Copy { src: mem_ptr, dst: result.clone() });
                     (result, CType::Pointer)
                 } else {
-                    let result = self.fresh_tmp(mem_type);
+                    let result = self.fresh_tmp_full(&mem_ft);
                     self.emit(TackyInstr::Load { src_ptr: mem_ptr, dst: result.clone() });
                     (result, mem_type)
                 }
@@ -852,12 +861,39 @@ impl TackyGen {
                 }
             }
             Exp::Subscript(arr, _) => {
-                // a[i] — type is pointee type of array
                 if let Exp::Var(name) = arr.as_ref() {
                     self.deref_type(name)
                 } else {
                     CType::Int
                 }
+            }
+            Exp::Dot(inner, member) => {
+                if let Exp::Var(name) = inner.as_ref() {
+                    let ft = self.get_full_type(name);
+                    if let FullType::Struct(tag) = &ft {
+                        if let Some(def) = self.struct_defs.get(tag) {
+                            if let Some(mem) = def.find_member(member) {
+                                return mem.member_type;
+                            }
+                        }
+                    }
+                }
+                CType::Int
+            }
+            Exp::Arrow(inner, member) => {
+                if let Exp::Var(name) = inner.as_ref() {
+                    let ft = self.get_full_type(name);
+                    if let FullType::Pointer(inner_ft) = &ft {
+                        if let FullType::Struct(tag) = inner_ft.as_ref() {
+                            if let Some(def) = self.struct_defs.get(tag) {
+                                if let Some(mem) = def.find_member(member) {
+                                    return mem.member_type;
+                                }
+                            }
+                        }
+                    }
+                }
+                CType::Int
             }
             _ => CType::Int,
         }
@@ -867,6 +903,70 @@ impl TackyGen {
         match exp {
             Exp::Var(name) => TackyVal::Var(name),
             _ => panic!("Expression is not a simple lvalue"),
+        }
+    }
+
+    /// Emit a word-by-word struct copy from src address to dst name
+    fn emit_struct_copy_to(&mut self, src_addr: TackyVal, dst_name: &str, struct_size: usize) {
+        let mut off = 0usize;
+        while off + 8 <= struct_size {
+            let ptr = self.fresh_tmp(CType::Pointer);
+            self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: src_addr.clone(), right: TackyVal::Constant(off as i64), dst: ptr.clone() });
+            let tmp = self.fresh_tmp(CType::Long);
+            self.emit(TackyInstr::Load { src_ptr: ptr, dst: tmp.clone() });
+            self.emit(TackyInstr::CopyToOffset { src: tmp, dst_name: dst_name.to_string(), offset: off as i64 });
+            off += 8;
+        }
+        while off + 4 <= struct_size {
+            let ptr = self.fresh_tmp(CType::Pointer);
+            self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: src_addr.clone(), right: TackyVal::Constant(off as i64), dst: ptr.clone() });
+            let tmp = self.fresh_tmp(CType::Int);
+            self.emit(TackyInstr::Load { src_ptr: ptr, dst: tmp.clone() });
+            self.emit(TackyInstr::CopyToOffset { src: tmp, dst_name: dst_name.to_string(), offset: off as i64 });
+            off += 4;
+        }
+        while off < struct_size {
+            let ptr = self.fresh_tmp(CType::Pointer);
+            self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: src_addr.clone(), right: TackyVal::Constant(off as i64), dst: ptr.clone() });
+            let tmp = self.fresh_tmp(CType::Char);
+            self.emit(TackyInstr::Load { src_ptr: ptr, dst: tmp.clone() });
+            self.emit(TackyInstr::CopyToOffset { src: tmp, dst_name: dst_name.to_string(), offset: off as i64 });
+            off += 1;
+        }
+    }
+
+    /// Emit struct copy from src address to dst address (both pointers)
+    fn emit_struct_copy_ptr_to_ptr(&mut self, src_addr: TackyVal, dst_addr: TackyVal, struct_size: usize) {
+        let mut off = 0usize;
+        while off + 8 <= struct_size {
+            let src_ptr = self.fresh_tmp(CType::Pointer);
+            self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: src_addr.clone(), right: TackyVal::Constant(off as i64), dst: src_ptr.clone() });
+            let tmp = self.fresh_tmp(CType::Long);
+            self.emit(TackyInstr::Load { src_ptr: src_ptr, dst: tmp.clone() });
+            let dst_ptr = self.fresh_tmp(CType::Pointer);
+            self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: dst_addr.clone(), right: TackyVal::Constant(off as i64), dst: dst_ptr.clone() });
+            self.emit(TackyInstr::Store { src: tmp, dst_ptr: dst_ptr });
+            off += 8;
+        }
+        while off + 4 <= struct_size {
+            let src_ptr = self.fresh_tmp(CType::Pointer);
+            self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: src_addr.clone(), right: TackyVal::Constant(off as i64), dst: src_ptr.clone() });
+            let tmp = self.fresh_tmp(CType::Int);
+            self.emit(TackyInstr::Load { src_ptr: src_ptr, dst: tmp.clone() });
+            let dst_ptr = self.fresh_tmp(CType::Pointer);
+            self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: dst_addr.clone(), right: TackyVal::Constant(off as i64), dst: dst_ptr.clone() });
+            self.emit(TackyInstr::Store { src: tmp, dst_ptr: dst_ptr });
+            off += 4;
+        }
+        while off < struct_size {
+            let src_ptr = self.fresh_tmp(CType::Pointer);
+            self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: src_addr.clone(), right: TackyVal::Constant(off as i64), dst: src_ptr.clone() });
+            let tmp = self.fresh_tmp(CType::Char);
+            self.emit(TackyInstr::Load { src_ptr: src_ptr, dst: tmp.clone() });
+            let dst_ptr = self.fresh_tmp(CType::Pointer);
+            self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: dst_addr.clone(), right: TackyVal::Constant(off as i64), dst: dst_ptr.clone() });
+            self.emit(TackyInstr::Store { src: tmp, dst_ptr: dst_ptr });
+            off += 1;
         }
     }
 
@@ -1061,6 +1161,34 @@ impl TackyGen {
                     });
                     return (dst, CType::Pointer);
                 }
+                // &(s.member) — address of struct member
+                if let Exp::Dot(inner_exp, member) = inner {
+                    let struct_name = match *inner_exp {
+                        Exp::Var(n) => n,
+                        _ => { let (v, _) = self.emit_exp(*inner_exp); if let TackyVal::Var(n) = v { n } else { panic!("Dot on non-var") } }
+                    };
+                    let struct_ft = self.get_full_type(&struct_name);
+                    let tag = match &struct_ft { FullType::Struct(t) => t.clone(), _ => panic!("Dot on non-struct") };
+                    let def = self.struct_defs.get(&tag).cloned().unwrap();
+                    let mem = def.find_member(&member).unwrap();
+                    let mem_offset = mem.offset;
+                    let struct_addr = self.fresh_tmp(CType::Pointer);
+                    self.emit(TackyInstr::GetAddress { src: TackyVal::Var(struct_name), dst: struct_addr.clone() });
+                    let result = self.fresh_tmp(CType::Pointer);
+                    self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: struct_addr, right: TackyVal::Constant(mem_offset as i64), dst: result.clone() });
+                    return (result, CType::Pointer);
+                }
+                // &(p->member) — address of member through pointer
+                if let Exp::Arrow(inner_exp, member) = inner {
+                    let (ptr_val, _) = self.emit_exp(*inner_exp);
+                    let ptr_ft = self.val_full_type(&ptr_val);
+                    let tag = match &ptr_ft { FullType::Pointer(inner) => match inner.as_ref() { FullType::Struct(t) => t.clone(), _ => panic!("") }, _ => panic!("") };
+                    let def = self.struct_defs.get(&tag).cloned().unwrap();
+                    let mem = def.find_member(&member).unwrap();
+                    let result = self.fresh_tmp(CType::Pointer);
+                    self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: ptr_val, right: TackyVal::Constant(mem.offset as i64), dst: result.clone() });
+                    return (result, CType::Pointer);
+                }
                 // &(arr[i]) — address of subscripted element (also handles i[arr])
                 if let Exp::Subscript(first, second) = inner {
                     // Try first as pointer, then second
@@ -1100,7 +1228,6 @@ impl TackyGen {
                 // *ptr — dereference pointer
                 let (ptr, _) = self.emit_exp(inner);
                 let _dbg_ft = self.val_full_type(&ptr);
-                eprintln!("DEREF: ptr={:?} full_type={:?}", ptr, _dbg_ft);
                 // Check if dereferencing produces an array type
                 let ptr_full = self.val_full_type(&ptr);
                 if let FullType::Pointer(ref inner_ft) = ptr_full {
@@ -1650,20 +1777,28 @@ impl TackyGen {
                 while let FullType::Array { elem, .. } = t { t = elem; }
                 t.to_ctype()
             };
-            let total_scalar_elems = total_bytes / scalar_type.size() as usize;
-            // Zero-fill
-            for i in 0..total_scalar_elems {
-                let offset = (i as i64) * (scalar_type.size() as i64);
-                let zero = if scalar_type == CType::Double {
-                    let z = self.fresh_tmp(CType::Double);
-                    self.emit(TackyInstr::Copy { src: TackyVal::DoubleConstant(0.0), dst: z.clone() });
-                    z
-                } else {
-                    let z = self.fresh_tmp(scalar_type);
+            // Zero-fill using long-sized chunks
+            let sz = if scalar_type.size() > 0 { scalar_type.size() as usize } else { 1 };
+            {
+                let mut off = 0usize;
+                while off + 8 <= total_bytes {
+                    let z = self.fresh_tmp(CType::Long);
                     self.emit(TackyInstr::Copy { src: TackyVal::Constant(0), dst: z.clone() });
-                    z
-                };
-                self.emit(TackyInstr::CopyToOffset { src: zero, dst_name: vd.name.clone(), offset });
+                    self.emit(TackyInstr::CopyToOffset { src: z, dst_name: vd.name.clone(), offset: off as i64 });
+                    off += 8;
+                }
+                while off + 4 <= total_bytes {
+                    let z = self.fresh_tmp(CType::Int);
+                    self.emit(TackyInstr::Copy { src: TackyVal::Constant(0), dst: z.clone() });
+                    self.emit(TackyInstr::CopyToOffset { src: z, dst_name: vd.name.clone(), offset: off as i64 });
+                    off += 4;
+                }
+                while off < total_bytes {
+                    let z = self.fresh_tmp(CType::Char);
+                    self.emit(TackyInstr::Copy { src: TackyVal::Constant(0), dst: z.clone() });
+                    self.emit(TackyInstr::CopyToOffset { src: z, dst_name: vd.name.clone(), offset: off as i64 });
+                    off += 1;
+                }
             }
             if let Some(Exp::StringLiteral(ref s)) = vd.init {
                 // String literal initializer for local char array: emit byte by byte
@@ -1690,21 +1825,44 @@ impl TackyGen {
             let struct_size = def.size;
             let struct_align = def.alignment;
             let ft = FullType::Struct(tag.clone());
+
+            // Static struct: emit as static data
+            if vd.storage_class == Some(StorageClass::Static) {
+                self.register_var(&vd.name, ft);
+                let mut init_values = vec![StaticInit::ZeroInit(struct_size)];
+                // TODO: handle static struct initializers
+                self.static_vars.push(TackyStaticVar {
+                    name: vd.name.clone(), global: false, alignment: struct_align, init_values,
+                });
+                return;
+            }
+            if vd.storage_class == Some(StorageClass::Extern) {
+                self.register_var(&vd.name, ft);
+                self.extern_vars.push(vd.name);
+                return;
+            }
             self.register_var(&vd.name, ft);
             self.array_sizes.insert(vd.name.clone(), struct_size);
-            // Zero-fill
-            let zero_elems = struct_size / 4;
-            for i in 0..zero_elems {
-                let z = self.fresh_tmp(CType::Int);
-                self.emit(TackyInstr::Copy { src: TackyVal::Constant(0), dst: z.clone() });
-                self.emit(TackyInstr::CopyToOffset { src: z, dst_name: vd.name.clone(), offset: (i * 4) as i64 });
-            }
-            let remaining = struct_size % 4;
-            if remaining > 0 {
-                for i in 0..remaining {
+            // Zero-fill using long-sized chunks
+            {
+                let mut off = 0usize;
+                while off + 8 <= struct_size {
+                    let z = self.fresh_tmp(CType::Long);
+                    self.emit(TackyInstr::Copy { src: TackyVal::Constant(0), dst: z.clone() });
+                    self.emit(TackyInstr::CopyToOffset { src: z, dst_name: vd.name.clone(), offset: off as i64 });
+                    off += 8;
+                }
+                while off + 4 <= struct_size {
+                    let z = self.fresh_tmp(CType::Int);
+                    self.emit(TackyInstr::Copy { src: TackyVal::Constant(0), dst: z.clone() });
+                    self.emit(TackyInstr::CopyToOffset { src: z, dst_name: vd.name.clone(), offset: off as i64 });
+                    off += 4;
+                }
+                while off < struct_size {
                     let z = self.fresh_tmp(CType::Char);
                     self.emit(TackyInstr::Copy { src: TackyVal::Constant(0), dst: z.clone() });
-                    self.emit(TackyInstr::CopyToOffset { src: z, dst_name: vd.name.clone(), offset: (zero_elems * 4 + i) as i64 });
+                    self.emit(TackyInstr::CopyToOffset { src: z, dst_name: vd.name.clone(), offset: off as i64 });
+                    off += 1;
                 }
             }
             // Handle compound initializer
@@ -1712,59 +1870,35 @@ impl TackyGen {
                 for (i, elem) in elems.iter().enumerate() {
                     if i >= def.members.len() { break; }
                     let member = &def.members[i];
-                    let (val, val_type) = self.emit_exp(elem.clone());
-                    let target_type = member.member_type;
-                    let val_conv = self.convert_to(val, val_type, target_type);
-                    self.emit(TackyInstr::CopyToOffset {
-                        src: val_conv,
-                        dst_name: vd.name.clone(),
-                        offset: member.offset as i64,
-                    });
+                    let mem_ft = &member.member_full_type;
+                    // Handle nested struct/array member init
+                    if mem_ft.is_array() || mem_ft.is_struct() {
+                        if let Exp::ArrayInit(ref sub_elems) = elem {
+                            // Nested compound init for array/struct member
+                            if mem_ft.is_array() {
+                                let elem_sizes = Self::compute_elem_sizes(mem_ft);
+                                let scalar_t = { let mut t = mem_ft; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
+                                self.emit_array_init_flat(&vd.name, elem, scalar_t, member.offset as i64, &elem_sizes);
+                            }
+                            // TODO: nested struct init
+                        }
+                    } else {
+                        let (val, val_type) = self.emit_exp(elem.clone());
+                        let target_type = member.member_type;
+                        let val_conv = self.convert_to(val, val_type, target_type);
+                        self.emit(TackyInstr::CopyToOffset {
+                            src: val_conv,
+                            dst_name: vd.name.clone(),
+                            offset: member.offset as i64,
+                        });
+                    }
                 }
             } else if let Some(init) = vd.init {
-                // Copy from another struct
+                // Copy from another struct expression
                 let (val, _) = self.emit_exp(init);
-                // Copy struct byte-by-byte (or word-by-word)
-                if let TackyVal::Var(ref src_name) = val {
-                    for i in 0..(struct_size / 8) {
-                        let tmp = self.fresh_tmp(CType::Long);
-                        self.emit(TackyInstr::CopyToOffset { src: TackyVal::Var(format!("__struct_copy_placeholder")), dst_name: vd.name.clone(), offset: 0 });
-                        // Actually, use Load/Store through pointers
-                        // Get address of src, add offset, load, store to dst
-                    }
-                    // Simpler approach: get address of src struct and memcpy-like approach
-                    // For now: copy using CopyToOffset with Load
-                    let src_addr = self.fresh_tmp(CType::Pointer);
-                    self.emit(TackyInstr::GetAddress { src: val.clone(), dst: src_addr.clone() });
-                    let dst_addr = self.fresh_tmp(CType::Pointer);
-                    self.emit(TackyInstr::GetAddress { src: TackyVal::Var(vd.name.clone()), dst: dst_addr.clone() });
-                    // Copy word by word
-                    let mut off = 0usize;
-                    while off + 8 <= struct_size {
-                        let ptr = self.fresh_tmp(CType::Pointer);
-                        self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: src_addr.clone(), right: TackyVal::Constant(off as i64), dst: ptr.clone() });
-                        let tmp = self.fresh_tmp(CType::Long);
-                        self.emit(TackyInstr::Load { src_ptr: ptr, dst: tmp.clone() });
-                        self.emit(TackyInstr::CopyToOffset { src: tmp, dst_name: vd.name.clone(), offset: off as i64 });
-                        off += 8;
-                    }
-                    while off + 4 <= struct_size {
-                        let ptr = self.fresh_tmp(CType::Pointer);
-                        self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: src_addr.clone(), right: TackyVal::Constant(off as i64), dst: ptr.clone() });
-                        let tmp = self.fresh_tmp(CType::Int);
-                        self.emit(TackyInstr::Load { src_ptr: ptr, dst: tmp.clone() });
-                        self.emit(TackyInstr::CopyToOffset { src: tmp, dst_name: vd.name.clone(), offset: off as i64 });
-                        off += 4;
-                    }
-                    while off < struct_size {
-                        let ptr = self.fresh_tmp(CType::Pointer);
-                        self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: src_addr.clone(), right: TackyVal::Constant(off as i64), dst: ptr.clone() });
-                        let tmp = self.fresh_tmp(CType::Char);
-                        self.emit(TackyInstr::Load { src_ptr: ptr, dst: tmp.clone() });
-                        self.emit(TackyInstr::CopyToOffset { src: tmp, dst_name: vd.name.clone(), offset: off as i64 });
-                        off += 1;
-                    }
-                }
+                let src_addr = self.fresh_tmp(CType::Pointer);
+                self.emit(TackyInstr::GetAddress { src: val, dst: src_addr.clone() });
+                self.emit_struct_copy_to(src_addr, &vd.name, struct_size);
             }
             return;
         }

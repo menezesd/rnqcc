@@ -776,42 +776,48 @@ impl TackyGen {
                 panic!("Array initializer not allowed in expression context");
             }
             Exp::Dot(inner, member) => {
-                let struct_name = match inner.as_ref() {
-                    Exp::Var(n) => n.clone(),
-                    _ => {
-                        let (val, _) = self.emit_exp(*inner);
-                        if let TackyVal::Var(n) = val { n } else { panic!("Dot on non-variable") }
-                    }
-                };
-                let struct_ft = self.get_full_type(&struct_name);
-                let tag = match &struct_ft {
-                    FullType::Struct(t) => t.clone(),
-                    _ => panic!("Dot on non-struct type: {:?}", struct_ft),
-                };
-                let def = self.struct_defs.get(&tag).cloned()
-                    .unwrap_or_else(|| panic!("Undefined struct: {}", tag));
-                let mem = def.find_member(&member)
-                    .unwrap_or_else(|| panic!("No member '{}' in struct {}", member, tag));
-                let mem_type = mem.member_type;
-                let mem_offset = mem.offset;
-                let mem_ft = mem.member_full_type.clone();
-
-                if mem_ft.is_array() || mem_ft.is_struct() {
-                    let struct_addr = self.fresh_tmp(CType::Pointer);
-                    self.emit(TackyInstr::GetAddress { src: TackyVal::Var(struct_name), dst: struct_addr.clone() });
-                    let result_ft = FullType::Pointer(Box::new(mem_ft));
-                    let mem_ptr = self.fresh_tmp_full(&result_ft);
-                    self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: struct_addr, right: TackyVal::Constant(mem_offset as i64), dst: mem_ptr.clone() });
-                    (mem_ptr, CType::Pointer)
+                // Determine struct address and tag
+                let (struct_addr, tag) = if let Exp::Var(ref n) = *inner {
+                    let ft = self.get_full_type(n);
+                    let tag = match &ft {
+                        FullType::Struct(t) => t.clone(),
+                        _ => panic!("Dot on non-struct type: {:?}", ft),
+                    };
+                    let addr = self.fresh_tmp(CType::Pointer);
+                    self.emit(TackyInstr::GetAddress { src: TackyVal::Var(n.clone()), dst: addr.clone() });
+                    (addr, tag)
+                } else if let Exp::Unary(UnaryOp::Deref, ref ptr_exp) = *inner {
+                    // (*ptr).member — get the pointer, dereference gives struct
+                    let (ptr, _) = self.emit_exp(*ptr_exp.clone());
+                    let ptr_ft = self.val_full_type(&ptr);
+                    let tag = match &ptr_ft {
+                        FullType::Pointer(inner_ft) => match inner_ft.as_ref() {
+                            FullType::Struct(t) => t.clone(),
+                            _ => panic!("Deref.Dot on non-struct-pointer"),
+                        },
+                        _ => panic!("Deref.Dot on non-pointer"),
+                    };
+                    (ptr, tag)
                 } else {
-                    let struct_addr = self.fresh_tmp(CType::Pointer);
-                    self.emit(TackyInstr::GetAddress { src: TackyVal::Var(struct_name), dst: struct_addr.clone() });
-                    let mem_ptr = self.fresh_tmp(CType::Pointer);
-                    self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: struct_addr, right: TackyVal::Constant(mem_offset as i64), dst: mem_ptr.clone() });
-                    let result = self.fresh_tmp_full(&mem_ft);
-                    self.emit(TackyInstr::Load { src_ptr: mem_ptr, dst: result.clone() });
-                    (result, mem_type)
-                }
+                    // Complex expression (e.g., another Dot/Arrow returning struct pointer)
+                    let (val, val_type) = self.emit_exp(*inner);
+                    let val_ft = self.val_full_type(&val);
+                    // If the expression returned a pointer to a struct member
+                    let tag = match &val_ft {
+                        FullType::Struct(t) => {
+                            let addr = self.fresh_tmp(CType::Pointer);
+                            self.emit(TackyInstr::GetAddress { src: val, dst: addr.clone() });
+                            return self.access_struct_member(addr, t.clone(), &member);
+                        }
+                        FullType::Pointer(inner) => match inner.as_ref() {
+                            FullType::Struct(t) => t.clone(),
+                            _ => panic!("Dot on non-struct result: {:?}", val_ft),
+                        },
+                        _ => panic!("Dot on non-struct result: {:?}", val_ft),
+                    };
+                    (val, tag)
+                };
+                self.access_struct_member(struct_addr, tag, &member)
             }
             Exp::Arrow(inner, member) => {
                 let (ptr_val, _) = self.emit_exp(*inner);
@@ -823,27 +829,7 @@ impl TackyGen {
                     },
                     _ => panic!("Arrow on non-pointer: {:?}", ptr_ft),
                 };
-                let def = self.struct_defs.get(&tag).cloned()
-                    .unwrap_or_else(|| panic!("Undefined struct: {}", tag));
-                let mem = def.find_member(&member)
-                    .unwrap_or_else(|| panic!("No member '{}' in struct {}", member, tag));
-                let mem_type = mem.member_type;
-                let mem_offset = mem.offset;
-                let mem_ft = mem.member_full_type.clone();
-
-                let mem_ptr = self.fresh_tmp(CType::Pointer);
-                self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: ptr_val, right: TackyVal::Constant(mem_offset as i64), dst: mem_ptr.clone() });
-
-                if mem_ft.is_array() || mem_ft.is_struct() {
-                    let result_ft = FullType::Pointer(Box::new(mem_ft));
-                    let result = self.fresh_tmp_full(&result_ft);
-                    self.emit(TackyInstr::Copy { src: mem_ptr, dst: result.clone() });
-                    (result, CType::Pointer)
-                } else {
-                    let result = self.fresh_tmp_full(&mem_ft);
-                    self.emit(TackyInstr::Load { src_ptr: mem_ptr, dst: result.clone() });
-                    (result, mem_type)
-                }
+                self.access_struct_member(ptr_val, tag, &member)
             }
         }
     }
@@ -903,6 +889,43 @@ impl TackyGen {
         match exp {
             Exp::Var(name) => TackyVal::Var(name),
             _ => panic!("Expression is not a simple lvalue"),
+        }
+    }
+
+    /// Access a struct member given the struct's base address
+    fn access_struct_member(&mut self, struct_addr: TackyVal, tag: String, member: &str) -> (TackyVal, CType) {
+        let def = self.struct_defs.get(&tag).cloned()
+            .unwrap_or_else(|| panic!("Undefined struct: {}", tag));
+        let mem = def.find_member(member)
+            .unwrap_or_else(|| panic!("No member '{}' in struct {}", member, tag));
+        let mem_type = mem.member_type;
+        let mem_offset = mem.offset;
+        let mem_ft = mem.member_full_type.clone();
+
+        let mem_ptr = self.fresh_tmp(CType::Pointer);
+        if mem_offset > 0 {
+            self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: struct_addr, right: TackyVal::Constant(mem_offset as i64), dst: mem_ptr.clone() });
+        } else {
+            self.emit(TackyInstr::Copy { src: struct_addr, dst: mem_ptr.clone() });
+        }
+
+        if mem_ft.is_array() {
+            // Array member: return pointer (decayed)
+            let result_ft = FullType::Pointer(Box::new(match &mem_ft { FullType::Array { elem, .. } => *elem.clone(), _ => mem_ft.clone() }));
+            let result = self.fresh_tmp_full(&result_ft);
+            self.emit(TackyInstr::Copy { src: mem_ptr, dst: result.clone() });
+            (result, CType::Pointer)
+        } else if mem_ft.is_struct() {
+            // Struct member: return pointer to it (not loaded)
+            let result_ft = FullType::Pointer(Box::new(mem_ft));
+            let result = self.fresh_tmp_full(&result_ft);
+            self.emit(TackyInstr::Copy { src: mem_ptr, dst: result.clone() });
+            (result, CType::Pointer)
+        } else {
+            // Scalar member: load the value
+            let result = self.fresh_tmp_full(&mem_ft);
+            self.emit(TackyInstr::Load { src_ptr: mem_ptr, dst: result.clone() });
+            (result, mem_type)
         }
     }
 

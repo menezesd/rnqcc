@@ -286,8 +286,8 @@ fn member_size_align(ft: &FullType, struct_defs: &std::collections::HashMap<Stri
         FullType::Array { elem, size } => {
             let (elem_size, elem_align) = member_size_align(elem, struct_defs);
             let total = elem_size * size;
-            let align = if total >= 16 { std::cmp::max(elem_align, 16) } else { elem_align };
-            (total, align)
+            // Inside structs, array alignment is just the element alignment
+            (total, elem_align)
         }
         FullType::Struct(tag) => {
             if let Some(def) = struct_defs.get(tag) {

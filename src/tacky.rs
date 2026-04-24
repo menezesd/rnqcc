@@ -2032,20 +2032,41 @@ impl TackyGen {
                             init_values.push(StaticInit::ZeroInit(mem.offset - bytes_written));
                         }
                         if mem.member_full_type.is_array() || mem.member_full_type.is_struct() {
-                            // Nested array/struct member in static init
-                            if let Exp::ArrayInit(_) = elem {
-                                let scalar_t = if mem.member_full_type.is_array() {
-                                    let mut t = &mem.member_full_type;
-                                    while let FullType::Array { elem: e, .. } = t { t = e; }
-                                    t.to_ctype()
-                                } else { CType::Int };
-                                let elem_sizes = Self::compute_elem_sizes(&mem.member_full_type);
-                                Self::flatten_static_init(elem, scalar_t, &elem_sizes, &mut init_values);
-                            } else if let Exp::StringLiteral(s) = elem {
+                            if let Exp::StringLiteral(s) = elem {
+                                // String literal for char array member
                                 let null_term = s.len() < mem.size;
                                 init_values.push(StaticInit::StringInit(s.clone(), null_term));
+                                let str_bytes = s.len() + if null_term { 1 } else { 0 };
+                                if str_bytes < mem.size {
+                                    init_values.push(StaticInit::ZeroInit(mem.size - str_bytes));
+                                }
+                            } else if let Exp::ArrayInit(ref sub_elems) = elem {
+                                if mem.member_full_type.is_array() {
+                                    let scalar_t = { let mut t = &mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
+                                    let elem_sizes = Self::compute_elem_sizes(&mem.member_full_type);
+                                    Self::flatten_static_init(elem, scalar_t, &elem_sizes, &mut init_values);
+                                    // Pad to member size
+                                    let written: usize = init_values.iter().map(|v| Self::static_init_size(v)).sum::<usize>() - (mem.offset + (bytes_written.max(mem.offset) - mem.offset));
+                                } else if let FullType::Struct(ref inner_tag) = mem.member_full_type {
+                                    // Nested struct compound init in static context
+                                    let inner_def = self.struct_defs.get(inner_tag).cloned().unwrap();
+                                    let mut inner_written = 0usize;
+                                    for (j, sub_elem) in sub_elems.iter().enumerate() {
+                                        if j >= inner_def.members.len() { break; }
+                                        let inner_mem = &inner_def.members[j];
+                                        if inner_written < inner_mem.offset {
+                                            init_values.push(StaticInit::ZeroInit(inner_mem.offset - inner_written));
+                                        }
+                                        let (v, is_dbl, is_uns) = eval_constant_init(&Some(sub_elem.clone()));
+                                        let cv = convert_init_value(v, inner_mem.member_type, is_dbl, is_uns);
+                                        init_values.push(make_static_init(cv, inner_mem.member_type));
+                                        inner_written = inner_mem.offset + inner_mem.member_type.size() as usize;
+                                    }
+                                    if inner_written < inner_def.size {
+                                        init_values.push(StaticInit::ZeroInit(inner_def.size - inner_written));
+                                    }
+                                }
                             }
-                            let written_here: usize = init_values.iter().skip(init_values.len().saturating_sub(10)).map(|v| Self::static_init_size(v)).sum();
                             bytes_written = mem.offset + mem.size;
                         } else if let Exp::StringLiteral(ref s) = elem {
                             if mem.member_type == CType::Pointer {
@@ -2116,7 +2137,16 @@ impl TackyGen {
                     let mem_ft = &member.member_full_type;
                     // Handle nested struct/array member init
                     if mem_ft.is_array() || mem_ft.is_struct() {
-                        if let Exp::ArrayInit(ref sub_elems) = elem {
+                        // Handle string literal for char array members
+                        if let Exp::StringLiteral(ref s) = elem {
+                            let chars_to_copy = std::cmp::min(s.len(), member.size);
+                            for (j, byte) in s.bytes().take(chars_to_copy).enumerate() {
+                                let char_type = CType::Char;
+                                let src = self.fresh_tmp(char_type);
+                                self.emit(TackyInstr::Copy { src: TackyVal::Constant(byte as i64), dst: src.clone() });
+                                self.emit(TackyInstr::CopyToOffset { src, dst_name: vd.name.clone(), offset: (member.offset + j) as i64 });
+                            }
+                        } else if let Exp::ArrayInit(ref sub_elems) = elem {
                             if mem_ft.is_array() {
                                 let elem_sizes = Self::compute_elem_sizes(mem_ft);
                                 let scalar_t = { let mut t = mem_ft; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };

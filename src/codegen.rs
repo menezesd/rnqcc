@@ -546,10 +546,12 @@ fn replace_pseudos(
                 let name = name.clone();
                 let mem_off = *mem_offset;
                 if statics.contains(&name) {
-                    // For static arrays, Data addressing doesn't support offset
-                    // Use Data(name) and add offset later
-                    *op = AsmOperand::Data(name);
-                    // TODO: handle nonzero offset for static arrays
+                    if mem_off != 0 {
+                        // Static var with offset: name+offset(%rip)
+                        *op = AsmOperand::Data(format!("{}+{}", name, mem_off));
+                    } else {
+                        *op = AsmOperand::Data(name);
+                    }
                 } else {
                     // Allocate if not yet allocated
                     let base_off = if let Some(&o) = map.get(&name) {

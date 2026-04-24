@@ -636,6 +636,11 @@ impl Parser {
     fn parse_var_declaration(&mut self) -> VarDeclaration {
         let (sc, base_type) = self.parse_specifiers();
         let (name, full_type, _) = self.parse_declarator_full(base_type);
+        let full_type = if base_type == CType::Struct {
+            if let Some(ref tag) = self.last_struct_tag {
+                Self::replace_scalar_struct(&full_type, tag)
+            } else { full_type }
+        } else { full_type };
         let ctype = full_type.to_ctype();
         let pi = match &full_type {
             FullType::Pointer(inner) => Some(ptr_info_from_full(inner)),
@@ -681,6 +686,12 @@ impl Parser {
         let parse_one_param = |s: &mut Self, fts: &mut Vec<FullType>| -> (String, CType, Option<(CType, usize)>) {
             let base = s.parse_type();
             let (name, full_type, _) = s.parse_declarator_full(base);
+            // Replace Scalar(Struct) with FullType::Struct(tag)
+            let full_type = if base == CType::Struct {
+                if let Some(ref tag) = s.last_struct_tag {
+                    Self::replace_scalar_struct(&full_type, tag)
+                } else { full_type }
+            } else { full_type };
             // Array parameters decay to pointers (first dimension dropped)
             let ft = match full_type {
                 FullType::Array { elem, .. } => FullType::Pointer(elem),

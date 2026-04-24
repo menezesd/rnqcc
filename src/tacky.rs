@@ -612,16 +612,27 @@ impl TackyGen {
                     if let FullType::Struct(ref tag) = lhs_ft {
                         let struct_size = self.struct_defs.get(tag).map(|d| d.size).unwrap_or(0);
                         let (rhs, rhs_type) = self.emit_exp(*right);
-                        let src_addr = if rhs_type == CType::Pointer || rhs_type == CType::Struct {
-                            // RHS is already a pointer (from Dot/Arrow/Deref) or a struct var
+                        let src_addr = if rhs_type == CType::Pointer {
+                            // RHS is a pointer to struct data (from Dot/Arrow)
+                            rhs
+                        } else if rhs_type == CType::Struct {
+                            // RHS is a struct var or deref result
+                            // Check if it's a deref result (which holds a pointer, not struct data)
                             let rhs_ft = self.val_full_type(&rhs);
-                            if rhs_ft.is_struct() {
+                            if let TackyVal::Var(ref rhs_name) = rhs {
+                                if self.array_sizes.contains_key(rhs_name) {
+                                    // It's a proper struct variable — take its address
+                                    let addr = self.fresh_tmp(CType::Pointer);
+                                    self.emit(TackyInstr::GetAddress { src: rhs, dst: addr.clone() });
+                                    addr
+                                } else {
+                                    // It's a deref temp — the value IS the address
+                                    rhs
+                                }
+                            } else {
                                 let addr = self.fresh_tmp(CType::Pointer);
                                 self.emit(TackyInstr::GetAddress { src: rhs, dst: addr.clone() });
                                 addr
-                            } else {
-                                // Already a pointer to struct data
-                                rhs
                             }
                         } else {
                             let addr = self.fresh_tmp(CType::Pointer);

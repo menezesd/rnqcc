@@ -125,6 +125,8 @@ impl Resolver {
             }
             Exp::SizeOf(inner) => Exp::SizeOf(Box::new(self.resolve_exp(*inner))),
             Exp::SizeOfType(ct, ft) => Exp::SizeOfType(ct, ft),
+            Exp::Dot(inner, member) => Exp::Dot(Box::new(self.resolve_exp(*inner)), member),
+            Exp::Arrow(inner, member) => Exp::Arrow(Box::new(self.resolve_exp(*inner)), member),
         }
     }
 
@@ -290,6 +292,9 @@ impl Resolver {
                     self.functions.insert(fd.name.clone(), fd.params.len());
                     BlockItem::Declaration(Declaration::FunDecl(fd))
                 }
+                BlockItem::Declaration(Declaration::StructDecl(sd)) => {
+                    BlockItem::Declaration(Declaration::StructDecl(sd))
+                }
                 BlockItem::Statement(stmt) => {
                     BlockItem::Statement(self.resolve_statement(stmt))
                 }
@@ -381,6 +386,7 @@ pub fn resolve(program: Program) -> Program {
                 let global_scope = resolver.scopes.first_mut().unwrap();
                 global_scope.insert(vd.name.clone(), vd.name.clone());
             }
+            Declaration::StructDecl(_) => {}
         }
     }
 
@@ -403,6 +409,7 @@ pub fn resolve(program: Program) -> Program {
                     storage_class: vd.storage_class,
                 })
             }
+            Declaration::StructDecl(sd) => Declaration::StructDecl(sd),
         })
         .collect();
 

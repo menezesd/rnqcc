@@ -42,6 +42,8 @@ pub enum CType {
     UInt,
     ULong,
     Double,
+    /// Struct type (tag tracked separately via FullType)
+    Struct,
     /// Pointer to some type. We don't track the pointee type at the assembly level —
     /// all pointers are 8 bytes. The pointee type is only needed for type checking
     /// which we handle during parsing/TACKY generation.
@@ -56,6 +58,7 @@ impl CType {
             CType::Int | CType::UInt => 4,
             CType::Long | CType::ULong | CType::Double | CType::Pointer => 8,
             CType::Void => 0,
+            CType::Struct => 0, // size tracked via FullType/StructDef
         }
     }
 
@@ -65,6 +68,10 @@ impl CType {
 
     pub fn is_char(self) -> bool {
         matches!(self, CType::Char | CType::SChar | CType::UChar)
+    }
+
+    pub fn is_struct(self) -> bool {
+        self == CType::Struct
     }
 
     pub fn is_double(self) -> bool {
@@ -108,6 +115,7 @@ pub enum FullType {
     Scalar(CType),
     Pointer(Box<FullType>),
     Array { elem: Box<FullType>, size: usize },
+    Struct(String), // struct tag name (resolved to unique identifier)
 }
 
 impl FullType {
@@ -117,27 +125,41 @@ impl FullType {
             FullType::Scalar(t) => *t,
             FullType::Pointer(_) => CType::Pointer,
             FullType::Array { .. } => CType::Pointer, // arrays decay to pointers in most contexts
+            FullType::Struct(_) => CType::Struct,
         }
     }
 
-    /// Total byte size of this type
+    /// Total byte size of this type (note: for Struct, returns 0 without struct_defs)
     pub fn byte_size(&self) -> usize {
         match self {
-            FullType::Scalar(t) => t.size() as usize,
+            FullType::Scalar(t) => std::cmp::max(t.size() as usize, 1),
             FullType::Pointer(_) => 8,
             FullType::Array { elem, size } => elem.byte_size() * size,
+            FullType::Struct(_) => 0, // need struct_defs to compute; caller should use byte_size_with
+        }
+    }
+
+    /// Total byte size with struct definitions
+    pub fn byte_size_with(&self, struct_defs: &std::collections::HashMap<String, StructDef>) -> usize {
+        match self {
+            FullType::Struct(tag) => {
+                struct_defs.get(tag).map(|d| d.size).unwrap_or(0)
+            }
+            FullType::Array { elem, size } => elem.byte_size_with(struct_defs) * size,
+            _ => self.byte_size(),
         }
     }
 
     /// Alignment requirement
     pub fn alignment(&self) -> usize {
         match self {
-            FullType::Scalar(t) => t.size() as usize,
+            FullType::Scalar(t) => std::cmp::max(t.size() as usize, 1),
             FullType::Pointer(_) => 8,
             FullType::Array { elem, .. } => {
                 let ea = elem.alignment();
                 if self.byte_size() >= 16 { std::cmp::max(ea, 16) } else { ea }
             }
+            FullType::Struct(_) => 1, // need struct_defs; caller should use alignment_with
         }
     }
 
@@ -170,6 +192,10 @@ impl FullType {
         matches!(self, FullType::Scalar(_))
     }
 
+    pub fn is_struct(&self) -> bool {
+        matches!(self, FullType::Struct(_))
+    }
+
     /// Construct from parser output (base type + ptr_info + array_dims)
     pub fn from_decl(base: CType, ptr_info: Option<(CType, usize)>, array_dims: &Option<Vec<usize>>) -> FullType {
         let base_full = if let Some((base_t, depth)) = ptr_info {
@@ -193,6 +219,82 @@ impl FullType {
             t
         } else {
             base_full
+        }
+    }
+}
+
+/// Struct definition: member layout information
+#[derive(Debug, Clone)]
+pub struct StructDef {
+    pub tag: String,
+    pub members: Vec<StructMember>,
+    pub size: usize,
+    pub alignment: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct StructMember {
+    pub name: String,
+    pub member_type: CType,
+    pub member_full_type: FullType,
+    pub offset: usize,
+    pub size: usize,
+}
+
+impl StructDef {
+    /// Compute layout from member declarations
+    pub fn from_members(tag: &str, members: &[MemberDeclaration], struct_defs: &std::collections::HashMap<String, StructDef>) -> Self {
+        let mut offset = 0usize;
+        let mut max_align = 1usize;
+        let mut laid_out = Vec::new();
+
+        for m in members {
+            let (m_size, m_align) = member_size_align(&m.member_full_type, struct_defs);
+            // Align offset
+            offset = (offset + m_align - 1) & !(m_align - 1);
+            laid_out.push(StructMember {
+                name: m.name.clone(),
+                member_type: m.member_type,
+                member_full_type: m.member_full_type.clone(),
+                offset,
+                size: m_size,
+            });
+            offset += m_size;
+            if m_align > max_align { max_align = m_align; }
+        }
+
+        // Pad to struct alignment
+        let total_size = (offset + max_align - 1) & !(max_align - 1);
+
+        StructDef {
+            tag: tag.to_string(),
+            members: laid_out,
+            size: total_size,
+            alignment: max_align,
+        }
+    }
+
+    pub fn find_member(&self, name: &str) -> Option<&StructMember> {
+        self.members.iter().find(|m| m.name == name)
+    }
+}
+
+fn member_size_align(ft: &FullType, struct_defs: &std::collections::HashMap<String, StructDef>) -> (usize, usize) {
+    match ft {
+        FullType::Scalar(t) => (std::cmp::max(t.size() as usize, 1), std::cmp::max(t.size() as usize, 1)),
+        FullType::Pointer(_) => (8, 8),
+        FullType::Array { elem, size } => {
+            let (elem_size, elem_align) = member_size_align(elem, struct_defs);
+            let total = elem_size * size;
+            let align = if total >= 16 { std::cmp::max(elem_align, 16) } else { elem_align };
+            (total, align)
+        }
+        FullType::Struct(tag) => {
+            if let Some(def) = struct_defs.get(tag) {
+                (def.size, def.alignment)
+            } else {
+                panic!("Undefined struct: {}", tag);
+            }
         }
     }
 }
@@ -233,6 +335,7 @@ pub enum Token {
     // Keywords
     KWChar,
     KWSizeOf,
+    KWStruct,
     KWInt,
     KWLong,
     KWUnsigned,
@@ -302,6 +405,9 @@ pub enum Token {
     // Ternary
     Question,
     Colon,
+    // Struct member access
+    Dot,
+    Arrow,
 }
 
 // ============================================================
@@ -363,6 +469,8 @@ pub enum Exp {
     ArrayInit(Vec<Exp>),           // {1, 2, 3} or {{1,2}, {3,4}}
     SizeOf(Box<Exp>),              // sizeof expr
     SizeOfType(CType, FullType),   // sizeof(type)
+    Dot(Box<Exp>, String),         // expr.member
+    Arrow(Box<Exp>, String),       // expr->member
 }
 
 #[derive(Debug)]
@@ -464,10 +572,24 @@ pub struct FunctionDeclaration {
     pub storage_class: Option<StorageClass>,
 }
 
+#[derive(Debug, Clone)]
+pub struct MemberDeclaration {
+    pub name: String,
+    pub member_type: CType,
+    pub member_full_type: FullType,
+}
+
+#[derive(Debug)]
+pub struct StructDeclaration {
+    pub tag: String,
+    pub members: Vec<MemberDeclaration>, // empty = incomplete type
+}
+
 #[derive(Debug)]
 pub enum Declaration {
     FunDecl(FunctionDeclaration),
     VarDecl(VarDeclaration),
+    StructDecl(StructDeclaration),
 }
 
 #[derive(Debug)]
@@ -654,6 +776,7 @@ impl From<CType> for AsmType {
             CType::Long | CType::ULong | CType::Pointer => AsmType::Quadword,
             CType::Double => AsmType::Double,
             CType::Void => AsmType::Longword,
+            CType::Struct => AsmType::Longword, // struct size tracked separately
         }
     }
 }

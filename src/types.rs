@@ -34,6 +34,9 @@ pub enum Stage {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CType {
+    Char,
+    SChar,
+    UChar,
     Int,
     Long,
     UInt,
@@ -49,6 +52,7 @@ pub enum CType {
 impl CType {
     pub fn size(self) -> i32 {
         match self {
+            CType::Char | CType::SChar | CType::UChar => 1,
             CType::Int | CType::UInt => 4,
             CType::Long | CType::ULong | CType::Double | CType::Pointer => 8,
             CType::Void => 0,
@@ -56,7 +60,11 @@ impl CType {
     }
 
     pub fn is_signed(self) -> bool {
-        matches!(self, CType::Int | CType::Long)
+        matches!(self, CType::Char | CType::SChar | CType::Int | CType::Long)
+    }
+
+    pub fn is_char(self) -> bool {
+        matches!(self, CType::Char | CType::SChar | CType::UChar)
     }
 
     pub fn is_double(self) -> bool {
@@ -67,8 +75,16 @@ impl CType {
         self == CType::Pointer
     }
 
+    /// Integer promotion: char types promote to Int
+    pub fn promote(self) -> CType {
+        if self.is_char() { CType::Int } else { self }
+    }
+
     /// Usual arithmetic conversions (C standard 6.3.1.8)
     pub fn common(a: CType, b: CType) -> CType {
+        // Integer promotions first
+        let a = a.promote();
+        let b = b.promote();
         if a == b { return a; }
         if a == CType::Double { return CType::Double; }
         if b == CType::Double { return CType::Double; }
@@ -191,9 +207,12 @@ pub enum StaticInit {
     LongInit(i64),
     UIntInit(u32),
     ULongInit(u64),
+    CharInit(i8),
+    UCharInit(u8),
     DoubleInit(f64),
     ZeroInit(usize), // zero-fill N bytes
-    PointerInit(i64), // pointer value (address as i64)
+    StringInit(String, bool), // (string_content, null_terminated) → .asciz or .ascii
+    PointerInit(String), // label name → .quad label_name
 }
 
 // ============================================================
@@ -209,7 +228,10 @@ pub enum Token {
     UIntLiteral(i64),
     ULongLiteral(i64),
     DoubleLiteral(f64),
+    CharLiteral(i64),
+    StringLiteral(String),
     // Keywords
+    KWChar,
     KWInt,
     KWLong,
     KWUnsigned,
@@ -327,8 +349,9 @@ pub enum Exp {
     UIntConstant(i64),
     ULongConstant(i64),
     DoubleConstant(f64),
+    StringLiteral(String),
     Var(String),
-    Cast(CType, Box<Exp>),
+    Cast(CType, Option<FullType>, Box<Exp>),
     Unary(UnaryOp, Box<Exp>),
     Binary(BinaryOp, Box<Exp>, Box<Exp>),
     Assign(Box<Exp>, Box<Exp>),
@@ -586,9 +609,17 @@ pub struct TackyStaticVar {
 }
 
 #[derive(Debug)]
+pub struct TackyStaticConstant {
+    pub name: String,
+    pub alignment: usize,
+    pub init: StaticInit,
+}
+
+#[derive(Debug)]
 pub enum TackyTopLevel {
     Function(TackyFunction),
     StaticVar(TackyStaticVar),
+    StaticConstant(TackyStaticConstant),
 }
 
 #[derive(Debug)]
@@ -606,6 +637,7 @@ pub struct TackyProgram {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AsmType {
+    Byte,     // 1-byte char
     Longword, // 32-bit int
     Quadword, // 64-bit long
     Double,   // 64-bit float (XMM)
@@ -614,6 +646,7 @@ pub enum AsmType {
 impl From<CType> for AsmType {
     fn from(t: CType) -> Self {
         match t {
+            CType::Char | CType::SChar | CType::UChar => AsmType::Byte,
             CType::Int | CType::UInt => AsmType::Longword,
             CType::Long | CType::ULong | CType::Pointer => AsmType::Quadword,
             CType::Double => AsmType::Double,
@@ -693,8 +726,8 @@ pub enum CondCode {
 #[derive(Debug)]
 pub enum AsmInstr {
     Mov(AsmType, AsmOperand, AsmOperand),
-    Movsx(AsmOperand, AsmOperand),  // movslq: sign-extend 32→64
-    MovZeroExtend(AsmOperand, AsmOperand), // movl (32→64 zero-extend via movl)
+    Movsx(AsmType, AsmType, AsmOperand, AsmOperand),  // (src_type, dst_type, src, dst) sign-extend
+    MovZeroExtend(AsmType, AsmType, AsmOperand, AsmOperand), // (src_type, dst_type, src, dst) zero-extend
     Unary(AsmType, AsmUnaryOp, AsmOperand),
     Binary(AsmType, AsmBinaryOp, AsmOperand, AsmOperand),
     Idiv(AsmType, AsmOperand),
@@ -735,9 +768,17 @@ pub struct AsmStaticVar {
 }
 
 #[derive(Debug)]
+pub struct AsmStaticConstant {
+    pub name: String,
+    pub alignment: usize,
+    pub init: StaticInit,
+}
+
+#[derive(Debug)]
 pub enum AsmTopLevel {
     Function(AsmFunction),
     StaticVar(AsmStaticVar),
+    StaticConstant(AsmStaticConstant),
 }
 
 #[derive(Debug)]

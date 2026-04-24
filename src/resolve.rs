@@ -86,7 +86,7 @@ impl Resolver {
 
     fn resolve_exp(&self, exp: Exp) -> Exp {
         match exp {
-            Exp::Constant(_) | Exp::LongConstant(_) | Exp::UIntConstant(_) | Exp::ULongConstant(_) | Exp::DoubleConstant(_) => exp,
+            Exp::Constant(_) | Exp::LongConstant(_) | Exp::UIntConstant(_) | Exp::ULongConstant(_) | Exp::DoubleConstant(_) | Exp::StringLiteral(_) => exp,
             Exp::Subscript(arr, idx) => Exp::Subscript(
                 Box::new(self.resolve_exp(*arr)),
                 Box::new(self.resolve_exp(*idx)),
@@ -95,7 +95,7 @@ impl Resolver {
                 elems.into_iter().map(|e| self.resolve_exp(e)).collect(),
             ),
             Exp::Var(name) => Exp::Var(self.resolve_var(&name)),
-            Exp::Cast(t, inner) => Exp::Cast(t, Box::new(self.resolve_exp(*inner))),
+            Exp::Cast(t, ft, inner) => Exp::Cast(t, ft, Box::new(self.resolve_exp(*inner))),
             Exp::Unary(op, inner) => Exp::Unary(op, Box::new(self.resolve_exp(*inner))),
             Exp::Binary(op, left, right) => Exp::Binary(
                 op,

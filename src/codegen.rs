@@ -19,7 +19,10 @@ fn val_type(val: &TackyVal, types: &HashMap<String, CType>) -> AsmType {
     match val {
         TackyVal::Constant(_) => AsmType::Longword,
         TackyVal::DoubleConstant(_) => AsmType::Double,
-        TackyVal::Var(name) => types.get(name).copied().unwrap_or(CType::Int).into(),
+        TackyVal::Var(name) => {
+            let ct = types.get(name).copied().unwrap_or(CType::Int);
+            ct.into()
+        }
     }
 }
 
@@ -75,27 +78,32 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, out: 
             out.push(AsmInstr::Ret);
         }
         TackyInstr::SignExtend { src, dst } => {
+            let src_t = val_type(src, types);
+            let dst_t = val_type(dst, types);
             match src {
-                TackyVal::Constant(c) => {
-                    out.push(AsmInstr::Mov(AsmType::Quadword, AsmOperand::Imm(*c), convert_val(dst)));
+                TackyVal::Constant(c) if dst_t != AsmType::Byte => {
+                    out.push(AsmInstr::Mov(dst_t, AsmOperand::Imm(*c), convert_val(dst)));
                 }
                 _ => {
-                    out.push(AsmInstr::Movsx(convert_val(src), convert_val(dst)));
+                    out.push(AsmInstr::Movsx(src_t, dst_t, convert_val(src), convert_val(dst)));
                 }
             }
         }
         TackyInstr::ZeroExtend { src, dst } => {
+            let src_t = val_type(src, types);
+            let dst_t = val_type(dst, types);
             match src {
-                TackyVal::Constant(c) => {
-                    out.push(AsmInstr::Mov(AsmType::Quadword, AsmOperand::Imm(*c), convert_val(dst)));
+                TackyVal::Constant(c) if dst_t != AsmType::Byte => {
+                    out.push(AsmInstr::Mov(dst_t, AsmOperand::Imm(*c), convert_val(dst)));
                 }
                 _ => {
-                    out.push(AsmInstr::MovZeroExtend(convert_val(src), convert_val(dst)));
+                    out.push(AsmInstr::MovZeroExtend(src_t, dst_t, convert_val(src), convert_val(dst)));
                 }
             }
         }
         TackyInstr::Truncate { src, dst } => {
-            out.push(AsmInstr::Mov(AsmType::Longword, convert_val(src), convert_val(dst)));
+            let dst_t = val_type(dst, types);
+            out.push(AsmInstr::Mov(dst_t, convert_val(src), convert_val(dst)));
         }
         TackyInstr::Unary { op: TackyUnaryOp::LogicalNot, src, dst } => {
             let t = val_type(src, types);
@@ -234,17 +242,33 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, out: 
         }
         TackyInstr::IntToDouble { src, dst } => {
             let src_t = val_type(src, types);
-            out.push(AsmInstr::Cvtsi2sd(src_t, convert_val(src), convert_val(dst)));
+            if src_t == AsmType::Byte {
+                // char→double: sign-extend to int first, then cvtsi2sd
+                out.push(AsmInstr::Movsx(AsmType::Byte, AsmType::Longword, convert_val(src), AsmOperand::Reg(Reg::R10)));
+                out.push(AsmInstr::Cvtsi2sd(AsmType::Longword, AsmOperand::Reg(Reg::R10), convert_val(dst)));
+            } else {
+                out.push(AsmInstr::Cvtsi2sd(src_t, convert_val(src), convert_val(dst)));
+            }
         }
         TackyInstr::DoubleToInt { src, dst } => {
             let dst_t = val_type(dst, types);
-            out.push(AsmInstr::Cvttsd2si(dst_t, convert_val(src), convert_val(dst)));
+            if dst_t == AsmType::Byte {
+                // double→char: cvttsd2si to int, then truncate to byte
+                out.push(AsmInstr::Cvttsd2si(AsmType::Longword, convert_val(src), AsmOperand::Reg(Reg::R10)));
+                out.push(AsmInstr::Mov(AsmType::Byte, AsmOperand::Reg(Reg::R10), convert_val(dst)));
+            } else {
+                out.push(AsmInstr::Cvttsd2si(dst_t, convert_val(src), convert_val(dst)));
+            }
         }
         TackyInstr::UIntToDouble { src, dst } => {
             let src_t = val_type(src, types);
-            if src_t == AsmType::Longword {
+            if src_t == AsmType::Byte {
+                // unsigned char→double: zero-extend to int, then cvtsi2sd
+                out.push(AsmInstr::MovZeroExtend(AsmType::Byte, AsmType::Longword, convert_val(src), AsmOperand::Reg(Reg::R10)));
+                out.push(AsmInstr::Cvtsi2sd(AsmType::Longword, AsmOperand::Reg(Reg::R10), convert_val(dst)));
+            } else if src_t == AsmType::Longword {
                 // Unsigned int (32-bit): zero-extend to R10 (64-bit), then cvtsi2sdq
-                out.push(AsmInstr::MovZeroExtend(convert_val(src), AsmOperand::Reg(Reg::R10)));
+                out.push(AsmInstr::MovZeroExtend(AsmType::Longword, AsmType::Quadword, convert_val(src), AsmOperand::Reg(Reg::R10)));
                 out.push(AsmInstr::Cvtsi2sd(AsmType::Quadword, AsmOperand::Reg(Reg::R10), convert_val(dst)));
             } else {
                 // Unsigned long (64-bit): need to handle values > LONG_MAX
@@ -312,12 +336,17 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, out: 
         }
         TackyInstr::DoubleToUInt { src, dst } => {
             let dst_t = val_type(dst, types);
-            // Double → signed long via cvttsd2siq, then truncate if needed
-            out.push(AsmInstr::Cvttsd2si(AsmType::Quadword, convert_val(src), AsmOperand::Reg(Reg::R10)));
-            if dst_t == AsmType::Longword {
-                out.push(AsmInstr::Mov(AsmType::Longword, AsmOperand::Reg(Reg::R10), convert_val(dst)));
+            if dst_t == AsmType::Byte {
+                // double→unsigned char: cvttsd2si to int, truncate to byte
+                out.push(AsmInstr::Cvttsd2si(AsmType::Longword, convert_val(src), AsmOperand::Reg(Reg::R10)));
+                out.push(AsmInstr::Mov(AsmType::Byte, AsmOperand::Reg(Reg::R10), convert_val(dst)));
             } else {
-                out.push(AsmInstr::Mov(AsmType::Quadword, AsmOperand::Reg(Reg::R10), convert_val(dst)));
+                out.push(AsmInstr::Cvttsd2si(AsmType::Quadword, convert_val(src), AsmOperand::Reg(Reg::R10)));
+                if dst_t == AsmType::Longword {
+                    out.push(AsmInstr::Mov(AsmType::Longword, AsmOperand::Reg(Reg::R10), convert_val(dst)));
+                } else {
+                    out.push(AsmInstr::Mov(AsmType::Quadword, AsmOperand::Reg(Reg::R10), convert_val(dst)));
+                }
             }
         }
         TackyInstr::Jump(label) => {
@@ -495,7 +524,8 @@ fn replace_pseudos(
                         let size = if let Some(&arr_size) = arr_sizes.get(&name) {
                             arr_size as i32
                         } else {
-                            types.get(&name).copied().unwrap_or(CType::Int).size()
+                            let ct = types.get(&name).copied().unwrap_or(CType::Int);
+                            std::cmp::max(ct.size(), 1)
                         };
                         let align = if let Some(&arr_size) = arr_sizes.get(&name) {
                             if arr_size >= 16 { 16 } else { std::cmp::max(size.min(16), 1) }
@@ -552,7 +582,7 @@ fn replace_pseudos(
                 replace_operand(src, &mut pseudo_map, &mut stack_offset, static_vars, types, arr_sizes);
                 replace_operand(dst, &mut pseudo_map, &mut stack_offset, static_vars, types, arr_sizes);
             }
-            AsmInstr::Movsx(src, dst) | AsmInstr::MovZeroExtend(src, dst) => {
+            AsmInstr::Movsx(_, _, src, dst) | AsmInstr::MovZeroExtend(_, _, src, dst) => {
                 replace_operand(src, &mut pseudo_map, &mut stack_offset, static_vars, types, arr_sizes);
                 replace_operand(dst, &mut pseudo_map, &mut stack_offset, static_vars, types, arr_sizes);
             }
@@ -622,14 +652,14 @@ fn fixup_instructions(func: &mut AsmFunction, stack_size: i32) {
                 new_instructions.push(AsmInstr::Mov(t, AsmOperand::Reg(Reg::R10), dst.clone()));
             }
             // movsx mem, mem
-            AsmInstr::Movsx(ref src, ref dst) if is_memory(src) && is_memory(dst) => {
-                new_instructions.push(AsmInstr::Movsx(src.clone(), AsmOperand::Reg(Reg::R10)));
-                new_instructions.push(AsmInstr::Mov(AsmType::Quadword, AsmOperand::Reg(Reg::R10), dst.clone()));
+            AsmInstr::Movsx(st, dt, ref src, ref dst) if is_memory(src) && is_memory(dst) => {
+                new_instructions.push(AsmInstr::Movsx(st, dt, src.clone(), AsmOperand::Reg(Reg::R10)));
+                new_instructions.push(AsmInstr::Mov(dt, AsmOperand::Reg(Reg::R10), dst.clone()));
             }
             // movzx mem, mem
-            AsmInstr::MovZeroExtend(ref src, ref dst) if is_memory(src) && is_memory(dst) => {
-                new_instructions.push(AsmInstr::MovZeroExtend(src.clone(), AsmOperand::Reg(Reg::R10)));
-                new_instructions.push(AsmInstr::Mov(AsmType::Quadword, AsmOperand::Reg(Reg::R10), dst.clone()));
+            AsmInstr::MovZeroExtend(st, dt, ref src, ref dst) if is_memory(src) && is_memory(dst) => {
+                new_instructions.push(AsmInstr::MovZeroExtend(st, dt, src.clone(), AsmOperand::Reg(Reg::R10)));
+                new_instructions.push(AsmInstr::Mov(dt, AsmOperand::Reg(Reg::R10), dst.clone()));
             }
             // idiv imm / div imm
             AsmInstr::Idiv(t, AsmOperand::Imm(val)) => {
@@ -798,6 +828,13 @@ pub fn gen(program: &TackyProgram) -> AsmProgram {
                     global: sv.global,
                     alignment: sv.alignment,
                     init_values: sv.init_values.clone(),
+                }));
+            }
+            TackyTopLevel::StaticConstant(sc) => {
+                top_level.push(AsmTopLevel::StaticConstant(AsmStaticConstant {
+                    name: sc.name.clone(),
+                    alignment: sc.alignment,
+                    init: sc.init.clone(),
                 }));
             }
         }

@@ -87,9 +87,14 @@ impl TackyGen {
             self.ptr_info.insert(name.to_string(), (base, depth));
         }
 
-        // Track array sizes
+        // Track array/struct sizes
         if ft.is_array() {
             self.array_sizes.insert(name.to_string(), ft.byte_size());
+        }
+        if let FullType::Struct(ref tag) = ft {
+            if let Some(def) = self.struct_defs.get(tag) {
+                self.array_sizes.insert(name.to_string(), def.size);
+            }
         }
     }
 
@@ -2438,6 +2443,7 @@ impl TackyGen {
             // Static struct: emit as static data
             if vd.storage_class == Some(StorageClass::Static) {
                 self.register_var(&vd.name, ft);
+                self.array_sizes.insert(vd.name.clone(), struct_size);
                 let mut init_values: Vec<StaticInit> = Vec::new();
                 if let Some(Exp::ArrayInit(ref elems)) = vd.init {
                     // Flatten compound initializer for static struct

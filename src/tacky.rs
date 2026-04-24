@@ -123,7 +123,7 @@ impl TackyGen {
     fn ptr_elem_size(&self, name: &str) -> i64 {
         if let Some(ft) = self.full_types.get(name) {
             match ft {
-                FullType::Pointer(inner) => inner.byte_size() as i64,
+                FullType::Pointer(inner) => inner.byte_size_with(&self.struct_defs) as i64,
                 _ => self.deref_type(name).size() as i64,
             }
         } else {
@@ -515,6 +515,18 @@ impl TackyGen {
                 // Check if LHS is a dereference: *ptr = value
                 if let Exp::Unary(UnaryOp::Deref, ptr_exp) = *left {
                     let (ptr, _) = self.emit_exp(*ptr_exp);
+                    let ptr_ft = self.val_full_type(&ptr);
+                    // Check if pointee is a struct — need struct copy
+                    if let FullType::Pointer(ref inner) = ptr_ft {
+                        if let FullType::Struct(ref tag) = **inner {
+                            let struct_size = self.struct_defs.get(tag).map(|d| d.size).unwrap_or(0);
+                            let (rhs, _) = self.emit_exp(*right);
+                            let src_addr = self.fresh_tmp(CType::Pointer);
+                            self.emit(TackyInstr::GetAddress { src: rhs, dst: src_addr.clone() });
+                            self.emit_struct_copy_ptr_to_ptr(src_addr, ptr, struct_size);
+                            return (TackyVal::Constant(0), CType::Struct);
+                        }
+                    }
                     let pointee_type = if let TackyVal::Var(ref name) = ptr {
                         self.deref_type(name)
                     } else { CType::Int };
@@ -1369,14 +1381,25 @@ impl TackyGen {
                 let ptr_full = self.val_full_type(&ptr);
                 if let FullType::Pointer(ref inner_ft) = ptr_full {
                     if inner_ft.is_array() {
-                        // Dereferencing a pointer-to-array produces the array itself
-                        // The array starts at the same address — no Load needed
-                        // The result is the array, which will decay to a pointer when used
                         let decayed = inner_ft.decay();
                         let result = self.fresh_tmp_full(&decayed);
-                        // Copy the pointer value (same address, different type)
                         self.emit(TackyInstr::Copy { src: ptr, dst: result.clone() });
                         return (result, decayed.to_ctype());
+                    }
+                    if inner_ft.is_struct() {
+                        // Dereferencing a pointer-to-struct: the struct lives at the pointer address
+                        // Return the pointer as the "struct value" (similar to array treatment)
+                        let result = self.fresh_tmp_full(inner_ft);
+                        self.emit(TackyInstr::Copy { src: ptr, dst: result.clone() });
+                        // Also register as aggregate for stack allocation
+                        if let TackyVal::Var(ref name) = result {
+                            if let FullType::Struct(ref tag) = **inner_ft {
+                                if let Some(def) = self.struct_defs.get(tag) {
+                                    self.array_sizes.insert(name.clone(), def.size);
+                                }
+                            }
+                        }
+                        return (result, CType::Struct);
                     }
                 }
                 let pointee_type = if let TackyVal::Var(ref name) = ptr {
@@ -2470,6 +2493,11 @@ pub fn generate(program: Program) -> TackyProgram {
                     if dft.is_array() {
                         gen.array_sizes.insert(vd.name.clone(), dft.byte_size());
                     }
+                    if let FullType::Struct(ref tag) = dft {
+                        if let Some(def) = gen.struct_defs.get(tag) {
+                            gen.array_sizes.insert(vd.name.clone(), def.size);
+                        }
+                    }
                 }
                 global_vars.insert(vd.name.clone());
             }
@@ -2521,6 +2549,59 @@ pub fn generate(program: Program) -> TackyProgram {
     let mut global_array_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     for decl in &program.declarations {
         if let Declaration::VarDecl(vd) = decl {
+            // Handle global struct variables
+            if let Some(FullType::Struct(ref tag)) = vd.decl_full_type {
+                if vd.storage_class != Some(StorageClass::Extern) && !global_array_names.contains(&vd.name) {
+                    let tag = tag.clone();
+                    let is_global = *linkage.get(&vd.name).unwrap_or(&true);
+                    if let Some(def) = gen.struct_defs.get(&tag) {
+                        let struct_size = def.size;
+                        let struct_align = def.alignment;
+                        let ft = FullType::Struct(tag.clone());
+                        gen.register_var(&vd.name, ft);
+                        gen.array_sizes.insert(vd.name.clone(), struct_size);
+                        global_array_names.insert(vd.name.clone());
+                        file_scope_vars.remove(&vd.name);
+
+                        let mut init_values: Vec<StaticInit> = Vec::new();
+                        if let Some(Exp::ArrayInit(ref elems)) = vd.init {
+                            // Compound initializer for global struct
+                            let def = gen.struct_defs.get(&tag).cloned().unwrap();
+                            let mut bytes_written = 0usize;
+                            for (i, elem) in elems.iter().enumerate() {
+                                if i >= def.members.len() { break; }
+                                let mem = &def.members[i];
+                                if bytes_written < mem.offset {
+                                    init_values.push(StaticInit::ZeroInit(mem.offset - bytes_written));
+                                }
+                                if mem.member_full_type.is_array() {
+                                    let scalar_t = { let mut t = &mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
+                                    let elem_sizes = TackyGen::compute_elem_sizes(&mem.member_full_type);
+                                    TackyGen::flatten_static_init(elem, scalar_t, &elem_sizes, &mut init_values);
+                                } else if mem.member_full_type.is_struct() {
+                                    // Nested struct init — flatten recursively
+                                    // TODO: proper nested struct static init
+                                    init_values.push(StaticInit::ZeroInit(mem.size));
+                                } else {
+                                    let (v, is_dbl, is_uns) = eval_constant_init(&Some(elem.clone()));
+                                    let cv = convert_init_value(v, mem.member_type, is_dbl, is_uns);
+                                    init_values.push(make_static_init(cv, mem.member_type));
+                                }
+                                bytes_written = mem.offset + mem.size;
+                            }
+                            if bytes_written < struct_size {
+                                init_values.push(StaticInit::ZeroInit(struct_size - bytes_written));
+                            }
+                        } else {
+                            init_values.push(StaticInit::ZeroInit(struct_size));
+                        }
+                        top_level.push(TackyTopLevel::StaticVar(TackyStaticVar {
+                            name: vd.name.clone(), global: is_global, alignment: struct_align, init_values,
+                        }));
+                    }
+                    continue;
+                }
+            }
             // Handle uninitialized global arrays (skip extern and already-handled)
             if vd.array_dims.is_some() && !matches!(&vd.init, Some(Exp::ArrayInit(_)) | Some(Exp::StringLiteral(_)))
                 && vd.storage_class != Some(StorageClass::Extern)

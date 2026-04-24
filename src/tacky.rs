@@ -7,6 +7,8 @@ struct TackyGen {
     string_counter: usize,
     instructions: Vec<TackyInstr>,
     current_function: String,
+    /// Hidden return pointer name for functions returning large structs
+    hidden_ret_ptr: Option<String>,
     static_vars: Vec<TackyStaticVar>,
     static_constants: Vec<TackyStaticConstant>,
     extern_vars: Vec<String>,
@@ -35,6 +37,7 @@ impl TackyGen {
             string_counter: 0,
             instructions: Vec::new(),
             current_function: String::new(),
+            hidden_ret_ptr: None,
             static_vars: Vec::new(),
             static_constants: Vec::new(),
             extern_vars: Vec::new(),
@@ -879,6 +882,33 @@ impl TackyGen {
                 }
                 // Use return FullType if available
                 let ret_ft = self.func_full_types.get(&name).cloned();
+                // Check if return requires hidden pointer (struct >16 bytes)
+                let uses_hidden_ptr = if let Some(FullType::Struct(ref tag)) = ret_ft {
+                    self.struct_defs.get(tag).map(|d| d.size > 16).unwrap_or(false)
+                } else { false };
+                if uses_hidden_ptr {
+                    // Allocate space for return value and pass as hidden first arg
+                    let rft = ret_ft.as_ref().unwrap();
+                    let tmp = self.fresh_tmp_full(rft);
+                    if let FullType::Struct(ref tag) = rft {
+                        if let TackyVal::Var(ref tmp_name) = tmp {
+                            if let Some(def) = self.struct_defs.get(tag) {
+                                self.array_sizes.insert(tmp_name.clone(), def.size);
+                            }
+                        }
+                    }
+                    // Get address and insert as first arg
+                    let ret_addr = self.fresh_tmp(CType::Pointer);
+                    self.emit(TackyInstr::GetAddress { src: tmp.clone(), dst: ret_addr.clone() });
+                    tacky_args.insert(0, ret_addr);
+                    self.emit(TackyInstr::FunCall { name, args: tacky_args, dst: tmp.clone() });
+                    if let Some(pi) = ret_pi {
+                        if let TackyVal::Var(ref dst_name) = tmp {
+                            self.ptr_info.insert(dst_name.clone(), pi);
+                        }
+                    }
+                    return (tmp, CType::Struct);
+                }
                 let dst = if let Some(ref rft) = ret_ft {
                     let tmp = self.fresh_tmp_full(rft);
                     // Register struct size for proper stack allocation
@@ -1136,12 +1166,14 @@ impl TackyGen {
                             FullType::Struct(t) => t.clone(),
                             _ => {
                                 // Last resort: find any struct that has this member
+                                let mut found_tag = None;
                                 for (tag, def) in &self.struct_defs {
                                     if def.find_member(member).is_some() {
-                                        return tag.clone();
+                                        found_tag = Some(tag.clone());
+                                        break;
                                     }
                                 }
-                                panic!("emit_dot_address: cannot determine struct tag, ft={:?}", base_ft)
+                                found_tag.unwrap_or_else(|| panic!("emit_dot_address: cannot determine struct tag, ft={:?}", base_ft))
                             }
                         }
                     }
@@ -1929,14 +1961,35 @@ impl TackyGen {
                 if let Some(exp) = exp {
                     let (val, val_type) = self.emit_exp(exp);
                     if ret_type == CType::Void {
-                        // void return — just emit return with dummy value
                         self.emit(TackyInstr::Return(TackyVal::Constant(0)));
+                    } else if let Some(ref ret_ptr) = self.hidden_ret_ptr.clone() {
+                        // Large struct return via hidden pointer
+                        let ret_ptr_val = TackyVal::Var(ret_ptr.clone());
+                        let src_addr = if val_type == CType::Struct {
+                            if let TackyVal::Var(ref name) = val {
+                                if self.array_sizes.contains_key(name) {
+                                    let a = self.fresh_tmp(CType::Pointer);
+                                    self.emit(TackyInstr::GetAddress { src: val, dst: a.clone() });
+                                    a
+                                } else { val }
+                            } else { val }
+                        } else {
+                            let a = self.fresh_tmp(CType::Pointer);
+                            self.emit(TackyInstr::GetAddress { src: val, dst: a.clone() });
+                            a
+                        };
+                        // Copy struct to hidden return pointer location
+                        let ret_ft = self.func_full_types.get(&self.current_function).cloned();
+                        let struct_size = if let Some(FullType::Struct(ref tag)) = ret_ft {
+                            self.struct_defs.get(tag).map(|d| d.size).unwrap_or(0)
+                        } else { 0 };
+                        self.emit_struct_copy_ptr_to_ptr(src_addr, ret_ptr_val.clone(), struct_size);
+                        self.emit(TackyInstr::Return(ret_ptr_val));
                     } else {
                         let val_conv = self.convert_to(val, val_type, ret_type);
                         self.emit(TackyInstr::Return(val_conv));
                     }
                 } else {
-                    // return; (no expression) — for void functions
                     self.emit(TackyInstr::Return(TackyVal::Constant(0)));
                 }
             }
@@ -2766,8 +2819,23 @@ impl TackyGen {
         self.current_function = func.name.clone();
         self.instructions.clear();
 
+        // Check if return type requires hidden pointer
+        let ret_needs_hidden_ptr = if let Some(FullType::Struct(ref tag)) = func.return_full_type {
+            self.struct_defs.get(tag).map(|d| d.size > 16).unwrap_or(false)
+        } else { false };
+        self.hidden_ret_ptr = if ret_needs_hidden_ptr {
+            let name = format!("__ret_ptr_{}", func.name);
+            self.var_types.insert(name.clone(), CType::Pointer);
+            self.symbol_types.insert(name.clone(), CType::Pointer);
+            Some(name)
+        } else { None };
+        let hidden_ret_ptr_name = self.hidden_ret_ptr.clone();
+
         // Register params — decompose struct params into eightbytes
         let mut tacky_params = Vec::new();
+        if let Some(ref ret_ptr) = hidden_ret_ptr_name {
+            tacky_params.push(ret_ptr.clone());
+        }
         let mut struct_param_fixups: Vec<(String, String, StructDef)> = Vec::new(); // (original_name, tag, def)
         for (i, (name, ptype, pi)) in func.params.iter().enumerate() {
             let ft = if i < func.param_full_types.len() {

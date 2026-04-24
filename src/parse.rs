@@ -485,9 +485,11 @@ impl Parser {
             let base_type = self.parse_type();
             let (name, full_type, _) = self.parse_declarator_full(base_type);
             let member_type = full_type.to_ctype();
-            // Handle struct tag in specifier — need to propagate tag info
-            let member_full_type = if member_type == CType::Struct {
-                full_type.clone()
+            // Replace Scalar(Struct) with FullType::Struct(tag)
+            let member_full_type = if base_type == CType::Struct {
+                if let Some(ref tag) = self.last_struct_tag {
+                    Self::replace_scalar_struct(&full_type, tag)
+                } else { full_type }
             } else {
                 full_type
             };

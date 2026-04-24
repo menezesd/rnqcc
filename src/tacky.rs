@@ -3179,9 +3179,53 @@ pub fn generate(program: Program) -> TackyProgram {
                                         init_values.push(StaticInit::ZeroInit(mem.size - array_bytes_written));
                                     }
                                 } else if mem.member_full_type.is_struct() {
-                                    // Nested struct init — flatten recursively
-                                    // TODO: proper nested struct static init
-                                    init_values.push(StaticInit::ZeroInit(mem.size));
+                                    if let Exp::ArrayInit(ref sub_elems) = elem {
+                                        if let FullType::Struct(ref inner_tag) = mem.member_full_type {
+                                            if let Some(inner_def) = gen.struct_defs.get(inner_tag).cloned() {
+                                                let mut inner_written = 0usize;
+                                                for (j, sub_elem) in sub_elems.iter().enumerate() {
+                                                    if j >= inner_def.members.len() { break; }
+                                                    let inner_mem = &inner_def.members[j];
+                                                    if inner_written < inner_mem.offset {
+                                                        init_values.push(StaticInit::ZeroInit(inner_mem.offset - inner_written));
+                                                    }
+                                                    if inner_mem.member_full_type.is_array() {
+                                                        let before_len: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
+                                                        let sc_t = { let mut t = &inner_mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
+                                                        let es = TackyGen::compute_elem_sizes(&inner_mem.member_full_type);
+                                                        TackyGen::flatten_static_init(sub_elem, sc_t, &es, &mut init_values);
+                                                        let after_len: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
+                                                        let ab = after_len - before_len;
+                                                        if ab < inner_mem.size { init_values.push(StaticInit::ZeroInit(inner_mem.size - ab)); }
+                                                    } else if let Exp::StringLiteral(ref s) = sub_elem {
+                                                        if inner_mem.member_type == CType::Pointer {
+                                                            let sl = gen.make_string_constant(s);
+                                                            init_values.push(StaticInit::PointerInit(sl));
+                                                        } else {
+                                                            let nt = s.len() < inner_mem.size;
+                                                            init_values.push(StaticInit::StringInit(s.clone(), nt));
+                                                            let sb = s.len() + if nt { 1 } else { 0 };
+                                                            if sb < inner_mem.size { init_values.push(StaticInit::ZeroInit(inner_mem.size - sb)); }
+                                                        }
+                                                    } else {
+                                                        let (v, is_dbl, is_uns) = eval_constant_init(&Some(sub_elem.clone()));
+                                                        let cv = convert_init_value(v, inner_mem.member_type, is_dbl, is_uns);
+                                                        init_values.push(make_static_init(cv, inner_mem.member_type));
+                                                    }
+                                                    inner_written = inner_mem.offset + std::cmp::max(inner_mem.member_type.size() as usize, inner_mem.size);
+                                                }
+                                                if inner_written < inner_def.size {
+                                                    init_values.push(StaticInit::ZeroInit(inner_def.size - inner_written));
+                                                }
+                                            } else {
+                                                init_values.push(StaticInit::ZeroInit(mem.size));
+                                            }
+                                        } else {
+                                            init_values.push(StaticInit::ZeroInit(mem.size));
+                                        }
+                                    } else {
+                                        init_values.push(StaticInit::ZeroInit(mem.size));
+                                    }
                                 } else if let Exp::StringLiteral(ref s) = elem {
                                     // String literal member → create string constant and pointer
                                     if mem.member_type == CType::Pointer {

@@ -827,7 +827,16 @@ impl TackyGen {
                 // Use return FullType if available
                 let ret_ft = self.func_full_types.get(&name).cloned();
                 let dst = if let Some(ref rft) = ret_ft {
-                    self.fresh_tmp_full(rft)
+                    let tmp = self.fresh_tmp_full(rft);
+                    // Register struct size for proper stack allocation
+                    if let FullType::Struct(ref tag) = rft {
+                        if let TackyVal::Var(ref tmp_name) = tmp {
+                            if let Some(def) = self.struct_defs.get(tag) {
+                                self.array_sizes.insert(tmp_name.clone(), def.size);
+                            }
+                        }
+                    }
+                    tmp
                 } else {
                     self.fresh_tmp(ret_type)
                 };
@@ -3004,10 +3013,20 @@ pub fn generate(program: Program) -> TackyProgram {
         }
     }
 
+    // Build var_struct_tags map
+    let mut var_struct_tags = std::collections::HashMap::new();
+    for (name, ft) in &gen.full_types {
+        if let FullType::Struct(tag) = ft {
+            var_struct_tags.insert(name.clone(), tag.clone());
+        }
+    }
+
     TackyProgram {
         top_level,
         global_vars,
         symbol_types: gen.symbol_types,
         array_sizes: gen.array_sizes,
+        struct_defs: gen.struct_defs,
+        var_struct_tags,
     }
 }

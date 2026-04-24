@@ -65,10 +65,55 @@ fn convert_double_val(val: &TackyVal, static_doubles: &mut Vec<(String, f64)>) -
     }
 }
 
-fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, out: &mut Vec<AsmInstr>, static_doubles: &mut Vec<(String, f64)>) {
+fn get_struct_classes(name: &str, var_struct_tags: &HashMap<String, String>, struct_defs: &HashMap<String, StructDef>) -> Option<Vec<ParamClass>> {
+    if let Some(tag) = var_struct_tags.get(name) {
+        if let Some(def) = struct_defs.get(tag) {
+            return Some(def.classify());
+        }
+    }
+    None
+}
+
+fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_sizes: &HashMap<String, usize>, out: &mut Vec<AsmInstr>, static_doubles: &mut Vec<(String, f64)>,
+    var_struct_tags: &HashMap<String, String>, struct_defs: &HashMap<String, StructDef>) {
     match instr {
         TackyInstr::Return(val) => {
             let t = val_type(val, types);
+            // Check if returning a struct
+            if let TackyVal::Var(ref name) = val {
+                if types.get(name).copied() == Some(CType::Struct) {
+                    if let Some(classes) = get_struct_classes(name, var_struct_tags, struct_defs) {
+                        let mut int_ret_idx = 0;
+                        let mut sse_ret_idx = 0;
+                        let int_ret_regs = [Reg::AX, Reg::DX];
+                        let sse_ret_regs = [XmmReg::XMM0, XmmReg::XMM1];
+                        for (eb_idx, class) in classes.iter().enumerate() {
+                            let eb_offset = (eb_idx * 8) as i32;
+                            match class {
+                                ParamClass::Sse => {
+                                    if sse_ret_idx < 2 {
+                                        out.push(AsmInstr::Mov(AsmType::Double,
+                                            AsmOperand::PseudoMem(name.clone(), eb_offset),
+                                            AsmOperand::Xmm(sse_ret_regs[sse_ret_idx].clone())));
+                                        sse_ret_idx += 1;
+                                    }
+                                }
+                                ParamClass::Integer => {
+                                    if int_ret_idx < 2 {
+                                        out.push(AsmInstr::Mov(AsmType::Quadword,
+                                            AsmOperand::PseudoMem(name.clone(), eb_offset),
+                                            AsmOperand::Reg(int_ret_regs[int_ret_idx].clone())));
+                                        int_ret_idx += 1;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    out.push(AsmInstr::Ret);
+                    return;
+                }
+            }
             if t == AsmType::Double {
                 let src = convert_double_val(val, static_doubles);
                 out.push(AsmInstr::Mov(AsmType::Double, src, AsmOperand::Xmm(XmmReg::XMM0)));
@@ -448,6 +493,40 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, out: 
                 out.push(AsmInstr::DeallocateStack(bytes_to_dealloc));
             }
             let ret_t = val_type(dst, types);
+            // Check if return value is a struct
+            if let TackyVal::Var(ref dst_name) = dst {
+                if types.get(dst_name).copied() == Some(CType::Struct) {
+                    if let Some(classes) = get_struct_classes(dst_name, var_struct_tags, struct_defs) {
+                        let mut int_ret_idx = 0;
+                        let mut sse_ret_idx = 0;
+                        let int_ret_regs = [Reg::AX, Reg::DX];
+                        let sse_ret_regs = [XmmReg::XMM0, XmmReg::XMM1];
+                        for (eb_idx, class) in classes.iter().enumerate() {
+                            let eb_offset = (eb_idx * 8) as i32;
+                            match class {
+                                ParamClass::Sse => {
+                                    if sse_ret_idx < 2 {
+                                        out.push(AsmInstr::Mov(AsmType::Double,
+                                            AsmOperand::Xmm(sse_ret_regs[sse_ret_idx].clone()),
+                                            AsmOperand::PseudoMem(dst_name.clone(), eb_offset)));
+                                        sse_ret_idx += 1;
+                                    }
+                                }
+                                ParamClass::Integer => {
+                                    if int_ret_idx < 2 {
+                                        out.push(AsmInstr::Mov(AsmType::Quadword,
+                                            AsmOperand::Reg(int_ret_regs[int_ret_idx].clone()),
+                                            AsmOperand::PseudoMem(dst_name.clone(), eb_offset)));
+                                        int_ret_idx += 1;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        return;
+                    }
+                }
+            }
             if ret_t == AsmType::Double {
                 out.push(AsmInstr::Mov(AsmType::Double, AsmOperand::Xmm(XmmReg::XMM0), convert_val(dst)));
             } else {
@@ -462,7 +541,8 @@ const XMM_ARG_REGISTERS: [XmmReg; 8] = [
     XmmReg::XMM4, XmmReg::XMM5, XmmReg::XMM6, XmmReg::XMM7,
 ];
 
-fn convert_function(func: &TackyFunction, types: &HashMap<String, CType>, static_doubles: &mut Vec<(String, f64)>) -> AsmFunction {
+fn convert_function(func: &TackyFunction, types: &HashMap<String, CType>, arr_sizes: &HashMap<String, usize>, static_doubles: &mut Vec<(String, f64)>,
+    var_struct_tags: &HashMap<String, String>, struct_defs: &HashMap<String, StructDef>) -> AsmFunction {
     let mut instructions = Vec::new();
 
     // System V ABI: integer args in DI,SI,DX,CX,R8,R9; double args in XMM0-XMM7
@@ -494,7 +574,7 @@ fn convert_function(func: &TackyFunction, types: &HashMap<String, CType>, static
     }
 
     for instr in &func.body {
-        convert_instruction(instr, types, &mut instructions, static_doubles);
+        convert_instruction(instr, types, arr_sizes, &mut instructions, static_doubles, var_struct_tags, struct_defs);
     }
     AsmFunction { name: func.name.clone(), global: func.global, instructions }
 }
@@ -829,7 +909,7 @@ pub fn gen(program: &TackyProgram) -> AsmProgram {
     for tl in &program.top_level {
         match tl {
             TackyTopLevel::Function(tf) => {
-                let mut asm_func = convert_function(tf, types, &mut static_doubles);
+                let mut asm_func = convert_function(tf, types, array_sizes, &mut static_doubles, &program.var_struct_tags, &program.struct_defs);
                 let stack_size = replace_pseudos(&mut asm_func, static_vars, types, array_sizes);
                 fixup_instructions(&mut asm_func, stack_size);
                 top_level.push(AsmTopLevel::Function(asm_func));

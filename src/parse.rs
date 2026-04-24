@@ -535,13 +535,15 @@ impl Parser {
             }
         }
         let (sc, base_type) = self.parse_specifiers();
+        // Save struct tag before declarator parsing (params may overwrite last_struct_tag)
+        let saved_struct_tag = if base_type == CType::Struct { self.last_struct_tag.clone() } else { None };
 
         let decl_tree = self.parse_declarator_tree();
         let (name, full_type, decl_params) = Self::process_declarator(&decl_tree, base_type);
 
         // Replace Scalar(Struct) with FullType::Struct(tag) if applicable
         let full_type = if base_type == CType::Struct {
-            if let Some(ref tag) = self.last_struct_tag {
+            if let Some(ref tag) = saved_struct_tag {
                 Self::replace_scalar_struct(&full_type, tag)
             } else { full_type }
         } else { full_type };
@@ -770,10 +772,11 @@ impl Parser {
                 }
             }
             let (sc, base_type) = self.parse_specifiers();
+            let saved_struct_tag = if base_type == CType::Struct { self.last_struct_tag.clone() } else { None };
             let (name, full_type, decl_params) = self.parse_declarator_full(base_type);
             // Replace Scalar(Struct) with FullType::Struct(tag)
             let full_type = if base_type == CType::Struct {
-                if let Some(ref tag) = self.last_struct_tag {
+                if let Some(ref tag) = saved_struct_tag {
                     Self::replace_scalar_struct(&full_type, tag)
                 } else { full_type }
             } else { full_type };

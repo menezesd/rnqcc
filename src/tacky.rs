@@ -2574,11 +2574,12 @@ impl TackyGen {
                             tacky_params.push(param_name);
                         }
                     }
-                    // Register the original struct var
-                    let def_size = def.size;
+                    // Register the original struct var — allocate enough for eightbyte storage
+                    let classes = def.classify();
+                    let alloc_size = std::cmp::max(def.size, classes.len() * 8);
                     struct_param_fixups.push((name.clone(), tag.clone(), def));
                     self.register_var(name, ft.clone());
-                    self.array_sizes.insert(name.clone(), def_size);
+                    self.array_sizes.insert(name.clone(), alloc_size);
                     continue;
                 }
             }

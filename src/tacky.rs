@@ -793,6 +793,55 @@ impl TackyGen {
                     self.emit(TackyInstr::Label(end_label));
                     return (TackyVal::Constant(0), CType::Void);
                 }
+                // Handle struct ternary
+                if then_type == CType::Struct {
+                    let then_ft = self.val_full_type(&then_val);
+                    let tag = match &then_ft {
+                        FullType::Struct(t) => t.clone(),
+                        FullType::Pointer(inner) => match inner.as_ref() {
+                            FullType::Struct(t) => t.clone(),
+                            _ => String::new(),
+                        },
+                        _ => String::new(),
+                    };
+                    let struct_size = self.struct_defs.get(&tag).map(|d| d.size).unwrap_or(0);
+                    // Create result struct
+                    let result = self.fresh_tmp_full(&FullType::Struct(tag.clone()));
+                    if let TackyVal::Var(ref rn) = result {
+                        self.array_sizes.insert(rn.clone(), struct_size);
+                    }
+                    // Copy then branch to result
+                    let then_addr = if then_ft.is_struct() {
+                        if let TackyVal::Var(ref n) = then_val {
+                            if self.array_sizes.contains_key(n) {
+                                let a = self.fresh_tmp(CType::Pointer);
+                                self.emit(TackyInstr::GetAddress { src: then_val, dst: a.clone() });
+                                a
+                            } else { then_val }
+                        } else { then_val }
+                    } else { then_val };
+                    if let TackyVal::Var(ref rn) = result {
+                        self.emit_struct_copy_to(then_addr, rn, struct_size);
+                    }
+                    self.emit(TackyInstr::Jump(end_label.clone()));
+                    self.emit(TackyInstr::Label(else_label));
+                    let (else_val, _) = self.emit_exp(*else_exp);
+                    let else_ft = self.val_full_type(&else_val);
+                    let else_addr = if else_ft.is_struct() {
+                        if let TackyVal::Var(ref n) = else_val {
+                            if self.array_sizes.contains_key(n) {
+                                let a = self.fresh_tmp(CType::Pointer);
+                                self.emit(TackyInstr::GetAddress { src: else_val, dst: a.clone() });
+                                a
+                            } else { else_val }
+                        } else { else_val }
+                    } else { else_val };
+                    if let TackyVal::Var(ref rn) = result {
+                        self.emit_struct_copy_to(else_addr, rn, struct_size);
+                    }
+                    self.emit(TackyInstr::Label(end_label));
+                    return (result, CType::Struct);
+                }
                 let then_tmp = self.fresh_tmp(then_type);
                 self.emit(TackyInstr::Copy { src: then_val, dst: then_tmp.clone() });
                 self.emit(TackyInstr::Jump(end_label.clone()));

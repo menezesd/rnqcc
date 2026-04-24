@@ -185,6 +185,55 @@ impl Lexer {
         }
     }
 
+    fn unescape_char(&mut self) -> char {
+        match self.advance() {
+            Some('\\') => match self.advance() {
+                Some('n') => '\n',
+                Some('t') => '\t',
+                Some('r') => '\r',
+                Some('\\') => '\\',
+                Some('\'') => '\'',
+                Some('"') => '"',
+                Some('?') => '?',
+                Some('a') => '\x07',
+                Some('b') => '\x08',
+                Some('f') => '\x0C',
+                Some('v') => '\x0B',
+                Some('0') => '\0',
+                Some(c) => panic!("Unknown escape sequence: \\{}", c),
+                None => panic!("Unexpected end of input in escape sequence"),
+            },
+            Some(c) => c,
+            None => panic!("Unexpected end of input in character/string literal"),
+        }
+    }
+
+    fn read_char_constant(&mut self) -> Token {
+        // Opening ' already consumed
+        let c = self.unescape_char();
+        match self.advance() {
+            Some('\'') => {}
+            _ => panic!("Expected closing single quote"),
+        }
+        Token::CharLiteral(c as i64)
+    }
+
+    fn read_string_literal(&mut self) -> Token {
+        // Opening " already consumed
+        let mut s = String::new();
+        loop {
+            match self.peek() {
+                Some('"') => { self.advance(); break; }
+                Some('\n') | None => panic!("Unterminated string literal"),
+                _ => {
+                    let c = self.unescape_char();
+                    s.push(c);
+                }
+            }
+        }
+        Token::StringLiteral(s)
+    }
+
     fn read_identifier_or_keyword(&mut self) -> Token {
         let start = self.pos;
         while let Some(c) = self.peek() {
@@ -217,6 +266,7 @@ impl Lexer {
             "default" => Token::KWDefault,
             "static" => Token::KWStatic,
             "extern" => Token::KWExtern,
+            "char" => Token::KWChar,
             _ => Token::Identifier(word),
         }
     }
@@ -330,6 +380,9 @@ impl Lexer {
 
                 '=' => self.two_char('=', Token::EqualEqual, Token::Assign),
                 '!' => self.two_char('=', Token::NotEqual, Token::Bang),
+
+                '\'' => self.read_char_constant(),
+                '"' => self.read_string_literal(),
 
                 // Float literal starting with '.' (e.g., .5)
                 '.' if self.peek().map_or(false, |c| c.is_ascii_digit()) => {

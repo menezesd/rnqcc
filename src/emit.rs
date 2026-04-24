@@ -21,6 +21,16 @@ fn reg_name(reg: &Reg, t: AsmType) -> &'static str {
         (Reg::R10, AsmType::Quadword) => "%r10",
         (Reg::R11, AsmType::Longword) => "%r11d",
         (Reg::R11, AsmType::Quadword) => "%r11",
+        // Byte: use 8-bit register names
+        (Reg::AX, AsmType::Byte) => "%al",
+        (Reg::CX, AsmType::Byte) => "%cl",
+        (Reg::DX, AsmType::Byte) => "%dl",
+        (Reg::DI, AsmType::Byte) => "%dil",
+        (Reg::SI, AsmType::Byte) => "%sil",
+        (Reg::R8, AsmType::Byte) => "%r8b",
+        (Reg::R9, AsmType::Byte) => "%r9b",
+        (Reg::R10, AsmType::Byte) => "%r10b",
+        (Reg::R11, AsmType::Byte) => "%r11b",
         (r, AsmType::Double) => panic!("Cannot use integer register {:?} for double", r),
     }
 }
@@ -76,12 +86,19 @@ fn show_operand_byte(op: &AsmOperand, platform: &Platform) -> String {
     }
 }
 
+fn show_operand_byte_or_imm(op: &AsmOperand, platform: &Platform) -> String {
+    match op {
+        AsmOperand::Imm(val) => format!("${}", val),
+        _ => show_operand_byte(op, platform),
+    }
+}
+
 fn show_operand_64(op: &AsmOperand, platform: &Platform) -> String {
     show_operand(op, AsmType::Quadword, platform)
 }
 
 fn suffix(t: AsmType) -> &'static str {
-    match t { AsmType::Longword => "l", AsmType::Quadword => "q", AsmType::Double => "sd" }
+    match t { AsmType::Byte => "b", AsmType::Longword => "l", AsmType::Quadword => "q", AsmType::Double => "sd" }
 }
 
 fn show_cc(cc: &CondCode) -> &'static str {
@@ -99,23 +116,42 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Platform) ->
         AsmInstr::Mov(t, src, dst) => {
             if *t == AsmType::Double {
                 writeln!(w, "\tmovsd {}, {}", show_operand(src, *t, platform), show_operand(dst, *t, platform))
+            } else if *t == AsmType::Byte {
+                writeln!(w, "\tmovb {}, {}", show_operand_byte_or_imm(src, platform), show_operand_byte(dst, platform))
             } else {
                 writeln!(w, "\tmov{} {}, {}", suffix(*t), show_operand(src, *t, platform), show_operand(dst, *t, platform))
             }
         }
-        AsmInstr::Movsx(src, dst) => {
-            writeln!(w, "\tmovslq {}, {}", show_operand(src, AsmType::Longword, platform), show_operand(dst, AsmType::Quadword, platform))
+        AsmInstr::Movsx(src_t, dst_t, src, dst) => {
+            let mnemonic = match (src_t, dst_t) {
+                (AsmType::Byte, AsmType::Longword) => "movsbl",
+                (AsmType::Byte, AsmType::Quadword) => "movsbq",
+                (AsmType::Longword, AsmType::Quadword) => "movslq",
+                _ => "movslq", // fallback
+            };
+            let src_str = if *src_t == AsmType::Byte {
+                show_operand_byte_or_imm(src, platform)
+            } else {
+                show_operand(src, *src_t, platform)
+            };
+            writeln!(w, "\t{} {}, {}", mnemonic, src_str, show_operand(dst, *dst_t, platform))
         }
-        AsmInstr::MovZeroExtend(src, dst) => {
-            // movl to a 32-bit register zero-extends to 64-bit automatically
-            // But if dst is memory we need to go through a register
-            match dst {
-                AsmOperand::Reg(reg) => {
-                    writeln!(w, "\tmovl {}, {}", show_operand(src, AsmType::Longword, platform), reg_name(reg, AsmType::Longword))
-                }
-                _ => {
-                    // Should have been fixed up to go through R10
-                    writeln!(w, "\tmovl {}, {}", show_operand(src, AsmType::Longword, platform), show_operand(dst, AsmType::Longword, platform))
+        AsmInstr::MovZeroExtend(src_t, dst_t, src, dst) => {
+            let mnemonic = match (src_t, dst_t) {
+                (AsmType::Byte, AsmType::Longword) => "movzbl",
+                (AsmType::Byte, AsmType::Quadword) => "movzbq",
+                _ => "movl", // Longword→Quadword: movl zero-extends automatically
+            };
+            if *src_t == AsmType::Byte {
+                writeln!(w, "\t{} {}, {}", mnemonic, show_operand_byte_or_imm(src, platform), show_operand(dst, *dst_t, platform))
+            } else {
+                match dst {
+                    AsmOperand::Reg(reg) => {
+                        writeln!(w, "\t{} {}, {}", mnemonic, show_operand(src, *src_t, platform), reg_name(reg, AsmType::Longword))
+                    }
+                    _ => {
+                        writeln!(w, "\t{} {}, {}", mnemonic, show_operand(src, *src_t, platform), show_operand(dst, *src_t, platform))
+                    }
                 }
             }
         }
@@ -172,7 +208,7 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Platform) ->
             match t {
                 AsmType::Longword => writeln!(w, "\tcdq"),
                 AsmType::Quadword => writeln!(w, "\tcqo"),
-                AsmType::Double => unreachable!("cdq not used with double"),
+                _ => unreachable!("cdq not used with byte/double"),
             }
         }
         AsmInstr::Cmp(t, src, dst) => {
@@ -265,7 +301,8 @@ fn emit_function(w: &mut dyn Write, func: &AsmFunction, platform: &Platform) -> 
 
 fn emit_static_var(w: &mut dyn Write, sv: &AsmStaticVar, platform: &Platform) -> std::io::Result<()> {
     let label = platform.show_label(&sv.name);
-    let all_zero = sv.init_values.iter().all(|v| matches!(v, StaticInit::ZeroInit(_)));
+    let all_zero = sv.init_values.iter().all(|v| matches!(v, StaticInit::ZeroInit(_)))
+        && !sv.init_values.is_empty();
 
     if all_zero {
         writeln!(w, "\t.bss")?;
@@ -279,16 +316,65 @@ fn emit_static_var(w: &mut dyn Write, sv: &AsmStaticVar, platform: &Platform) ->
     writeln!(w, "{}:", label)?;
 
     for init in &sv.init_values {
-        match init {
-            StaticInit::IntInit(v) => writeln!(w, "\t.long {}", v)?,
-            StaticInit::LongInit(v) => writeln!(w, "\t.quad {}", v)?,
-            StaticInit::UIntInit(v) => writeln!(w, "\t.long {}", v)?,
-            StaticInit::ULongInit(v) => writeln!(w, "\t.quad {}", v)?,
-            StaticInit::DoubleInit(v) => writeln!(w, "\t.quad {}", v.to_bits())?,
-            StaticInit::ZeroInit(n) => writeln!(w, "\t.zero {}", n)?,
-            StaticInit::PointerInit(v) => writeln!(w, "\t.quad {}", v)?,
+        emit_static_init(w, init, platform)?;
+    }
+    Ok(())
+}
+
+fn escape_string_for_asm(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'\\' => out.push_str("\\\\"),
+            b'"' => out.push_str("\\\""),
+            b'\n' => out.push_str("\\n"),
+            b'\t' => out.push_str("\\t"),
+            b'\r' => out.push_str("\\r"),
+            0 => out.push_str("\\0"),
+            // Use octal for control chars that assembler may not support
+            b if b >= 0x20 && b < 0x7f => out.push(b as char),
+            b => { out.push_str(&format!("\\{:03o}", b)); }
         }
     }
+    out
+}
+
+fn emit_static_init(w: &mut dyn Write, init: &StaticInit, platform: &Platform) -> std::io::Result<()> {
+    match init {
+        StaticInit::CharInit(v) => writeln!(w, "\t.byte {}", *v as u8),
+        StaticInit::UCharInit(v) => writeln!(w, "\t.byte {}", v),
+        StaticInit::IntInit(v) => writeln!(w, "\t.long {}", v),
+        StaticInit::LongInit(v) => writeln!(w, "\t.quad {}", v),
+        StaticInit::UIntInit(v) => writeln!(w, "\t.long {}", v),
+        StaticInit::ULongInit(v) => writeln!(w, "\t.quad {}", v),
+        StaticInit::DoubleInit(v) => writeln!(w, "\t.quad {}", v.to_bits()),
+        StaticInit::ZeroInit(n) => writeln!(w, "\t.zero {}", n),
+        StaticInit::StringInit(s, null_terminated) => {
+            let escaped = escape_string_for_asm(s);
+            if *null_terminated {
+                writeln!(w, "\t.asciz \"{}\"", escaped)
+            } else {
+                writeln!(w, "\t.ascii \"{}\"", escaped)
+            }
+        }
+        StaticInit::PointerInit(label) => {
+            writeln!(w, "\t.quad {}", platform.show_label(label))
+        }
+    }
+}
+
+fn emit_static_constant(w: &mut dyn Write, sc: &AsmStaticConstant, platform: &Platform) -> std::io::Result<()> {
+    let label = platform.show_label(&sc.name);
+    // Constant strings go in read-only section
+    match platform {
+        Platform::OsX => writeln!(w, "\t.section __TEXT,__cstring")?,
+        Platform::Linux => writeln!(w, "\t.section .rodata")?,
+    }
+    if sc.alignment > 1 {
+        writeln!(w, "\t.balign {}", sc.alignment)?;
+    }
+    writeln!(w, "{}:", label)?;
+    emit_static_init(w, &sc.init, platform)?;
     Ok(())
 }
 
@@ -305,6 +391,7 @@ pub fn emit(assembly_file: &str, program: &AsmProgram, platform: &Platform) -> s
         match tl {
             AsmTopLevel::Function(func) => emit_function(&mut w, func, platform)?,
             AsmTopLevel::StaticVar(sv) => emit_static_var(&mut w, sv, platform)?,
+            AsmTopLevel::StaticConstant(sc) => emit_static_constant(&mut w, sc, platform)?,
         }
     }
     emit_stack_note(&mut w, platform)?;

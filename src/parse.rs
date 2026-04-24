@@ -88,6 +88,7 @@ impl Parser {
         let mut sc = None;
         let mut has_int = false;
         let mut has_long = false;
+        let mut has_char = false;
         let mut has_unsigned = false;
         let mut has_signed = false;
         let mut has_void = false;
@@ -102,13 +103,17 @@ impl Parser {
                     self.advance();
                     sc = Some(StorageClass::Extern);
                 }
-                Some(Token::KWInt) if !has_int && !has_void => {
+                Some(Token::KWInt) if !has_int && !has_void && !has_char => {
                     self.advance();
                     has_int = true;
                 }
-                Some(Token::KWLong) if !has_long && !has_void => {
+                Some(Token::KWLong) if !has_long && !has_void && !has_char => {
                     self.advance();
                     has_long = true;
+                }
+                Some(Token::KWChar) if !has_char && !has_int && !has_long && !has_void => {
+                    self.advance();
+                    has_char = true;
                 }
                 Some(Token::KWUnsigned) if !has_unsigned && !has_signed && !has_void => {
                     self.advance();
@@ -118,15 +123,15 @@ impl Parser {
                     self.advance();
                     has_signed = true;
                 }
-                Some(Token::KWDouble) if !has_int && !has_void && !has_unsigned && !has_signed => {
+                Some(Token::KWDouble) if !has_int && !has_void && !has_unsigned && !has_signed && !has_char => {
                     self.advance();
                     return (sc, CType::Double); // handles both 'double' and 'long double'
                 }
-                Some(Token::KWFloat) if !has_int && !has_long && !has_void && !has_unsigned && !has_signed => {
+                Some(Token::KWFloat) if !has_int && !has_long && !has_void && !has_unsigned && !has_signed && !has_char => {
                     self.advance();
                     return (sc, CType::Double); // float promoted to double
                 }
-                Some(Token::KWVoid) if !has_int && !has_long && !has_void && !has_unsigned && !has_signed => {
+                Some(Token::KWVoid) if !has_int && !has_long && !has_void && !has_unsigned && !has_signed && !has_char => {
                     self.advance();
                     has_void = true;
                 }
@@ -134,12 +139,18 @@ impl Parser {
             }
         }
 
-        if !has_int && !has_long && !has_void && !has_unsigned && !has_signed {
+        if !has_int && !has_long && !has_void && !has_unsigned && !has_signed && !has_char {
             panic!("Expected type specifier");
         }
 
         let ctype = if has_void {
             CType::Void
+        } else if has_char && has_unsigned {
+            CType::UChar
+        } else if has_char && has_signed {
+            CType::SChar
+        } else if has_char {
+            CType::Char
         } else if has_unsigned && has_long {
             CType::ULong
         } else if has_unsigned {
@@ -158,25 +169,30 @@ impl Parser {
         if self.at(&Token::KWFloat) { self.advance(); return CType::Double; }
         let mut has_int = false;
         let mut has_long = false;
+        let mut has_char = false;
         let mut has_unsigned = false;
         let mut has_signed = false;
         for _ in 0..3 {
             match self.peek() {
-                Some(Token::KWInt) if !has_int => { self.advance(); has_int = true; }
-                Some(Token::KWLong) if !has_long => { self.advance(); has_long = true; }
+                Some(Token::KWInt) if !has_int && !has_char => { self.advance(); has_int = true; }
+                Some(Token::KWLong) if !has_long && !has_char => { self.advance(); has_long = true; }
+                Some(Token::KWChar) if !has_char && !has_int && !has_long => { self.advance(); has_char = true; }
                 Some(Token::KWUnsigned) if !has_unsigned && !has_signed => { self.advance(); has_unsigned = true; }
                 Some(Token::KWSigned) if !has_signed && !has_unsigned => { self.advance(); has_signed = true; }
                 _ => break,
             }
         }
-        if has_unsigned && has_long { CType::ULong }
+        if has_char && has_unsigned { CType::UChar }
+        else if has_char && has_signed { CType::SChar }
+        else if has_char { CType::Char }
+        else if has_unsigned && has_long { CType::ULong }
         else if has_unsigned { CType::UInt }
         else if has_long { CType::Long }
         else { CType::Int }
     }
 
     fn is_type_keyword(tok: &Token) -> bool {
-        matches!(tok, Token::KWInt | Token::KWLong | Token::KWVoid | Token::KWUnsigned | Token::KWSigned | Token::KWDouble | Token::KWFloat)
+        matches!(tok, Token::KWInt | Token::KWLong | Token::KWVoid | Token::KWUnsigned | Token::KWSigned | Token::KWDouble | Token::KWFloat | Token::KWChar)
     }
 
     /// Process a declarator tree to extract name, derived type, and params
@@ -258,6 +274,7 @@ impl Parser {
                 Some(Token::UIntLiteral(n)) => { self.advance(); n as usize }
                 Some(Token::LongLiteral(n)) => { self.advance(); n as usize }
                 Some(Token::ULongLiteral(n)) => { self.advance(); n as usize }
+                Some(Token::CharLiteral(n)) => { self.advance(); n as usize }
                 Some(Token::CloseBracket) => 0, // empty []
                 _ => panic!("Expected array size or ]"),
             };
@@ -619,6 +636,7 @@ impl Parser {
                 | Some(Token::KWDouble)
                 | Some(Token::KWFloat)
                 | Some(Token::KWVoid)
+                | Some(Token::KWChar)
                 | Some(Token::KWStatic)
                 | Some(Token::KWExtern)
         )
@@ -1108,7 +1126,8 @@ impl Parser {
                 self.expect(Token::CloseParen);
                 let target_type = full_type.to_ctype();
                 let operand = self.parse_unary();
-                Exp::Cast(target_type, Box::new(operand))
+                let cast_ft = if target_type == CType::Pointer { Some(full_type) } else { None };
+                Exp::Cast(target_type, cast_ft, Box::new(operand))
             }
             _ => self.parse_postfix(),
         }
@@ -1170,6 +1189,19 @@ impl Parser {
             Some(Token::DoubleLiteral(val)) => {
                 self.advance();
                 Exp::DoubleConstant(val)
+            }
+            Some(Token::CharLiteral(val)) => {
+                self.advance();
+                Exp::Constant(val) // char constants have type int
+            }
+            Some(Token::StringLiteral(_)) => {
+                // Concatenate adjacent string literals
+                let mut s = String::new();
+                while let Some(Token::StringLiteral(part)) = self.peek().cloned() {
+                    self.advance();
+                    s.push_str(&part);
+                }
+                Exp::StringLiteral(s)
             }
             Some(Token::Identifier(name)) => {
                 self.advance();

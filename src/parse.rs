@@ -1273,10 +1273,15 @@ impl Parser {
                 self.advance(); // consume '('
                 let base_type = self.parse_type();
                 let full_type = self.parse_abstract_declarator_type(base_type);
+                let full_type = if base_type == CType::Struct {
+                    if let Some(ref tag) = self.last_struct_tag {
+                        Self::replace_scalar_struct(&full_type, tag)
+                    } else { full_type }
+                } else { full_type };
                 self.expect(Token::CloseParen);
                 let target_type = full_type.to_ctype();
                 let operand = self.parse_unary();
-                let cast_ft = if target_type == CType::Pointer { Some(full_type) } else { None };
+                let cast_ft = if target_type == CType::Pointer || target_type == CType::Struct { Some(full_type) } else { None };
                 Exp::Cast(target_type, cast_ft, Box::new(operand))
             }
             _ => self.parse_postfix(),

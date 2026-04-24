@@ -964,7 +964,24 @@ impl TackyGen {
             Exp::Arrow(inner, member) => {
                 let (ptr, _) = self.emit_exp((**inner).clone());
                 let ptr_ft = self.val_full_type(&ptr);
-                let tag = match &ptr_ft { FullType::Pointer(inner) => match inner.as_ref() { FullType::Struct(t) => t.clone(), _ => panic!("emit_dot_address Arrow: inner is {:?}, expected Struct", inner) }, _ => panic!("emit_dot_address Arrow: ft is {:?}, expected Pointer", ptr_ft) };
+                // Try to get struct tag from FullType; fall back to looking up ptr_info
+                let tag = match &ptr_ft {
+                    FullType::Pointer(inner) => match inner.as_ref() {
+                        FullType::Struct(t) => t.clone(),
+                        _ => {
+                            // Fallback: try ptr_info
+                            if let TackyVal::Var(ref name) = ptr {
+                                if let Some(&(base_t, _)) = self.ptr_info.get(name) {
+                                    if base_t == CType::Struct {
+                                        // Can't determine tag from ptr_info alone
+                                    }
+                                }
+                            }
+                            panic!("emit_dot_address Arrow: inner is {:?}, expected Struct", inner)
+                        }
+                    },
+                    _ => panic!("emit_dot_address Arrow: ft is {:?}, expected Pointer. Consider adding cast_ft in the cast expression.", ptr_ft)
+                };
                 let def = self.struct_defs.get(&tag).cloned().unwrap();
                 let mem = def.find_member(member).unwrap();
                 let result = self.fresh_tmp(CType::Pointer);

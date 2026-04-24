@@ -599,9 +599,22 @@ impl TackyGen {
                     if let FullType::Pointer(ref inner) = ptr_ft {
                         if let FullType::Struct(ref tag) = **inner {
                             let struct_size = self.struct_defs.get(tag).map(|d| d.size).unwrap_or(0);
-                            let (rhs, _) = self.emit_exp(*right);
-                            let src_addr = self.fresh_tmp(CType::Pointer);
-                            self.emit(TackyInstr::GetAddress { src: rhs, dst: src_addr.clone() });
+                            let (rhs, rhs_type) = self.emit_exp(*right);
+                            let src_addr = if let TackyVal::Var(ref n) = rhs {
+                                if self.array_sizes.contains_key(n) {
+                                    // Proper struct variable — take its address
+                                    let a = self.fresh_tmp(CType::Pointer);
+                                    self.emit(TackyInstr::GetAddress { src: rhs, dst: a.clone() });
+                                    a
+                                } else {
+                                    // Deref temp or pointer — use directly
+                                    rhs
+                                }
+                            } else {
+                                let a = self.fresh_tmp(CType::Pointer);
+                                self.emit(TackyInstr::GetAddress { src: rhs, dst: a.clone() });
+                                a
+                            };
                             self.emit_struct_copy_ptr_to_ptr(src_addr, ptr, struct_size);
                             return (TackyVal::Constant(0), CType::Struct);
                         }
@@ -1820,18 +1833,12 @@ impl TackyGen {
                         return (result, decayed.to_ctype());
                     }
                     if inner_ft.is_struct() {
-                        // Dereferencing a pointer-to-struct: the struct lives at the pointer address
-                        // Return the pointer as the "struct value" (similar to array treatment)
-                        let result = self.fresh_tmp_full(inner_ft);
+                        // Dereferencing a pointer-to-struct: return the pointer value
+                        // The temp holds a POINTER to the struct, not the struct data
+                        // Don't register in array_sizes — use the pointer directly for access
+                        let result = self.fresh_tmp(CType::Pointer);
+                        self.full_types.insert(if let TackyVal::Var(ref n) = result { n.clone() } else { String::new() }, inner_ft.as_ref().clone());
                         self.emit(TackyInstr::Copy { src: ptr, dst: result.clone() });
-                        // Also register as aggregate for stack allocation
-                        if let TackyVal::Var(ref name) = result {
-                            if let FullType::Struct(ref tag) = **inner_ft {
-                                if let Some(def) = self.struct_defs.get(tag) {
-                                    self.array_sizes.insert(name.clone(), def.size);
-                                }
-                            }
-                        }
                         return (result, CType::Struct);
                     }
                 }

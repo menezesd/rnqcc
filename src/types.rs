@@ -232,6 +232,43 @@ pub struct StructDef {
     pub alignment: usize,
 }
 
+/// System V ABI classification for struct parameter passing
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ParamClass {
+    Integer,
+    Sse,
+    Memory,
+}
+
+impl StructDef {
+    /// Classify a struct for System V ABI parameter/return passing.
+    /// Returns a list of ParamClass for each 8-byte chunk, or Memory if passed on stack.
+    pub fn classify(&self) -> Vec<ParamClass> {
+        if self.size > 16 {
+            return vec![ParamClass::Memory];
+        }
+        let num_eightbytes = (self.size + 7) / 8;
+        let mut classes = vec![ParamClass::Integer; num_eightbytes];
+
+        for mem in &self.members {
+            let eightbyte_idx = mem.offset / 8;
+            if eightbyte_idx >= num_eightbytes { continue; }
+            match mem.member_type {
+                CType::Double => { classes[eightbyte_idx] = ParamClass::Sse; }
+                _ => {} // Integer types keep the default INTEGER class
+            }
+            // If a member spans two eightbytes, classify both
+            let end = mem.offset + std::cmp::max(mem.size, 1);
+            if end > (eightbyte_idx + 1) * 8 && eightbyte_idx + 1 < num_eightbytes {
+                if mem.member_type == CType::Double {
+                    classes[eightbyte_idx + 1] = ParamClass::Sse;
+                }
+            }
+        }
+        classes
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StructMember {
     pub name: String,

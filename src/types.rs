@@ -708,6 +708,12 @@ pub enum TackyInstr {
         dst_name: String,
         offset: i64,
     },
+    /// Read from aggregate at byte offset: dst = src_name[offset]
+    CopyFromOffset {
+        src_name: String,
+        offset: i64,
+        dst: TackyVal,
+    },
     /// Add pointer + index * scale → dst
     AddPtr {
         ptr: TackyVal,

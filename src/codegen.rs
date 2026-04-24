@@ -321,6 +321,14 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, out: 
                 out.push(AsmInstr::Mov(src_t, convert_val(src), AsmOperand::PseudoMem(dst_name.clone(), *offset as i32)));
             }
         }
+        TackyInstr::CopyFromOffset { src_name, offset, dst } => {
+            let dst_t = val_type(dst, types);
+            if dst_t == AsmType::Double {
+                out.push(AsmInstr::Mov(AsmType::Double, AsmOperand::PseudoMem(src_name.clone(), *offset as i32), convert_val(dst)));
+            } else {
+                out.push(AsmInstr::Mov(dst_t, AsmOperand::PseudoMem(src_name.clone(), *offset as i32), convert_val(dst)));
+            }
+        }
         TackyInstr::AddPtr { ptr, index, scale, dst } => {
             // ptr + index * scale → dst
             // For now: Mov ptr to AX, Mov index to DX, imulq $scale, %rdx, leaq (%rax,%rdx,1), dst

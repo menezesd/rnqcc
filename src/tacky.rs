@@ -2153,10 +2153,24 @@ impl TackyGen {
                                         if inner_written < inner_mem.offset {
                                             init_values.push(StaticInit::ZeroInit(inner_mem.offset - inner_written));
                                         }
-                                        let (v, is_dbl, is_uns) = eval_constant_init(&Some(sub_elem.clone()));
-                                        let cv = convert_init_value(v, inner_mem.member_type, is_dbl, is_uns);
-                                        init_values.push(make_static_init(cv, inner_mem.member_type));
-                                        inner_written = inner_mem.offset + inner_mem.member_type.size() as usize;
+                                        if inner_mem.member_full_type.is_array() {
+                                            if let Exp::ArrayInit(_) = sub_elem {
+                                                let scalar_t = { let mut t = &inner_mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
+                                                let elem_sizes = Self::compute_elem_sizes(&inner_mem.member_full_type);
+                                                Self::flatten_static_init(sub_elem, scalar_t, &elem_sizes, &mut init_values);
+                                                let written: usize = init_values.iter().map(|v| Self::static_init_size(v)).sum::<usize>();
+                                                // Pad inner member
+                                            } else if let Exp::StringLiteral(ref s) = sub_elem {
+                                                let null_term = s.len() < inner_mem.size;
+                                                init_values.push(StaticInit::StringInit(s.clone(), null_term));
+                                            }
+                                            inner_written = inner_mem.offset + inner_mem.size;
+                                        } else {
+                                            let (v, is_dbl, is_uns) = eval_constant_init(&Some(sub_elem.clone()));
+                                            let cv = convert_init_value(v, inner_mem.member_type, is_dbl, is_uns);
+                                            init_values.push(make_static_init(cv, inner_mem.member_type));
+                                            inner_written = inner_mem.offset + std::cmp::max(inner_mem.member_type.size() as usize, 1);
+                                        }
                                     }
                                     if inner_written < inner_def.size {
                                         init_values.push(StaticInit::ZeroInit(inner_def.size - inner_written));

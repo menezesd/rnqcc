@@ -10,7 +10,10 @@ const ARG_REGISTERS: [Reg; 6] = [Reg::DI, Reg::SI, Reg::DX, Reg::CX, Reg::R8, Re
 fn convert_val(val: &TackyVal) -> AsmOperand {
     match val {
         TackyVal::Constant(c) => AsmOperand::Imm(*c),
-        TackyVal::DoubleConstant(_) => panic!("Double constants should be handled as data references"),
+        TackyVal::DoubleConstant(d) => {
+            // Treat as integer bits when used in non-double context
+            AsmOperand::Imm(d.to_bits() as i64)
+        }
         TackyVal::Var(name) => AsmOperand::Pseudo(name.clone()),
     }
 }
@@ -370,7 +373,12 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
             let src_t = val_type(src, types);
             // Load pointer value into R11, then store indirectly
             out.push(AsmInstr::Mov(AsmType::Quadword, convert_val(dst_ptr), AsmOperand::Reg(Reg::R11)));
-            out.push(AsmInstr::StoreIndirect(src_t, convert_val(src), Reg::R11));
+            let src_op = if src_t == AsmType::Double || matches!(src, TackyVal::DoubleConstant(_)) {
+                convert_double_val(src, static_doubles)
+            } else {
+                convert_val(src)
+            };
+            out.push(AsmInstr::StoreIndirect(src_t, src_op, Reg::R11));
         }
         TackyInstr::CopyToOffset { src, dst_name, offset } => {
             let src_t = val_type(src, types);

@@ -119,13 +119,18 @@ fn constant_folding(instructions: Vec<TackyInstr>, types: &std::collections::Has
             _ => None,
         };
 
-        // First, try to resolve operands using known constants
-        let instr = resolve_constants(&instr, &const_map);
+        // Resolve operands using known constants — but NOT for Copy sources
+        // (Copy sources are handled by CFG-based copy propagation)
+        let instr = if matches!(&instr, TackyInstr::Copy { .. }) {
+            instr // Don't resolve Copy sources
+        } else {
+            resolve_constants(&instr, &const_map)
+        };
 
         // Then fold the instruction
         let folded = fold_instruction(instr, types, src_type_hint);
 
-        // Track constants: if Copy(Constant(x), Var(v)), record v = x
+        // Track constants: Copy(Constant, Var) and Copy(Var, Var) where Var is known
         match &folded {
             TackyInstr::Copy { src: TackyVal::Constant(c), dst: TackyVal::Var(name) } => {
                 let t = types.get(name).copied().unwrap_or(CType::Int);
@@ -133,6 +138,14 @@ fn constant_folding(instructions: Vec<TackyInstr>, types: &std::collections::Has
             }
             TackyInstr::Copy { src: TackyVal::DoubleConstant(d), dst: TackyVal::Var(name) } => {
                 const_map.insert(name.clone(), (TackyVal::DoubleConstant(*d), CType::Double));
+            }
+            TackyInstr::Copy { src: TackyVal::Var(s), dst: TackyVal::Var(name) } => {
+                // If source has a known constant, propagate it
+                if let Some((cval, ct)) = const_map.get(s).cloned() {
+                    const_map.insert(name.clone(), (cval, ct));
+                } else {
+                    const_map.remove(name);
+                }
             }
             // Any instruction that writes to a variable invalidates our knowledge
             _ => {

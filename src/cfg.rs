@@ -409,6 +409,13 @@ fn rewrite_instruction(instr: &TackyInstr, reaching: &HashSet<CopyInstr>) -> Opt
         }
         // Don't rewrite GetAddress (uses address, not value)
         TackyInstr::GetAddress { .. } => Some(instr.clone()),
+        TackyInstr::FunCall { name, args, dst, stack_arg_indices, struct_arg_groups } => {
+            let new_args: Vec<TackyVal> = args.iter().map(|a| replace_operand(a, reaching)).collect();
+            Some(TackyInstr::FunCall { name: name.clone(), args: new_args, dst: dst.clone(), stack_arg_indices: stack_arg_indices.clone(), struct_arg_groups: struct_arg_groups.clone() })
+        }
+        TackyInstr::AddPtr { ptr, index, scale, dst } => {
+            Some(TackyInstr::AddPtr { ptr: replace_operand(ptr, reaching), index: replace_operand(index, reaching), scale: *scale, dst: dst.clone() })
+        }
         _ => Some(instr.clone()),
     }
 }

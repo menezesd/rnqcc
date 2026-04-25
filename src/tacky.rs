@@ -2304,6 +2304,57 @@ impl TackyGen {
 
     /// Flatten a static initializer (possibly nested ArrayInit) into a flat list of StaticInit values.
     /// Uses elem_sizes to properly zero-pad partial initializations.
+    fn flatten_static_init_struct(init: &Exp, def: &StructDef, struct_defs: &std::collections::HashMap<String, StructDef>, out: &mut Vec<StaticInit>) {
+        if let Exp::ArrayInit(elems) = init {
+            let mut pos = 0usize; // position within the struct
+            for (i, elem) in elems.iter().enumerate() {
+                if i >= def.members.len() { break; }
+                let mem = &def.members[i];
+                // Padding before this member
+                if mem.offset > pos {
+                    out.push(StaticInit::ZeroInit(mem.offset - pos));
+                    pos = mem.offset;
+                }
+                match elem {
+                    Exp::StringLiteral(s) if mem.member_full_type.is_array() => {
+                        let null_terminated = s.len() < mem.size;
+                        let str_to_write = if s.len() <= mem.size { s.clone() } else { s[..mem.size].to_string() };
+                        out.push(StaticInit::StringInit(str_to_write, null_terminated));
+                        let str_bytes = std::cmp::min(s.len() + if null_terminated { 1 } else { 0 }, mem.size);
+                        if str_bytes < mem.size {
+                            out.push(StaticInit::ZeroInit(mem.size - str_bytes));
+                        }
+                        pos = mem.offset + mem.size;
+                    }
+                    Exp::ArrayInit(_) if mem.member_full_type.is_struct() => {
+                        if let FullType::Struct(ref tag) = mem.member_full_type {
+                            if let Some(inner_def) = struct_defs.get(tag) {
+                                Self::flatten_static_init_struct(elem, inner_def, struct_defs, out);
+                                pos = mem.offset + inner_def.size;
+                            }
+                        }
+                    }
+                    Exp::ArrayInit(_) if mem.member_full_type.is_array() => {
+                        let elem_sizes = Self::compute_elem_sizes(&mem.member_full_type, struct_defs);
+                        let scalar_t = { let mut t = &mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
+                        Self::flatten_static_init(elem, scalar_t, &elem_sizes, out);
+                        pos = mem.offset + mem.size;
+                    }
+                    _ => {
+                        let (v, is_dbl, is_uns) = eval_constant_init(&Some(elem.clone()));
+                        let cv = convert_init_value(v, mem.member_type, is_dbl, is_uns);
+                        out.push(make_static_init(cv, mem.member_type));
+                        pos = mem.offset + std::cmp::max(mem.member_type.size() as usize, 1);
+                    }
+                }
+            }
+            // Trailing padding
+            if pos < def.size {
+                out.push(StaticInit::ZeroInit(def.size - pos));
+            }
+        }
+    }
+
     fn flatten_static_init(init: &Exp, base_type: CType, elem_sizes: &[i64], out: &mut Vec<StaticInit>) {
         match init {
             Exp::ArrayInit(elems) => {
@@ -2406,8 +2457,35 @@ impl TackyGen {
                     init_values.push(StaticInit::ZeroInit(total_bytes - string_bytes));
                 }
             } else if let Some(ref init_exp) = vd.init {
-                let elem_sizes = Self::compute_elem_sizes(&full_type, &self.struct_defs);
-                Self::flatten_static_init(init_exp, base_type, &elem_sizes, &mut init_values);
+                // For arrays of structs, use struct-aware init
+                let inner_struct_tag = {
+                    let mut t = &full_type;
+                    while let FullType::Array { elem: e, .. } = t { t = e; }
+                    if let FullType::Struct(tag) = t { Some(tag.clone()) } else { None }
+                };
+                if let (Some(ref tag), Exp::ArrayInit(ref top_elems)) = (&inner_struct_tag, init_exp) {
+                    if let Some(sdef) = self.struct_defs.get(tag).cloned() {
+                        let outer_elem_size = sdef.size;
+                        for elem in top_elems {
+                            let start: usize = init_values.iter().map(|v| Self::static_init_size(v)).sum();
+                            if let Exp::ArrayInit(_) = elem {
+                                Self::flatten_static_init_struct(elem, &sdef, &self.struct_defs, &mut init_values);
+                            } else {
+                                let (v, is_dbl, is_uns) = eval_constant_init(&Some(elem.clone()));
+                                let cv = convert_init_value(v, base_type, is_dbl, is_uns);
+                                init_values.push(make_static_init(cv, base_type));
+                            }
+                            let end: usize = init_values.iter().map(|v| Self::static_init_size(v)).sum();
+                            let written = end - start;
+                            if written < outer_elem_size {
+                                init_values.push(StaticInit::ZeroInit(outer_elem_size - written));
+                            }
+                        }
+                    }
+                } else {
+                    let elem_sizes = Self::compute_elem_sizes(&full_type, &self.struct_defs);
+                    Self::flatten_static_init(init_exp, base_type, &elem_sizes, &mut init_values);
+                }
                 let initialized_bytes: usize = init_values.iter().map(|v| Self::static_init_size(v)).sum();
                 if initialized_bytes < total_bytes {
                     init_values.push(StaticInit::ZeroInit(total_bytes - initialized_bytes));

@@ -1032,7 +1032,11 @@ impl TackyGen {
                     let ret_addr = self.fresh_tmp(CType::Pointer);
                     self.emit(TackyInstr::GetAddress { src: tmp.clone(), dst: ret_addr.clone() });
                     tacky_args.insert(0, ret_addr);
-                    self.emit(TackyInstr::FunCall { name, args: tacky_args, dst: tmp.clone(), stack_arg_indices: stack_arg_indices.clone(), struct_arg_groups: struct_arg_groups.clone() });
+                    // Shift all indices by 1 to account for the inserted hidden return pointer
+                    let shifted_stack = stack_arg_indices.iter().map(|&i| i + 1).collect();
+                    let shifted_groups: Vec<(usize, usize, Vec<bool>)> = struct_arg_groups.iter()
+                        .map(|(s, c, v)| (s + 1, *c, v.clone())).collect();
+                    self.emit(TackyInstr::FunCall { name, args: tacky_args, dst: tmp.clone(), stack_arg_indices: shifted_stack, struct_arg_groups: shifted_groups });
                     if let Some(pi) = ret_pi {
                         if let TackyVal::Var(ref dst_name) = tmp {
                             self.ptr_info.insert(dst_name.clone(), pi);

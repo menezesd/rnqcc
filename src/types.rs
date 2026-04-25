@@ -771,21 +771,21 @@ pub struct Program {
 // TACKY IR (Three-Address Code)
 // ============================================================
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TackyVal {
     Constant(i64),
     DoubleConstant(f64),
     Var(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TackyUnaryOp {
     Negate,
     Complement,
     LogicalNot,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TackyBinaryOp {
     Add,
     Sub,
@@ -805,8 +805,9 @@ pub enum TackyBinaryOp {
     GreaterEqual,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TackyInstr {
+    Nop,
     Return(TackyVal),
     Unary {
         op: TackyUnaryOp,

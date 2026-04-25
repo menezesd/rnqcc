@@ -4,6 +4,7 @@ mod codegen;
 mod compile;
 mod emit;
 mod lex;
+mod optimize;
 mod parse;
 mod resolve;
 mod tacky;
@@ -57,8 +58,8 @@ fn preprocess(src: &str) -> String {
     output
 }
 
-fn do_compile(stage: &Stage, preprocessed_src: &str, target: &Platform) -> String {
-    compile::compile(stage, preprocessed_src, target);
+fn do_compile(stage: &Stage, preprocessed_src: &str, target: &Platform, opt_flags: &optimize::OptimizationFlags) -> String {
+    compile::compile(stage, preprocessed_src, target, opt_flags);
     let _ = std::fs::remove_file(preprocessed_src);
     replace_extension(preprocessed_src, "s")
 }
@@ -79,12 +80,12 @@ fn assemble_and_link(asm_files: &[String], output: &str, target: &Platform, clea
     }
 }
 
-fn driver(target: Platform, debug: bool, stage: Stage, sources: &[&str]) {
+fn driver(target: Platform, debug: bool, stage: Stage, sources: &[&str], opt_flags: &optimize::OptimizationFlags) {
     let mut asm_files = Vec::new();
 
     for src in sources {
         let preprocessed_name = preprocess(src);
-        let assembly_name = do_compile(&stage, &preprocessed_name, &target);
+        let assembly_name = do_compile(&stage, &preprocessed_name, &target, opt_flags);
         asm_files.push(assembly_name);
     }
 
@@ -152,6 +153,36 @@ fn main() {
                 .help("Write out debug information"),
         )
         .arg(
+            Arg::with_name("fold_constants")
+                .long("fold-constants")
+                .takes_value(false)
+                .help("Enable constant folding optimization"),
+        )
+        .arg(
+            Arg::with_name("eliminate_unreachable_code")
+                .long("eliminate-unreachable-code")
+                .takes_value(false)
+                .help("Enable unreachable code elimination"),
+        )
+        .arg(
+            Arg::with_name("propagate_copies")
+                .long("propagate-copies")
+                .takes_value(false)
+                .help("Enable copy propagation"),
+        )
+        .arg(
+            Arg::with_name("eliminate_dead_stores")
+                .long("eliminate-dead-stores")
+                .takes_value(false)
+                .help("Enable dead store elimination"),
+        )
+        .arg(
+            Arg::with_name("optimize")
+                .long("optimize")
+                .takes_value(false)
+                .help("Enable all optimizations"),
+        )
+        .arg(
             Arg::with_name("src_files")
                 .index(1)
                 .required(true)
@@ -185,5 +216,13 @@ fn main() {
     let debug = matches.is_present("debug");
     let src_files: Vec<&str> = matches.values_of("src_files").unwrap().collect();
 
-    driver(target, debug, stage, &src_files);
+    let all_opts = matches.is_present("optimize");
+    let opt_flags = optimize::OptimizationFlags {
+        fold_constants: all_opts || matches.is_present("fold_constants"),
+        eliminate_unreachable_code: all_opts || matches.is_present("eliminate_unreachable_code"),
+        propagate_copies: all_opts || matches.is_present("propagate_copies"),
+        eliminate_dead_stores: all_opts || matches.is_present("eliminate_dead_stores"),
+    };
+
+    driver(target, debug, stage, &src_files, &opt_flags);
 }

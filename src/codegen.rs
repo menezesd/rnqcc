@@ -77,6 +77,7 @@ fn get_struct_classes(name: &str, var_struct_tags: &HashMap<String, String>, str
 fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_sizes: &HashMap<String, usize>, out: &mut Vec<AsmInstr>, static_doubles: &mut Vec<(String, f64)>,
     var_struct_tags: &HashMap<String, String>, struct_defs: &HashMap<String, StructDef>) {
     match instr {
+        TackyInstr::Nop => { /* skip */ }
         TackyInstr::Return(val) => {
             let t = val_type(val, types);
             // Check if returning a struct
@@ -982,9 +983,8 @@ fn fixup_instructions(func: &mut AsmFunction, stack_size: i32) {
                     new_instructions.push(AsmInstr::StoreIndirect(t, AsmOperand::Reg(Reg::R10), reg.clone()));
                 }
             }
-            // Ret → epilogue
+            // Ret → epilogue (movq %rbp, %rsp in Ret handles stack cleanup)
             AsmInstr::Ret => {
-                new_instructions.push(AsmInstr::DeallocateStack(aligned_stack));
                 new_instructions.push(AsmInstr::Ret);
             }
             other => {

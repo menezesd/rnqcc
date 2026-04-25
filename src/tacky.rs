@@ -3375,22 +3375,32 @@ pub fn generate(program: Program) -> TackyProgram {
                                                         init_values.push(StaticInit::ZeroInit(inner_mem.offset - inner_written));
                                                     }
                                                     if inner_mem.member_full_type.is_array() {
-                                                        let before_len: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
-                                                        let sc_t = { let mut t = &inner_mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
-                                                        let es = TackyGen::compute_elem_sizes(&inner_mem.member_full_type, &gen.struct_defs);
-                                                        TackyGen::flatten_static_init(sub_elem, sc_t, &es, &mut init_values);
-                                                        let after_len: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
-                                                        let ab = after_len - before_len;
-                                                        if ab < inner_mem.size { init_values.push(StaticInit::ZeroInit(inner_mem.size - ab)); }
-                                                    } else if let Exp::StringLiteral(ref s) = sub_elem {
-                                                        if inner_mem.member_type == CType::Pointer {
-                                                            let sl = gen.make_string_constant(s);
-                                                            init_values.push(StaticInit::PointerInit(sl));
-                                                        } else {
+                                                        if let Exp::StringLiteral(ref s) = sub_elem {
+                                                            // String literal for char array member
                                                             let nt = s.len() < inner_mem.size;
                                                             init_values.push(StaticInit::StringInit(s.clone(), nt));
                                                             let sb = s.len() + if nt { 1 } else { 0 };
                                                             if sb < inner_mem.size { init_values.push(StaticInit::ZeroInit(inner_mem.size - sb)); }
+                                                        } else {
+                                                            let before_len: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
+                                                            let sc_t = { let mut t = &inner_mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
+                                                            let es = TackyGen::compute_elem_sizes(&inner_mem.member_full_type, &gen.struct_defs);
+                                                            TackyGen::flatten_static_init(sub_elem, sc_t, &es, &mut init_values);
+                                                            let after_len: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
+                                                            let ab = after_len - before_len;
+                                                            if ab < inner_mem.size { init_values.push(StaticInit::ZeroInit(inner_mem.size - ab)); }
+                                                        }
+                                                    } else if let Exp::StringLiteral(ref s) = sub_elem {
+                                                        if inner_mem.member_full_type.is_array() {
+                                                            // String literal for char array member
+                                                            let nt = s.len() < inner_mem.size;
+                                                            init_values.push(StaticInit::StringInit(s.clone(), nt));
+                                                            let sb = s.len() + if nt { 1 } else { 0 };
+                                                            if sb < inner_mem.size { init_values.push(StaticInit::ZeroInit(inner_mem.size - sb)); }
+                                                        } else {
+                                                            // String literal for pointer member
+                                                            let sl = gen.make_string_constant(s);
+                                                            init_values.push(StaticInit::PointerInit(sl));
                                                         }
                                                     } else {
                                                         let (v, is_dbl, is_uns) = eval_constant_init(&Some(sub_elem.clone()));

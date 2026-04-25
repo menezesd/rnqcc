@@ -2211,11 +2211,27 @@ impl TackyGen {
                     match elem {
                         Exp::ArrayInit(_) if inner_sizes.is_empty() && scalar_type == CType::Struct => {
                             // Compound initializer for struct/union element in array
+                            // Find the struct tag for the array element type
                             let arr_ft = self.get_full_type(arr_name);
                             let struct_tag = {
                                 let mut t = &arr_ft;
+                                // Peel arrays AND drill into struct first members if the
+                                // outermost type is a struct/union (happens for nested unions)
                                 while let FullType::Array { elem: e, .. } = t { t = e; }
-                                match t { FullType::Struct(tag) => tag.clone(), _ => panic!("Expected struct in array") }
+                                if let FullType::Struct(tag) = t {
+                                    // Check if this is a union whose first member is an array of structs
+                                    if let Some(def) = self.struct_defs.get(tag) {
+                                        if def.is_union {
+                                            if let Some(mem) = def.members.first() {
+                                                let mut mt = &mem.member_full_type;
+                                                while let FullType::Array { elem: e, .. } = mt { mt = e; }
+                                                if let FullType::Struct(inner_tag) = mt {
+                                                    inner_tag.clone()
+                                                } else { tag.clone() }
+                                            } else { tag.clone() }
+                                        } else { tag.clone() }
+                                    } else { tag.clone() }
+                                } else { panic!("Expected struct in array") }
                             };
                             self.emit_struct_init_at(arr_name, elem, &struct_tag, elem_offset);
                         }

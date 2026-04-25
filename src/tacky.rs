@@ -2276,7 +2276,7 @@ impl TackyGen {
 
     /// Flatten a static initializer (possibly nested ArrayInit) into a flat list of StaticInit values.
     /// Uses elem_sizes to properly zero-pad partial initializations.
-    fn flatten_static_init_struct(init: &Exp, def: &StructDef, struct_defs: &std::collections::HashMap<String, StructDef>, out: &mut Vec<StaticInit>) {
+    fn flatten_static_init_struct(init: &Exp, def: &StructDef, struct_defs: &std::collections::HashMap<String, StructDef>, out: &mut Vec<StaticInit>, string_constants: &mut Vec<(String, String)>) {
         if let Exp::ArrayInit(elems) = init {
             let mut pos = 0usize; // position within the struct
             for (i, elem) in elems.iter().enumerate() {
@@ -2301,7 +2301,7 @@ impl TackyGen {
                     Exp::ArrayInit(_) if mem.member_full_type.is_struct() => {
                         if let FullType::Struct(ref tag) = mem.member_full_type {
                             if let Some(inner_def) = struct_defs.get(tag) {
-                                Self::flatten_static_init_struct(elem, inner_def, struct_defs, out);
+                                Self::flatten_static_init_struct(elem, inner_def, struct_defs, out, string_constants);
                                 pos = mem.offset + inner_def.size;
                             }
                         }
@@ -2311,6 +2311,12 @@ impl TackyGen {
                         let scalar_t = { let mut t = &mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
                         Self::flatten_static_init(elem, scalar_t, &elem_sizes, out);
                         pos = mem.offset + mem.size;
+                    }
+                    Exp::StringLiteral(s) if mem.member_type == CType::Pointer => {
+                        let label = format!("__static_str_{}", string_constants.len());
+                        string_constants.push((label.clone(), s.clone()));
+                        out.push(StaticInit::PointerInit(label));
+                        pos = mem.offset + 8;
                     }
                     _ => {
                         let (v, is_dbl, is_uns) = eval_constant_init(&Some(elem.clone()));
@@ -2451,7 +2457,17 @@ impl TackyGen {
                         for elem in top_elems {
                             let start: usize = init_values.iter().map(|v| Self::static_init_size(v)).sum();
                             if let Exp::ArrayInit(_) = elem {
-                                Self::flatten_static_init_struct(elem, &sdef, &self.struct_defs, &mut init_values);
+                                let mut str_consts = Vec::new();
+                                Self::flatten_static_init_struct(elem, &sdef, &self.struct_defs, &mut init_values, &mut str_consts);
+                                for (label, s) in str_consts {
+                                    let sc_label = self.make_string_constant(&s);
+                                    // Replace the label in init_values
+                                    for iv in init_values.iter_mut() {
+                                        if let StaticInit::PointerInit(ref mut l) = iv {
+                                            if *l == label { *l = sc_label.clone(); }
+                                        }
+                                    }
+                                }
                             } else {
                                 let (v, is_dbl, is_uns) = eval_constant_init(&Some(elem.clone()));
                                 let cv = convert_init_value(v, base_type, is_dbl, is_uns);
@@ -3381,7 +3397,7 @@ pub fn generate(program: Program) -> TackyProgram {
                                                         let cv = convert_init_value(v, inner_mem.member_type, is_dbl, is_uns);
                                                         init_values.push(make_static_init(cv, inner_mem.member_type));
                                                     }
-                                                    inner_written = inner_mem.offset + std::cmp::max(inner_mem.member_type.size() as usize, inner_mem.size);
+                                                    inner_written = inner_mem.offset + inner_mem.size;
                                                 }
                                                 if inner_written < inner_def.size {
                                                     init_values.push(StaticInit::ZeroInit(inner_def.size - inner_written));
@@ -3529,7 +3545,16 @@ pub fn generate(program: Program) -> TackyProgram {
                         for elem in top_elems {
                             let start: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
                             if let Exp::ArrayInit(_) = elem {
-                                TackyGen::flatten_static_init_struct(elem, &sdef, &gen.struct_defs, &mut init_values);
+                                let mut str_consts = Vec::new();
+                                TackyGen::flatten_static_init_struct(elem, &sdef, &gen.struct_defs, &mut init_values, &mut str_consts);
+                                for (label, s) in str_consts {
+                                    let sc_label = gen.make_string_constant(&s);
+                                    for iv in init_values.iter_mut() {
+                                        if let StaticInit::PointerInit(ref mut l) = iv {
+                                            if *l == label { *l = sc_label.clone(); }
+                                        }
+                                    }
+                                }
                             } else {
                                 let (v, is_dbl, is_uns) = eval_constant_init(&Some(elem.clone()));
                                 let cv = convert_init_value(v, base_type, is_dbl, is_uns);

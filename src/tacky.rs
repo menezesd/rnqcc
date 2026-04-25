@@ -2209,21 +2209,26 @@ impl TackyGen {
                 for (i, elem) in elems.iter().enumerate() {
                     let elem_offset = base_offset + (i as i64) * this_elem_size;
                     match elem {
-                        _ if inner_sizes.is_empty() && scalar_type == CType::Struct => {
-                            // Struct element within array of structs
+                        Exp::ArrayInit(_) if inner_sizes.is_empty() && scalar_type == CType::Struct => {
+                            // Compound initializer for struct/union element in array
                             let arr_ft = self.get_full_type(arr_name);
                             let struct_tag = {
                                 let mut t = &arr_ft;
                                 while let FullType::Array { elem: e, .. } = t { t = e; }
                                 match t { FullType::Struct(tag) => tag.clone(), _ => panic!("Expected struct in array") }
                             };
-                            if let Exp::ArrayInit(_) = elem {
-                                // Compound initializer for struct
-                                self.emit_struct_init_at(arr_name, elem, &struct_tag, elem_offset);
-                            } else {
-                                // Struct-valued expression (variable, conditional, etc.)
-                                let struct_size = self.struct_defs.get(&struct_tag).map(|d| d.size).unwrap_or(0);
-                                let (val, val_type) = self.emit_exp(elem.clone());
+                            self.emit_struct_init_at(arr_name, elem, &struct_tag, elem_offset);
+                        }
+                        _ if inner_sizes.is_empty() && scalar_type == CType::Struct && self.typeof_exp(elem).is_struct() => {
+                            // Struct-valued expression in struct/union array
+                            let arr_ft = self.get_full_type(arr_name);
+                            let struct_tag = {
+                                let mut t = &arr_ft;
+                                while let FullType::Array { elem: e, .. } = t { t = e; }
+                                match t { FullType::Struct(tag) => tag.clone(), _ => panic!("Expected struct in array") }
+                            };
+                            let struct_size = self.struct_defs.get(&struct_tag).map(|d| d.size).unwrap_or(0);
+                            let (val, val_type) = self.emit_exp(elem.clone());
                                 let src_addr = if val_type == CType::Pointer { val } else { self.get_struct_addr(val) };
                                 let dst_addr = self.fresh_tmp(CType::Pointer);
                                 self.emit(TackyInstr::GetAddress { src: TackyVal::Var(arr_name.to_string()), dst: dst_addr.clone() });
@@ -2234,7 +2239,6 @@ impl TackyGen {
                                     self.emit(TackyInstr::Copy { src: dst_addr, dst: elem_addr.clone() });
                                 }
                                 self.emit_struct_copy_ptr_to_ptr(src_addr, elem_addr, struct_size);
-                            }
                         }
                         Exp::ArrayInit(_) => {
                             self.emit_array_init_flat(arr_name, elem, scalar_type, elem_offset, inner_sizes);
@@ -2726,27 +2730,45 @@ impl TackyGen {
             if let Some(Exp::ArrayInit(ref elems)) = vd.init {
                 // For unions, if first member is array/struct, delegate the whole init
                 if def.is_union && !def.members.is_empty() {
-                    // For unions, the compound init {x} initializes the first member with x
+                    // For unions, the whole compound init {x, y, ...} initializes
+                    // the FIRST MEMBER only. All elements go to the first member.
                     let mem = &def.members[0];
-                    let first_elem = &elems[0]; // The initializer for the first member
+                    let init_ref = vd.init.as_ref().unwrap();
                     if mem.member_full_type.is_array() {
-                        // Handle string literal for char array first member
-                        if let Exp::StringLiteral(ref s) = first_elem {
-                            let chars_to_copy = std::cmp::min(s.len(), mem.size);
-                            for (j, byte) in s.bytes().take(chars_to_copy).enumerate() {
-                                let src = self.fresh_tmp(CType::Char);
-                                self.emit(TackyInstr::Copy { src: TackyVal::Constant(byte as i64), dst: src.clone() });
-                                self.emit(TackyInstr::CopyToOffset { src, dst_name: vd.name.clone(), offset: j as i64 });
+                        // Check if the first (and only) element is a string literal
+                        if elems.len() == 1 {
+                            if let Exp::StringLiteral(ref s) = elems[0] {
+                                let chars_to_copy = std::cmp::min(s.len(), mem.size);
+                                for (j, byte) in s.bytes().take(chars_to_copy).enumerate() {
+                                    let src = self.fresh_tmp(CType::Char);
+                                    self.emit(TackyInstr::Copy { src: TackyVal::Constant(byte as i64), dst: src.clone() });
+                                    self.emit(TackyInstr::CopyToOffset { src, dst_name: vd.name.clone(), offset: j as i64 });
+                                }
+                            } else {
+                                // Single ArrayInit element → pass to array init for the array member
+                                let mem_elem_sizes = Self::compute_elem_sizes(&mem.member_full_type, &self.struct_defs);
+                                let inner_scalar = { let mut t = &mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
+                                self.emit_array_init_flat(&vd.name, &elems[0], inner_scalar, 0, &mem_elem_sizes);
                             }
                         } else {
+                            // Multiple elements → they're all array element inits
                             let mem_elem_sizes = Self::compute_elem_sizes(&mem.member_full_type, &self.struct_defs);
                             let inner_scalar = { let mut t = &mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
-                            self.emit_array_init_flat(&vd.name, first_elem, inner_scalar, 0, &mem_elem_sizes);
+                            self.emit_array_init_flat(&vd.name, init_ref, inner_scalar, 0, &mem_elem_sizes);
                         }
-                    } else if let FullType::Struct(ref inner_tag) = mem.member_full_type {
-                        self.emit_struct_init_at(&vd.name, first_elem, inner_tag, 0);
+                    } else if mem.member_full_type.is_struct() {
+                        if let FullType::Struct(ref inner_tag) = mem.member_full_type {
+                            // Pass the first element (the struct's init), not the whole union init
+                            if elems.len() == 1 {
+                                self.emit_struct_init_at(&vd.name, &elems[0], inner_tag, 0);
+                            } else {
+                                // Multiple elements → interpret as struct member inits
+                                self.emit_struct_init_at(&vd.name, init_ref, inner_tag, 0);
+                            }
+                        }
                     } else {
-                        let (val, val_type) = self.emit_exp(first_elem.clone());
+                        // Scalar first member — use first element
+                        let (val, val_type) = self.emit_exp(elems[0].clone());
                         let val_conv = self.convert_to(val, val_type, mem.member_type);
                         self.emit(TackyInstr::CopyToOffset { src: val_conv, dst_name: vd.name.clone(), offset: 0 });
                     }

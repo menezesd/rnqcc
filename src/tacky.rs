@@ -2628,6 +2628,25 @@ impl TackyGen {
                                 self.emit(TackyInstr::Copy { src: TackyVal::Constant(byte as i64), dst: src.clone() });
                                 self.emit(TackyInstr::CopyToOffset { src, dst_name: vd.name.clone(), offset: (member.offset + j) as i64 });
                             }
+                        } else if mem_ft.is_struct() && !matches!(elem, Exp::ArrayInit(_) | Exp::StringLiteral(_)) {
+                            // Struct member initialized with a struct-valued expression (e.g., a variable)
+                            let struct_size = mem_ft.byte_size_with(&self.struct_defs);
+                            let (val, val_type) = self.emit_exp(elem.clone());
+                            let src_addr = if val_type == CType::Pointer {
+                                val
+                            } else {
+                                self.get_struct_addr(val)
+                            };
+                            // Copy struct data to the member offset
+                            let dst_addr = self.fresh_tmp(CType::Pointer);
+                            self.emit(TackyInstr::GetAddress { src: TackyVal::Var(vd.name.clone()), dst: dst_addr.clone() });
+                            let member_addr = self.fresh_tmp(CType::Pointer);
+                            if member.offset > 0 {
+                                self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: dst_addr, right: TackyVal::Constant(member.offset as i64), dst: member_addr.clone() });
+                            } else {
+                                self.emit(TackyInstr::Copy { src: dst_addr, dst: member_addr.clone() });
+                            }
+                            self.emit_struct_copy_ptr_to_ptr(src_addr, member_addr, struct_size);
                         } else if let Exp::ArrayInit(ref sub_elems) = elem {
                             if mem_ft.is_array() {
                                 let elem_sizes = Self::compute_elem_sizes(mem_ft, &self.struct_defs);

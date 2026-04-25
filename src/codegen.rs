@@ -438,7 +438,7 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
         TackyInstr::Label(label) => {
             out.push(AsmInstr::Label(label.clone()));
         }
-        TackyInstr::FunCall { name, args, dst } => {
+        TackyInstr::FunCall { name, args, dst, stack_arg_indices } => {
             // Classify args into int regs, xmm regs, and stack
             let mut int_reg_args = Vec::new();
             let mut xmm_reg_args = Vec::new();
@@ -446,7 +446,12 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
             let mut int_idx = 0usize;
             let mut xmm_idx = 0usize;
 
-            for arg in args.iter() {
+            for (arg_idx, arg) in args.iter().enumerate() {
+                // MEMORY-class struct eightbytes always go on the stack
+                if stack_arg_indices.contains(&arg_idx) {
+                    stack_args_list.push(arg);
+                    continue;
+                }
                 let t = val_type(arg, types);
                 if t == AsmType::Double {
                     if xmm_idx < 8 {
@@ -564,6 +569,14 @@ fn convert_function(func: &TackyFunction, types: &HashMap<String, CType>, arr_si
     let mut stack_arg_idx = 0usize;
 
     for param in &func.params {
+        // MEMORY-class struct eightbytes always go on the stack
+        if func.stack_params.contains(param) {
+            let offset = 16 + (stack_arg_idx * 8) as i32;
+            let t: AsmType = types.get(param).copied().unwrap_or(CType::Int).into();
+            instructions.push(AsmInstr::Mov(AsmType::Quadword, AsmOperand::Stack(offset), AsmOperand::Pseudo(param.clone())));
+            stack_arg_idx += 1;
+            continue;
+        }
         let t: AsmType = types.get(param).copied().unwrap_or(CType::Int).into();
         if t == AsmType::Double {
             if xmm_reg_idx < 8 {

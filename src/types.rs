@@ -699,6 +699,8 @@ pub enum TackyInstr {
         name: String,
         args: Vec<TackyVal>,
         dst: TackyVal,
+        /// Indices of args that must be passed on the stack (MEMORY-class struct eightbytes)
+        stack_arg_indices: std::collections::HashSet<usize>,
     },
     SignExtend {
         src: TackyVal,
@@ -767,6 +769,8 @@ pub struct TackyFunction {
     pub params: Vec<String>,
     pub global: bool,
     pub body: Vec<TackyInstr>,
+    /// Params that must be passed on the stack (MEMORY-class struct eightbytes)
+    pub stack_params: std::collections::HashSet<String>,
 }
 
 #[derive(Debug)]

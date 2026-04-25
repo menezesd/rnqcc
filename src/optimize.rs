@@ -41,22 +41,46 @@ fn optimize_function(func: &mut TackyFunction, flags: &OptimizationFlags, types:
         return;
     }
 
+    // Find static variables (for aliased var analysis)
+    let static_vars: std::collections::HashSet<String> = types.iter()
+        .filter(|(name, _)| !name.starts_with("tmp.") && !name.starts_with("__"))
+        .filter(|(name, _)| {
+            // Heuristic: non-temp variables that aren't function params
+            !func.params.contains(name)
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+
     loop {
         let before = func.body.clone();
+
+        // Find aliased vars (address taken or static)
+        let aliased_vars = crate::cfg::find_aliased_vars(&func.body, &static_vars);
 
         // Constant folding operates on flat instruction list
         if flags.fold_constants {
             func.body = constant_folding(std::mem::take(&mut func.body), types);
         }
 
-        // The other three optimizations use control-flow graphs
-        // For now, just do unreachable code elimination on the flat list
+        // Unreachable code elimination on flat list
         if flags.eliminate_unreachable_code {
             func.body = unreachable_code_elimination(std::mem::take(&mut func.body));
         }
 
-        // TODO: copy propagation (requires CFG + data-flow analysis)
-        // TODO: dead store elimination (requires CFG + data-flow analysis)
+        // Copy propagation and dead store elimination use CFG
+        if flags.propagate_copies || flags.eliminate_dead_stores {
+            let mut cfg = crate::cfg::CFG::build(std::mem::take(&mut func.body));
+
+            if flags.propagate_copies {
+                crate::cfg::copy_propagation(&mut cfg, &aliased_vars, types);
+            }
+
+            if flags.eliminate_dead_stores {
+                crate::cfg::dead_store_elimination(&mut cfg, &aliased_vars, &static_vars);
+            }
+
+            func.body = cfg.to_instructions();
+        }
 
         if func.body == before || func.body.is_empty() {
             break;

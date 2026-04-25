@@ -2407,9 +2407,19 @@ impl TackyGen {
             let dims = vd.array_dims.as_ref().unwrap();
             let full_type = vd.decl_full_type.clone()
                 .unwrap_or_else(|| FullType::from_decl(base_type, vd.ptr_info, &vd.array_dims));
-            let total_elems: usize = dims.iter().product();
-            let total_bytes = total_elems * base_type.size() as usize;
-            let align = if total_bytes >= 16 { 16 } else { std::cmp::max(base_type.size() as usize, 1) };
+            let total_bytes = full_type.byte_size_with(&self.struct_defs);
+            let align = {
+                let elem_align = {
+                    let mut t = &full_type;
+                    while let FullType::Array { elem, .. } = t { t = elem; }
+                    if let FullType::Struct(tag) = t {
+                        self.struct_defs.get(tag).map(|d| d.alignment).unwrap_or(1)
+                    } else {
+                        std::cmp::max(base_type.size() as usize, 1)
+                    }
+                };
+                if total_bytes >= 16 { std::cmp::max(elem_align, 16) } else { std::cmp::max(elem_align, 1) }
+            };
             self.register_var(&vd.name, full_type.clone());
             let mut init_values: Vec<StaticInit> = Vec::new();
 
@@ -3419,13 +3429,12 @@ pub fn generate(program: Program) -> TackyProgram {
             if vd.array_dims.is_some() && !matches!(&vd.init, Some(Exp::ArrayInit(_)) | Some(Exp::StringLiteral(_)))
                 && vd.storage_class != Some(StorageClass::Extern)
                 && !global_array_names.contains(&vd.name) {
-                let dims = vd.array_dims.as_ref().unwrap();
                 let base_type = vd.var_type;
-                let total_elems: usize = dims.iter().product();
-                let total_bytes = total_elems * base_type.size() as usize;
-                let align = if total_bytes >= 16 { 16 } else { base_type.size() as usize };
+                let ft = vd.decl_full_type.clone()
+                    .unwrap_or_else(|| FullType::from_decl(base_type, vd.ptr_info, &vd.array_dims));
+                let total_bytes = ft.byte_size_with(&gen.struct_defs);
+                let align = if total_bytes >= 16 { 16 } else { std::cmp::max(base_type.size() as usize, 1) };
                 let is_global = *linkage.get(&vd.name).unwrap_or(&true);
-                let ft = FullType::from_decl(base_type, vd.ptr_info, &vd.array_dims);
                 gen.register_var(&vd.name, ft);
                 global_array_names.insert(vd.name.clone());
                 file_scope_vars.remove(&vd.name);
@@ -3482,14 +3491,14 @@ pub fn generate(program: Program) -> TackyProgram {
             }
             if let (Some(ref dims), Some(Exp::ArrayInit(ref elems))) = (&vd.array_dims, &vd.init) {
                 let base_type = vd.var_type;
-                let total_elems: usize = dims.iter().product();
-                let total_bytes = total_elems * base_type.size() as usize;
-                let align = if total_bytes >= 16 { 16 } else { base_type.size() as usize };
+                let ft = vd.decl_full_type.clone()
+                    .unwrap_or_else(|| FullType::from_decl(base_type, vd.ptr_info, &vd.array_dims));
+                let total_bytes = ft.byte_size_with(&gen.struct_defs);
+                let align = if total_bytes >= 16 { 16 } else { std::cmp::max(base_type.size() as usize, 1) };
                 let is_global = *linkage.get(&vd.name).unwrap_or(&true);
 
                 // Build init values with proper sub-array zero-padding
                 let mut init_values: Vec<StaticInit> = Vec::new();
-                let ft = FullType::from_decl(base_type, vd.ptr_info, &vd.array_dims);
                 let elem_sizes = TackyGen::compute_elem_sizes(&ft, &gen.struct_defs);
                 // Simple flatten for global arrays (they only have constant inits)
                 fn flatten_init(exp: &Exp, base_type: CType, vals: &mut Vec<StaticInit>) {
@@ -3504,7 +3513,34 @@ pub fn generate(program: Program) -> TackyProgram {
                         }
                     }
                 }
-                TackyGen::flatten_static_init(&vd.init.as_ref().unwrap(), base_type, &elem_sizes, &mut init_values);
+                // For arrays of structs, use struct-aware init
+                let inner_struct_tag = {
+                    let mut t = &ft;
+                    while let FullType::Array { elem: e, .. } = t { t = e; }
+                    if let FullType::Struct(tag) = t { Some(tag.clone()) } else { None }
+                };
+                if let (Some(ref tag), Exp::ArrayInit(ref top_elems)) = (&inner_struct_tag, vd.init.as_ref().unwrap()) {
+                    if let Some(sdef) = gen.struct_defs.get(tag).cloned() {
+                        let outer_elem_size = sdef.size;
+                        for elem in top_elems {
+                            let start: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
+                            if let Exp::ArrayInit(_) = elem {
+                                TackyGen::flatten_static_init_struct(elem, &sdef, &gen.struct_defs, &mut init_values);
+                            } else {
+                                let (v, is_dbl, is_uns) = eval_constant_init(&Some(elem.clone()));
+                                let cv = convert_init_value(v, base_type, is_dbl, is_uns);
+                                init_values.push(make_static_init(cv, base_type));
+                            }
+                            let end: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
+                            let written = end - start;
+                            if written < outer_elem_size {
+                                init_values.push(StaticInit::ZeroInit(outer_elem_size - written));
+                            }
+                        }
+                    }
+                } else {
+                    TackyGen::flatten_static_init(&vd.init.as_ref().unwrap(), base_type, &elem_sizes, &mut init_values);
+                }
                 let initialized_bytes: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
                 if initialized_bytes < total_bytes {
                     init_values.push(StaticInit::ZeroInit(total_bytes - initialized_bytes));
@@ -3515,7 +3551,6 @@ pub fn generate(program: Program) -> TackyProgram {
                 }));
 
                 // Register FullType
-                let ft = FullType::from_decl(base_type, vd.ptr_info, &vd.array_dims);
                 gen.register_var(&vd.name, ft);
                 global_array_names.insert(vd.name.clone());
 

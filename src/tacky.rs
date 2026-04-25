@@ -2781,9 +2781,12 @@ impl TackyGen {
                 }
             } else if let Some(init) = vd.init {
                 // Copy from another struct expression
-                let (val, _) = self.emit_exp(init);
-                let src_addr = self.fresh_tmp(CType::Pointer);
-                self.emit(TackyInstr::GetAddress { src: val, dst: src_addr.clone() });
+                let (val, val_type) = self.emit_exp(init);
+                let src_addr = if val_type == CType::Pointer {
+                    val // Already a pointer (from Dot/Arrow returning struct member)
+                } else {
+                    self.get_struct_addr(val)
+                };
                 self.emit_struct_copy_to(src_addr, &vd.name, struct_size);
             }
             return;

@@ -3464,14 +3464,56 @@ pub fn generate(program: Program) -> TackyProgram {
                                             init_values.push(StaticInit::ZeroInit(mem.size - str_bytes));
                                         }
                                     } else {
-                                        let before_len: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
-                                        let scalar_t = { let mut t = &mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
-                                        let elem_sizes = TackyGen::compute_elem_sizes(&mem.member_full_type, &gen.struct_defs);
-                                        TackyGen::flatten_static_init(elem, scalar_t, &elem_sizes, &mut init_values);
-                                        let after_len: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
-                                        let array_bytes_written = after_len - before_len;
-                                        if array_bytes_written < mem.size {
-                                            init_values.push(StaticInit::ZeroInit(mem.size - array_bytes_written));
+                                        // Check if this is an array of structs/unions
+                                        let inner_struct_tag = {
+                                            let mut t = &mem.member_full_type;
+                                            while let FullType::Array { elem: e, .. } = t { t = e; }
+                                            if let FullType::Struct(tag) = t { Some(tag.clone()) } else { None }
+                                        };
+                                        if let (Some(ref tag), Exp::ArrayInit(ref arr_elems)) = (&inner_struct_tag, elem) {
+                                            if let Some(sdef) = gen.struct_defs.get(tag).cloned() {
+                                                let elem_size = sdef.size;
+                                                for ae in arr_elems {
+                                                    let start: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
+                                                    if let Exp::ArrayInit(_) = ae {
+                                                        let mut str_consts = Vec::new();
+                                                        TackyGen::flatten_static_init_struct(ae, &sdef, &gen.struct_defs, &mut init_values, &mut str_consts);
+                                                        for (label, s) in str_consts {
+                                                            let sc_label = gen.make_string_constant(&s);
+                                                            for iv in init_values.iter_mut() {
+                                                                if let StaticInit::PointerInit(ref mut l) = iv {
+                                                                    if *l == label { *l = sc_label.clone(); }
+                                                                }
+                                                            }
+                                                        }
+                                                    } else {
+                                                        let (v, is_dbl, is_uns) = eval_constant_init(&Some(ae.clone()));
+                                                        let cv = convert_init_value(v, CType::Struct, is_dbl, is_uns);
+                                                        init_values.push(make_static_init(cv, CType::Struct));
+                                                    }
+                                                    let end: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
+                                                    let written = end - start;
+                                                    if written < elem_size {
+                                                        init_values.push(StaticInit::ZeroInit(elem_size - written));
+                                                    }
+                                                }
+                                                // Pad remaining if array is partially initialized
+                                                let total_written: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
+                                                let expected = bytes_written + mem.size; // bytes_written was set before padding
+                                                if total_written < expected {
+                                                    init_values.push(StaticInit::ZeroInit(expected - total_written));
+                                                }
+                                            }
+                                        } else {
+                                            let before_len: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
+                                            let scalar_t = { let mut t = &mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
+                                            let elem_sizes = TackyGen::compute_elem_sizes(&mem.member_full_type, &gen.struct_defs);
+                                            TackyGen::flatten_static_init(elem, scalar_t, &elem_sizes, &mut init_values);
+                                            let after_len: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
+                                            let array_bytes_written = after_len - before_len;
+                                            if array_bytes_written < mem.size {
+                                                init_values.push(StaticInit::ZeroInit(mem.size - array_bytes_written));
+                                            }
                                         }
                                     }
                                 } else if mem.member_full_type.is_struct() {

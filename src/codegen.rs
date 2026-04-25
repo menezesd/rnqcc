@@ -131,7 +131,9 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
                 let src = convert_double_val(val, static_doubles);
                 out.push(AsmInstr::Mov(AsmType::Double, src, AsmOperand::Xmm(XmmReg::XMM0)));
             } else {
-                out.push(AsmInstr::Mov(t, convert_val(val), AsmOperand::Reg(Reg::AX)));
+                // Use Quadword for return to preserve all 64 bits
+                let ret_type = if t == AsmType::Longword { AsmType::Quadword } else { t };
+                out.push(AsmInstr::Mov(ret_type, convert_val(val), AsmOperand::Reg(Reg::AX)));
             }
             out.push(AsmInstr::Ret);
         }

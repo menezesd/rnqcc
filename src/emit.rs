@@ -119,6 +119,16 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Platform) ->
             } else if *t == AsmType::Byte {
                 writeln!(w, "\tmovb {}, {}", show_operand_byte_or_imm(src, platform), show_operand_byte(dst, platform))
             } else {
+                // For 64-bit immediates that don't fit in 32-bit sign-extended,
+                // split into two instructions: movq $imm, %r10; movq %r10, dst
+                if *t == AsmType::Quadword {
+                    if let AsmOperand::Imm(v) = src {
+                        if *v > i32::MAX as i64 || *v < i32::MIN as i64 {
+                            writeln!(w, "\tmovq ${}, %r10", v)?;
+                            return writeln!(w, "\tmovq %r10, {}", show_operand(dst, *t, platform));
+                        }
+                    }
+                }
                 writeln!(w, "\tmov{} {}, {}", suffix(*t), show_operand(src, *t, platform), show_operand(dst, *t, platform))
             }
         }

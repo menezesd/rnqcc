@@ -226,7 +226,12 @@ fn fold_instruction(instr: TackyInstr, types: &std::collections::HashMap<String,
             }
             // Try double constant folding
             if let (Some(l), Some(r)) = (const_double(&left), const_double(&right)) {
-                if let Some(result) = eval_binary_double(&op, l, r) {
+                if is_comparison(&op) {
+                    // Comparisons return int, not double
+                    if let Some(result) = eval_binary_double(&op, l, r) {
+                        return TackyInstr::Copy { src: TackyVal::Constant(result as i64), dst };
+                    }
+                } else if let Some(result) = eval_binary_double(&op, l, r) {
                     return TackyInstr::Copy { src: TackyVal::DoubleConstant(result), dst };
                 }
             }
@@ -242,6 +247,9 @@ fn fold_instruction(instr: TackyInstr, types: &std::collections::HashMap<String,
                 match op {
                     TackyUnaryOp::Negate => {
                         return TackyInstr::Copy { src: TackyVal::DoubleConstant(-d), dst };
+                    }
+                    TackyUnaryOp::LogicalNot => {
+                        return TackyInstr::Copy { src: TackyVal::Constant(if d == 0.0 { 1 } else { 0 }), dst };
                     }
                     _ => {}
                 }
@@ -273,7 +281,18 @@ fn fold_instruction(instr: TackyInstr, types: &std::collections::HashMap<String,
         // Type conversions with constant source
         TackyInstr::Truncate { src, dst } => {
             if let Some(v) = const_val(&src) {
-                return TackyInstr::Copy { src: TackyVal::Constant(v as i32 as i64), dst };
+                // Truncate to the destination type
+                let dst_type = if let TackyVal::Var(ref n) = dst {
+                    types.get(n).copied().unwrap_or(CType::Int)
+                } else { CType::Int };
+                let truncated = match dst_type {
+                    CType::Char | CType::SChar => v as i8 as i64,
+                    CType::UChar => v as u8 as i64,
+                    CType::Int => v as i32 as i64,
+                    CType::UInt => v as u32 as i64,
+                    _ => v as i32 as i64,
+                };
+                return TackyInstr::Copy { src: TackyVal::Constant(truncated), dst };
             }
             TackyInstr::Truncate { src, dst }
         }
@@ -291,13 +310,27 @@ fn fold_instruction(instr: TackyInstr, types: &std::collections::HashMap<String,
         }
         TackyInstr::DoubleToInt { src, dst } => {
             if let TackyVal::DoubleConstant(d) = src {
-                return TackyInstr::Copy { src: TackyVal::Constant(d as i64), dst };
+                let dst_type = if let TackyVal::Var(ref n) = dst { types.get(n).copied().unwrap_or(CType::Int) } else { CType::Int };
+                let v = match dst_type {
+                    CType::Int => d as i32 as i64,
+                    CType::Long => d as i64,
+                    CType::Char | CType::SChar => d as i8 as i64,
+                    _ => d as i64,
+                };
+                return TackyInstr::Copy { src: TackyVal::Constant(v), dst };
             }
             TackyInstr::DoubleToInt { src, dst }
         }
         TackyInstr::DoubleToUInt { src, dst } => {
             if let TackyVal::DoubleConstant(d) = src {
-                return TackyInstr::Copy { src: TackyVal::Constant(d as u64 as i64), dst };
+                let dst_type = if let TackyVal::Var(ref n) = dst { types.get(n).copied().unwrap_or(CType::UInt) } else { CType::UInt };
+                let v = match dst_type {
+                    CType::UInt => d as u32 as i64,
+                    CType::ULong => d as u64 as i64,
+                    CType::UChar => d as u8 as i64,
+                    _ => d as u64 as i64,
+                };
+                return TackyInstr::Copy { src: TackyVal::Constant(v), dst };
             }
             TackyInstr::DoubleToUInt { src, dst }
         }

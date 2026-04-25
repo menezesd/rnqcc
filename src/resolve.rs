@@ -300,7 +300,11 @@ impl Resolver {
         if vd.storage_class == Some(StorageClass::Extern) {
             let current = self.scopes.last_mut().unwrap();
             current.insert(vd.name.clone(), vd.name.clone());
-            return vd;
+            let resolved_dft = vd.decl_full_type.map(|ft| self.resolve_struct_tags_in_ft(ft));
+            return VarDeclaration {
+                decl_full_type: resolved_dft,
+                ..vd
+            };
         }
         let unique_name = self.declare_var(&vd.name);
         let init = vd.init.map(|e| self.resolve_exp(e));

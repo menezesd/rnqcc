@@ -914,6 +914,7 @@ impl TackyGen {
                     Vec::new() // We don't store param full types in func_full_types currently
                 } else { Vec::new() };
                 let mut tacky_args = Vec::new();
+                let mut stack_arg_indices = std::collections::HashSet::new();
                 for (i, arg) in args.into_iter().enumerate() {
                     let (val, val_type) = self.emit_exp(arg);
                     let val_ft = self.val_full_type(&val);
@@ -933,8 +934,28 @@ impl TackyGen {
                         if let Some(def) = self.struct_defs.get(&tag).cloned() {
                             let classes = def.classify();
                             if classes.len() == 1 && classes[0] == ParamClass::Memory {
-                                // Large struct: pass on stack (TODO)
-                                tacky_args.push(val);
+                                // Large struct: decompose into 8-byte chunks for stack passing
+                                let struct_addr = self.fresh_tmp(CType::Pointer);
+                                if val_ft.is_struct() {
+                                    self.emit(TackyInstr::GetAddress { src: val, dst: struct_addr.clone() });
+                                } else {
+                                    self.emit(TackyInstr::Copy { src: val, dst: struct_addr.clone() });
+                                }
+                                let num_eightbytes = (def.size + 7) / 8;
+                                let start_idx = tacky_args.len();
+                                for eb in 0..num_eightbytes {
+                                    let eb_offset = (eb * 8) as i64;
+                                    let tmp = self.fresh_tmp(CType::Long);
+                                    stack_arg_indices.insert(start_idx + eb);
+                                    let ptr = self.fresh_tmp(CType::Pointer);
+                                    if eb_offset > 0 {
+                                        self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: struct_addr.clone(), right: TackyVal::Constant(eb_offset), dst: ptr.clone() });
+                                    } else {
+                                        self.emit(TackyInstr::Copy { src: struct_addr.clone(), dst: ptr.clone() });
+                                    }
+                                    self.emit(TackyInstr::Load { src_ptr: ptr, dst: tmp.clone() });
+                                    tacky_args.push(tmp);
+                                }
                             } else {
                                 // Get address of the struct
                                 let struct_addr = self.fresh_tmp(CType::Pointer);
@@ -1006,7 +1027,7 @@ impl TackyGen {
                     let ret_addr = self.fresh_tmp(CType::Pointer);
                     self.emit(TackyInstr::GetAddress { src: tmp.clone(), dst: ret_addr.clone() });
                     tacky_args.insert(0, ret_addr);
-                    self.emit(TackyInstr::FunCall { name, args: tacky_args, dst: tmp.clone() });
+                    self.emit(TackyInstr::FunCall { name, args: tacky_args, dst: tmp.clone(), stack_arg_indices: stack_arg_indices.clone() });
                     if let Some(pi) = ret_pi {
                         if let TackyVal::Var(ref dst_name) = tmp {
                             self.ptr_info.insert(dst_name.clone(), pi);
@@ -1028,7 +1049,7 @@ impl TackyGen {
                 } else {
                     self.fresh_tmp(ret_type)
                 };
-                self.emit(TackyInstr::FunCall { name, args: tacky_args, dst: dst.clone() });
+                self.emit(TackyInstr::FunCall { name, args: tacky_args, dst: dst.clone(), stack_arg_indices });
                 // Propagate return pointer info
                 if let Some(pi) = ret_pi {
                     if let TackyVal::Var(ref dst_name) = dst {
@@ -2930,6 +2951,7 @@ impl TackyGen {
 
         // Register params — decompose struct params into eightbytes
         let mut tacky_params = Vec::new();
+        let mut stack_params = std::collections::HashSet::new();
         if let Some(ref ret_ptr) = hidden_ret_ptr_name {
             tacky_params.push(ret_ptr.clone());
         }
@@ -2945,10 +2967,15 @@ impl TackyGen {
                 if let Some(def) = self.struct_defs.get(tag).cloned() {
                     let classes = def.classify();
                     if classes.len() == 1 && classes[0] == ParamClass::Memory {
-                        // Large struct: passed on stack (TODO: hidden pointer)
-                        tacky_params.push(name.clone());
-                        self.var_types.insert(name.clone(), CType::Pointer);
-                        self.symbol_types.insert(name.clone(), CType::Pointer);
+                        // Large struct: decompose into 8-byte eightbyte params (all on stack)
+                        let num_eightbytes = (def.size + 7) / 8;
+                        for eb_idx in 0..num_eightbytes {
+                            let param_name = format!("{}_eb{}", name, eb_idx);
+                            self.var_types.insert(param_name.clone(), CType::Long);
+                            self.symbol_types.insert(param_name.clone(), CType::Long);
+                            tacky_params.push(param_name.clone());
+                            stack_params.insert(param_name);
+                        }
                     } else {
                         // Decompose into eightbyte params
                         for (eb_idx, class) in classes.iter().enumerate() {
@@ -2985,7 +3012,12 @@ impl TackyGen {
         // Reassemble struct params from eightbytes
         for (name, tag, def) in &struct_param_fixups {
             let classes = def.classify();
-            for (eb_idx, class) in classes.iter().enumerate() {
+            let num_ebs = if classes.len() == 1 && classes[0] == ParamClass::Memory {
+                (def.size + 7) / 8
+            } else {
+                classes.len()
+            };
+            for eb_idx in 0..num_ebs {
                 let param_name = format!("{}_eb{}", name, eb_idx);
                 let eb_offset = (eb_idx * 8) as i64;
                 self.emit(TackyInstr::CopyToOffset {
@@ -3004,6 +3036,7 @@ impl TackyGen {
             params: tacky_params,
             global: true, // overridden by linkage map in generate()
             body: std::mem::take(&mut self.instructions),
+            stack_params,
         })
     }
 }

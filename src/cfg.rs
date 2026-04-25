@@ -301,8 +301,12 @@ fn transfer_copies(
                 };
                 if let Some(cs) = copy_src {
                     let copy = CopyInstr { src: cs.clone(), dst: d.clone() };
-                    if current.contains(&copy) {
-                        // Redundant
+                    // Check for redundancy: x = y is redundant if y = x is already reaching
+                    let reverse_redundant = if let CopySrc::Var(s) = &cs {
+                        current.contains(&CopyInstr { src: CopySrc::Var(d.clone()), dst: s.clone() })
+                    } else { false };
+                    if current.contains(&copy) || reverse_redundant {
+                        // Redundant — don't modify reaching copies
                     } else {
                         // Kill copies to/from dst
                         current.retain(|c| {
@@ -394,12 +398,18 @@ fn replace_operand(val: &TackyVal, reaching: &HashSet<CopyInstr>) -> TackyVal {
 fn rewrite_instruction(instr: &TackyInstr, reaching: &HashSet<CopyInstr>) -> Option<TackyInstr> {
     match instr {
         TackyInstr::Copy { src, dst } => {
-            if let TackyVal::Var(d) = dst {
-                // Check if this copy is redundant
+            if let (TackyVal::Var(s), TackyVal::Var(d)) = (src, dst) {
+                // Check if this copy is redundant (either direction)
+                let fwd = CopyInstr { src: CopySrc::Var(s.clone()), dst: d.clone() };
+                let rev = CopyInstr { src: CopySrc::Var(d.clone()), dst: s.clone() };
+                if reaching.contains(&fwd) || reaching.contains(&rev) {
+                    return None; // Eliminate redundant copy
+                }
+            } else if let TackyVal::Var(d) = dst {
                 let copy_src = match src {
-                    TackyVal::Var(s) => Some(CopySrc::Var(s.clone())),
                     TackyVal::Constant(c) => Some(CopySrc::Constant(*c)),
                     TackyVal::DoubleConstant(c) => Some(CopySrc::DoubleConstant(c.to_bits())),
+                    _ => None,
                 };
                 if let Some(cs) = copy_src {
                     let fwd = CopyInstr { src: cs, dst: d.clone() };

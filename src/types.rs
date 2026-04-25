@@ -710,6 +710,8 @@ pub enum TackyInstr {
         dst: TackyVal,
         /// Indices of args that must be passed on the stack (MEMORY-class struct eightbytes)
         stack_arg_indices: std::collections::HashSet<usize>,
+        /// Groups of consecutive args that form struct eightbytes (start_idx, count, is_sse_vec)
+        struct_arg_groups: Vec<(usize, usize, Vec<bool>)>,
     },
     SignExtend {
         src: TackyVal,

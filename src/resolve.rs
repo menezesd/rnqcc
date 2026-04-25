@@ -343,7 +343,7 @@ impl Resolver {
                         let resolved_ft = self.resolve_struct_tags_in_ft(m.member_full_type);
                         MemberDeclaration { name: m.name, member_type: m.member_type, member_full_type: resolved_ft }
                     }).collect();
-                    BlockItem::Declaration(Declaration::StructDecl(StructDeclaration { tag: unique_tag, members: resolved_members }))
+                    BlockItem::Declaration(Declaration::StructDecl(StructDeclaration { tag: unique_tag, members: resolved_members, is_union: sd.is_union }))
                 }
                 BlockItem::Statement(stmt) => {
                     BlockItem::Statement(self.resolve_statement(stmt))
@@ -481,7 +481,7 @@ pub fn resolve(program: Program) -> Program {
                     let resolved_ft = resolver.resolve_struct_tags_in_ft(m.member_full_type);
                     MemberDeclaration { name: m.name, member_type: m.member_type, member_full_type: resolved_ft }
                 }).collect();
-                Declaration::StructDecl(StructDeclaration { tag: unique_tag, members: resolved_members })
+                Declaration::StructDecl(StructDeclaration { tag: unique_tag, members: resolved_members, is_union: sd.is_union })
             }
         })
         .collect();

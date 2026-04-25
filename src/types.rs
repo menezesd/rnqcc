@@ -224,13 +224,14 @@ impl FullType {
     }
 }
 
-/// Struct definition: member layout information
+/// Struct/Union definition: member layout information
 #[derive(Debug, Clone)]
 pub struct StructDef {
     pub tag: String,
     pub members: Vec<StructMember>,
     pub size: usize,
     pub alignment: usize,
+    pub is_union: bool,
 }
 
 /// System V ABI classification for struct parameter passing
@@ -321,33 +322,59 @@ pub struct StructMember {
 impl StructDef {
     /// Compute layout from member declarations
     pub fn from_members(tag: &str, members: &[MemberDeclaration], struct_defs: &std::collections::HashMap<String, StructDef>) -> Self {
+        Self::from_members_ex(tag, members, struct_defs, false)
+    }
+
+    pub fn from_members_union(tag: &str, members: &[MemberDeclaration], struct_defs: &std::collections::HashMap<String, StructDef>) -> Self {
+        Self::from_members_ex(tag, members, struct_defs, true)
+    }
+
+    fn from_members_ex(tag: &str, members: &[MemberDeclaration], struct_defs: &std::collections::HashMap<String, StructDef>, is_union: bool) -> Self {
         let mut offset = 0usize;
         let mut max_align = 1usize;
+        let mut max_size = 0usize;
         let mut laid_out = Vec::new();
 
         for m in members {
             let (m_size, m_align) = member_size_align(&m.member_full_type, struct_defs);
-            // Align offset
-            offset = (offset + m_align - 1) & !(m_align - 1);
-            laid_out.push(StructMember {
-                name: m.name.clone(),
-                member_type: m.member_type,
-                member_full_type: m.member_full_type.clone(),
-                offset,
-                size: m_size,
-            });
-            offset += m_size;
+            if is_union {
+                // Union: all members at offset 0
+                laid_out.push(StructMember {
+                    name: m.name.clone(),
+                    member_type: m.member_type,
+                    member_full_type: m.member_full_type.clone(),
+                    offset: 0,
+                    size: m_size,
+                });
+                if m_size > max_size { max_size = m_size; }
+            } else {
+                // Struct: sequential layout with alignment
+                offset = (offset + m_align - 1) & !(m_align - 1);
+                laid_out.push(StructMember {
+                    name: m.name.clone(),
+                    member_type: m.member_type,
+                    member_full_type: m.member_full_type.clone(),
+                    offset,
+                    size: m_size,
+                });
+                offset += m_size;
+            }
             if m_align > max_align { max_align = m_align; }
         }
 
-        // Pad to struct alignment
-        let total_size = (offset + max_align - 1) & !(max_align - 1);
+        let total_size = if is_union {
+            // Union size = max member size, padded to alignment
+            (max_size + max_align - 1) & !(max_align - 1)
+        } else {
+            (offset + max_align - 1) & !(max_align - 1)
+        };
 
         StructDef {
             tag: tag.to_string(),
             members: laid_out,
             size: total_size,
             alignment: max_align,
+            is_union,
         }
     }
 
@@ -413,6 +440,7 @@ pub enum Token {
     KWChar,
     KWSizeOf,
     KWStruct,
+    KWUnion,
     KWInt,
     KWLong,
     KWUnsigned,
@@ -660,6 +688,7 @@ pub struct MemberDeclaration {
 pub struct StructDeclaration {
     pub tag: String,
     pub members: Vec<MemberDeclaration>, // empty = incomplete type
+    pub is_union: bool,
 }
 
 #[derive(Debug)]

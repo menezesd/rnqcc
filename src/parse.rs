@@ -149,8 +149,8 @@ impl Parser {
         }
 
         if !has_int && !has_long && !has_void && !has_unsigned && !has_signed && !has_char {
-            // Check for struct
-            if self.at(&Token::KWStruct) {
+            // Check for struct or union
+            if self.at(&Token::KWStruct) || self.at(&Token::KWUnion) {
                 let ct_ft = self.parse_struct_type_specifier();
                 return (sc, ct_ft.0);
             }
@@ -211,7 +211,7 @@ impl Parser {
     }
 
     fn is_type_keyword(tok: &Token) -> bool {
-        matches!(tok, Token::KWInt | Token::KWLong | Token::KWVoid | Token::KWUnsigned | Token::KWSigned | Token::KWDouble | Token::KWFloat | Token::KWChar | Token::KWStruct)
+        matches!(tok, Token::KWInt | Token::KWLong | Token::KWVoid | Token::KWUnsigned | Token::KWSigned | Token::KWDouble | Token::KWFloat | Token::KWChar | Token::KWStruct | Token::KWUnion)
     }
 
     /// Process a declarator tree to extract name, derived type, and params
@@ -505,29 +505,30 @@ impl Parser {
     }
 
     fn parse_struct_type_specifier(&mut self) -> (CType, String) {
-        self.expect(Token::KWStruct);
+        if self.at(&Token::KWUnion) {
+            self.advance();
+        } else {
+            self.expect(Token::KWStruct);
+        }
         let tag = self.parse_identifier();
         self.last_struct_tag = Some(tag.clone());
-        (CType::Struct, tag)
+        (CType::Struct, tag)  // Unions use same CType::Struct internally
     }
 
     fn parse_declaration(&mut self) -> Declaration {
-        // Check for struct declaration: struct tag { members };
-        if self.at(&Token::KWStruct) {
-            // Peek ahead: if it's struct tag { ... }, it's a struct declaration
-            // If it's struct tag identifier, it's a variable declaration with struct type
+        // Check for struct/union declaration: struct/union tag { members };
+        if self.at(&Token::KWStruct) || self.at(&Token::KWUnion) {
+            let is_union = self.at(&Token::KWUnion);
             let save_pos = self.pos;
-            self.advance(); // consume 'struct'
+            self.advance(); // consume 'struct' or 'union'
             let tag = self.parse_identifier();
             if self.at(&Token::OpenBrace) {
-                // struct tag { members };
                 let members = self.parse_struct_members();
                 self.expect(Token::Semicolon);
-                return Declaration::StructDecl(StructDeclaration { tag, members });
+                return Declaration::StructDecl(StructDeclaration { tag, members, is_union });
             } else if self.at(&Token::Semicolon) {
-                // struct tag; (forward declaration)
                 self.advance();
-                return Declaration::StructDecl(StructDeclaration { tag, members: vec![] });
+                return Declaration::StructDecl(StructDeclaration { tag, members: vec![], is_union });
             } else {
                 // struct tag variable_name... — it's a variable/function with struct type
                 // Put back and let normal parsing handle it
@@ -747,6 +748,7 @@ impl Parser {
                 | Some(Token::KWVoid)
                 | Some(Token::KWChar)
                 | Some(Token::KWStruct)
+                | Some(Token::KWUnion)
                 | Some(Token::KWStatic)
                 | Some(Token::KWExtern)
         )
@@ -755,17 +757,18 @@ impl Parser {
     fn parse_block_item(&mut self) -> BlockItem {
         if self.is_declaration_start() {
             // Check for struct declaration
-            if self.at(&Token::KWStruct) {
+            if self.at(&Token::KWStruct) || self.at(&Token::KWUnion) {
+                let is_union = self.at(&Token::KWUnion);
                 let save_pos = self.pos;
-                self.advance(); // consume 'struct'
+                self.advance(); // consume 'struct' or 'union'
                 let tag = self.parse_identifier();
                 if self.at(&Token::OpenBrace) {
                     let members = self.parse_struct_members();
                     self.expect(Token::Semicolon);
-                    return BlockItem::Declaration(Declaration::StructDecl(StructDeclaration { tag, members }));
+                    return BlockItem::Declaration(Declaration::StructDecl(StructDeclaration { tag, members, is_union }));
                 } else if self.at(&Token::Semicolon) {
                     self.advance();
-                    return BlockItem::Declaration(Declaration::StructDecl(StructDeclaration { tag, members: vec![] }));
+                    return BlockItem::Declaration(Declaration::StructDecl(StructDeclaration { tag, members: vec![], is_union }));
                 } else {
                     // struct tag var; — put back
                     self.pos = save_pos;

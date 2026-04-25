@@ -1,5 +1,6 @@
 use clap::{App, Arg};
 
+mod cfg;
 mod codegen;
 mod compile;
 mod emit;

@@ -509,30 +509,65 @@ fn eval_unary(op: &TackyUnaryOp, v: i64) -> Option<i64> {
 // ============================================================
 
 fn unreachable_code_elimination(instructions: Vec<TackyInstr>) -> Vec<TackyInstr> {
-    // First pass: collect all jump targets (labels that are actually jumped to)
-    let mut jump_targets = std::collections::HashSet::new();
+    // Iterative approach: keep removing unreachable code until stable
+    let mut result = instructions;
+    loop {
+        let before_len = result.len();
+        result = unreachable_code_pass(result);
+        if result.len() == before_len {
+            break;
+        }
+    }
+    result
+}
+
+fn unreachable_code_pass(instructions: Vec<TackyInstr>) -> Vec<TackyInstr> {
+    // Pass 1: linear scan to mark reachable instructions
+    // Only consider labels reachable if jumped to from REACHABLE code
+    let mut reachable_labels = std::collections::HashSet::new();
+    let mut reachable = true;
+
     for instr in &instructions {
         match instr {
-            TackyInstr::Jump(target) => { jump_targets.insert(target.clone()); }
-            TackyInstr::JumpIfZero(_, target) => { jump_targets.insert(target.clone()); }
-            TackyInstr::JumpIfNotZero(_, target) => { jump_targets.insert(target.clone()); }
+            TackyInstr::Label(label) => {
+                if reachable_labels.contains(label) {
+                    reachable = true;
+                }
+                // Labels referenced by earlier reachable jumps make this reachable
+            }
+            TackyInstr::Jump(target) if reachable => {
+                reachable_labels.insert(target.clone());
+                reachable = false;
+            }
+            TackyInstr::JumpIfZero(_, target) if reachable => {
+                reachable_labels.insert(target.clone());
+                // Conditional jump: next instruction is also reachable
+            }
+            TackyInstr::JumpIfNotZero(_, target) if reachable => {
+                reachable_labels.insert(target.clone());
+            }
+            TackyInstr::Return(_) if reachable => {
+                reachable = false;
+            }
+            TackyInstr::Jump(_) | TackyInstr::Return(_) => {
+                // Already unreachable
+            }
             _ => {}
         }
     }
 
-    // Second pass: remove unreachable code
+    // Pass 2: keep only reachable instructions
     let mut result = Vec::new();
-    let mut reachable = true;
-
+    reachable = true;
     for instr in instructions {
         match &instr {
             TackyInstr::Label(label) => {
-                if jump_targets.contains(label) {
+                if reachable_labels.contains(label) {
                     reachable = true;
+                } else if !reachable {
+                    continue; // Skip unreachable label
                 }
-                if reachable {
-                    result.push(instr);
-                }
+                result.push(instr);
             }
             TackyInstr::Jump(_) | TackyInstr::Return(_) => {
                 if reachable {
@@ -540,9 +575,7 @@ fn unreachable_code_elimination(instructions: Vec<TackyInstr>) -> Vec<TackyInstr
                 }
                 reachable = false;
             }
-            TackyInstr::Nop => {
-                // Skip nops (produced by constant folding)
-            }
+            TackyInstr::Nop => { /* skip */ }
             _ => {
                 if reachable {
                     result.push(instr);
@@ -551,33 +584,38 @@ fn unreachable_code_elimination(instructions: Vec<TackyInstr>) -> Vec<TackyInstr
         }
     }
 
-    // Third pass: remove labels that are no longer jumped to
-    let mut final_jump_targets = std::collections::HashSet::new();
+    // Pass 3: remove labels that are no longer jumped to
+    let mut final_targets = std::collections::HashSet::new();
     for instr in &result {
         match instr {
-            TackyInstr::Jump(target) => { final_jump_targets.insert(target.clone()); }
-            TackyInstr::JumpIfZero(_, target) => { final_jump_targets.insert(target.clone()); }
-            TackyInstr::JumpIfNotZero(_, target) => { final_jump_targets.insert(target.clone()); }
+            TackyInstr::Jump(t) | TackyInstr::JumpIfZero(_, t) | TackyInstr::JumpIfNotZero(_, t) => {
+                final_targets.insert(t.clone());
+            }
             _ => {}
         }
     }
     result.retain(|instr| {
         if let TackyInstr::Label(label) = instr {
-            final_jump_targets.contains(label)
+            final_targets.contains(label)
         } else {
             true
         }
     });
 
-    // Remove jumps to the immediately following label
+    // Pass 4: remove jumps to immediately following label
     let mut cleaned = Vec::new();
     for i in 0..result.len() {
-        if let TackyInstr::Jump(ref target) = result[i] {
-            // Check if next non-nop instruction is this label
+        let target_opt = match &result[i] {
+            TackyInstr::Jump(t) => Some(t.clone()),
+            TackyInstr::JumpIfZero(_, t) => Some(t.clone()),
+            TackyInstr::JumpIfNotZero(_, t) => Some(t.clone()),
+            _ => None,
+        };
+        if let Some(target) = target_opt {
             if i + 1 < result.len() {
                 if let TackyInstr::Label(ref label) = result[i + 1] {
-                    if target == label {
-                        continue; // Skip this jump
+                    if target == *label {
+                        continue;
                     }
                 }
             }

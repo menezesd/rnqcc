@@ -1758,13 +1758,12 @@ impl TackyGen {
                         return (result, decayed.to_ctype());
                     }
                     if inner_ft.is_struct() {
-                        // Dereferencing a pointer-to-struct: return the pointer value
+                        // Dereferencing a pointer-to-struct/union: return the pointer value
                         // The temp holds a POINTER to the struct, not the struct data
-                        // Don't register in array_sizes — use the pointer directly for access
-                        let result = self.fresh_tmp(CType::Pointer);
-                        self.full_types.insert(if let TackyVal::Var(ref n) = result { n.clone() } else { String::new() }, inner_ft.as_ref().clone());
+                        let ptr_ft = FullType::Pointer(Box::new(inner_ft.as_ref().clone()));
+                        let result = self.fresh_tmp_full(&ptr_ft);
                         self.emit(TackyInstr::Copy { src: ptr, dst: result.clone() });
-                        return (result, CType::Struct);
+                        return (result, CType::Pointer);
                     }
                 }
                 let pointee_type = if let TackyVal::Var(ref name) = ptr {

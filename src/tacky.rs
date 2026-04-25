@@ -2190,16 +2190,32 @@ impl TackyGen {
                 for (i, elem) in elems.iter().enumerate() {
                     let elem_offset = base_offset + (i as i64) * this_elem_size;
                     match elem {
-                        Exp::ArrayInit(_) if inner_sizes.is_empty() && scalar_type == CType::Struct => {
-                            // Struct compound initializer within array of structs
-                            // We need the struct tag — look it up from arr_name's full type
+                        _ if inner_sizes.is_empty() && scalar_type == CType::Struct => {
+                            // Struct element within array of structs
                             let arr_ft = self.get_full_type(arr_name);
                             let struct_tag = {
                                 let mut t = &arr_ft;
                                 while let FullType::Array { elem: e, .. } = t { t = e; }
                                 match t { FullType::Struct(tag) => tag.clone(), _ => panic!("Expected struct in array") }
                             };
-                            self.emit_struct_init_at(arr_name, elem, &struct_tag, elem_offset);
+                            if let Exp::ArrayInit(_) = elem {
+                                // Compound initializer for struct
+                                self.emit_struct_init_at(arr_name, elem, &struct_tag, elem_offset);
+                            } else {
+                                // Struct-valued expression (variable, conditional, etc.)
+                                let struct_size = self.struct_defs.get(&struct_tag).map(|d| d.size).unwrap_or(0);
+                                let (val, val_type) = self.emit_exp(elem.clone());
+                                let src_addr = if val_type == CType::Pointer { val } else { self.get_struct_addr(val) };
+                                let dst_addr = self.fresh_tmp(CType::Pointer);
+                                self.emit(TackyInstr::GetAddress { src: TackyVal::Var(arr_name.to_string()), dst: dst_addr.clone() });
+                                let elem_addr = self.fresh_tmp(CType::Pointer);
+                                if elem_offset > 0 {
+                                    self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: dst_addr, right: TackyVal::Constant(elem_offset), dst: elem_addr.clone() });
+                                } else {
+                                    self.emit(TackyInstr::Copy { src: dst_addr, dst: elem_addr.clone() });
+                                }
+                                self.emit_struct_copy_ptr_to_ptr(src_addr, elem_addr, struct_size);
+                            }
                         }
                         Exp::ArrayInit(_) => {
                             self.emit_array_init_flat(arr_name, elem, scalar_type, elem_offset, inner_sizes);

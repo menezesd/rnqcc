@@ -1202,43 +1202,11 @@ impl TackyGen {
                     CType::Int
                 }
             }
-            Exp::Dot(inner, member) => {
-                // Try to find the struct tag from the inner expression
-                let tag_opt = match inner.as_ref() {
-                    Exp::Var(name) => {
-                        let ft = self.get_full_type(name);
-                        match ft { FullType::Struct(t) => Some(t), _ => None }
-                    }
-                    Exp::Dot(_, _) | Exp::Arrow(_, _) => {
-                        // For nested Dot/Arrow, get the member's full type from the parent
-                        let parent_ft = self.dot_member_full_type(inner);
-                        match parent_ft { FullType::Struct(t) => Some(t), _ => None }
-                    }
-                    _ => None,
-                };
-                if let Some(tag) = tag_opt {
-                    if let Some(def) = self.struct_defs.get(&tag) {
-                        if let Some(mem) = def.find_member(member) {
-                            return mem.member_type;
-                        }
-                    }
-                }
-                CType::Int
+            Exp::Dot(_, _) => {
+                self.typeof_exp(exp).to_ctype()
             }
-            Exp::Arrow(inner, member) => {
-                if let Exp::Var(name) = inner.as_ref() {
-                    let ft = self.get_full_type(name);
-                    if let FullType::Pointer(inner_ft) = &ft {
-                        if let FullType::Struct(tag) = inner_ft.as_ref() {
-                            if let Some(def) = self.struct_defs.get(tag) {
-                                if let Some(mem) = def.find_member(member) {
-                                    return mem.member_type;
-                                }
-                            }
-                        }
-                    }
-                }
-                CType::Int
+            Exp::Arrow(_, _) => {
+                self.typeof_exp(exp).to_ctype()
             }
             _ => CType::Int,
         }

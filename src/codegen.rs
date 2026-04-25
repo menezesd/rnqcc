@@ -438,7 +438,42 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
         TackyInstr::Label(label) => {
             out.push(AsmInstr::Label(label.clone()));
         }
-        TackyInstr::FunCall { name, args, dst, stack_arg_indices } => {
+        TackyInstr::FunCall { name, args, dst, stack_arg_indices, struct_arg_groups } => {
+            // Pre-compute which args must go on stack due to struct group overflow
+            let mut force_stack_args: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            {
+                let mut sim_int = 0usize;
+                let mut sim_xmm = 0usize;
+                for (arg_idx, arg) in args.iter().enumerate() {
+                    if stack_arg_indices.contains(&arg_idx) {
+                        force_stack_args.insert(arg_idx);
+                        continue;
+                    }
+                    let group = struct_arg_groups.iter().find(|(start, count, _)| arg_idx >= *start && arg_idx < *start + *count);
+                    if let Some((start, count, is_sse_vec)) = group {
+                        if arg_idx == *start {
+                            let int_needed: usize = is_sse_vec.iter().filter(|&&is_sse| !is_sse).count();
+                            let sse_needed: usize = is_sse_vec.iter().filter(|&&is_sse| is_sse).count();
+                            if sim_int + int_needed <= 6 && sim_xmm + sse_needed <= 8 {
+                                sim_int += int_needed;
+                                sim_xmm += sse_needed;
+                            } else {
+                                for j in *start..*start + *count {
+                                    force_stack_args.insert(j);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    let t = val_type(arg, types);
+                    if t == AsmType::Double {
+                        if sim_xmm < 8 { sim_xmm += 1; }
+                    } else {
+                        if sim_int < 6 { sim_int += 1; }
+                    }
+                }
+            }
+
             // Classify args into int regs, xmm regs, and stack
             let mut int_reg_args = Vec::new();
             let mut xmm_reg_args = Vec::new();
@@ -447,8 +482,7 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
             let mut xmm_idx = 0usize;
 
             for (arg_idx, arg) in args.iter().enumerate() {
-                // MEMORY-class struct eightbytes always go on the stack
-                if stack_arg_indices.contains(&arg_idx) {
+                if force_stack_args.contains(&arg_idx) {
                     stack_args_list.push(arg);
                     continue;
                 }

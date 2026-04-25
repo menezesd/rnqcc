@@ -915,6 +915,7 @@ impl TackyGen {
                 } else { Vec::new() };
                 let mut tacky_args = Vec::new();
                 let mut stack_arg_indices = std::collections::HashSet::new();
+                let mut struct_arg_groups: Vec<(usize, usize, Vec<bool>)> = Vec::new();
                 for (i, arg) in args.into_iter().enumerate() {
                     let (val, val_type) = self.emit_exp(arg);
                     let val_ft = self.val_full_type(&val);
@@ -964,6 +965,10 @@ impl TackyGen {
                                 } else {
                                     self.emit(TackyInstr::Copy { src: val, dst: struct_addr.clone() });
                                 }
+                                // Record struct group info
+                                let group_start = tacky_args.len();
+                                let is_sse_vec: Vec<bool> = classes.iter().map(|c| *c == ParamClass::Sse).collect();
+                                struct_arg_groups.push((group_start, classes.len(), is_sse_vec));
                                 // Decompose into eightbytes
                                 for (eb_idx, class) in classes.iter().enumerate() {
                                     let eb_offset = (eb_idx * 8) as i64;
@@ -1027,7 +1032,7 @@ impl TackyGen {
                     let ret_addr = self.fresh_tmp(CType::Pointer);
                     self.emit(TackyInstr::GetAddress { src: tmp.clone(), dst: ret_addr.clone() });
                     tacky_args.insert(0, ret_addr);
-                    self.emit(TackyInstr::FunCall { name, args: tacky_args, dst: tmp.clone(), stack_arg_indices: stack_arg_indices.clone() });
+                    self.emit(TackyInstr::FunCall { name, args: tacky_args, dst: tmp.clone(), stack_arg_indices: stack_arg_indices.clone(), struct_arg_groups: struct_arg_groups.clone() });
                     if let Some(pi) = ret_pi {
                         if let TackyVal::Var(ref dst_name) = tmp {
                             self.ptr_info.insert(dst_name.clone(), pi);
@@ -1049,7 +1054,7 @@ impl TackyGen {
                 } else {
                     self.fresh_tmp(ret_type)
                 };
-                self.emit(TackyInstr::FunCall { name, args: tacky_args, dst: dst.clone(), stack_arg_indices });
+                self.emit(TackyInstr::FunCall { name, args: tacky_args, dst: dst.clone(), stack_arg_indices, struct_arg_groups });
                 // Propagate return pointer info
                 if let Some(pi) = ret_pi {
                     if let TackyVal::Var(ref dst_name) = dst {

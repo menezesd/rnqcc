@@ -896,6 +896,11 @@ pub enum TackyInstr {
         scale: i64,
         dst: TackyVal,
     },
+    /// Whole-struct copy annotation (no-op in codegen, used by copy propagation)
+    CopyStruct {
+        src_name: String,
+        dst_name: String,
+    },
 }
 
 #[derive(Debug)]

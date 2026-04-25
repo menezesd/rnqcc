@@ -120,10 +120,13 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Platform) ->
                 writeln!(w, "\tmovb {}, {}", show_operand_byte_or_imm(src, platform), show_operand_byte(dst, platform))
             } else {
                 // For 64-bit immediates that don't fit in 32-bit sign-extended,
-                // split into two instructions: movq $imm, %r10; movq %r10, dst
+                // if dst is a register, emit movabsq directly; otherwise use r10
                 if *t == AsmType::Quadword {
                     if let AsmOperand::Imm(v) = src {
                         if *v > i32::MAX as i64 || *v < i32::MIN as i64 {
+                            if matches!(dst, AsmOperand::Reg(_)) {
+                                return writeln!(w, "\tmovq ${}, {}", v, show_operand(dst, *t, platform));
+                            }
                             writeln!(w, "\tmovq ${}, %r10", v)?;
                             return writeln!(w, "\tmovq %r10, {}", show_operand(dst, *t, platform));
                         }
@@ -205,7 +208,27 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Platform) ->
                     };
                     writeln!(w, "\t{}{} {}, {}", mnemonic, suffix(*t), shift_src, show_operand(dst, *t, platform))
                 }
-                _ => writeln!(w, "\t{}{} {}, {}", mnemonic, suffix(*t), show_operand(src, *t, platform), show_operand(dst, *t, platform)),
+                _ => {
+                    // For imulq with large 64-bit immediates, load into r10 first
+                    if *t == AsmType::Quadword && matches!(op, AsmBinaryOp::Mul) {
+                        if let AsmOperand::Imm(v) = src {
+                            if *v > i32::MAX as i64 || *v < i32::MIN as i64 {
+                                writeln!(w, "\tmovq ${}, %r10", v)?;
+                                return writeln!(w, "\timulq %r10, {}", show_operand(dst, *t, platform));
+                            }
+                        }
+                    }
+                    // For other binary ops with large 64-bit immediates
+                    if *t == AsmType::Quadword {
+                        if let AsmOperand::Imm(v) = src {
+                            if *v > i32::MAX as i64 || *v < i32::MIN as i64 {
+                                writeln!(w, "\tmovq ${}, %r10", v)?;
+                                return writeln!(w, "\t{}{} %r10, {}", mnemonic, suffix(*t), show_operand(dst, *t, platform));
+                            }
+                        }
+                    }
+                    writeln!(w, "\t{}{} {}, {}", mnemonic, suffix(*t), show_operand(src, *t, platform), show_operand(dst, *t, platform))
+                }
             }
         }
         AsmInstr::Idiv(t, operand) => {
@@ -225,6 +248,15 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Platform) ->
             if *t == AsmType::Double {
                 writeln!(w, "\tcomisd {}, {}", show_operand(src, *t, platform), show_operand(dst, *t, platform))
             } else {
+                // cmpq doesn't support 64-bit immediates
+                if *t == AsmType::Quadword {
+                    if let AsmOperand::Imm(v) = src {
+                        if *v > i32::MAX as i64 || *v < i32::MIN as i64 {
+                            writeln!(w, "\tmovq ${}, %r10", v)?;
+                            return writeln!(w, "\tcmpq %r10, {}", show_operand(dst, *t, platform));
+                        }
+                    }
+                }
                 writeln!(w, "\tcmp{} {}, {}", suffix(*t), show_operand(src, *t, platform), show_operand(dst, *t, platform))
             }
         }
@@ -246,6 +278,15 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Platform) ->
             if *t == AsmType::Double {
                 writeln!(w, "\tmovsd {}, ({})", show_operand(src, *t, platform), reg64)
             } else {
+                // Handle 64-bit immediates that don't fit in 32-bit sign-extended
+                if *t == AsmType::Quadword {
+                    if let AsmOperand::Imm(v) = src {
+                        if *v > i32::MAX as i64 || *v < i32::MIN as i64 {
+                            writeln!(w, "\tmovq ${}, %r10", v)?;
+                            return writeln!(w, "\tmovq %r10, ({})", reg64);
+                        }
+                    }
+                }
                 writeln!(w, "\tmov{} {}, ({})", suffix(*t), show_operand(src, *t, platform), reg64)
             }
         }
@@ -268,6 +309,13 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Platform) ->
         }
         AsmInstr::Label(label) => writeln!(w, ".L{}:", label),
         AsmInstr::Push(operand) => {
+            // pushq doesn't support 64-bit immediates
+            if let AsmOperand::Imm(v) = operand {
+                if *v > i32::MAX as i64 || *v < i32::MIN as i64 {
+                    writeln!(w, "\tmovq ${}, %r10", v)?;
+                    return writeln!(w, "\tpushq %r10");
+                }
+            }
             writeln!(w, "\tpushq {}", show_operand_64(operand, platform))
         }
         AsmInstr::Call(name) => {

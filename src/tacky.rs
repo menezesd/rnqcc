@@ -665,13 +665,22 @@ impl TackyGen {
                     if let FullType::Struct(ref tag) = lhs_ft {
                         let struct_size = self.struct_defs.get(tag).map(|d| d.size).unwrap_or(0);
                         let (rhs, rhs_type) = self.emit_exp(*right);
+                        // Extract source struct name for copy propagation before consuming rhs
+                        let rhs_struct_name = if rhs_type == CType::Struct {
+                            if let TackyVal::Var(ref n) = rhs { Some(n.clone()) } else { None }
+                        } else { None };
                         let src_addr = if rhs_type == CType::Pointer {
                             rhs
                         } else {
                             self.get_struct_addr(rhs)
                         };
                         if let Exp::Var(ref lhs_name) = *left {
-                            self.emit_struct_copy_to(src_addr, lhs_name, struct_size);
+                            // For var = var struct assignments, emit CopyStruct (codegen handles bytewise copy)
+                            if let Some(src_name) = rhs_struct_name {
+                                self.emit(TackyInstr::CopyStruct { src_name, dst_name: lhs_name.clone() });
+                            } else {
+                                self.emit_struct_copy_to(src_addr, lhs_name, struct_size);
+                            }
                             return (TackyVal::Var(lhs_name.clone()), CType::Struct);
                         } else {
                             // Complex LHS (subscript, dot, arrow, deref): get its address
@@ -958,7 +967,10 @@ impl TackyGen {
                                     tacky_args.push(tmp);
                                 }
                             } else {
-                                // Get address of the struct
+                                // Get address of the struct (or use CopyFromOffset for named structs)
+                                let struct_var_name = if val_ft.is_struct() {
+                                    if let TackyVal::Var(ref n) = val { Some(n.clone()) } else { None }
+                                } else { None };
                                 let struct_addr = self.fresh_tmp(CType::Pointer);
                                 if val_ft.is_struct() {
                                     self.emit(TackyInstr::GetAddress { src: val, dst: struct_addr.clone() });
@@ -977,25 +989,35 @@ impl TackyGen {
                                     match class {
                                         ParamClass::Sse => {
                                             let tmp = self.fresh_tmp(CType::Double);
-                                            let ptr = self.fresh_tmp(CType::Pointer);
-                                            if eb_offset > 0 {
-                                                self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: struct_addr.clone(), right: TackyVal::Constant(eb_offset), dst: ptr.clone() });
+                                            if let Some(ref sname) = struct_var_name {
+                                                // Use CopyFromOffset for copy propagation
+                                                self.emit(TackyInstr::CopyFromOffset { src_name: sname.clone(), offset: eb_offset, dst: tmp.clone() });
                                             } else {
-                                                self.emit(TackyInstr::Copy { src: struct_addr.clone(), dst: ptr.clone() });
+                                                let ptr = self.fresh_tmp(CType::Pointer);
+                                                if eb_offset > 0 {
+                                                    self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: struct_addr.clone(), right: TackyVal::Constant(eb_offset), dst: ptr.clone() });
+                                                } else {
+                                                    self.emit(TackyInstr::Copy { src: struct_addr.clone(), dst: ptr.clone() });
+                                                }
+                                                self.emit(TackyInstr::Load { src_ptr: ptr, dst: tmp.clone() });
                                             }
-                                            self.emit(TackyInstr::Load { src_ptr: ptr, dst: tmp.clone() });
                                             tacky_args.push(tmp);
                                         }
                                         ParamClass::Integer => {
                                             let load_type = CType::Long; // always use full 64-bit for eightbytes
                                             let tmp = self.fresh_tmp(load_type);
-                                            let ptr = self.fresh_tmp(CType::Pointer);
-                                            if eb_offset > 0 {
-                                                self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: struct_addr.clone(), right: TackyVal::Constant(eb_offset), dst: ptr.clone() });
+                                            if let Some(ref sname) = struct_var_name {
+                                                // Use CopyFromOffset for copy propagation
+                                                self.emit(TackyInstr::CopyFromOffset { src_name: sname.clone(), offset: eb_offset, dst: tmp.clone() });
                                             } else {
-                                                self.emit(TackyInstr::Copy { src: struct_addr.clone(), dst: ptr.clone() });
+                                                let ptr = self.fresh_tmp(CType::Pointer);
+                                                if eb_offset > 0 {
+                                                    self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: struct_addr.clone(), right: TackyVal::Constant(eb_offset), dst: ptr.clone() });
+                                                } else {
+                                                    self.emit(TackyInstr::Copy { src: struct_addr.clone(), dst: ptr.clone() });
+                                                }
+                                                self.emit(TackyInstr::Load { src_ptr: ptr, dst: tmp.clone() });
                                             }
-                                            self.emit(TackyInstr::Load { src_ptr: ptr, dst: tmp.clone() });
                                             tacky_args.push(tmp);
                                         }
                                         _ => { tacky_args.push(TackyVal::Constant(0)); }
@@ -2893,12 +2915,19 @@ impl TackyGen {
             } else if let Some(init) = vd.init {
                 // Copy from another struct expression
                 let (val, val_type) = self.emit_exp(init);
-                let src_addr = if val_type == CType::Pointer {
-                    val // Already a pointer (from Dot/Arrow returning struct member)
+                let rhs_struct_name = if val_type == CType::Struct {
+                    if let TackyVal::Var(ref n) = val { Some(n.clone()) } else { None }
+                } else { None };
+                if let Some(src_name) = rhs_struct_name {
+                    self.emit(TackyInstr::CopyStruct { src_name, dst_name: vd.name.clone() });
                 } else {
-                    self.get_struct_addr(val)
-                };
-                self.emit_struct_copy_to(src_addr, &vd.name, struct_size);
+                    let src_addr = if val_type == CType::Pointer {
+                        val
+                    } else {
+                        self.get_struct_addr(val)
+                    };
+                    self.emit_struct_copy_to(src_addr, &vd.name, struct_size);
+                }
             }
             return;
         }

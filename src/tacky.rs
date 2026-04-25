@@ -2124,6 +2124,19 @@ impl TackyGen {
                 let mem = &def.members[0];
                 let mem_offset = base_offset + mem.offset as i64;
                 if mem.member_full_type.is_array() {
+                    // For union with array first member, check for string literal init
+                    if elems.len() == 1 {
+                        if let Exp::StringLiteral(ref s) = elems[0] {
+                            let chars_to_copy = std::cmp::min(s.len(), mem.size);
+                            for (j, byte) in s.bytes().take(chars_to_copy).enumerate() {
+                                let src = self.fresh_tmp(CType::Char);
+                                self.emit(TackyInstr::Copy { src: TackyVal::Constant(byte as i64), dst: src.clone() });
+                                self.emit(TackyInstr::CopyToOffset { src, dst_name: arr_name.to_string(), offset: mem_offset + j as i64 });
+                            }
+                            return;
+                        }
+                    }
+                    // For compound array init, pass the elements
                     let mem_elem_sizes = Self::compute_elem_sizes(&mem.member_full_type, &self.struct_defs);
                     let inner_scalar = { let mut t = &mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
                     self.emit_array_init_flat(arr_name, init, inner_scalar, mem_offset, &mem_elem_sizes);
@@ -2718,9 +2731,19 @@ impl TackyGen {
                     let mem = &def.members[0];
                     let first_elem = &elems[0]; // The initializer for the first member
                     if mem.member_full_type.is_array() {
-                        let mem_elem_sizes = Self::compute_elem_sizes(&mem.member_full_type, &self.struct_defs);
-                        let inner_scalar = { let mut t = &mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
-                        self.emit_array_init_flat(&vd.name, first_elem, inner_scalar, 0, &mem_elem_sizes);
+                        // Handle string literal for char array first member
+                        if let Exp::StringLiteral(ref s) = first_elem {
+                            let chars_to_copy = std::cmp::min(s.len(), mem.size);
+                            for (j, byte) in s.bytes().take(chars_to_copy).enumerate() {
+                                let src = self.fresh_tmp(CType::Char);
+                                self.emit(TackyInstr::Copy { src: TackyVal::Constant(byte as i64), dst: src.clone() });
+                                self.emit(TackyInstr::CopyToOffset { src, dst_name: vd.name.clone(), offset: j as i64 });
+                            }
+                        } else {
+                            let mem_elem_sizes = Self::compute_elem_sizes(&mem.member_full_type, &self.struct_defs);
+                            let inner_scalar = { let mut t = &mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
+                            self.emit_array_init_flat(&vd.name, first_elem, inner_scalar, 0, &mem_elem_sizes);
+                        }
                     } else if let FullType::Struct(ref inner_tag) = mem.member_full_type {
                         self.emit_struct_init_at(&vd.name, first_elem, inner_tag, 0);
                     } else {

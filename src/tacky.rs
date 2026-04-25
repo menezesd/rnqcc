@@ -1043,10 +1043,13 @@ impl TackyGen {
                 let dst = if let Some(ref rft) = ret_ft {
                     let tmp = self.fresh_tmp_full(rft);
                     // Register struct size for proper stack allocation
+                    // Pad to eightbyte boundary so return value register writes are safe
                     if let FullType::Struct(ref tag) = rft {
                         if let TackyVal::Var(ref tmp_name) = tmp {
                             if let Some(def) = self.struct_defs.get(tag) {
-                                self.array_sizes.insert(tmp_name.clone(), def.size);
+                                let classes = def.classify_with(&self.struct_defs);
+                                let alloc_size = std::cmp::max(def.size, classes.len() * 8);
+                                self.array_sizes.insert(tmp_name.clone(), alloc_size);
                             }
                         }
                     }

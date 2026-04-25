@@ -106,8 +106,7 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
                                 }
                                 ParamClass::Integer => {
                                     if int_ret_idx < 2 {
-                                        let mov_type = if eb_size >= 8 { AsmType::Quadword } else { AsmType::Longword };
-                                        out.push(AsmInstr::Mov(mov_type,
+                                        out.push(AsmInstr::Mov(AsmType::Quadword,
                                             AsmOperand::PseudoMem(name.clone(), eb_offset),
                                             AsmOperand::Reg(int_ret_regs[int_ret_idx].clone())));
                                         int_ret_idx += 1;
@@ -565,8 +564,7 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
                                 }
                                 ParamClass::Integer => {
                                     if int_ret_idx < 2 {
-                                        let mov_type = if eb_size >= 8 { AsmType::Quadword } else { AsmType::Longword };
-                                        out.push(AsmInstr::Mov(mov_type,
+                                        out.push(AsmInstr::Mov(AsmType::Quadword,
                                             AsmOperand::Reg(int_ret_regs[int_ret_idx].clone()),
                                             AsmOperand::PseudoMem(dst_name.clone(), eb_offset)));
                                         int_ret_idx += 1;

@@ -285,23 +285,87 @@ impl StructDef {
         fields
     }
 
+    fn flatten_member_fields(&self, mem: &StructMember, base_offset: usize, struct_defs: &std::collections::HashMap<String, StructDef>) -> Vec<(usize, CType)> {
+        let abs_offset = base_offset + mem.offset;
+        match &mem.member_full_type {
+            FullType::Struct(tag) => {
+                if let Some(def) = struct_defs.get(tag) {
+                    def.flatten_fields(abs_offset, struct_defs)
+                } else { vec![] }
+            }
+            FullType::Array { elem, .. } => {
+                let mut inner = elem.as_ref();
+                while let FullType::Array { elem: e, .. } = inner { inner = e; }
+                let scalar_type = inner.to_ctype();
+                let elem_size = inner.byte_size();
+                if elem_size == 0 { return vec![]; }
+                let total_elems = mem.size / elem_size;
+                (0..total_elems).map(|i| (abs_offset + i * elem_size, scalar_type)).collect()
+            }
+            _ => vec![(abs_offset, mem.member_type)],
+        }
+    }
+
     pub fn classify_with(&self, struct_defs: &std::collections::HashMap<String, StructDef>) -> Vec<ParamClass> {
         if self.size > 16 {
             return vec![ParamClass::Memory];
         }
         let num_eightbytes = (self.size + 7) / 8;
-        let mut classes = vec![ParamClass::Integer; num_eightbytes];
 
-        let fields = self.flatten_fields(0, struct_defs);
-        for (offset, ctype) in &fields {
-            if *ctype == CType::Double {
-                let eb = offset / 8;
-                if eb < num_eightbytes {
-                    classes[eb] = ParamClass::Sse;
+        if self.is_union {
+            // Union classification: check ALL members
+            // Start with NO_CLASS, then merge each member's classification
+            // SSE + SSE = SSE, SSE + INTEGER = INTEGER, INTEGER + INTEGER = INTEGER
+            let mut classes = vec![None::<ParamClass>; num_eightbytes];
+            for mem in &self.members {
+                // Get the classification this member would produce
+                let mem_classes = match &mem.member_full_type {
+                    FullType::Struct(tag) => {
+                        if let Some(def) = struct_defs.get(tag) {
+                            def.classify_with(struct_defs)
+                        } else {
+                            vec![ParamClass::Integer]
+                        }
+                    }
+                    _ => {
+                        // Scalar/array/pointer member: classify only covered eightbytes
+                        let fields = self.flatten_member_fields(mem, 0, struct_defs);
+                        let mem_ebs = (mem.size + 7) / 8;
+                        let mut mc = Vec::new();
+                        for eb in 0..std::cmp::min(mem_ebs, num_eightbytes) {
+                            let has_double = fields.iter().any(|(off, ct)| off / 8 == eb && *ct == CType::Double);
+                            mc.push(if has_double { ParamClass::Sse } else { ParamClass::Integer });
+                        }
+                        mc
+                    }
+                };
+                // Merge: INTEGER dominates SSE
+                for (eb, mc) in mem_classes.iter().enumerate() {
+                    if eb >= num_eightbytes { break; }
+                    match (&classes[eb], mc) {
+                        (None, _) => classes[eb] = Some(*mc),
+                        (Some(ParamClass::Integer), _) => {} // INTEGER stays
+                        (Some(ParamClass::Sse), ParamClass::Integer) => classes[eb] = Some(ParamClass::Integer),
+                        (Some(ParamClass::Sse), ParamClass::Sse) => {} // SSE stays
+                        _ => {}
+                    }
                 }
             }
+            classes.iter().map(|c| c.unwrap_or(ParamClass::Integer)).collect()
+        } else {
+            // Struct classification: based on flattened fields
+            let mut classes = vec![ParamClass::Integer; num_eightbytes];
+            let fields = self.flatten_fields(0, struct_defs);
+            for (offset, ctype) in &fields {
+                if *ctype == CType::Double {
+                    let eb = offset / 8;
+                    if eb < num_eightbytes {
+                        classes[eb] = ParamClass::Sse;
+                    }
+                }
+            }
+            classes
         }
-        classes
     }
 
     pub fn classify(&self) -> Vec<ParamClass> {

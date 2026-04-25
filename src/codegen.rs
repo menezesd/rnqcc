@@ -87,6 +87,29 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
     var_struct_tags: &HashMap<String, String>, struct_defs: &HashMap<String, StructDef>) {
     match instr {
         TackyInstr::Nop => { /* skip */ }
+        TackyInstr::CopyStruct { src_name, dst_name } => {
+            // Emit bytewise copy for struct-to-struct assignment
+            let struct_size = var_struct_tags.get(dst_name)
+                .and_then(|tag| struct_defs.get(tag))
+                .map(|d| d.size)
+                .unwrap_or(0);
+            let mut off = 0i32;
+            while (off as usize) + 8 <= struct_size {
+                out.push(AsmInstr::Mov(AsmType::Quadword, AsmOperand::PseudoMem(src_name.clone(), off), AsmOperand::Reg(Reg::R10)));
+                out.push(AsmInstr::Mov(AsmType::Quadword, AsmOperand::Reg(Reg::R10), AsmOperand::PseudoMem(dst_name.clone(), off)));
+                off += 8;
+            }
+            while (off as usize) + 4 <= struct_size {
+                out.push(AsmInstr::Mov(AsmType::Longword, AsmOperand::PseudoMem(src_name.clone(), off), AsmOperand::Reg(Reg::R10)));
+                out.push(AsmInstr::Mov(AsmType::Longword, AsmOperand::Reg(Reg::R10), AsmOperand::PseudoMem(dst_name.clone(), off)));
+                off += 4;
+            }
+            while (off as usize) < struct_size {
+                out.push(AsmInstr::Mov(AsmType::Byte, AsmOperand::PseudoMem(src_name.clone(), off), AsmOperand::Reg(Reg::R10)));
+                out.push(AsmInstr::Mov(AsmType::Byte, AsmOperand::Reg(Reg::R10), AsmOperand::PseudoMem(dst_name.clone(), off)));
+                off += 1;
+            }
+        }
         TackyInstr::Return(val) => {
             let t = val_type(val, types);
             // Check if returning a struct
@@ -245,17 +268,39 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
                 TackyVal::Constant(_) => CType::Int,
                 TackyVal::DoubleConstant(_) => CType::Double,
             };
+            let right_ctype = match right {
+                TackyVal::Var(n) => types.get(n).copied().unwrap_or(CType::Int),
+                TackyVal::Constant(_) => CType::Int,
+                TackyVal::DoubleConstant(_) => CType::Double,
+            };
             // Double comparisons use unsigned condition codes (comisd sets CF/ZF)
-            let is_unsigned = !left_ctype.is_signed() || left_ctype == CType::Double;
+            // Use unsigned if either operand is unsigned
+            let is_unsigned = !left_ctype.is_signed() || !right_ctype.is_signed() || left_ctype == CType::Double;
 
             if let Some(cc) = is_comparison(op, is_unsigned) {
-                let t = val_type(left, types);
-                let cmp_type = if t == AsmType::Double || val_type(right, types) == AsmType::Double {
-                    AsmType::Double
-                } else if t == AsmType::Quadword || val_type(right, types) == AsmType::Quadword {
-                    AsmType::Quadword
-                } else {
-                    AsmType::Longword
+                // Determine comparison type from variable types, not constant apparent sizes
+                let var_type = |v: &TackyVal| -> Option<AsmType> {
+                    match v {
+                        TackyVal::Var(n) => Some(match types.get(n).copied().unwrap_or(CType::Int) {
+                            CType::Long | CType::ULong | CType::Pointer => AsmType::Quadword,
+                            CType::Double => AsmType::Double,
+                            _ => AsmType::Longword,
+                        }),
+                        TackyVal::DoubleConstant(_) => Some(AsmType::Double),
+                        _ => None,
+                    }
+                };
+                let cmp_type = match (var_type(left), var_type(right)) {
+                    (Some(AsmType::Double), _) | (_, Some(AsmType::Double)) => AsmType::Double,
+                    (Some(AsmType::Quadword), _) | (_, Some(AsmType::Quadword)) => AsmType::Quadword,
+                    (Some(t), _) => t,
+                    (_, Some(t)) => t,
+                    _ => {
+                        // Both constants: use val_type
+                        let lt = val_type(left, types);
+                        let rt = val_type(right, types);
+                        if lt == AsmType::Quadword || rt == AsmType::Quadword { AsmType::Quadword } else { AsmType::Longword }
+                    }
                 };
                 if cmp_type == AsmType::Double {
                     let l = convert_double_val(left, static_doubles);
@@ -402,9 +447,14 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
             // If index is a constant, compute offset at compile time
             if let TackyVal::Constant(idx) = index {
                 let offset = *idx * *scale;
-                out.push(AsmInstr::Mov(AsmType::Quadword, convert_val(ptr), AsmOperand::Reg(Reg::AX)));
-                out.push(AsmInstr::Binary(AsmType::Quadword, AsmBinaryOp::Add, AsmOperand::Imm(offset), AsmOperand::Reg(Reg::AX)));
-                out.push(AsmInstr::Mov(AsmType::Quadword, AsmOperand::Reg(Reg::AX), convert_val(dst)));
+                if offset == 0 {
+                    out.push(AsmInstr::Mov(AsmType::Quadword, convert_val(ptr), convert_val(dst)));
+                } else {
+                    // Use lea to avoid add instruction
+                    out.push(AsmInstr::Mov(AsmType::Quadword, convert_val(ptr), AsmOperand::Reg(Reg::AX)));
+                    out.push(AsmInstr::Mov(AsmType::Quadword, AsmOperand::Imm(offset), AsmOperand::Reg(Reg::DX)));
+                    out.push(AsmInstr::Lea(AsmOperand::Indexed(Reg::AX, Reg::DX, 1), convert_val(dst)));
+                }
             } else {
                 out.push(AsmInstr::Mov(AsmType::Quadword, convert_val(ptr), AsmOperand::Reg(Reg::AX)));
                 out.push(AsmInstr::Mov(AsmType::Quadword, convert_val(index), AsmOperand::Reg(Reg::DX)));
@@ -547,6 +597,12 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
             // Move int register args
             for (i, arg) in &int_reg_args {
                 let t = val_type(arg, types);
+                // For constants going into registers: use Quadword when value is negative
+                // (movl zero-extends, which changes the meaning of negative values)
+                let t = match arg {
+                    TackyVal::Constant(v) if *v < 0 && t == AsmType::Longword => AsmType::Quadword,
+                    _ => t,
+                };
                 out.push(AsmInstr::Mov(t, convert_val(arg), AsmOperand::Reg(ARG_REGISTERS[*i].clone())));
             }
             // Move xmm register args

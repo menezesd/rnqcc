@@ -48,26 +48,21 @@ fn optimize_function(func: &mut TackyFunction, flags: &OptimizationFlags, types:
         return;
     }
 
-    // Static variables are those with static storage duration
     let static_vars = static_var_names.clone();
 
     loop {
         let before = func.body.clone();
 
-        // Find aliased vars (address taken or static)
         let aliased_vars = crate::cfg::find_aliased_vars(&func.body, &static_vars);
 
-        // Constant folding operates on flat instruction list
         if flags.fold_constants {
             func.body = constant_folding(std::mem::take(&mut func.body), types);
         }
 
-        // Unreachable code elimination on flat list
         if flags.eliminate_unreachable_code {
             func.body = unreachable_code_elimination(std::mem::take(&mut func.body));
         }
 
-        // Copy propagation and dead store elimination use CFG
         if flags.propagate_copies || flags.eliminate_dead_stores {
             let mut cfg = crate::cfg::CFG::build(std::mem::take(&mut func.body));
 
@@ -82,10 +77,55 @@ fn optimize_function(func: &mut TackyFunction, flags: &OptimizationFlags, types:
             func.body = cfg.to_instructions();
         }
 
+        // Simple CSE for CopyFromOffset: replace duplicate reads with Copy
+        if flags.propagate_copies {
+            func.body = cse_copy_from_offset(std::mem::take(&mut func.body));
+        }
+
         if func.body == before || func.body.is_empty() {
             break;
         }
     }
+}
+
+// ============================================================
+// Simple CSE for CopyFromOffset
+// ============================================================
+
+fn cse_copy_from_offset(instructions: Vec<TackyInstr>) -> Vec<TackyInstr> {
+    // Track (src_name, offset) → first output variable
+    let mut seen: std::collections::HashMap<(String, i64), String> = std::collections::HashMap::new();
+    instructions.into_iter().map(|instr| {
+        match &instr {
+            TackyInstr::CopyFromOffset { src_name, offset, dst } => {
+                let key = (src_name.clone(), *offset);
+                if let Some(prev_dst) = seen.get(&key) {
+                    // Duplicate CopyFromOffset — replace with Copy from previous output
+                    if let TackyVal::Var(d) = dst {
+                        return TackyInstr::Copy {
+                            src: TackyVal::Var(prev_dst.clone()),
+                            dst: TackyVal::Var(d.clone()),
+                        };
+                    }
+                }
+                if let TackyVal::Var(d) = dst {
+                    seen.insert(key, d.clone());
+                }
+            }
+            // CopyToOffset/CopyStruct/Store/FunCall may modify the struct — invalidate
+            TackyInstr::CopyToOffset { dst_name, .. } | TackyInstr::CopyStruct { dst_name, .. } => {
+                seen.retain(|k, _| k.0 != *dst_name);
+            }
+            TackyInstr::Store { .. } | TackyInstr::FunCall { .. } => {
+                seen.clear();
+            }
+            TackyInstr::Label(_) => {
+                seen.clear();
+            }
+            _ => {}
+        }
+        instr
+    }).collect()
 }
 
 // ============================================================
@@ -102,10 +142,8 @@ fn constant_folding(instructions: Vec<TackyInstr>, types: &std::collections::Has
             const_map.clear();
             return instr;
         }
-        // At jumps, function calls — be conservative
-        if matches!(&instr, TackyInstr::FunCall { .. }) {
-            // Function calls may modify globals — clear non-temp variables
-            // For simplicity, clear everything
+        // At function calls and stores — be conservative (may modify aliased vars)
+        if matches!(&instr, TackyInstr::FunCall { .. } | TackyInstr::Store { .. }) {
             const_map.clear();
         }
 
@@ -119,15 +157,15 @@ fn constant_folding(instructions: Vec<TackyInstr>, types: &std::collections::Has
             _ => None,
         };
 
-        // Resolve operands using known constants — but NOT for Copy sources
-        // (Copy sources are handled by CFG-based copy propagation)
-        let instr = if matches!(&instr, TackyInstr::Copy { .. }) {
-            instr // Don't resolve Copy sources
+        // Resolve operands using known constants — but NOT for Copy/Store/CopyToOffset sources
+        // (Copy sources: handled by CFG-based copy propagation)
+        // (Store/CopyToOffset sources: constant replacement may lose type info)
+        let instr = if matches!(&instr, TackyInstr::Copy { .. } | TackyInstr::Store { .. } | TackyInstr::CopyToOffset { .. }) {
+            instr
         } else {
             resolve_constants(&instr, &const_map)
         };
 
-        // Then fold the instruction
         let folded = fold_instruction(instr, types, src_type_hint);
 
         // Track constants: Copy(Constant, Var) and Copy(Var, Var) where Var is known
@@ -412,6 +450,14 @@ fn fold_instruction(instr: TackyInstr, types: &std::collections::HashMap<String,
                 return TackyInstr::Copy { src: TackyVal::DoubleConstant(v as u64 as f64), dst };
             }
             TackyInstr::UIntToDouble { src, dst }
+        }
+        TackyInstr::AddPtr { ptr, index, scale, dst } => {
+            if let Some(idx) = const_val(&index) {
+                if idx == 0 {
+                    return TackyInstr::Copy { src: ptr, dst };
+                }
+            }
+            TackyInstr::AddPtr { ptr, index, scale, dst }
         }
         other => other,
     }

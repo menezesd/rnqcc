@@ -221,7 +221,7 @@ pub fn copy_propagation(cfg: &mut CFG, aliased_vars: &HashSet<String>, types: &H
         let mut new_instrs = Vec::new();
         for (i, instr) in block.instructions.iter().enumerate() {
             let reaching = instr_reaching.get(&(block.id, i)).cloned().unwrap_or_default();
-            if let Some(rewritten) = rewrite_instruction(instr, &reaching) {
+            if let Some(rewritten) = rewrite_instruction(instr, &reaching, types) {
                 new_instrs.push(rewritten);
             }
             // else: instruction was eliminated (redundant copy)
@@ -247,6 +247,9 @@ fn collect_all_copies(cfg: &CFG, types: &HashMap<String, CType>) -> HashSet<Copy
                 }
                 TackyInstr::Copy { src: TackyVal::DoubleConstant(c), dst: TackyVal::Var(d) } => {
                     copies.insert(CopyInstr { src: CopySrc::DoubleConstant(c.to_bits()), dst: d.clone() });
+                }
+                TackyInstr::CopyStruct { src_name, dst_name } => {
+                    copies.insert(CopyInstr { src: CopySrc::Var(src_name.clone()), dst: dst_name.clone() });
                 }
                 _ => {}
             }
@@ -359,6 +362,17 @@ fn transfer_copies(
                     !src_aliased && !aliased.contains(&c.dst)
                 });
             }
+            TackyInstr::CopyStruct { src_name, dst_name } => {
+                let copy = CopyInstr { src: CopySrc::Var(src_name.clone()), dst: dst_name.clone() };
+                let reverse_redundant = current.contains(&CopyInstr { src: CopySrc::Var(dst_name.clone()), dst: src_name.clone() });
+                if !current.contains(&copy) && !reverse_redundant {
+                    current.retain(|c| {
+                        let src_match = match &c.src { CopySrc::Var(v) => v == dst_name, _ => false };
+                        c.dst != *dst_name && !src_match
+                    });
+                    current.insert(copy);
+                }
+            }
             _ => {
                 // Kill copies to/from dst if instruction writes to a variable
                 if let Some(d) = get_instr_dst(instr) {
@@ -391,7 +405,8 @@ fn get_instr_dst(instr: &TackyInstr) -> Option<String> {
         TackyInstr::CopyFromOffset { dst: TackyVal::Var(n), .. } |
         TackyInstr::AddPtr { dst: TackyVal::Var(n), .. } |
         TackyInstr::FunCall { dst: TackyVal::Var(n), .. } => Some(n.clone()),
-        TackyInstr::CopyToOffset { dst_name, .. } => Some(dst_name.clone()),
+        TackyInstr::CopyToOffset { dst_name, .. } |
+        TackyInstr::CopyStruct { dst_name, .. } => Some(dst_name.clone()),
         _ => None,
     }
 }
@@ -426,7 +441,51 @@ fn replace_operand(val: &TackyVal, reaching: &HashSet<CopyInstr>) -> TackyVal {
     val.clone()
 }
 
-fn rewrite_instruction(instr: &TackyInstr, reaching: &HashSet<CopyInstr>) -> Option<TackyInstr> {
+fn replace_operand_typed(val: &TackyVal, reaching: &HashSet<CopyInstr>, types: &HashMap<String, CType>) -> TackyVal {
+    // Like replace_operand, but for constants, check that the type would be preserved
+    if let TackyVal::Var(name) = val {
+        let orig_type = types.get(name).copied().unwrap_or(CType::Int);
+        let mut best: Option<&CopyInstr> = None;
+        for copy in reaching {
+            if copy.dst == *name {
+                match (&best, &copy.src) {
+                    (None, CopySrc::Var(_)) => best = Some(copy),
+                    (None, CopySrc::Constant(c)) => {
+                        // Only use constant if it produces same AsmType as the variable
+                        let const_size = if *c > i32::MAX as i64 || *c < i32::MIN as i64 { 8 } else { 4 };
+                        let var_size = orig_type.size();
+                        if const_size == var_size { best = Some(copy); }
+                    }
+                    (Some(b), CopySrc::Var(_)) if !matches!(&b.src, CopySrc::Var(_)) => best = Some(copy),
+                    _ => {}
+                }
+            }
+        }
+        if let Some(copy) = best {
+            return match &copy.src {
+                CopySrc::Var(s) => TackyVal::Var(s.clone()),
+                CopySrc::Constant(c) => TackyVal::Constant(*c),
+                CopySrc::DoubleConstant(bits) => TackyVal::DoubleConstant(f64::from_bits(*bits)),
+            };
+        }
+    }
+    val.clone()
+}
+
+fn replace_operand_var_only(val: &TackyVal, reaching: &HashSet<CopyInstr>) -> TackyVal {
+    if let TackyVal::Var(name) = val {
+        for copy in reaching {
+            if copy.dst == *name {
+                if let CopySrc::Var(s) = &copy.src {
+                    return TackyVal::Var(s.clone());
+                }
+            }
+        }
+    }
+    val.clone()
+}
+
+fn rewrite_instruction(instr: &TackyInstr, reaching: &HashSet<CopyInstr>, types: &HashMap<String, CType>) -> Option<TackyInstr> {
     match instr {
         TackyInstr::Copy { src, dst } => {
             if let (TackyVal::Var(s), TackyVal::Var(d)) = (src, dst) {
@@ -459,10 +518,16 @@ fn rewrite_instruction(instr: &TackyInstr, reaching: &HashSet<CopyInstr>) -> Opt
             Some(TackyInstr::Unary { op: op.clone(), src: replace_operand(src, reaching), dst: dst.clone() })
         }
         TackyInstr::Binary { op, left, right, dst } => {
+            // For comparisons, use typed replacement to preserve signedness
+            let is_cmp = matches!(op, TackyBinaryOp::Equal | TackyBinaryOp::NotEqual |
+                TackyBinaryOp::LessThan | TackyBinaryOp::LessEqual |
+                TackyBinaryOp::GreaterThan | TackyBinaryOp::GreaterEqual);
+            let new_left = if is_cmp { replace_operand_typed(left, reaching, types) } else { replace_operand(left, reaching) };
+            let new_right = if is_cmp { replace_operand_typed(right, reaching, types) } else { replace_operand(right, reaching) };
             Some(TackyInstr::Binary {
                 op: op.clone(),
-                left: replace_operand(left, reaching),
-                right: replace_operand(right, reaching),
+                left: new_left,
+                right: new_right,
                 dst: dst.clone(),
             })
         }
@@ -482,7 +547,9 @@ fn rewrite_instruction(instr: &TackyInstr, reaching: &HashSet<CopyInstr>) -> Opt
             Some(TackyInstr::ZeroExtend { src: replace_operand(src, reaching), dst: dst.clone() })
         }
         TackyInstr::Store { src, dst_ptr } => {
-            Some(TackyInstr::Store { src: replace_operand(src, reaching), dst_ptr: replace_operand(dst_ptr, reaching) })
+            // Replace Store src, but only with constants if the type is preserved
+            let new_src = replace_operand_typed(src, reaching, types);
+            Some(TackyInstr::Store { src: new_src, dst_ptr: replace_operand(dst_ptr, reaching) })
         }
         TackyInstr::Load { src_ptr, dst } => {
             Some(TackyInstr::Load { src_ptr: replace_operand(src_ptr, reaching), dst: dst.clone() })
@@ -499,7 +566,7 @@ fn rewrite_instruction(instr: &TackyInstr, reaching: &HashSet<CopyInstr>) -> Opt
         TackyInstr::UIntToDouble { src, dst } => {
             Some(TackyInstr::UIntToDouble { src: replace_operand(src, reaching), dst: dst.clone() })
         }
-        // Don't rewrite GetAddress (uses address, not value)
+        // Don't rewrite GetAddress (uses address, not value; changing address breaks aliasing)
         TackyInstr::GetAddress { .. } => Some(instr.clone()),
         TackyInstr::FunCall { name, args, dst, stack_arg_indices, struct_arg_groups } => {
             let new_args: Vec<TackyVal> = args.iter().map(|a| replace_operand(a, reaching)).collect();
@@ -507,6 +574,35 @@ fn rewrite_instruction(instr: &TackyInstr, reaching: &HashSet<CopyInstr>) -> Opt
         }
         TackyInstr::AddPtr { ptr, index, scale, dst } => {
             Some(TackyInstr::AddPtr { ptr: replace_operand(ptr, reaching), index: replace_operand(index, reaching), scale: *scale, dst: dst.clone() })
+        }
+        TackyInstr::CopyToOffset { src, dst_name, offset } => {
+            // Use typed replacement to avoid losing type info for small constants
+            Some(TackyInstr::CopyToOffset { src: replace_operand_typed(src, reaching, types), dst_name: dst_name.clone(), offset: *offset })
+        }
+        TackyInstr::CopyFromOffset { src_name, offset, dst } => {
+            // Check if src_name has a reaching copy (struct-to-struct copy)
+            let new_src_name = {
+                let mut result = src_name.clone();
+                for copy in reaching.iter() {
+                    if copy.dst == *src_name {
+                        if let CopySrc::Var(s) = &copy.src {
+                            result = s.clone();
+                            break;
+                        }
+                    }
+                }
+                result
+            };
+            Some(TackyInstr::CopyFromOffset { src_name: new_src_name, offset: *offset, dst: dst.clone() })
+        }
+        TackyInstr::CopyStruct { src_name, dst_name } => {
+            // Check if redundant (either direction)
+            let fwd = CopyInstr { src: CopySrc::Var(src_name.clone()), dst: dst_name.clone() };
+            let rev = CopyInstr { src: CopySrc::Var(dst_name.clone()), dst: src_name.clone() };
+            if reaching.contains(&fwd) || reaching.contains(&rev) {
+                return None; // Eliminate redundant struct copy
+            }
+            Some(instr.clone())
         }
         _ => Some(instr.clone()),
     }
@@ -516,9 +612,7 @@ fn rewrite_instruction(instr: &TackyInstr, reaching: &HashSet<CopyInstr>) -> Opt
 // Dead Store Elimination
 // ============================================================
 
-pub fn dead_store_elimination(cfg: &mut CFG, aliased_vars: &HashSet<String>, _static_vars: &HashSet<String>) {
-    // Use aliased_vars (which includes static vars) for liveness
-    let static_vars = aliased_vars;
+pub fn dead_store_elimination(cfg: &mut CFG, aliased_vars: &HashSet<String>, static_vars: &HashSet<String>) {
     // Liveness analysis (backward data-flow)
     let mut block_live_in: HashMap<usize, HashSet<String>> = HashMap::new();
     for block in &cfg.blocks {
@@ -625,12 +719,15 @@ fn transfer_liveness(
                 if let TackyVal::Var(d) = dst { current.remove(d); }
                 current.insert(src_name.clone());
             }
-            // Store writes through a pointer — generates aliased vars, doesn't kill
+            // CopyStruct overwrites entire struct — kills dst, generates src
+            TackyInstr::CopyStruct { src_name, dst_name } => {
+                current.remove(dst_name);
+                current.insert(src_name.clone());
+            }
+            // Store writes through a pointer — reads src and dst_ptr, but doesn't read aliased vars
             TackyInstr::Store { src, dst_ptr } => {
                 if let TackyVal::Var(s) = src { current.insert(s.clone()); }
                 if let TackyVal::Var(p) = dst_ptr { current.insert(p.clone()); }
-                // Store may write to any aliased var — generate all aliased
-                current.extend(aliased_vars.iter().cloned());
             }
             // Load reads through a pointer — generates aliased vars
             TackyInstr::Load { src_ptr, dst } => {
@@ -674,10 +771,11 @@ fn get_instr_sources(instr: &TackyInstr) -> Vec<String> {
         TackyInstr::UIntToDouble { src, .. } => add_var(src, &mut srcs),
         TackyInstr::Store { src, dst_ptr } => { add_var(src, &mut srcs); add_var(dst_ptr, &mut srcs); }
         TackyInstr::Load { src_ptr, .. } => add_var(src_ptr, &mut srcs),
-        TackyInstr::GetAddress { src, .. } => add_var(src, &mut srcs),
+        TackyInstr::GetAddress { .. } => {} // GetAddress takes address, doesn't read value
         TackyInstr::AddPtr { ptr, index, .. } => { add_var(ptr, &mut srcs); add_var(index, &mut srcs); }
         TackyInstr::CopyToOffset { src, .. } => add_var(src, &mut srcs),
         TackyInstr::CopyFromOffset { dst: _, .. } => {} // src_name is just a name, not a TackyVal
+        TackyInstr::CopyStruct { src_name, .. } => srcs.push(src_name.clone()),
         _ => {}
     }
     srcs
@@ -686,8 +784,7 @@ fn get_instr_sources(instr: &TackyInstr) -> Vec<String> {
 fn is_dead_store(instr: &TackyInstr, live_after: &HashSet<String>) -> bool {
     // Never eliminate function calls (side effects), stores (write through pointer),
     // CopyToOffset (partial struct update), or GetAddress
-    if matches!(instr, TackyInstr::FunCall { .. } | TackyInstr::Store { .. } |
-        TackyInstr::CopyToOffset { .. } | TackyInstr::GetAddress { .. }) {
+    if matches!(instr, TackyInstr::FunCall { .. } | TackyInstr::Store { .. }) {
         return false;
     }
     // Never eliminate jumps, labels, returns

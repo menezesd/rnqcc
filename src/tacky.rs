@@ -2758,12 +2758,20 @@ impl TackyGen {
                         }
                     } else if mem.member_full_type.is_struct() {
                         if let FullType::Struct(ref inner_tag) = mem.member_full_type {
-                            // Pass the first element (the struct's init), not the whole union init
-                            if elems.len() == 1 {
-                                self.emit_struct_init_at(&vd.name, &elems[0], inner_tag, 0);
+                            let first = &elems[0];
+                            if let Exp::ArrayInit(_) = first {
+                                // Compound init for the struct member
+                                if elems.len() == 1 {
+                                    self.emit_struct_init_at(&vd.name, first, inner_tag, 0);
+                                } else {
+                                    self.emit_struct_init_at(&vd.name, init_ref, inner_tag, 0);
+                                }
                             } else {
-                                // Multiple elements → interpret as struct member inits
-                                self.emit_struct_init_at(&vd.name, init_ref, inner_tag, 0);
+                                // Struct-valued expression (variable, etc.) — struct copy
+                                let struct_size = mem.member_full_type.byte_size_with(&self.struct_defs);
+                                let (val, val_type) = self.emit_exp(first.clone());
+                                let src_addr = if val_type == CType::Pointer { val } else { self.get_struct_addr(val) };
+                                self.emit_struct_copy_to(src_addr, &vd.name, struct_size);
                             }
                         }
                     } else {

@@ -89,7 +89,7 @@ impl TackyGen {
 
         // Track array/struct sizes
         if ft.is_array() {
-            self.array_sizes.insert(name.to_string(), ft.byte_size());
+            self.array_sizes.insert(name.to_string(), ft.byte_size_with(&self.struct_defs));
         }
         if let FullType::Struct(ref tag) = ft {
             if let Some(def) = self.struct_defs.get(tag) {
@@ -158,113 +158,124 @@ impl TackyGen {
         self.instructions.push(instr);
     }
 
-    /// Get the byte size of an expression's type (for sizeof) without evaluating it
-    fn sizeof_exp(&self, exp: &Exp) -> usize {
+    /// Compute the FullType of an expression without evaluating it (for sizeof, etc.)
+    fn typeof_exp(&self, exp: &Exp) -> FullType {
         match exp {
-            Exp::Constant(_) => 4, // int
-            Exp::LongConstant(_) => 8,
-            Exp::UIntConstant(_) => 4,
-            Exp::ULongConstant(_) => 8,
-            Exp::DoubleConstant(_) => 8,
-            Exp::StringLiteral(s) => s.len() + 1, // char array including null
-            Exp::Var(name) => {
-                // Don't decay arrays for sizeof
-                let ft = self.get_full_type(name);
-                ft.byte_size_with(&self.struct_defs)
-            }
+            Exp::Constant(_) => FullType::Scalar(CType::Int),
+            Exp::LongConstant(_) => FullType::Scalar(CType::Long),
+            Exp::UIntConstant(_) => FullType::Scalar(CType::UInt),
+            Exp::ULongConstant(_) => FullType::Scalar(CType::ULong),
+            Exp::DoubleConstant(_) => FullType::Scalar(CType::Double),
+            Exp::StringLiteral(s) => FullType::Array {
+                elem: Box::new(FullType::Scalar(CType::Char)),
+                size: s.len() + 1,
+            },
+            Exp::Var(name) => self.get_full_type(name),
             Exp::Cast(ct, ft, _) => {
                 if let Some(ref full) = ft {
-                    full.byte_size()
+                    full.clone()
                 } else {
-                    ct.size() as usize
+                    FullType::Scalar(*ct)
                 }
             }
             Exp::Unary(UnaryOp::Deref, inner) => {
-                // *ptr: need to figure out what ptr points to
-                let inner_size = self.sizeof_exp(inner);
-                // The type of *ptr is the pointee type
-                // For sizeof, we need to compute the expression type
-                match inner.as_ref() {
-                    Exp::Var(name) => {
-                        let ft = self.get_full_type(name);
-                        match ft {
-                            FullType::Pointer(inner_ft) => inner_ft.byte_size(),
-                            _ => 4, // fallback
-                        }
-                    }
-                    _ => 8, // fallback to pointer size
+                let inner_ft = self.typeof_exp(inner);
+                match inner_ft {
+                    FullType::Pointer(pointee) => *pointee,
+                    FullType::Array { elem, .. } => *elem,
+                    _ => FullType::Scalar(CType::Int),
                 }
+            }
+            Exp::Unary(UnaryOp::AddrOf, inner) => {
+                FullType::Pointer(Box::new(self.typeof_exp(inner)))
             }
             Exp::Subscript(arr, _) => {
-                // arr[i]: element type
-                match arr.as_ref() {
-                    Exp::Var(name) => {
-                        let ft = self.get_full_type(name);
-                        match ft {
-                            FullType::Array { elem, .. } => elem.byte_size(),
-                            FullType::Pointer(inner) => inner.byte_size(),
-                            _ => 4,
-                        }
-                    }
-                    _ => 4,
+                let arr_ft = self.typeof_exp(arr);
+                match arr_ft {
+                    FullType::Array { elem, .. } => *elem,
+                    FullType::Pointer(inner) => *inner,
+                    _ => FullType::Scalar(CType::Int),
                 }
             }
-            Exp::FunctionCall(name, _) => {
-                let ret_type = self.func_types.get(name)
-                    .map(|(rt, _, _)| *rt).unwrap_or(CType::Int);
-                std::cmp::max(ret_type.size() as usize, 1)
+            Exp::Dot(inner, member) => {
+                let inner_ft = self.typeof_exp(inner);
+                if let FullType::Struct(tag) = &inner_ft {
+                    if let Some(def) = self.struct_defs.get(tag) {
+                        if let Some(mem) = def.find_member(member) {
+                            return mem.member_full_type.clone();
+                        }
+                    }
+                }
+                FullType::Scalar(CType::Int)
             }
-            Exp::SizeOf(_) | Exp::SizeOfType(_, _) => 8, // sizeof returns unsigned long
-            Exp::Unary(UnaryOp::AddrOf, _) => 8, // &x is a pointer
+            Exp::Arrow(inner, member) => {
+                let inner_ft = self.typeof_exp(inner);
+                let pointee = match inner_ft {
+                    FullType::Pointer(p) => *p,
+                    _ => inner_ft,
+                };
+                if let FullType::Struct(tag) = &pointee {
+                    if let Some(def) = self.struct_defs.get(tag) {
+                        if let Some(mem) = def.find_member(member) {
+                            return mem.member_full_type.clone();
+                        }
+                    }
+                }
+                FullType::Scalar(CType::Int)
+            }
+            Exp::FunctionCall(name, _) => {
+                if let Some(ft) = self.func_full_types.get(name) {
+                    ft.clone()
+                } else {
+                    let ret_type = self.func_types.get(name)
+                        .map(|(rt, _, _)| *rt).unwrap_or(CType::Int);
+                    FullType::Scalar(ret_type)
+                }
+            }
+            Exp::SizeOf(_) | Exp::SizeOfType(_, _) => FullType::Scalar(CType::ULong),
             Exp::Unary(UnaryOp::PreIncrement | UnaryOp::PreDecrement | UnaryOp::PostIncrement | UnaryOp::PostDecrement, inner) => {
-                self.sizeof_exp(inner)
+                self.typeof_exp(inner)
             }
             Exp::Unary(UnaryOp::Negate | UnaryOp::Complement, inner) => {
-                // promoted result
-                std::cmp::max(self.sizeof_exp(inner), 4)
+                let ft = self.typeof_exp(inner);
+                match ft {
+                    FullType::Scalar(ct) if ct.size() < 4 => FullType::Scalar(CType::Int),
+                    _ => ft,
+                }
             }
-            Exp::Unary(UnaryOp::LogicalNot, _) => 4, // !x is always int
+            Exp::Unary(UnaryOp::LogicalNot, _) => FullType::Scalar(CType::Int),
             Exp::Binary(op, left, right) => {
                 if matches!(op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr |
                     BinaryOp::Equal | BinaryOp::NotEqual |
                     BinaryOp::LessThan | BinaryOp::GreaterThan |
                     BinaryOp::LessEqual | BinaryOp::GreaterEqual) {
-                    4 // comparisons return int
+                    FullType::Scalar(CType::Int)
                 } else if matches!(op, BinaryOp::ShiftLeft | BinaryOp::ShiftRight) {
-                    // Shift result type is promoted left operand type
-                    std::cmp::max(self.sizeof_exp(left), 4) // promoted to at least int
-                } else {
-                    // Common type of both operands (promoted)
-                    let l = std::cmp::max(self.sizeof_exp(left), 4);
-                    let r = std::cmp::max(self.sizeof_exp(right), 4);
-                    std::cmp::max(l, r)
-                }
-            }
-            Exp::Dot(inner, member) => {
-                // sizeof(x.member) — get member's type size
-                if let Exp::Var(name) = inner.as_ref() {
-                    let ft = self.get_full_type(name);
-                    if let FullType::Struct(tag) = &ft {
-                        if let Some(def) = self.struct_defs.get(tag) {
-                            if let Some(mem) = def.find_member(&member) {
-                                return mem.member_full_type.byte_size_with(&self.struct_defs);
-                            }
-                        }
+                    let ft = self.typeof_exp(left);
+                    match ft {
+                        FullType::Scalar(ct) if ct.size() < 4 => FullType::Scalar(CType::Int),
+                        _ => ft,
                     }
+                } else {
+                    let l = self.typeof_exp(left);
+                    let r = self.typeof_exp(right);
+                    if l.byte_size_with(&self.struct_defs) >= r.byte_size_with(&self.struct_defs) { l } else { r }
                 }
-                4 // fallback
             }
-            Exp::Arrow(_, member) => 4, // fallback
-            Exp::Assign(left, _) => self.sizeof_exp(left),
-            Exp::CompoundAssign(_, left, _) => self.sizeof_exp(left),
+            Exp::Assign(left, _) => self.typeof_exp(left),
+            Exp::CompoundAssign(_, left, _) => self.typeof_exp(left),
             Exp::Conditional(_, then_e, else_e) => {
-                // Result type is common type of both branches
-                let t_size = self.sizeof_exp(then_e);
-                let e_size = self.sizeof_exp(else_e);
-                std::cmp::max(t_size, e_size)
+                let t = self.typeof_exp(then_e);
+                let e = self.typeof_exp(else_e);
+                if t.byte_size_with(&self.struct_defs) >= e.byte_size_with(&self.struct_defs) { t } else { e }
             }
-            _ => 4, // default to int
+            _ => FullType::Scalar(CType::Int),
         }
+    }
+
+    /// Get the byte size of an expression's type (for sizeof) without evaluating it
+    fn sizeof_exp(&self, exp: &Exp) -> usize {
+        self.typeof_exp(exp).byte_size_with(&self.struct_defs)
     }
 
     fn static_init_size(v: &StaticInit) -> usize {
@@ -478,6 +489,22 @@ impl TackyGen {
             Exp::Binary(op, left, right) => self.emit_binary(op, *left, *right),
             Exp::Assign(left, right) => {
                 // Check if LHS is a subscript: a[i] = value
+                if let Exp::Subscript(ref arr, ref idx) = *left {
+                    // Check if element type is struct — need struct copy
+                    let lhs_ft = self.typeof_exp(&left);
+                    if let FullType::Struct(ref tag) = lhs_ft {
+                        let struct_size = self.struct_defs.get(tag).map(|d| d.size).unwrap_or(0);
+                        let (ptr, _elem_type, _) = self.emit_subscript_addr(*arr.clone(), *idx.clone());
+                        let (rhs, rhs_type) = self.emit_exp(*right);
+                        let src_addr = if rhs_type == CType::Pointer {
+                            rhs
+                        } else {
+                            self.get_struct_addr(rhs)
+                        };
+                        self.emit_struct_copy_ptr_to_ptr(src_addr, ptr.clone(), struct_size);
+                        return (ptr, CType::Pointer);
+                    }
+                }
                 if let Exp::Subscript(arr, idx) = *left {
                     let (ptr, elem_type, _elem_ft) = self.emit_subscript_addr(*arr, *idx);
                     let (rhs, rhs_type) = self.emit_exp(*right);
@@ -632,19 +659,36 @@ impl TackyGen {
                     self.emit(TackyInstr::Store { src: rhs_conv.clone(), dst_ptr: ptr });
                     return (rhs_conv, pointee_type);
                 }
-                // Check for struct assignment: struct_var = other_struct
-                if let Exp::Var(ref lhs_name) = *left {
-                    let lhs_ft = self.get_full_type(lhs_name);
+                // Check for struct assignment: lhs = rhs where lhs is struct type
+                {
+                    let lhs_ft = self.typeof_exp(&left);
                     if let FullType::Struct(ref tag) = lhs_ft {
                         let struct_size = self.struct_defs.get(tag).map(|d| d.size).unwrap_or(0);
                         let (rhs, rhs_type) = self.emit_exp(*right);
                         let src_addr = if rhs_type == CType::Pointer {
-                            rhs // Already a pointer (from Dot/Arrow)
+                            rhs
                         } else {
                             self.get_struct_addr(rhs)
                         };
-                        self.emit_struct_copy_to(src_addr, lhs_name, struct_size);
-                        return (TackyVal::Var(lhs_name.clone()), CType::Struct);
+                        if let Exp::Var(ref lhs_name) = *left {
+                            self.emit_struct_copy_to(src_addr, lhs_name, struct_size);
+                            return (TackyVal::Var(lhs_name.clone()), CType::Struct);
+                        } else {
+                            // Complex LHS (subscript, dot, arrow, deref): get its address
+                            let (lhs_val, _) = self.emit_exp(*left);
+                            let dst_addr = if let TackyVal::Var(ref n) = lhs_val {
+                                let ft = self.get_full_type(n);
+                                if ft.is_pointer() {
+                                    lhs_val
+                                } else {
+                                    self.get_struct_addr(lhs_val)
+                                }
+                            } else {
+                                lhs_val
+                            };
+                            self.emit_struct_copy_ptr_to_ptr(src_addr, dst_addr.clone(), struct_size);
+                            return (dst_addr, CType::Pointer);
+                        }
                     }
                 }
                 let lhs_type = self.lvalue_type(&left);
@@ -684,7 +728,7 @@ impl TackyGen {
                     // For pointer compound assign (ptr += n), use ptr_elem_size for scaling
                     if elem_type == CType::Pointer && matches!(op, BinaryOp::Add | BinaryOp::Sub) {
                         let elem_size = match &elem_full {
-                            FullType::Pointer(inner) => inner.byte_size() as i64,
+                            FullType::Pointer(inner) => inner.byte_size_with(&self.struct_defs) as i64,
                             _ => 1,
                         };
                         let rhs_long = self.convert_to(rhs, rhs_type, CType::Long);
@@ -1007,7 +1051,7 @@ impl TackyGen {
                     (second_val, first_val, first_ctype, second_full)
                 };
                 let (elem_full, scale) = match &arr_full {
-                    FullType::Pointer(inner) => (inner.as_ref().clone(), inner.byte_size() as i64),
+                    FullType::Pointer(inner) => (inner.as_ref().clone(), inner.byte_size_with(&self.struct_defs) as i64),
                     _ => (FullType::Scalar(CType::Int), 4), // fallback
                 };
 
@@ -1032,6 +1076,14 @@ impl TackyGen {
                     // A "decay" here just reinterprets the pointer type
                     self.emit(TackyInstr::Copy { src: ptr, dst: decayed_ptr.clone() });
                     return (decayed_ptr, decayed.to_ctype());
+                }
+
+                // For struct elements, return pointer (structs don't fit in registers)
+                if elem_full.is_struct() {
+                    let ptr_ft = FullType::Pointer(Box::new(elem_full));
+                    let result = self.fresh_tmp_full(&ptr_ft);
+                    self.emit(TackyInstr::Copy { src: ptr, dst: result.clone() });
+                    return (result, CType::Pointer);
                 }
 
                 // For scalar/pointer elements, load the value
@@ -1317,117 +1369,19 @@ impl TackyGen {
     }
 
     fn dot_inner_tag(&self, exp: &Exp) -> String {
-        match exp {
-            Exp::Var(n) => {
-                let ft = self.get_full_type(n);
-                match ft {
-                    FullType::Struct(t) => t,
-                    FullType::Pointer(inner) => match *inner { FullType::Struct(t) => t, _ => panic!("Dot on non-struct ptr var: {:?}", inner) },
-                    _ => panic!("Dot on non-struct var: {:?}", ft)
-                }
-            }
-            Exp::Dot(inner, member) => {
-                let parent_tag = self.dot_inner_tag(inner);
-                let def = self.struct_defs.get(&parent_tag).unwrap();
-                let mem = def.find_member(member).unwrap();
-                match &mem.member_full_type { FullType::Struct(t) => t.clone(), _ => panic!("Nested dot on non-struct member") }
-            }
-            Exp::Arrow(inner, member) => {
-                if let Exp::Var(n) = inner.as_ref() {
-                    let ft = self.get_full_type(n);
-                    if let FullType::Pointer(inner_ft) = ft {
-                        if let FullType::Struct(t) = inner_ft.as_ref() {
-                            let def = self.struct_defs.get(t).unwrap();
-                            let mem = def.find_member(member).unwrap();
-                            match &mem.member_full_type { FullType::Struct(t) => t.clone(), _ => panic!("") }
-                        } else { panic!("") }
-                    } else { panic!("") }
-                } else { panic!("") }
-            }
-            Exp::Subscript(arr, _) => {
-                // arr[i].member — arr should be pointer to struct
-                if let Exp::Var(n) = arr.as_ref() {
-                    let ft = self.get_full_type(n);
-                    match &ft {
-                        FullType::Pointer(inner) | FullType::Array { elem: inner, .. } => {
-                            match inner.as_ref() {
-                                FullType::Struct(t) => return t.clone(),
-                                _ => {}
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                // Try evaluating the subscript's inner expression
-                // For Arrow(...)[i], recursively find the struct tag
-                if let Exp::Arrow(inner, mem) = arr.as_ref() {
-                    if let Exp::Var(n) = inner.as_ref() {
-                        let ft = self.get_full_type(n);
-                        if let FullType::Pointer(inner_ft) = &ft {
-                            if let FullType::Struct(t) = inner_ft.as_ref() {
-                                let def = self.struct_defs.get(t).unwrap();
-                                if let Some(m) = def.find_member(mem) {
-                                    // The subscript element type
-                                    match &m.member_full_type {
-                                        FullType::Array { elem, .. } => {
-                                            match elem.as_ref() {
-                                                FullType::Struct(t) => return t.clone(),
-                                                _ => {}
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                // General fallback: try to find any struct that matches
-                for (tag, def) in &self.struct_defs {
-                    // Heuristic: find a struct that contains the member we're looking for
-                    // This is set by the caller context
-                }
-                panic!("dot_inner_tag: cannot determine struct for subscript: {:?}", exp)
-            }
-            Exp::Unary(UnaryOp::Deref, inner) => {
-                // (*ptr).member
-                if let Exp::Var(n) = inner.as_ref() {
-                    let ft = self.get_full_type(n);
-                    if let FullType::Pointer(inner_ft) = &ft {
-                        if let FullType::Struct(t) = inner_ft.as_ref() {
-                            return t.clone();
-                        }
-                    }
-                }
-                panic!("dot_inner_tag: cannot determine struct for deref: {:?}", exp)
-            }
-            other => panic!("dot_inner_tag on non-struct expression: {:?}", other),
+        let ft = self.typeof_exp(exp);
+        match ft {
+            FullType::Struct(t) => t,
+            FullType::Pointer(inner) => match *inner {
+                FullType::Struct(t) => t,
+                _ => panic!("dot_inner_tag: pointer to non-struct: {:?}", inner),
+            },
+            _ => panic!("dot_inner_tag: non-struct type {:?} for {:?}", ft, exp),
         }
     }
 
     fn dot_member_full_type(&self, exp: &Exp) -> FullType {
-        match exp {
-            Exp::Dot(inner, member) => {
-                let tag = self.dot_inner_tag(inner);
-                let def = self.struct_defs.get(&tag).unwrap();
-                let mem = def.find_member(member).unwrap();
-                mem.member_full_type.clone()
-            }
-            Exp::Arrow(inner, member) => {
-                if let Exp::Var(n) = inner.as_ref() {
-                    let ft = self.get_full_type(n);
-                    if let FullType::Pointer(inner_ft) = ft {
-                        if let FullType::Struct(t) = inner_ft.as_ref() {
-                            let def = self.struct_defs.get(t).unwrap();
-                            let mem = def.find_member(member).unwrap();
-                            return mem.member_full_type.clone();
-                        }
-                    }
-                }
-                FullType::Scalar(CType::Int)
-            }
-            _ => FullType::Scalar(CType::Int),
-        }
+        self.typeof_exp(exp)
     }
 
     /// Access a struct member given the struct's base address
@@ -1561,7 +1515,7 @@ impl TackyGen {
             (second_val, first_val, first_type, second_full)
         };
         let (elem_full, scale) = match &arr_full {
-            FullType::Pointer(inner) => (inner.as_ref().clone(), inner.byte_size() as i64),
+            FullType::Pointer(inner) => (inner.as_ref().clone(), inner.byte_size_with(&self.struct_defs) as i64),
             _ => {
                 // Fallback to old approach
                 let elem_type = if let TackyVal::Var(ref name) = arr_val {
@@ -1762,7 +1716,9 @@ impl TackyGen {
                         self.emit(TackyInstr::GetAddress { src: TackyVal::Var(struct_name), dst: addr.clone() });
                         addr
                     };
-                    let result = self.fresh_tmp(CType::Pointer);
+                    let mem_ft = mem.member_full_type.clone();
+                    let addr_ft = FullType::Pointer(Box::new(mem_ft));
+                    let result = self.fresh_tmp_full(&addr_ft);
                     if mem_offset > 0 {
                         self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: struct_addr, right: TackyVal::Constant(mem_offset as i64), dst: result.clone() });
                     } else {
@@ -1777,7 +1733,9 @@ impl TackyGen {
                     let tag = match &ptr_ft { FullType::Pointer(inner) => match inner.as_ref() { FullType::Struct(t) => t.clone(), _ => panic!("") }, _ => panic!("") };
                     let def = self.struct_defs.get(&tag).cloned().unwrap();
                     let mem = def.find_member(&member).unwrap();
-                    let result = self.fresh_tmp(CType::Pointer);
+                    let mem_ft = mem.member_full_type.clone();
+                    let addr_ft = FullType::Pointer(Box::new(mem_ft));
+                    let result = self.fresh_tmp_full(&addr_ft);
                     self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: ptr_val, right: TackyVal::Constant(mem.offset as i64), dst: result.clone() });
                     return (result, CType::Pointer);
                 }
@@ -2186,6 +2144,47 @@ impl TackyGen {
     /// `base_offset` is the byte offset from the start of the array.
     /// `elem_sizes`: byte size of each sub-array level.
     /// For `int[4][2][6]`: elem_sizes = [48, 24, 4] (size of [2][6], [6], int)
+    fn emit_struct_init_at(&mut self, arr_name: &str, init: &Exp, tag: &str, base_offset: i64) {
+        if let Exp::ArrayInit(elems) = init {
+            let def = self.struct_defs.get(tag).cloned()
+                .unwrap_or_else(|| panic!("Undefined struct: {}", tag));
+            for (i, elem) in elems.iter().enumerate() {
+                if i >= def.members.len() { break; }
+                let mem = &def.members[i];
+                let mem_offset = base_offset + mem.offset as i64;
+                match elem {
+                    Exp::ArrayInit(_) if mem.member_full_type.is_array() => {
+                        let mem_elem_sizes = Self::compute_elem_sizes(&mem.member_full_type, &self.struct_defs);
+                        let inner_scalar = { let mut t = &mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
+                        self.emit_array_init_flat(arr_name, elem, inner_scalar, mem_offset, &mem_elem_sizes);
+                    }
+                    Exp::ArrayInit(_) if mem.member_full_type.is_struct() => {
+                        if let FullType::Struct(ref inner_tag) = mem.member_full_type {
+                            self.emit_struct_init_at(arr_name, elem, inner_tag, mem_offset);
+                        }
+                    }
+                    Exp::StringLiteral(s) if mem.member_full_type.is_array() => {
+                        let chars_to_copy = std::cmp::min(s.len(), mem.size);
+                        for (j, byte) in s.bytes().take(chars_to_copy).enumerate() {
+                            let src = self.fresh_tmp(CType::Char);
+                            self.emit(TackyInstr::Copy { src: TackyVal::Constant(byte as i64), dst: src.clone() });
+                            self.emit(TackyInstr::CopyToOffset { src, dst_name: arr_name.to_string(), offset: mem_offset + j as i64 });
+                        }
+                    }
+                    _ => {
+                        let (val, val_type) = self.emit_exp(elem.clone());
+                        let val_conv = self.convert_to(val, val_type, mem.member_type);
+                        self.emit(TackyInstr::CopyToOffset {
+                            src: val_conv,
+                            dst_name: arr_name.to_string(),
+                            offset: mem_offset,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     fn emit_array_init_flat(&mut self, arr_name: &str, init: &Exp, scalar_type: CType, base_offset: i64, elem_sizes: &[i64]) {
         match init {
             Exp::ArrayInit(elems) => {
@@ -2194,6 +2193,17 @@ impl TackyGen {
                 for (i, elem) in elems.iter().enumerate() {
                     let elem_offset = base_offset + (i as i64) * this_elem_size;
                     match elem {
+                        Exp::ArrayInit(_) if inner_sizes.is_empty() && scalar_type == CType::Struct => {
+                            // Struct compound initializer within array of structs
+                            // We need the struct tag — look it up from arr_name's full type
+                            let arr_ft = self.get_full_type(arr_name);
+                            let struct_tag = {
+                                let mut t = &arr_ft;
+                                while let FullType::Array { elem: e, .. } = t { t = e; }
+                                match t { FullType::Struct(tag) => tag.clone(), _ => panic!("Expected struct in array") }
+                            };
+                            self.emit_struct_init_at(arr_name, elem, &struct_tag, elem_offset);
+                        }
                         Exp::ArrayInit(_) => {
                             self.emit_array_init_flat(arr_name, elem, scalar_type, elem_offset, inner_sizes);
                         }
@@ -2253,11 +2263,11 @@ impl TackyGen {
 
     /// Compute element sizes for each array dimension.
     /// For `int[4][2][6]`: returns [48, 24, 4] (sizes of [2][6], [6], int)
-    fn compute_elem_sizes(ft: &FullType) -> Vec<i64> {
+    fn compute_elem_sizes(ft: &FullType, struct_defs: &HashMap<String, StructDef>) -> Vec<i64> {
         let mut sizes = Vec::new();
         let mut t = ft;
         while let FullType::Array { elem, .. } = t {
-            sizes.push(elem.byte_size() as i64);
+            sizes.push(elem.byte_size_with(struct_defs) as i64);
             t = elem;
         }
         sizes
@@ -2367,7 +2377,7 @@ impl TackyGen {
                     init_values.push(StaticInit::ZeroInit(total_bytes - string_bytes));
                 }
             } else if let Some(ref init_exp) = vd.init {
-                let elem_sizes = Self::compute_elem_sizes(&full_type);
+                let elem_sizes = Self::compute_elem_sizes(&full_type, &self.struct_defs);
                 Self::flatten_static_init(init_exp, base_type, &elem_sizes, &mut init_values);
                 let initialized_bytes: usize = init_values.iter().map(|v| Self::static_init_size(v)).sum();
                 if initialized_bytes < total_bytes {
@@ -2387,7 +2397,7 @@ impl TackyGen {
             let base_type = vd.var_type;
             let full_type = vd.decl_full_type.clone()
                 .unwrap_or_else(|| FullType::from_decl(base_type, vd.ptr_info, &vd.array_dims));
-            let total_bytes = full_type.byte_size();
+            let total_bytes = full_type.byte_size_with(&self.struct_defs);
             self.register_var(&vd.name, full_type.clone());
             self.array_sizes.insert(vd.name.clone(), total_bytes);
             let scalar_type = {
@@ -2429,7 +2439,7 @@ impl TackyGen {
                 }
                 // Null terminator if there's room (already zero-filled above)
             } else if let Some(init) = vd.init {
-                let elem_sizes = Self::compute_elem_sizes(&full_type);
+                let elem_sizes = Self::compute_elem_sizes(&full_type, &self.struct_defs);
                 self.emit_array_init_flat(&vd.name, &init, scalar_type, 0, &elem_sizes);
             }
             return;
@@ -2471,7 +2481,7 @@ impl TackyGen {
                             } else if let Exp::ArrayInit(ref sub_elems) = elem {
                                 if mem.member_full_type.is_array() {
                                     let scalar_t = { let mut t = &mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
-                                    let elem_sizes = Self::compute_elem_sizes(&mem.member_full_type);
+                                    let elem_sizes = Self::compute_elem_sizes(&mem.member_full_type, &self.struct_defs);
                                     let before_len: usize = init_values.iter().map(|v| Self::static_init_size(v)).sum();
                                     Self::flatten_static_init(elem, scalar_t, &elem_sizes, &mut init_values);
                                     let after_len: usize = init_values.iter().map(|v| Self::static_init_size(v)).sum();
@@ -2492,7 +2502,7 @@ impl TackyGen {
                                         if inner_mem.member_full_type.is_array() {
                                             if let Exp::ArrayInit(_) = sub_elem {
                                                 let scalar_t = { let mut t = &inner_mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
-                                                let elem_sizes = Self::compute_elem_sizes(&inner_mem.member_full_type);
+                                                let elem_sizes = Self::compute_elem_sizes(&inner_mem.member_full_type, &self.struct_defs);
                                                 Self::flatten_static_init(sub_elem, scalar_t, &elem_sizes, &mut init_values);
                                                 let written: usize = init_values.iter().map(|v| Self::static_init_size(v)).sum::<usize>();
                                                 // Pad inner member
@@ -2594,7 +2604,7 @@ impl TackyGen {
                             }
                         } else if let Exp::ArrayInit(ref sub_elems) = elem {
                             if mem_ft.is_array() {
-                                let elem_sizes = Self::compute_elem_sizes(mem_ft);
+                                let elem_sizes = Self::compute_elem_sizes(mem_ft, &self.struct_defs);
                                 let scalar_t = { let mut t = mem_ft; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
                                 self.emit_array_init_flat(&vd.name, elem, scalar_t, member.offset as i64, &elem_sizes);
                             } else if let FullType::Struct(ref inner_tag) = mem_ft {
@@ -2605,9 +2615,22 @@ impl TackyGen {
                                     if j >= inner_def.members.len() { break; }
                                     let inner_mem = &inner_def.members[j];
                                     if inner_mem.member_full_type.is_array() {
-                                        let elem_sizes = Self::compute_elem_sizes(&inner_mem.member_full_type);
+                                        let elem_sizes = Self::compute_elem_sizes(&inner_mem.member_full_type, &self.struct_defs);
                                         let scalar_t = { let mut t = &inner_mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
                                         self.emit_array_init_flat(&vd.name, sub_elem, scalar_t, (member.offset + inner_mem.offset) as i64, &elem_sizes);
+                                    } else if inner_mem.member_full_type.is_struct() {
+                                        if let (Exp::ArrayInit(_), FullType::Struct(ref nested_tag)) = (sub_elem, &inner_mem.member_full_type) {
+                                            self.emit_struct_init_at(&vd.name, sub_elem, nested_tag, (member.offset + inner_mem.offset) as i64);
+                                        } else {
+                                            let (val, val_type) = self.emit_exp(sub_elem.clone());
+                                            let target_type = inner_mem.member_type;
+                                            let val_conv = self.convert_to(val, val_type, target_type);
+                                            self.emit(TackyInstr::CopyToOffset {
+                                                src: val_conv,
+                                                dst_name: vd.name.clone(),
+                                                offset: (member.offset + inner_mem.offset) as i64,
+                                            });
+                                        }
                                     } else {
                                         let (val, val_type) = self.emit_exp(sub_elem.clone());
                                         let target_type = inner_mem.member_type;
@@ -2746,7 +2769,7 @@ impl TackyGen {
                         let base_type = vd.var_type;
                         // Build FullType from dims
                         let full_type = FullType::from_decl(base_type, vd.ptr_info, &vd.array_dims);
-                        let total_bytes = full_type.byte_size();
+                        let total_bytes = full_type.byte_size_with(&self.struct_defs);
 
                         // Register the array variable directly (no __array_storage_ indirection)
                         // The array IS the storage. It has type Array, not Pointer.
@@ -3095,7 +3118,7 @@ pub fn generate(program: Program) -> TackyProgram {
                 if let Some(ref dft) = vd.decl_full_type {
                     gen.full_types.insert(vd.name.clone(), dft.clone());
                     if dft.is_array() {
-                        gen.array_sizes.insert(vd.name.clone(), dft.byte_size());
+                        gen.array_sizes.insert(vd.name.clone(), dft.byte_size_with(&gen.struct_defs));
                     }
                     if let FullType::Struct(ref tag) = dft {
                         if let Some(def) = gen.struct_defs.get(tag) {
@@ -3191,7 +3214,7 @@ pub fn generate(program: Program) -> TackyProgram {
                                     } else {
                                         let before_len: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
                                         let scalar_t = { let mut t = &mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
-                                        let elem_sizes = TackyGen::compute_elem_sizes(&mem.member_full_type);
+                                        let elem_sizes = TackyGen::compute_elem_sizes(&mem.member_full_type, &gen.struct_defs);
                                         TackyGen::flatten_static_init(elem, scalar_t, &elem_sizes, &mut init_values);
                                         let after_len: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
                                         let array_bytes_written = after_len - before_len;
@@ -3213,7 +3236,7 @@ pub fn generate(program: Program) -> TackyProgram {
                                                     if inner_mem.member_full_type.is_array() {
                                                         let before_len: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
                                                         let sc_t = { let mut t = &inner_mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
-                                                        let es = TackyGen::compute_elem_sizes(&inner_mem.member_full_type);
+                                                        let es = TackyGen::compute_elem_sizes(&inner_mem.member_full_type, &gen.struct_defs);
                                                         TackyGen::flatten_static_init(sub_elem, sc_t, &es, &mut init_values);
                                                         let after_len: usize = init_values.iter().map(|v| TackyGen::static_init_size(v)).sum();
                                                         let ab = after_len - before_len;
@@ -3356,7 +3379,7 @@ pub fn generate(program: Program) -> TackyProgram {
                 // Build init values with proper sub-array zero-padding
                 let mut init_values: Vec<StaticInit> = Vec::new();
                 let ft = FullType::from_decl(base_type, vd.ptr_info, &vd.array_dims);
-                let elem_sizes = TackyGen::compute_elem_sizes(&ft);
+                let elem_sizes = TackyGen::compute_elem_sizes(&ft, &gen.struct_defs);
                 // Simple flatten for global arrays (they only have constant inits)
                 fn flatten_init(exp: &Exp, base_type: CType, vals: &mut Vec<StaticInit>) {
                     match exp {

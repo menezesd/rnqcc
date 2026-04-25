@@ -35,11 +35,11 @@ fn validate_extension(filename: &str) {
 }
 
 fn replace_extension(filename: &str, new_extension: &str) -> String {
-    let base = Path::new(filename)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    format!("{}.{}", base, new_extension)
+    let path = Path::new(filename);
+    path.with_extension(new_extension)
+        .to_str()
+        .unwrap()
+        .to_string()
 }
 
 fn run_command(cmd: &str) {
@@ -88,13 +88,27 @@ fn driver(target: Platform, debug: bool, stage: Stage, sources: &[&str]) {
         asm_files.push(assembly_name);
     }
 
-    if stage == Stage::Executable {
+    if stage == Stage::Object {
+        // Assemble each .s to .o
+        for asm_file in &asm_files {
+            let obj_file = replace_extension(asm_file, "o");
+            let arch_flag = match target {
+                Platform::OsX => " -arch x86_64",
+                Platform::Linux => "",
+            };
+            run_command(&format!("gcc{} -c {} -o {}", arch_flag, asm_file, obj_file));
+            if !debug {
+                let _ = std::fs::remove_file(asm_file);
+            }
+        }
+    } else if stage == Stage::Executable {
         // Output name is based on the first source file
         let output_file = Path::new(sources[0])
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("a.out");
-        assemble_and_link(&asm_files, output_file, &target, !debug);
+            .with_extension("")
+            .to_str()
+            .unwrap_or("a.out")
+            .to_string();
+        assemble_and_link(&asm_files, &output_file, &target, !debug);
     }
 }
 
@@ -149,7 +163,7 @@ fn main() {
     let stage = if matches.is_present("emit_asm") {
         Stage::Assembly
     } else if matches.is_present("compile_only") {
-        Stage::Assembly // compile to .s, then assemble to .o
+        Stage::Object
     } else {
         match matches.value_of("stage") {
             Some("lex") => Stage::Lex,

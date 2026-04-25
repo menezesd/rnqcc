@@ -269,6 +269,7 @@ impl Lexer {
             "char" => Token::KWChar,
             "sizeof" => Token::KWSizeOf,
             "struct" => Token::KWStruct,
+            "union" => Token::KWUnion,
             _ => Token::Identifier(word),
         }
     }

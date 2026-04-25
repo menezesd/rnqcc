@@ -933,7 +933,7 @@ impl TackyGen {
                             _ => { tacky_args.push(val); continue; }
                         };
                         if let Some(def) = self.struct_defs.get(&tag).cloned() {
-                            let classes = def.classify();
+                            let classes = def.classify_with(&self.struct_defs);
                             if classes.len() == 1 && classes[0] == ParamClass::Memory {
                                 // Large struct: decompose into 8-byte chunks for stack passing
                                 let struct_addr = self.fresh_tmp(CType::Pointer);
@@ -2971,7 +2971,7 @@ impl TackyGen {
 
             if let FullType::Struct(ref tag) = ft {
                 if let Some(def) = self.struct_defs.get(tag).cloned() {
-                    let classes = def.classify();
+                    let classes = def.classify_with(&self.struct_defs);
                     if classes.len() == 1 && classes[0] == ParamClass::Memory {
                         // Large struct: decompose into 8-byte eightbyte params (all on stack)
                         let num_eightbytes = (def.size + 7) / 8;
@@ -3000,7 +3000,7 @@ impl TackyGen {
                         struct_param_groups.push((group_start, classes.len(), is_sse_vec));
                     }
                     // Register the original struct var — allocate enough for eightbyte storage
-                    let classes = def.classify();
+                    let classes = def.classify_with(&self.struct_defs);
                     let alloc_size = std::cmp::max(def.size, classes.len() * 8);
                     struct_param_fixups.push((name.clone(), tag.clone(), def));
                     self.register_var(name, ft.clone());
@@ -3020,7 +3020,7 @@ impl TackyGen {
 
         // Reassemble struct params from eightbytes
         for (name, tag, def) in &struct_param_fixups {
-            let classes = def.classify();
+            let classes = def.classify_with(&self.struct_defs);
             let num_ebs = if classes.len() == 1 && classes[0] == ParamClass::Memory {
                 (def.size + 7) / 8
             } else {

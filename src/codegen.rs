@@ -68,7 +68,7 @@ fn convert_double_val(val: &TackyVal, static_doubles: &mut Vec<(String, f64)>) -
 fn get_struct_classes(name: &str, var_struct_tags: &HashMap<String, String>, struct_defs: &HashMap<String, StructDef>) -> Option<Vec<ParamClass>> {
     if let Some(tag) = var_struct_tags.get(name) {
         if let Some(def) = struct_defs.get(tag) {
-            return Some(def.classify());
+            return Some(def.classify_with(struct_defs));
         }
     }
     None

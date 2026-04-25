@@ -180,7 +180,7 @@ impl Parser {
 
     fn parse_type(&mut self) -> CType {
         if self.at(&Token::KWVoid) { self.advance(); return CType::Void; }
-        if self.at(&Token::KWStruct) {
+        if self.at(&Token::KWStruct) || self.at(&Token::KWUnion) {
             let (ct, _) = self.parse_struct_type_specifier();
             return ct;
         }

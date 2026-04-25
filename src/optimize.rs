@@ -97,7 +97,7 @@ fn constant_folding(instructions: Vec<TackyInstr>, types: &std::collections::Has
     let mut const_map: std::collections::HashMap<String, (TackyVal, CType)> = std::collections::HashMap::new();
 
     instructions.into_iter().map(|instr| {
-        // At labels, clear the const_map (control flow can merge)
+        // At labels, clear the const_map (control flow can merge with different values)
         if let TackyInstr::Label(_) = &instr {
             const_map.clear();
             return instr;

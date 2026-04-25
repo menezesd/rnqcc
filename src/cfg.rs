@@ -159,11 +159,18 @@ pub fn find_aliased_vars(instructions: &[TackyInstr], static_vars: &HashSet<Stri
 // Copy Propagation
 // ============================================================
 
-/// A copy instruction: dst = src
+/// A copy instruction: dst = src (src can be a variable or constant)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CopyInstr {
-    pub src: String,
+    pub src: CopySrc,
     pub dst: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CopySrc {
+    Var(String),
+    Constant(i64),
+    DoubleConstant(u64), // store as bits for Eq/Hash
 }
 
 pub fn copy_propagation(cfg: &mut CFG, aliased_vars: &HashSet<String>, types: &HashMap<String, CType>) {
@@ -227,13 +234,21 @@ fn collect_all_copies(cfg: &CFG, types: &HashMap<String, CType>) -> HashSet<Copy
     let mut copies = HashSet::new();
     for block in &cfg.blocks {
         for instr in &block.instructions {
-            if let TackyInstr::Copy { src: TackyVal::Var(s), dst: TackyVal::Var(d) } = instr {
-                // Only include if same type or same signedness
-                let st = types.get(s).copied().unwrap_or(CType::Int);
-                let dt = types.get(d).copied().unwrap_or(CType::Int);
-                if st == dt || (st.is_signed() == dt.is_signed() && st.size() == dt.size()) {
-                    copies.insert(CopyInstr { src: s.clone(), dst: d.clone() });
+            match instr {
+                TackyInstr::Copy { src: TackyVal::Var(s), dst: TackyVal::Var(d) } => {
+                    let st = types.get(s).copied().unwrap_or(CType::Int);
+                    let dt = types.get(d).copied().unwrap_or(CType::Int);
+                    if st == dt || (st.is_signed() == dt.is_signed() && st.size() == dt.size()) {
+                        copies.insert(CopyInstr { src: CopySrc::Var(s.clone()), dst: d.clone() });
+                    }
                 }
+                TackyInstr::Copy { src: TackyVal::Constant(c), dst: TackyVal::Var(d) } => {
+                    copies.insert(CopyInstr { src: CopySrc::Constant(*c), dst: d.clone() });
+                }
+                TackyInstr::Copy { src: TackyVal::DoubleConstant(c), dst: TackyVal::Var(d) } => {
+                    copies.insert(CopyInstr { src: CopySrc::DoubleConstant(c.to_bits()), dst: d.clone() });
+                }
+                _ => {}
             }
         }
     }
@@ -272,39 +287,65 @@ fn transfer_copies(
         annotations.insert((block.id, i), current.clone());
 
         match instr {
-            TackyInstr::Copy { src: TackyVal::Var(s), dst: TackyVal::Var(d) } => {
-                let st = types.get(s).copied().unwrap_or(CType::Int);
-                let dt = types.get(d).copied().unwrap_or(CType::Int);
-                // Check if this is a redundant copy (already in reaching)
-                let copy = CopyInstr { src: s.clone(), dst: d.clone() };
-                if current.contains(&copy) || (current.contains(&CopyInstr { src: d.clone(), dst: s.clone() }) && s == d) {
-                    // Skip — redundant
-                } else {
-                    // Kill copies to/from dst
-                    current.retain(|c| c.src != *d && c.dst != *d);
-                    // Add if same type/signedness
-                    if st == dt || (st.is_signed() == dt.is_signed() && st.size() == dt.size()) {
+            TackyInstr::Copy { src, dst: TackyVal::Var(d) } => {
+                let copy_src = match src {
+                    TackyVal::Var(s) => {
+                        let st = types.get(s).copied().unwrap_or(CType::Int);
+                        let dt = types.get(d).copied().unwrap_or(CType::Int);
+                        if st == dt || (st.is_signed() == dt.is_signed() && st.size() == dt.size()) {
+                            Some(CopySrc::Var(s.clone()))
+                        } else { None }
+                    }
+                    TackyVal::Constant(c) => Some(CopySrc::Constant(*c)),
+                    TackyVal::DoubleConstant(c) => Some(CopySrc::DoubleConstant(c.to_bits())),
+                };
+                if let Some(cs) = copy_src {
+                    let copy = CopyInstr { src: cs.clone(), dst: d.clone() };
+                    if current.contains(&copy) {
+                        // Redundant
+                    } else {
+                        // Kill copies to/from dst
+                        current.retain(|c| {
+                            let src_match = match &c.src { CopySrc::Var(v) => v == d, _ => false };
+                            c.dst != *d && !src_match
+                        });
                         current.insert(copy);
                     }
+                } else {
+                    // Type conversion copy — kill copies to/from dst only
+                    current.retain(|c| {
+                        let src_match = match &c.src { CopySrc::Var(v) => v == d, _ => false };
+                        c.dst != *d && !src_match
+                    });
                 }
             }
             TackyInstr::FunCall { dst, .. } => {
                 // Kill copies involving aliased vars or dst
                 current.retain(|c| {
-                    !aliased.contains(&c.src) && !aliased.contains(&c.dst)
+                    let src_aliased = match &c.src { CopySrc::Var(v) => aliased.contains(v), _ => false };
+                    !src_aliased && !aliased.contains(&c.dst)
                 });
                 if let TackyVal::Var(d) = dst {
-                    current.retain(|c| c.src != *d && c.dst != *d);
+                    current.retain(|c| {
+                        let src_match = match &c.src { CopySrc::Var(v) => v == d, _ => false };
+                        c.dst != *d && !src_match
+                    });
                 }
             }
             TackyInstr::Store { .. } => {
                 // Kill copies involving aliased vars
-                current.retain(|c| !aliased.contains(&c.src) && !aliased.contains(&c.dst));
+                current.retain(|c| {
+                    let src_aliased = match &c.src { CopySrc::Var(v) => aliased.contains(v), _ => false };
+                    !src_aliased && !aliased.contains(&c.dst)
+                });
             }
             _ => {
                 // Kill copies to/from dst if instruction writes to a variable
                 if let Some(d) = get_instr_dst(instr) {
-                    current.retain(|c| c.src != d && c.dst != d);
+                    current.retain(|c| {
+                        let src_match = match &c.src { CopySrc::Var(v) => v == &d, _ => false };
+                        c.dst != d && !src_match
+                    });
                 }
             }
         }
@@ -339,7 +380,11 @@ fn replace_operand(val: &TackyVal, reaching: &HashSet<CopyInstr>) -> TackyVal {
     if let TackyVal::Var(name) = val {
         for copy in reaching {
             if copy.dst == *name {
-                return TackyVal::Var(copy.src.clone());
+                return match &copy.src {
+                    CopySrc::Var(s) => TackyVal::Var(s.clone()),
+                    CopySrc::Constant(c) => TackyVal::Constant(*c),
+                    CopySrc::DoubleConstant(bits) => TackyVal::DoubleConstant(f64::from_bits(*bits)),
+                };
             }
         }
     }
@@ -349,12 +394,18 @@ fn replace_operand(val: &TackyVal, reaching: &HashSet<CopyInstr>) -> TackyVal {
 fn rewrite_instruction(instr: &TackyInstr, reaching: &HashSet<CopyInstr>) -> Option<TackyInstr> {
     match instr {
         TackyInstr::Copy { src, dst } => {
-            if let (TackyVal::Var(s), TackyVal::Var(d)) = (src, dst) {
-                // Check if this copy is redundant (src and dst already equal via reaching copies)
-                let rev = CopyInstr { src: d.clone(), dst: s.clone() };
-                let fwd = CopyInstr { src: s.clone(), dst: d.clone() };
-                if reaching.contains(&rev) || reaching.contains(&fwd) {
-                    return None; // Eliminate redundant copy
+            if let TackyVal::Var(d) = dst {
+                // Check if this copy is redundant
+                let copy_src = match src {
+                    TackyVal::Var(s) => Some(CopySrc::Var(s.clone())),
+                    TackyVal::Constant(c) => Some(CopySrc::Constant(*c)),
+                    TackyVal::DoubleConstant(c) => Some(CopySrc::DoubleConstant(c.to_bits())),
+                };
+                if let Some(cs) = copy_src {
+                    let fwd = CopyInstr { src: cs, dst: d.clone() };
+                    if reaching.contains(&fwd) {
+                        return None; // Eliminate redundant copy
+                    }
                 }
             }
             let new_src = replace_operand(src, reaching);

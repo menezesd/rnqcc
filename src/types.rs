@@ -780,6 +780,11 @@ pub struct TackyFunction {
     pub body: Vec<TackyInstr>,
     /// Params that must be passed on the stack (MEMORY-class struct eightbytes)
     pub stack_params: std::collections::HashSet<String>,
+    /// Groups of consecutive params that form struct eightbytes.
+    /// Each (start_idx, count, is_sse_vec) means params[start..start+count]
+    /// must ALL fit in registers or ALL go on the stack.
+    /// is_sse_vec indicates which eightbytes need SSE vs integer registers.
+    pub struct_param_groups: Vec<(usize, usize, Vec<bool>)>,
 }
 
 #[derive(Debug)]

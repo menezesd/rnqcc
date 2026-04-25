@@ -2952,6 +2952,7 @@ impl TackyGen {
         // Register params — decompose struct params into eightbytes
         let mut tacky_params = Vec::new();
         let mut stack_params = std::collections::HashSet::new();
+        let mut struct_param_groups: Vec<(usize, usize, Vec<bool>)> = Vec::new();
         if let Some(ref ret_ptr) = hidden_ret_ptr_name {
             tacky_params.push(ret_ptr.clone());
         }
@@ -2978,6 +2979,8 @@ impl TackyGen {
                         }
                     } else {
                         // Decompose into eightbyte params
+                        let group_start = tacky_params.len();
+                        let is_sse_vec: Vec<bool> = classes.iter().map(|c| *c == ParamClass::Sse).collect();
                         for (eb_idx, class) in classes.iter().enumerate() {
                             let param_name = format!("{}_eb{}", name, eb_idx);
                             let remaining = def.size as i64 - (eb_idx * 8) as i64;
@@ -2989,6 +2992,7 @@ impl TackyGen {
                             self.symbol_types.insert(param_name.clone(), param_type);
                             tacky_params.push(param_name);
                         }
+                        struct_param_groups.push((group_start, classes.len(), is_sse_vec));
                     }
                     // Register the original struct var — allocate enough for eightbyte storage
                     let classes = def.classify();
@@ -3037,6 +3041,7 @@ impl TackyGen {
             global: true, // overridden by linkage map in generate()
             body: std::mem::take(&mut self.instructions),
             stack_params,
+            struct_param_groups,
         })
     }
 }

@@ -334,7 +334,14 @@ impl Resolver {
                         }
                     }
                     self.functions.insert(fd.name.clone(), fd.params.len());
-                    BlockItem::Declaration(Declaration::FunDecl(fd))
+                    let resolved_rft = fd.return_full_type.map(|ft| self.resolve_struct_tags_in_ft(ft));
+                    let resolved_pfts: Vec<FullType> = fd.param_full_types.into_iter()
+                        .map(|ft| self.resolve_struct_tags_in_ft(ft)).collect();
+                    BlockItem::Declaration(Declaration::FunDecl(FunctionDeclaration {
+                        return_full_type: resolved_rft,
+                        param_full_types: resolved_pfts,
+                        ..fd
+                    }))
                 }
                 BlockItem::Declaration(Declaration::StructDecl(sd)) => {
                     let unique_tag = self.declare_tag(&sd.tag);

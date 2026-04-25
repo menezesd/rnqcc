@@ -399,15 +399,21 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
         }
         TackyInstr::AddPtr { ptr, index, scale, dst } => {
             // ptr + index * scale → dst
-            // For now: Mov ptr to AX, Mov index to DX, imulq $scale, %rdx, leaq (%rax,%rdx,1), dst
-            // Or simpler: Mul + Add
-            out.push(AsmInstr::Mov(AsmType::Quadword, convert_val(ptr), AsmOperand::Reg(Reg::AX)));
-            out.push(AsmInstr::Mov(AsmType::Quadword, convert_val(index), AsmOperand::Reg(Reg::DX)));
-            if *scale == 1 || *scale == 2 || *scale == 4 || *scale == 8 {
-                out.push(AsmInstr::Lea(AsmOperand::Indexed(Reg::AX, Reg::DX, *scale as i32), convert_val(dst)));
+            // If index is a constant, compute offset at compile time
+            if let TackyVal::Constant(idx) = index {
+                let offset = *idx * *scale;
+                out.push(AsmInstr::Mov(AsmType::Quadword, convert_val(ptr), AsmOperand::Reg(Reg::AX)));
+                out.push(AsmInstr::Binary(AsmType::Quadword, AsmBinaryOp::Add, AsmOperand::Imm(offset), AsmOperand::Reg(Reg::AX)));
+                out.push(AsmInstr::Mov(AsmType::Quadword, AsmOperand::Reg(Reg::AX), convert_val(dst)));
             } else {
-                out.push(AsmInstr::Binary(AsmType::Quadword, AsmBinaryOp::Mul, AsmOperand::Imm(*scale), AsmOperand::Reg(Reg::DX)));
-                out.push(AsmInstr::Lea(AsmOperand::Indexed(Reg::AX, Reg::DX, 1), convert_val(dst)));
+                out.push(AsmInstr::Mov(AsmType::Quadword, convert_val(ptr), AsmOperand::Reg(Reg::AX)));
+                out.push(AsmInstr::Mov(AsmType::Quadword, convert_val(index), AsmOperand::Reg(Reg::DX)));
+                if *scale == 1 || *scale == 2 || *scale == 4 || *scale == 8 {
+                    out.push(AsmInstr::Lea(AsmOperand::Indexed(Reg::AX, Reg::DX, *scale as i32), convert_val(dst)));
+                } else {
+                    out.push(AsmInstr::Binary(AsmType::Quadword, AsmBinaryOp::Mul, AsmOperand::Imm(*scale), AsmOperand::Reg(Reg::DX)));
+                    out.push(AsmInstr::Lea(AsmOperand::Indexed(Reg::AX, Reg::DX, 1), convert_val(dst)));
+                }
             }
         }
         TackyInstr::DoubleToUInt { src, dst } => {

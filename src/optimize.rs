@@ -204,6 +204,36 @@ fn resolve_constants(instr: &TackyInstr, const_map: &std::collections::HashMap<S
         TackyInstr::Copy { src, dst } => {
             TackyInstr::Copy { src: resolve_val(src, const_map), dst: dst.clone() }
         }
+        TackyInstr::AddPtr { ptr, index, scale, dst } => {
+            TackyInstr::AddPtr {
+                ptr: resolve_val(ptr, const_map),
+                index: resolve_val(index, const_map),
+                scale: *scale,
+                dst: dst.clone(),
+            }
+        }
+        TackyInstr::Store { src, dst_ptr } => {
+            TackyInstr::Store {
+                src: resolve_val(src, const_map),
+                dst_ptr: resolve_val(dst_ptr, const_map),
+            }
+        }
+        TackyInstr::Load { src_ptr, dst } => {
+            TackyInstr::Load {
+                src_ptr: resolve_val(src_ptr, const_map),
+                dst: dst.clone(),
+            }
+        }
+        TackyInstr::FunCall { name, args, dst, stack_arg_indices, struct_arg_groups } => {
+            let new_args: Vec<TackyVal> = args.iter().map(|a| resolve_val(a, const_map)).collect();
+            TackyInstr::FunCall {
+                name: name.clone(),
+                args: new_args,
+                dst: dst.clone(),
+                stack_arg_indices: stack_arg_indices.clone(),
+                struct_arg_groups: struct_arg_groups.clone(),
+            }
+        }
         other => other.clone(),
     }
 }

@@ -568,12 +568,55 @@ fn convert_function(func: &TackyFunction, types: &HashMap<String, CType>, arr_si
     let mut xmm_reg_idx = 0usize;
     let mut stack_arg_idx = 0usize;
 
-    for param in &func.params {
-        // MEMORY-class struct eightbytes always go on the stack
-        if func.stack_params.contains(param) {
-            let offset = 16 + (stack_arg_idx * 8) as i32;
+    // Pre-compute which params must go on stack due to struct group overflow
+    let mut force_stack: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    {
+        let mut sim_int_idx = 0usize;
+        let mut sim_xmm_idx = 0usize;
+        // Account for hidden return pointer
+        for (i, param) in func.params.iter().enumerate() {
+            if func.stack_params.contains(param) {
+                force_stack.insert(i);
+                continue;
+            }
+            // Check if this param is part of a struct group
+            let group = func.struct_param_groups.iter().find(|(start, count, _)| i >= *start && i < *start + *count);
+            if let Some((start, count, is_sse_vec)) = group {
+                if i == *start {
+                    // First eightbyte in group — check if ALL fit
+                    let int_needed: usize = is_sse_vec.iter().filter(|&&is_sse| !is_sse).count();
+                    let sse_needed: usize = is_sse_vec.iter().filter(|&&is_sse| is_sse).count();
+                    if sim_int_idx + int_needed <= 6 && sim_xmm_idx + sse_needed <= 8 {
+                        // All fit — consume registers
+                        sim_int_idx += int_needed;
+                        sim_xmm_idx += sse_needed;
+                    } else {
+                        // Don't fit — force all to stack
+                        for j in *start..*start + *count {
+                            force_stack.insert(j);
+                        }
+                    }
+                }
+                // Skip non-first eightbytes (already handled)
+                continue;
+            }
+            // Regular param
             let t: AsmType = types.get(param).copied().unwrap_or(CType::Int).into();
-            instructions.push(AsmInstr::Mov(AsmType::Quadword, AsmOperand::Stack(offset), AsmOperand::Pseudo(param.clone())));
+            if t == AsmType::Double {
+                if sim_xmm_idx < 8 { sim_xmm_idx += 1; }
+                // else overflow
+            } else {
+                if sim_int_idx < 6 { sim_int_idx += 1; }
+            }
+        }
+    }
+
+    for (i, param) in func.params.iter().enumerate() {
+        if force_stack.contains(&i) || func.stack_params.contains(param) {
+            let offset = 16 + (stack_arg_idx * 8) as i32;
+            let t: AsmType = types.get(param).copied().unwrap_or(CType::Long).into();
+            let mov_type = if t == AsmType::Double { AsmType::Double } else { t };
+            instructions.push(AsmInstr::Mov(mov_type, AsmOperand::Stack(offset), AsmOperand::Pseudo(param.clone())));
             stack_arg_idx += 1;
             continue;
         }

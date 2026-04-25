@@ -28,14 +28,15 @@ pub fn optimize_program(program: &mut TackyProgram, flags: &OptimizationFlags) {
     if !flags.any_enabled() {
         return;
     }
+    let types = program.symbol_types.clone();
     for top in &mut program.top_level {
         if let TackyTopLevel::Function(func) = top {
-            optimize_function(func, flags);
+            optimize_function(func, flags, &types);
         }
     }
 }
 
-fn optimize_function(func: &mut TackyFunction, flags: &OptimizationFlags) {
+fn optimize_function(func: &mut TackyFunction, flags: &OptimizationFlags, types: &std::collections::HashMap<String, CType>) {
     if func.body.is_empty() {
         return;
     }
@@ -45,7 +46,7 @@ fn optimize_function(func: &mut TackyFunction, flags: &OptimizationFlags) {
 
         // Constant folding operates on flat instruction list
         if flags.fold_constants {
-            func.body = constant_folding(std::mem::take(&mut func.body));
+            func.body = constant_folding(std::mem::take(&mut func.body), types);
         }
 
         // The other three optimizations use control-flow graphs
@@ -67,9 +68,9 @@ fn optimize_function(func: &mut TackyFunction, flags: &OptimizationFlags) {
 // Constant Folding
 // ============================================================
 
-fn constant_folding(instructions: Vec<TackyInstr>) -> Vec<TackyInstr> {
-    // Track which variables hold known constant values
-    let mut const_map: std::collections::HashMap<String, TackyVal> = std::collections::HashMap::new();
+fn constant_folding(instructions: Vec<TackyInstr>, types: &std::collections::HashMap<String, CType>) -> Vec<TackyInstr> {
+    // Track which variables hold known constant values, along with their type
+    let mut const_map: std::collections::HashMap<String, (TackyVal, CType)> = std::collections::HashMap::new();
 
     instructions.into_iter().map(|instr| {
         // At labels, clear the const_map (control flow can merge)
@@ -84,19 +85,30 @@ fn constant_folding(instructions: Vec<TackyInstr>) -> Vec<TackyInstr> {
             const_map.clear();
         }
 
+        // Capture source operand types before resolution (for typed folding)
+        let src_type_hint = match &instr {
+            TackyInstr::Binary { left, right, .. } => {
+                let lt = resolve_val_type(left, &const_map, types);
+                let rt = resolve_val_type(right, &const_map, types);
+                Some(CType::common(lt, rt))
+            }
+            _ => None,
+        };
+
         // First, try to resolve operands using known constants
         let instr = resolve_constants(&instr, &const_map);
 
         // Then fold the instruction
-        let folded = fold_instruction(instr);
+        let folded = fold_instruction(instr, types, src_type_hint);
 
         // Track constants: if Copy(Constant(x), Var(v)), record v = x
         match &folded {
             TackyInstr::Copy { src: TackyVal::Constant(c), dst: TackyVal::Var(name) } => {
-                const_map.insert(name.clone(), TackyVal::Constant(*c));
+                let t = types.get(name).copied().unwrap_or(CType::Int);
+                const_map.insert(name.clone(), (TackyVal::Constant(*c), t));
             }
             TackyInstr::Copy { src: TackyVal::DoubleConstant(d), dst: TackyVal::Var(name) } => {
-                const_map.insert(name.clone(), TackyVal::DoubleConstant(*d));
+                const_map.insert(name.clone(), (TackyVal::DoubleConstant(*d), CType::Double));
             }
             // Any instruction that writes to a variable invalidates our knowledge
             _ => {
@@ -110,7 +122,7 @@ fn constant_folding(instructions: Vec<TackyInstr>) -> Vec<TackyInstr> {
     }).collect()
 }
 
-fn resolve_constants(instr: &TackyInstr, const_map: &std::collections::HashMap<String, TackyVal>) -> TackyInstr {
+fn resolve_constants(instr: &TackyInstr, const_map: &std::collections::HashMap<String, (TackyVal, CType)>) -> TackyInstr {
     // Replace variable operands with their known constant values
     match instr {
         TackyInstr::Binary { op, left, right, dst } => {
@@ -159,13 +171,25 @@ fn resolve_constants(instr: &TackyInstr, const_map: &std::collections::HashMap<S
     }
 }
 
-fn resolve_val(val: &TackyVal, const_map: &std::collections::HashMap<String, TackyVal>) -> TackyVal {
+fn resolve_val(val: &TackyVal, const_map: &std::collections::HashMap<String, (TackyVal, CType)>) -> TackyVal {
     if let TackyVal::Var(name) = val {
-        if let Some(cval) = const_map.get(name) {
+        if let Some((cval, _)) = const_map.get(name) {
             return cval.clone();
         }
     }
     val.clone()
+}
+
+fn resolve_val_type(val: &TackyVal, const_map: &std::collections::HashMap<String, (TackyVal, CType)>, types: &std::collections::HashMap<String, CType>) -> CType {
+    if let TackyVal::Var(name) = val {
+        if let Some((_, t)) = const_map.get(name) {
+            return *t;
+        }
+        if let Some(t) = types.get(name) {
+            return *t;
+        }
+    }
+    CType::Int
 }
 
 fn get_dst_name(instr: &TackyInstr) -> Option<String> {
@@ -187,12 +211,16 @@ fn get_dst_name(instr: &TackyInstr) -> Option<String> {
     }
 }
 
-fn fold_instruction(instr: TackyInstr) -> TackyInstr {
+fn fold_instruction(instr: TackyInstr, types: &std::collections::HashMap<String, CType>, src_type_hint: Option<CType>) -> TackyInstr {
     match instr {
         TackyInstr::Binary { op, left, right, dst } => {
             // Try integer constant folding
             if let (Some(l), Some(r)) = (const_val(&left), const_val(&right)) {
-                if let Some(result) = eval_binary(&op, l, r) {
+                // Determine the type of the operation from the destination
+                let dst_type = if let TackyVal::Var(ref n) = dst {
+                    types.get(n).copied().unwrap_or(CType::Int)
+                } else { CType::Int };
+                if let Some(result) = eval_binary_typed(&op, l, r, dst_type, src_type_hint) {
                     return TackyInstr::Copy { src: TackyVal::Constant(result), dst };
                 }
             }
@@ -292,6 +320,95 @@ fn fold_instruction(instr: TackyInstr) -> TackyInstr {
 fn const_val(val: &TackyVal) -> Option<i64> {
     match val {
         TackyVal::Constant(c) => Some(*c),
+        _ => None,
+    }
+}
+
+fn is_comparison(op: &TackyBinaryOp) -> bool {
+    matches!(op, TackyBinaryOp::Equal | TackyBinaryOp::NotEqual |
+        TackyBinaryOp::LessThan | TackyBinaryOp::GreaterThan |
+        TackyBinaryOp::LessEqual | TackyBinaryOp::GreaterEqual)
+}
+
+fn eval_binary_typed(op: &TackyBinaryOp, l: i64, r: i64, dst_type: CType, src_type_hint: Option<CType>) -> Option<i64> {
+    // For comparisons, use the source operand type (not the int result type)
+    let op_type = if is_comparison(op) {
+        src_type_hint.unwrap_or(dst_type)
+    } else {
+        dst_type
+    };
+
+    match op_type {
+        CType::Int | CType::Char | CType::SChar => eval_binary_i32(op, l as i32, r as i32).map(|v| v as i64),
+        CType::UInt | CType::UChar => eval_binary_u32(op, l as u32, r as u32).map(|v| v as i64),
+        CType::Long => eval_binary(op, l, r),
+        CType::ULong => eval_binary_u64(op, l as u64, r as u64).map(|v| v as i64),
+        _ => eval_binary(op, l, r),
+    }
+}
+
+fn eval_binary_i32(op: &TackyBinaryOp, l: i32, r: i32) -> Option<i32> {
+    match op {
+        TackyBinaryOp::Add => Some(l.wrapping_add(r)),
+        TackyBinaryOp::Sub => Some(l.wrapping_sub(r)),
+        TackyBinaryOp::Mul => Some(l.wrapping_mul(r)),
+        TackyBinaryOp::Div => if r == 0 { None } else { Some(l.wrapping_div(r)) },
+        TackyBinaryOp::Mod => if r == 0 { None } else { Some(l.wrapping_rem(r)) },
+        TackyBinaryOp::BitwiseAnd => Some(l & r),
+        TackyBinaryOp::BitwiseOr => Some(l | r),
+        TackyBinaryOp::BitwiseXor => Some(l ^ r),
+        TackyBinaryOp::ShiftLeft => Some(l.wrapping_shl(r as u32)),
+        TackyBinaryOp::ShiftRight => Some(l.wrapping_shr(r as u32)),
+        TackyBinaryOp::Equal => Some(if l == r { 1 } else { 0 }),
+        TackyBinaryOp::NotEqual => Some(if l != r { 1 } else { 0 }),
+        TackyBinaryOp::LessThan => Some(if l < r { 1 } else { 0 }),
+        TackyBinaryOp::GreaterThan => Some(if l > r { 1 } else { 0 }),
+        TackyBinaryOp::LessEqual => Some(if l <= r { 1 } else { 0 }),
+        TackyBinaryOp::GreaterEqual => Some(if l >= r { 1 } else { 0 }),
+        _ => None,
+    }
+}
+
+fn eval_binary_u32(op: &TackyBinaryOp, l: u32, r: u32) -> Option<u32> {
+    match op {
+        TackyBinaryOp::Add => Some(l.wrapping_add(r)),
+        TackyBinaryOp::Sub => Some(l.wrapping_sub(r)),
+        TackyBinaryOp::Mul => Some(l.wrapping_mul(r)),
+        TackyBinaryOp::Div => if r == 0 { None } else { Some(l / r) },
+        TackyBinaryOp::Mod => if r == 0 { None } else { Some(l % r) },
+        TackyBinaryOp::BitwiseAnd => Some(l & r),
+        TackyBinaryOp::BitwiseOr => Some(l | r),
+        TackyBinaryOp::BitwiseXor => Some(l ^ r),
+        TackyBinaryOp::ShiftLeft => Some(l.wrapping_shl(r)),
+        TackyBinaryOp::ShiftRight => Some(l.wrapping_shr(r)),
+        TackyBinaryOp::Equal => Some(if l == r { 1 } else { 0 }),
+        TackyBinaryOp::NotEqual => Some(if l != r { 1 } else { 0 }),
+        TackyBinaryOp::LessThan => Some(if l < r { 1 } else { 0 }),
+        TackyBinaryOp::GreaterThan => Some(if l > r { 1 } else { 0 }),
+        TackyBinaryOp::LessEqual => Some(if l <= r { 1 } else { 0 }),
+        TackyBinaryOp::GreaterEqual => Some(if l >= r { 1 } else { 0 }),
+        _ => None,
+    }
+}
+
+fn eval_binary_u64(op: &TackyBinaryOp, l: u64, r: u64) -> Option<u64> {
+    match op {
+        TackyBinaryOp::Add => Some(l.wrapping_add(r)),
+        TackyBinaryOp::Sub => Some(l.wrapping_sub(r)),
+        TackyBinaryOp::Mul => Some(l.wrapping_mul(r)),
+        TackyBinaryOp::Div => if r == 0 { None } else { Some(l / r) },
+        TackyBinaryOp::Mod => if r == 0 { None } else { Some(l % r) },
+        TackyBinaryOp::BitwiseAnd => Some(l & r),
+        TackyBinaryOp::BitwiseOr => Some(l | r),
+        TackyBinaryOp::BitwiseXor => Some(l ^ r),
+        TackyBinaryOp::ShiftLeft => Some(l.wrapping_shl(r as u32)),
+        TackyBinaryOp::ShiftRight => Some(l.wrapping_shr(r as u32)),
+        TackyBinaryOp::Equal => Some(if l == r { 1 } else { 0 }),
+        TackyBinaryOp::NotEqual => Some(if l != r { 1 } else { 0 }),
+        TackyBinaryOp::LessThan => Some(if l < r { 1 } else { 0 }),
+        TackyBinaryOp::GreaterThan => Some(if l > r { 1 } else { 0 }),
+        TackyBinaryOp::LessEqual => Some(if l <= r { 1 } else { 0 }),
+        TackyBinaryOp::GreaterEqual => Some(if l >= r { 1 } else { 0 }),
         _ => None,
     }
 }

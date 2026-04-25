@@ -2292,8 +2292,8 @@ impl TackyGen {
                 }
             }
             Exp::StringLiteral(s) => {
-                let this_elem_size = if !elem_sizes.is_empty() { elem_sizes[0] } else { s.len() as i64 + 1 };
-                let chars_to_copy = std::cmp::min(s.len(), this_elem_size as usize);
+                // String literal fills the array; use its own length, not per-element size
+                let chars_to_copy = s.len();
                 let char_type = if scalar_type == CType::UChar { CType::UChar } else { CType::Char };
                 for (i, byte) in s.bytes().take(chars_to_copy).enumerate() {
                     let src = self.fresh_tmp(char_type);

@@ -234,21 +234,14 @@ fn collect_all_copies(cfg: &CFG, types: &HashMap<String, CType>) -> HashSet<Copy
     let mut copies = HashSet::new();
     for block in &cfg.blocks {
         for instr in &block.instructions {
-            match instr {
-                TackyInstr::Copy { src: TackyVal::Var(s), dst: TackyVal::Var(d) } => {
-                    let st = types.get(s).copied().unwrap_or(CType::Int);
-                    let dt = types.get(d).copied().unwrap_or(CType::Int);
-                    if st == dt || (st.is_signed() == dt.is_signed() && st.size() == dt.size()) {
-                        copies.insert(CopyInstr { src: CopySrc::Var(s.clone()), dst: d.clone() });
-                    }
+            // Only track variable-to-variable copies (not constant assignments)
+            // Constant propagation is handled by the constant folding pass
+            if let TackyInstr::Copy { src: TackyVal::Var(s), dst: TackyVal::Var(d) } = instr {
+                let st = types.get(s).copied().unwrap_or(CType::Int);
+                let dt = types.get(d).copied().unwrap_or(CType::Int);
+                if st == dt || (st.is_signed() == dt.is_signed() && st.size() == dt.size()) {
+                    copies.insert(CopyInstr { src: CopySrc::Var(s.clone()), dst: d.clone() });
                 }
-                TackyInstr::Copy { src: TackyVal::Constant(c), dst: TackyVal::Var(d) } => {
-                    copies.insert(CopyInstr { src: CopySrc::Constant(*c), dst: d.clone() });
-                }
-                TackyInstr::Copy { src: TackyVal::DoubleConstant(c), dst: TackyVal::Var(d) } => {
-                    copies.insert(CopyInstr { src: CopySrc::DoubleConstant(c.to_bits()), dst: d.clone() });
-                }
-                _ => {}
             }
         }
     }
@@ -287,24 +280,13 @@ fn transfer_copies(
         annotations.insert((block.id, i), current.clone());
 
         match instr {
-            TackyInstr::Copy { src, dst: TackyVal::Var(d) } => {
-                let copy_src = match src {
-                    TackyVal::Var(s) => {
-                        let st = types.get(s).copied().unwrap_or(CType::Int);
-                        let dt = types.get(d).copied().unwrap_or(CType::Int);
-                        if st == dt || (st.is_signed() == dt.is_signed() && st.size() == dt.size()) {
-                            Some(CopySrc::Var(s.clone()))
-                        } else { None }
-                    }
-                    TackyVal::Constant(c) => Some(CopySrc::Constant(*c)),
-                    TackyVal::DoubleConstant(c) => Some(CopySrc::DoubleConstant(c.to_bits())),
-                };
-                if let Some(cs) = copy_src {
-                    let copy = CopyInstr { src: cs.clone(), dst: d.clone() };
-                    // Check for redundancy: x = y is redundant if y = x is already reaching
-                    let reverse_redundant = if let CopySrc::Var(s) = &cs {
-                        current.contains(&CopyInstr { src: CopySrc::Var(d.clone()), dst: s.clone() })
-                    } else { false };
+            TackyInstr::Copy { src: TackyVal::Var(s), dst: TackyVal::Var(d) } => {
+                let st = types.get(s).copied().unwrap_or(CType::Int);
+                let dt = types.get(d).copied().unwrap_or(CType::Int);
+                let same_type = st == dt || (st.is_signed() == dt.is_signed() && st.size() == dt.size());
+                if same_type {
+                    let copy = CopyInstr { src: CopySrc::Var(s.clone()), dst: d.clone() };
+                    let reverse_redundant = current.contains(&CopyInstr { src: CopySrc::Var(d.clone()), dst: s.clone() });
                     if current.contains(&copy) || reverse_redundant {
                         // Redundant — don't modify reaching copies
                     } else {
@@ -316,12 +298,19 @@ fn transfer_copies(
                         current.insert(copy);
                     }
                 } else {
-                    // Type conversion copy — kill copies to/from dst only
+                    // Type conversion copy — kill copies to/from dst
                     current.retain(|c| {
                         let src_match = match &c.src { CopySrc::Var(v) => v == d, _ => false };
                         c.dst != *d && !src_match
                     });
                 }
+            }
+            TackyInstr::Copy { dst: TackyVal::Var(d), .. } => {
+                // Constant copy or other — kill copies to/from dst
+                current.retain(|c| {
+                    let src_match = match &c.src { CopySrc::Var(v) => v == d, _ => false };
+                    c.dst != *d && !src_match
+                });
             }
             TackyInstr::FunCall { dst, .. } => {
                 // Kill copies involving aliased vars or dst
@@ -382,14 +371,29 @@ fn get_instr_dst(instr: &TackyInstr) -> Option<String> {
 
 fn replace_operand(val: &TackyVal, reaching: &HashSet<CopyInstr>) -> TackyVal {
     if let TackyVal::Var(name) = val {
+        // Find matching copy, prefer variable sources over constants
+        let mut best: Option<&CopyInstr> = None;
         for copy in reaching {
             if copy.dst == *name {
-                return match &copy.src {
-                    CopySrc::Var(s) => TackyVal::Var(s.clone()),
-                    CopySrc::Constant(c) => TackyVal::Constant(*c),
-                    CopySrc::DoubleConstant(bits) => TackyVal::DoubleConstant(f64::from_bits(*bits)),
-                };
+                match (&best, &copy.src) {
+                    (None, _) => best = Some(copy),
+                    (Some(b), CopySrc::Var(_)) if !matches!(&b.src, CopySrc::Var(_)) => best = Some(copy),
+                    (Some(b), CopySrc::Var(s)) if matches!(&b.src, CopySrc::Var(_)) => {
+                        // Both are variables — pick deterministically (alphabetically)
+                        if let CopySrc::Var(bs) = &b.src {
+                            if s < bs { best = Some(copy); }
+                        }
+                    }
+                    _ => {} // Keep existing best
+                }
             }
+        }
+        if let Some(copy) = best {
+            return match &copy.src {
+                CopySrc::Var(s) => TackyVal::Var(s.clone()),
+                CopySrc::Constant(c) => TackyVal::Constant(*c),
+                CopySrc::DoubleConstant(bits) => TackyVal::DoubleConstant(f64::from_bits(*bits)),
+            };
         }
     }
     val.clone()

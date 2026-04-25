@@ -987,7 +987,7 @@ impl TackyGen {
                                             tacky_args.push(tmp);
                                         }
                                         ParamClass::Integer => {
-                                            let load_type = if eb_size >= 8 { CType::Long } else { CType::Int };
+                                            let load_type = CType::Long; // always use full 64-bit for eightbytes
                                             let tmp = self.fresh_tmp(load_type);
                                             let ptr = self.fresh_tmp(CType::Pointer);
                                             if eb_offset > 0 {

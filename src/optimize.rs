@@ -29,27 +29,27 @@ pub fn optimize_program(program: &mut TackyProgram, flags: &OptimizationFlags) {
         return;
     }
     let types = program.symbol_types.clone();
+    // Collect static/global variable names
+    let mut static_var_names = program.global_vars.clone();
+    for top in &program.top_level {
+        if let TackyTopLevel::StaticVar(sv) = top {
+            static_var_names.insert(sv.name.clone());
+        }
+    }
     for top in &mut program.top_level {
         if let TackyTopLevel::Function(func) = top {
-            optimize_function(func, flags, &types);
+            optimize_function(func, flags, &types, &static_var_names);
         }
     }
 }
 
-fn optimize_function(func: &mut TackyFunction, flags: &OptimizationFlags, types: &std::collections::HashMap<String, CType>) {
+fn optimize_function(func: &mut TackyFunction, flags: &OptimizationFlags, types: &std::collections::HashMap<String, CType>, static_var_names: &std::collections::HashSet<String>) {
     if func.body.is_empty() {
         return;
     }
 
-    // Find static variables (for aliased var analysis)
-    let static_vars: std::collections::HashSet<String> = types.iter()
-        .filter(|(name, _)| !name.starts_with("tmp.") && !name.starts_with("__"))
-        .filter(|(name, _)| {
-            // Heuristic: non-temp variables that aren't function params
-            !func.params.contains(name)
-        })
-        .map(|(name, _)| name.clone())
-        .collect();
+    // Static variables are those with static storage duration
+    let static_vars = static_var_names.clone();
 
     loop {
         let before = func.body.clone();

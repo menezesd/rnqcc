@@ -489,7 +489,9 @@ fn rewrite_instruction(instr: &TackyInstr, reaching: &HashSet<CopyInstr>) -> Opt
 // Dead Store Elimination
 // ============================================================
 
-pub fn dead_store_elimination(cfg: &mut CFG, aliased_vars: &HashSet<String>, static_vars: &HashSet<String>) {
+pub fn dead_store_elimination(cfg: &mut CFG, aliased_vars: &HashSet<String>, _static_vars: &HashSet<String>) {
+    // Use aliased_vars (which includes static vars) for liveness
+    let static_vars = aliased_vars;
     // Liveness analysis (backward data-flow)
     let mut block_live_in: HashMap<usize, HashSet<String>> = HashMap::new();
     for block in &cfg.blocks {
@@ -581,8 +583,34 @@ fn transfer_liveness(
                 for arg in args {
                     if let TackyVal::Var(a) = arg { current.insert(a.clone()); }
                 }
-                // Function calls may read any static/aliased var
-                current.extend(static_vars.iter().cloned());
+                // Function calls may read/write any aliased var (static + address-taken)
+                current.extend(aliased_vars.iter().cloned());
+            }
+            // CopyToOffset modifies a sub-field — generates (not kills) the struct
+            TackyInstr::CopyToOffset { src, dst_name, .. } => {
+                // Generate dst_name (struct is still needed)
+                current.insert(dst_name.clone());
+                // Generate source
+                if let TackyVal::Var(s) = src { current.insert(s.clone()); }
+            }
+            // CopyFromOffset reads a sub-field — generates the struct, kills dst
+            TackyInstr::CopyFromOffset { src_name, dst, .. } => {
+                if let TackyVal::Var(d) = dst { current.remove(d); }
+                current.insert(src_name.clone());
+            }
+            // Store writes through a pointer — generates aliased vars, doesn't kill
+            TackyInstr::Store { src, dst_ptr } => {
+                if let TackyVal::Var(s) = src { current.insert(s.clone()); }
+                if let TackyVal::Var(p) = dst_ptr { current.insert(p.clone()); }
+                // Store may write to any aliased var — generate all aliased
+                current.extend(aliased_vars.iter().cloned());
+            }
+            // Load reads through a pointer — generates aliased vars
+            TackyInstr::Load { src_ptr, dst } => {
+                if let TackyVal::Var(d) = dst { current.remove(d); }
+                if let TackyVal::Var(p) = src_ptr { current.insert(p.clone()); }
+                // Load may read any aliased var
+                current.extend(aliased_vars.iter().cloned());
             }
             _ => {
                 if let Some(d) = get_instr_dst(instr) {
@@ -629,8 +657,10 @@ fn get_instr_sources(instr: &TackyInstr) -> Vec<String> {
 }
 
 fn is_dead_store(instr: &TackyInstr, live_after: &HashSet<String>) -> bool {
-    // Never eliminate function calls (side effects) or stores (write through pointer)
-    if matches!(instr, TackyInstr::FunCall { .. } | TackyInstr::Store { .. }) {
+    // Never eliminate function calls (side effects), stores (write through pointer),
+    // CopyToOffset (partial struct update), or GetAddress
+    if matches!(instr, TackyInstr::FunCall { .. } | TackyInstr::Store { .. } |
+        TackyInstr::CopyToOffset { .. } | TackyInstr::GetAddress { .. }) {
         return false;
     }
     // Never eliminate jumps, labels, returns

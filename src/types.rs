@@ -244,38 +244,68 @@ pub enum ParamClass {
 impl StructDef {
     /// Classify a struct for System V ABI parameter/return passing.
     /// Returns a list of ParamClass for each 8-byte chunk, or Memory if passed on stack.
-    pub fn classify(&self) -> Vec<ParamClass> {
+    /// Flatten all fields to (byte_offset, scalar_type) pairs,
+    /// recursing into nested structs and arrays.
+    fn flatten_fields(&self, base_offset: usize, struct_defs: &std::collections::HashMap<String, StructDef>) -> Vec<(usize, CType)> {
+        let mut fields = Vec::new();
+        for mem in &self.members {
+            let abs_offset = base_offset + mem.offset;
+            match &mem.member_full_type {
+                FullType::Struct(tag) => {
+                    if let Some(def) = struct_defs.get(tag) {
+                        fields.extend(def.flatten_fields(abs_offset, struct_defs));
+                    }
+                }
+                FullType::Array { elem, size } => {
+                    let mut inner = elem.as_ref();
+                    while let FullType::Array { elem: e, .. } = inner { inner = e; }
+                    let elem_size = inner.byte_size();
+                    let scalar_type = inner.to_ctype();
+                    // For arrays of structs, recurse
+                    if let FullType::Struct(tag) = inner {
+                        if let Some(def) = struct_defs.get(tag) {
+                            let total_elems: usize = mem.size / std::cmp::max(def.size, 1);
+                            for i in 0..total_elems {
+                                fields.extend(def.flatten_fields(abs_offset + i * def.size, struct_defs));
+                            }
+                        }
+                    } else {
+                        let total_elems = if elem_size > 0 { mem.size / elem_size } else { 0 };
+                        for i in 0..total_elems {
+                            fields.push((abs_offset + i * elem_size, scalar_type));
+                        }
+                    }
+                }
+                _ => {
+                    fields.push((abs_offset, mem.member_type));
+                }
+            }
+        }
+        fields
+    }
+
+    pub fn classify_with(&self, struct_defs: &std::collections::HashMap<String, StructDef>) -> Vec<ParamClass> {
         if self.size > 16 {
             return vec![ParamClass::Memory];
         }
         let num_eightbytes = (self.size + 7) / 8;
         let mut classes = vec![ParamClass::Integer; num_eightbytes];
 
-        for mem in &self.members {
-            // Determine the effective scalar type for classification
-            // For arrays, use the element type; for scalars, use member_type
-            let effective_type = match &mem.member_full_type {
-                FullType::Array { elem, size } => {
-                    // Array of doubles → classify each element's eightbyte
-                    let mut t = elem.as_ref();
-                    while let FullType::Array { elem: inner, .. } = t { t = inner; }
-                    t.to_ctype()
-                }
-                _ => mem.member_type,
-            };
-
-            if effective_type == CType::Double {
-                // For double/double-array members, classify all covered eightbytes as SSE
-                let start_eb = mem.offset / 8;
-                let end = mem.offset + std::cmp::max(mem.size, 1);
-                let end_eb = (end + 7) / 8;
-                for eb in start_eb..std::cmp::min(end_eb, num_eightbytes) {
+        let fields = self.flatten_fields(0, struct_defs);
+        for (offset, ctype) in &fields {
+            if *ctype == CType::Double {
+                let eb = offset / 8;
+                if eb < num_eightbytes {
                     classes[eb] = ParamClass::Sse;
                 }
             }
-            // INTEGER members keep the default
         }
         classes
+    }
+
+    pub fn classify(&self) -> Vec<ParamClass> {
+        // Legacy version without struct_defs — works for structs without nested structs
+        self.classify_with(&std::collections::HashMap::new())
     }
 }
 

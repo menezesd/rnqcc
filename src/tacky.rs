@@ -2118,8 +2118,27 @@ impl TackyGen {
         if let Exp::ArrayInit(elems) = init {
             let def = self.struct_defs.get(tag).cloned()
                 .unwrap_or_else(|| panic!("Undefined struct: {}", tag));
+            // For unions, the compound init initializes the first member only.
+            // If the first member is an array/struct, treat the whole init as its initializer.
+            if def.is_union && !def.members.is_empty() {
+                let mem = &def.members[0];
+                let mem_offset = base_offset + mem.offset as i64;
+                if mem.member_full_type.is_array() {
+                    let mem_elem_sizes = Self::compute_elem_sizes(&mem.member_full_type, &self.struct_defs);
+                    let inner_scalar = { let mut t = &mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
+                    self.emit_array_init_flat(arr_name, init, inner_scalar, mem_offset, &mem_elem_sizes);
+                    return;
+                } else if mem.member_full_type.is_struct() {
+                    if let FullType::Struct(ref inner_tag) = mem.member_full_type {
+                        self.emit_struct_init_at(arr_name, init, inner_tag, mem_offset);
+                        return;
+                    }
+                }
+                // For scalar first member, just use the first element
+            }
+            let max_members = if def.is_union { 1 } else { def.members.len() };
             for (i, elem) in elems.iter().enumerate() {
-                if i >= def.members.len() { break; }
+                if i >= max_members { break; }
                 let mem = &def.members[i];
                 let mem_offset = base_offset + mem.offset as i64;
                 match elem {
@@ -2279,8 +2298,9 @@ impl TackyGen {
     fn flatten_static_init_struct(init: &Exp, def: &StructDef, struct_defs: &std::collections::HashMap<String, StructDef>, out: &mut Vec<StaticInit>, string_constants: &mut Vec<(String, String)>) {
         if let Exp::ArrayInit(elems) = init {
             let mut pos = 0usize; // position within the struct
+            let max_members = if def.is_union { 1 } else { def.members.len() };
             for (i, elem) in elems.iter().enumerate() {
-                if i >= def.members.len() { break; }
+                if i >= max_members { break; }
                 let mem = &def.members[i];
                 // Padding before this member
                 if mem.offset > pos {
@@ -2692,8 +2712,26 @@ impl TackyGen {
             }
             // Handle compound initializer
             if let Some(Exp::ArrayInit(ref elems)) = vd.init {
+                // For unions, if first member is array/struct, delegate the whole init
+                if def.is_union && !def.members.is_empty() {
+                    // For unions, the compound init {x} initializes the first member with x
+                    let mem = &def.members[0];
+                    let first_elem = &elems[0]; // The initializer for the first member
+                    if mem.member_full_type.is_array() {
+                        let mem_elem_sizes = Self::compute_elem_sizes(&mem.member_full_type, &self.struct_defs);
+                        let inner_scalar = { let mut t = &mem.member_full_type; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
+                        self.emit_array_init_flat(&vd.name, first_elem, inner_scalar, 0, &mem_elem_sizes);
+                    } else if let FullType::Struct(ref inner_tag) = mem.member_full_type {
+                        self.emit_struct_init_at(&vd.name, first_elem, inner_tag, 0);
+                    } else {
+                        let (val, val_type) = self.emit_exp(first_elem.clone());
+                        let val_conv = self.convert_to(val, val_type, mem.member_type);
+                        self.emit(TackyInstr::CopyToOffset { src: val_conv, dst_name: vd.name.clone(), offset: 0 });
+                    }
+                } else {
+                let max_members = def.members.len();
                 for (i, elem) in elems.iter().enumerate() {
-                    if i >= def.members.len() { break; }
+                    if i >= max_members { break; }
                     let member = &def.members[i];
                     let mem_ft = &member.member_full_type;
                     // Handle nested struct/array member init
@@ -2779,6 +2817,7 @@ impl TackyGen {
                         });
                     }
                 }
+                } // end else (non-union compound init)
             } else if let Some(init) = vd.init {
                 // Copy from another struct expression
                 let (val, val_type) = self.emit_exp(init);
@@ -3336,11 +3375,12 @@ pub fn generate(program: Program) -> TackyProgram {
 
                         let mut init_values: Vec<StaticInit> = Vec::new();
                         if let Some(Exp::ArrayInit(ref elems)) = vd.init {
-                            // Compound initializer for global struct
+                            // Compound initializer for global struct/union
                             let def = gen.struct_defs.get(&tag).cloned().unwrap();
+                            let max_members = if def.is_union { 1 } else { def.members.len() };
                             let mut bytes_written = 0usize;
                             for (i, elem) in elems.iter().enumerate() {
-                                if i >= def.members.len() { break; }
+                                if i >= max_members { break; }
                                 let mem = &def.members[i];
                                 if bytes_written < mem.offset {
                                     init_values.push(StaticInit::ZeroInit(mem.offset - bytes_written));

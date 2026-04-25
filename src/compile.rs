@@ -1,12 +1,13 @@
 use crate::codegen;
 use crate::emit;
 use crate::lex;
+use crate::optimize;
 use crate::parse;
 use crate::resolve;
 use crate::tacky;
 use crate::types::*;
 
-pub fn compile(stage: &Stage, src_file: &str, platform: &Platform) {
+pub fn compile(stage: &Stage, src_file: &str, platform: &Platform, opt_flags: &optimize::OptimizationFlags) {
     // Read source file
     let source = std::fs::read_to_string(src_file)
         .unwrap_or_else(|_| panic!("Could not read file: {}", src_file));
@@ -30,10 +31,13 @@ pub fn compile(stage: &Stage, src_file: &str, platform: &Platform) {
     }
 
     // Generate TACKY IR
-    let tacky_program = tacky::generate(resolved_ast);
+    let mut tacky_program = tacky::generate(resolved_ast);
     if *stage == Stage::Tacky {
         return;
     }
+
+    // Optimize TACKY IR
+    optimize::optimize_program(&mut tacky_program, opt_flags);
 
     // Generate assembly IR and emit
     let asm_program = codegen::gen(&tacky_program);

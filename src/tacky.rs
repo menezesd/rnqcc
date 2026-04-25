@@ -2991,7 +2991,7 @@ impl TackyGen {
                             let remaining = def.size as i64 - (eb_idx * 8) as i64;
                             let param_type = match class {
                                 ParamClass::Sse => CType::Double,
-                                _ => if remaining >= 8 { CType::Long } else { CType::Int },
+                                _ => CType::Long, // eightbytes always use full 64-bit register
                             };
                             self.var_types.insert(param_name.clone(), param_type);
                             self.symbol_types.insert(param_name.clone(), param_type);

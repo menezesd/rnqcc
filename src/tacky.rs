@@ -1259,35 +1259,8 @@ impl TackyGen {
                         }
                     }
                 };
-                // Get the struct tag — try dot_inner_tag first, fall back to evaluating
-                let tag = match self.try_dot_inner_tag(inner) {
-                    Some(t) => t,
-                    None => {
-                        // Evaluate inner expression to get its type
-                        // (The expression was already evaluated above for base_addr,
-                        //  but we need the tag. Look at the base_addr's FullType.)
-                        // This is a fallback — if base_addr came from eval, check its ft
-                        let base_ft = self.val_full_type(&base_addr);
-                        match &base_ft {
-                            FullType::Pointer(inner) => match inner.as_ref() {
-                                FullType::Struct(t) => t.clone(),
-                                _ => panic!("emit_dot_address: cannot determine struct tag for {:?}", inner),
-                            },
-                            FullType::Struct(t) => t.clone(),
-                            _ => {
-                                // Last resort: find any struct that has this member
-                                let mut found_tag = None;
-                                for (tag, def) in &self.struct_defs {
-                                    if def.find_member(member).is_some() {
-                                        found_tag = Some(tag.clone());
-                                        break;
-                                    }
-                                }
-                                found_tag.unwrap_or_else(|| panic!("emit_dot_address: cannot determine struct tag, ft={:?}", base_ft))
-                            }
-                        }
-                    }
-                };
+                // Get the struct tag using typeof_exp
+                let tag = self.dot_inner_tag(inner);
                 let def = self.struct_defs.get(&tag).cloned().unwrap();
                 let mem = def.find_member(member).unwrap();
                 let result = self.fresh_tmp(CType::Pointer);
@@ -2167,6 +2140,21 @@ impl TackyGen {
                             self.emit(TackyInstr::Copy { src: TackyVal::Constant(byte as i64), dst: src.clone() });
                             self.emit(TackyInstr::CopyToOffset { src, dst_name: arr_name.to_string(), offset: mem_offset + j as i64 });
                         }
+                    }
+                    _ if mem.member_full_type.is_struct() => {
+                        // Struct member initialized from a struct-valued expression
+                        let struct_size = mem.member_full_type.byte_size_with(&self.struct_defs);
+                        let (val, val_type) = self.emit_exp(elem.clone());
+                        let src_addr = if val_type == CType::Pointer { val } else { self.get_struct_addr(val) };
+                        let dst_addr = self.fresh_tmp(CType::Pointer);
+                        self.emit(TackyInstr::GetAddress { src: TackyVal::Var(arr_name.to_string()), dst: dst_addr.clone() });
+                        let member_addr = self.fresh_tmp(CType::Pointer);
+                        if mem_offset > 0 {
+                            self.emit(TackyInstr::Binary { op: TackyBinaryOp::Add, left: dst_addr, right: TackyVal::Constant(mem_offset), dst: member_addr.clone() });
+                        } else {
+                            self.emit(TackyInstr::Copy { src: dst_addr, dst: member_addr.clone() });
+                        }
+                        self.emit_struct_copy_ptr_to_ptr(src_addr, member_addr, struct_size);
                     }
                     _ => {
                         let (val, val_type) = self.emit_exp(elem.clone());

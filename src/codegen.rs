@@ -17,7 +17,13 @@ fn convert_val(val: &TackyVal) -> AsmOperand {
 
 fn val_type(val: &TackyVal, types: &HashMap<String, CType>) -> AsmType {
     match val {
-        TackyVal::Constant(_) => AsmType::Longword,
+        TackyVal::Constant(c) => {
+            if *c > i32::MAX as i64 || *c < i32::MIN as i64 {
+                AsmType::Quadword
+            } else {
+                AsmType::Longword
+            }
+        }
         TackyVal::DoubleConstant(_) => AsmType::Double,
         TackyVal::Var(name) => {
             let ct = types.get(name).copied().unwrap_or(CType::Int);
@@ -285,7 +291,7 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
         }
         TackyInstr::Copy { src, dst } => {
             let t = val_type(dst, types);
-            let src_op = if t == AsmType::Double {
+            let src_op = if t == AsmType::Double || matches!(src, TackyVal::DoubleConstant(_)) {
                 convert_double_val(src, static_doubles)
             } else {
                 convert_val(src)

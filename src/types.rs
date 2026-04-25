@@ -252,19 +252,28 @@ impl StructDef {
         let mut classes = vec![ParamClass::Integer; num_eightbytes];
 
         for mem in &self.members {
-            let eightbyte_idx = mem.offset / 8;
-            if eightbyte_idx >= num_eightbytes { continue; }
-            match mem.member_type {
-                CType::Double => { classes[eightbyte_idx] = ParamClass::Sse; }
-                _ => {} // Integer types keep the default INTEGER class
-            }
-            // If a member spans two eightbytes, classify both
-            let end = mem.offset + std::cmp::max(mem.size, 1);
-            if end > (eightbyte_idx + 1) * 8 && eightbyte_idx + 1 < num_eightbytes {
-                if mem.member_type == CType::Double {
-                    classes[eightbyte_idx + 1] = ParamClass::Sse;
+            // Determine the effective scalar type for classification
+            // For arrays, use the element type; for scalars, use member_type
+            let effective_type = match &mem.member_full_type {
+                FullType::Array { elem, size } => {
+                    // Array of doubles → classify each element's eightbyte
+                    let mut t = elem.as_ref();
+                    while let FullType::Array { elem: inner, .. } = t { t = inner; }
+                    t.to_ctype()
+                }
+                _ => mem.member_type,
+            };
+
+            if effective_type == CType::Double {
+                // For double/double-array members, classify all covered eightbytes as SSE
+                let start_eb = mem.offset / 8;
+                let end = mem.offset + std::cmp::max(mem.size, 1);
+                let end_eb = (end + 7) / 8;
+                for eb in start_eb..std::cmp::min(end_eb, num_eightbytes) {
+                    classes[eb] = ParamClass::Sse;
                 }
             }
+            // INTEGER members keep the default
         }
         classes
     }

@@ -5,6 +5,8 @@ fn reg_name(reg: &Reg, t: AsmType) -> &'static str {
     match (reg, t) {
         (Reg::AX, AsmType::Longword) => "%eax",
         (Reg::AX, AsmType::Quadword) => "%rax",
+        (Reg::BX, AsmType::Longword) => "%ebx",
+        (Reg::BX, AsmType::Quadword) => "%rbx",
         (Reg::CX, AsmType::Longword) => "%ecx",
         (Reg::CX, AsmType::Quadword) => "%rcx",
         (Reg::DX, AsmType::Longword) => "%edx",
@@ -21,8 +23,21 @@ fn reg_name(reg: &Reg, t: AsmType) -> &'static str {
         (Reg::R10, AsmType::Quadword) => "%r10",
         (Reg::R11, AsmType::Longword) => "%r11d",
         (Reg::R11, AsmType::Quadword) => "%r11",
+        (Reg::R12, AsmType::Longword) => "%r12d",
+        (Reg::R12, AsmType::Quadword) => "%r12",
+        (Reg::R13, AsmType::Longword) => "%r13d",
+        (Reg::R13, AsmType::Quadword) => "%r13",
+        (Reg::R14, AsmType::Longword) => "%r14d",
+        (Reg::R14, AsmType::Quadword) => "%r14",
+        (Reg::R15, AsmType::Longword) => "%r15d",
+        (Reg::R15, AsmType::Quadword) => "%r15",
+        (Reg::SP, AsmType::Longword) => "%esp",
+        (Reg::SP, AsmType::Quadword) => "%rsp",
+        (Reg::BP, AsmType::Longword) => "%ebp",
+        (Reg::BP, AsmType::Quadword) => "%rbp",
         // Byte: use 8-bit register names
         (Reg::AX, AsmType::Byte) => "%al",
+        (Reg::BX, AsmType::Byte) => "%bl",
         (Reg::CX, AsmType::Byte) => "%cl",
         (Reg::DX, AsmType::Byte) => "%dl",
         (Reg::DI, AsmType::Byte) => "%dil",
@@ -31,6 +46,12 @@ fn reg_name(reg: &Reg, t: AsmType) -> &'static str {
         (Reg::R9, AsmType::Byte) => "%r9b",
         (Reg::R10, AsmType::Byte) => "%r10b",
         (Reg::R11, AsmType::Byte) => "%r11b",
+        (Reg::R12, AsmType::Byte) => "%r12b",
+        (Reg::R13, AsmType::Byte) => "%r13b",
+        (Reg::R14, AsmType::Byte) => "%r14b",
+        (Reg::R15, AsmType::Byte) => "%r15b",
+        (Reg::SP, AsmType::Byte) => "%spl",
+        (Reg::BP, AsmType::Byte) => "%bpl",
         (r, AsmType::Double) => panic!("Cannot use integer register {:?} for double", r),
     }
 }
@@ -38,6 +59,7 @@ fn reg_name(reg: &Reg, t: AsmType) -> &'static str {
 fn reg_name_8(reg: &Reg) -> &'static str {
     match reg {
         Reg::AX => "%al",
+        Reg::BX => "%bl",
         Reg::CX => "%cl",
         Reg::DX => "%dl",
         Reg::DI => "%dil",
@@ -46,6 +68,12 @@ fn reg_name_8(reg: &Reg) -> &'static str {
         Reg::R9 => "%r9b",
         Reg::R10 => "%r10b",
         Reg::R11 => "%r11b",
+        Reg::R12 => "%r12b",
+        Reg::R13 => "%r13b",
+        Reg::R14 => "%r14b",
+        Reg::R15 => "%r15b",
+        Reg::SP => "%spl",
+        Reg::BP => "%bpl",
     }
 }
 
@@ -55,6 +83,9 @@ fn xmm_name(reg: &XmmReg) -> &'static str {
         XmmReg::XMM2 => "%xmm2", XmmReg::XMM3 => "%xmm3",
         XmmReg::XMM4 => "%xmm4", XmmReg::XMM5 => "%xmm5",
         XmmReg::XMM6 => "%xmm6", XmmReg::XMM7 => "%xmm7",
+        XmmReg::XMM8 => "%xmm8", XmmReg::XMM9 => "%xmm9",
+        XmmReg::XMM10 => "%xmm10", XmmReg::XMM11 => "%xmm11",
+        XmmReg::XMM12 => "%xmm12", XmmReg::XMM13 => "%xmm13",
         XmmReg::XMM14 => "%xmm14", XmmReg::XMM15 => "%xmm15",
     }
 }
@@ -309,6 +340,11 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Platform) ->
         }
         AsmInstr::Label(label) => writeln!(w, ".L{}:", label),
         AsmInstr::Push(operand) => {
+            // pushq doesn't support XMM registers
+            if let AsmOperand::Xmm(xmm) = operand {
+                writeln!(w, "\tsubq $8, %rsp")?;
+                return writeln!(w, "\tmovsd {}, (%rsp)", xmm_name(xmm));
+            }
             // pushq doesn't support 64-bit immediates
             if let AsmOperand::Imm(v) = operand {
                 if *v > i32::MAX as i64 || *v < i32::MIN as i64 {
@@ -318,7 +354,10 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Platform) ->
             }
             writeln!(w, "\tpushq {}", show_operand_64(operand, platform))
         }
-        AsmInstr::Call(name) => {
+        AsmInstr::Pop(reg) => {
+            writeln!(w, "\tpopq {}", reg_name(reg, AsmType::Quadword))
+        }
+        AsmInstr::Call(name, _, _) => {
             let label = platform.show_label(name);
             match platform {
                 Platform::OsX => writeln!(w, "\tcall {}", label),

@@ -7,6 +7,7 @@ mod emit;
 mod lex;
 mod optimize;
 mod parse;
+mod regalloc;
 mod resolve;
 mod tacky;
 mod types;
@@ -59,8 +60,8 @@ fn preprocess(src: &str) -> String {
     output
 }
 
-fn do_compile(stage: &Stage, preprocessed_src: &str, target: &Platform, opt_flags: &optimize::OptimizationFlags) -> String {
-    compile::compile(stage, preprocessed_src, target, opt_flags);
+fn do_compile(stage: &Stage, preprocessed_src: &str, target: &Platform, opt_flags: &optimize::OptimizationFlags, no_coalescing: bool) -> String {
+    compile::compile(stage, preprocessed_src, target, opt_flags, no_coalescing);
     let _ = std::fs::remove_file(preprocessed_src);
     replace_extension(preprocessed_src, "s")
 }
@@ -81,12 +82,12 @@ fn assemble_and_link(asm_files: &[String], output: &str, target: &Platform, clea
     }
 }
 
-fn driver(target: Platform, debug: bool, stage: Stage, sources: &[&str], opt_flags: &optimize::OptimizationFlags) {
+fn driver(target: Platform, debug: bool, stage: Stage, sources: &[&str], opt_flags: &optimize::OptimizationFlags, no_coalescing: bool) {
     let mut asm_files = Vec::new();
 
     for src in sources {
         let preprocessed_name = preprocess(src);
-        let assembly_name = do_compile(&stage, &preprocessed_name, &target, opt_flags);
+        let assembly_name = do_compile(&stage, &preprocessed_name, &target, opt_flags, no_coalescing);
         asm_files.push(assembly_name);
     }
 
@@ -184,6 +185,12 @@ fn main() {
                 .help("Enable all optimizations"),
         )
         .arg(
+            Arg::with_name("no_coalescing")
+                .long("no-coalescing")
+                .takes_value(false)
+                .help("Disable register coalescing"),
+        )
+        .arg(
             Arg::with_name("src_files")
                 .index(1)
                 .required(true)
@@ -225,5 +232,7 @@ fn main() {
         eliminate_dead_stores: all_opts || matches.is_present("eliminate_dead_stores"),
     };
 
-    driver(target, debug, stage, &src_files, &opt_flags);
+    let no_coalescing = matches.is_present("no_coalescing");
+
+    driver(target, debug, stage, &src_files, &opt_flags, no_coalescing);
 }

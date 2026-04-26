@@ -978,15 +978,16 @@ impl From<CType> for AsmType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum XmmReg {
     XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7,
-    XMM14, XMM15,
+    XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Reg {
     AX,
+    BX,
     CX,
     DX,
     DI,
@@ -995,6 +996,12 @@ pub enum Reg {
     R9,
     R10,
     R11,
+    R12,
+    R13,
+    R14,
+    R15,
+    SP,
+    BP,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1046,7 +1053,7 @@ pub enum CondCode {
     BE, // below or equal
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AsmInstr {
     Mov(AsmType, AsmOperand, AsmOperand),
     Movsx(AsmType, AsmType, AsmOperand, AsmOperand),  // (src_type, dst_type, src, dst) sign-extend
@@ -1062,7 +1069,8 @@ pub enum AsmInstr {
     SetCC(CondCode, AsmOperand),
     Label(String),
     Push(AsmOperand),
-    Call(String),
+    Call(String, usize, usize), // name, int_reg_args, sse_reg_args
+    Pop(Reg),
     Cvtsi2sd(AsmType, AsmOperand, AsmOperand), // int/long → double
     Cvttsd2si(AsmType, AsmOperand, AsmOperand), // double → int/long (truncate)
     Lea(AsmOperand, AsmOperand),               // leaq src, dst

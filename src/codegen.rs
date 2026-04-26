@@ -611,7 +611,7 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
                 out.push(AsmInstr::Mov(AsmType::Double, src, AsmOperand::Xmm(XMM_ARG_REGISTERS[*i].clone())));
             }
 
-            out.push(AsmInstr::Call(name.clone()));
+            out.push(AsmInstr::Call(name.clone(), int_reg_args.len(), xmm_reg_args.len()));
             let bytes_to_dealloc = (stack_count * 8 + padding) as i32;
             if bytes_to_dealloc > 0 {
                 out.push(AsmInstr::DeallocateStack(bytes_to_dealloc));
@@ -903,14 +903,20 @@ fn is_memory(op: &AsmOperand) -> bool {
     matches!(op, AsmOperand::Stack(_) | AsmOperand::Data(_))
 }
 
-fn fixup_instructions(func: &mut AsmFunction, stack_size: i32) {
-    let aligned_stack = (stack_size + 15) & !15;
+fn fixup_instructions(func: &mut AsmFunction, stack_size: i32, callee_saved: &[Reg]) {
+    let num_cs = callee_saved.len() as i32;
+    let total_aligned = (stack_size + 8 * num_cs + 15) & !15;
+    let adjusted_stack = total_aligned - 8 * num_cs;
     let old_instructions = std::mem::take(&mut func.instructions);
     let mut new_instructions = Vec::new();
 
     // Prologue placeholder
     new_instructions.push(AsmInstr::Push(AsmOperand::Reg(Reg::AX)));
-    new_instructions.push(AsmInstr::AllocateStack(aligned_stack));
+    new_instructions.push(AsmInstr::AllocateStack(adjusted_stack));
+    // Push callee-saved registers
+    for reg in callee_saved {
+        new_instructions.push(AsmInstr::Push(AsmOperand::Reg(*reg)));
+    }
 
     for instr in old_instructions {
         match instr {
@@ -923,13 +929,13 @@ fn fixup_instructions(func: &mut AsmFunction, stack_size: i32) {
                 new_instructions.push(AsmInstr::Mov(t, src.clone(), AsmOperand::Reg(Reg::R10)));
                 new_instructions.push(AsmInstr::Mov(t, AsmOperand::Reg(Reg::R10), dst.clone()));
             }
-            // movsx mem, mem
-            AsmInstr::Movsx(st, dt, ref src, ref dst) if is_memory(src) && is_memory(dst) => {
+            // movsx with memory dst (movslq can't write to memory)
+            AsmInstr::Movsx(st, dt, ref src, ref dst) if is_memory(dst) => {
                 new_instructions.push(AsmInstr::Movsx(st, dt, src.clone(), AsmOperand::Reg(Reg::R10)));
                 new_instructions.push(AsmInstr::Mov(dt, AsmOperand::Reg(Reg::R10), dst.clone()));
             }
-            // movzx mem, mem
-            AsmInstr::MovZeroExtend(st, dt, ref src, ref dst) if is_memory(src) && is_memory(dst) => {
+            // movzx with memory dst
+            AsmInstr::MovZeroExtend(st, dt, ref src, ref dst) if is_memory(dst) => {
                 new_instructions.push(AsmInstr::MovZeroExtend(st, dt, src.clone(), AsmOperand::Reg(Reg::R10)));
                 new_instructions.push(AsmInstr::Mov(dt, AsmOperand::Reg(Reg::R10), dst.clone()));
             }
@@ -1061,8 +1067,11 @@ fn fixup_instructions(func: &mut AsmFunction, stack_size: i32) {
                     new_instructions.push(AsmInstr::StoreIndirect(t, AsmOperand::Reg(Reg::R10), reg.clone()));
                 }
             }
-            // Ret → epilogue (movq %rbp, %rsp in Ret handles stack cleanup)
+            // Ret → pop callee-saved registers (reverse order), then epilogue
             AsmInstr::Ret => {
+                for reg in callee_saved.iter().rev() {
+                    new_instructions.push(AsmInstr::Pop(*reg));
+                }
                 new_instructions.push(AsmInstr::Ret);
             }
             other => {
@@ -1078,7 +1087,65 @@ fn fixup_instructions(func: &mut AsmFunction, stack_size: i32) {
 // Public API
 // ============================================================
 
-pub fn gen(program: &TackyProgram) -> AsmProgram {
+fn compute_aliased(body: &[TackyInstr], static_vars: &std::collections::HashSet<String>) -> std::collections::HashSet<String> {
+    let mut aliased = static_vars.clone();
+    for instr in body {
+        if let TackyInstr::GetAddress { src: TackyVal::Var(name), .. } = instr {
+            aliased.insert(name.clone());
+        }
+    }
+    aliased
+}
+
+fn compute_ret_regs(
+    body: &[TackyInstr],
+    types: &HashMap<String, CType>,
+    var_struct_tags: &HashMap<String, String>,
+    struct_defs: &HashMap<String, StructDef>,
+) -> Vec<crate::regalloc::RegId> {
+    use crate::regalloc::RegId;
+    for instr in body {
+        match instr {
+            TackyInstr::Return(TackyVal::DoubleConstant(_)) => {
+                return vec![RegId::Xmm(XmmReg::XMM0)];
+            }
+            TackyInstr::Return(TackyVal::Constant(_)) => {
+                return vec![RegId::Gp(Reg::AX)];
+            }
+            TackyInstr::Return(TackyVal::Var(name)) => {
+                let ct = types.get(name).copied().unwrap_or(CType::Int);
+                return match ct {
+                    CType::Double => vec![RegId::Xmm(XmmReg::XMM0)],
+                    CType::Void => vec![],
+                    CType::Struct => {
+                        let mut regs = Vec::new();
+                        if let Some(tag) = var_struct_tags.get(name) {
+                            if let Some(def) = struct_defs.get(tag) {
+                                let classes = def.classify_with(struct_defs);
+                                let int_rets = [Reg::AX, Reg::DX];
+                                let sse_rets = [XmmReg::XMM0, XmmReg::XMM1];
+                                let (mut ir, mut sr) = (0usize, 0usize);
+                                for c in &classes {
+                                    match c {
+                                        ParamClass::Integer => { regs.push(RegId::Gp(int_rets[ir])); ir += 1; }
+                                        ParamClass::Sse => { regs.push(RegId::Xmm(sse_rets[sr])); sr += 1; }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        if regs.is_empty() { vec![RegId::Gp(Reg::AX)] } else { regs }
+                    }
+                    _ => vec![RegId::Gp(Reg::AX)],
+                };
+            }
+            _ => {}
+        }
+    }
+    vec![] // void function
+}
+
+pub fn gen(program: &TackyProgram, no_coalescing: bool) -> AsmProgram {
     let static_vars = &program.global_vars;
     let types = &program.symbol_types;
     let array_sizes = &program.array_sizes;
@@ -1089,8 +1156,23 @@ pub fn gen(program: &TackyProgram) -> AsmProgram {
         match tl {
             TackyTopLevel::Function(tf) => {
                 let mut asm_func = convert_function(tf, types, array_sizes, &mut static_doubles, &program.var_struct_tags, &program.struct_defs);
+
+                // Compute aliased variables (address-taken + static)
+                let aliased = compute_aliased(&tf.body, static_vars);
+
+                // Compute return value registers for EXIT node liveness
+                let ret_regs = compute_ret_regs(&tf.body, types, &program.var_struct_tags, &program.struct_defs);
+
+                // Register allocation
+                let regalloc_result = crate::regalloc::allocate_registers(
+                    &mut asm_func, &aliased, types, array_sizes, &ret_regs, no_coalescing,
+                );
+
+                // Phase 2: replace remaining pseudos with stack slots
                 let stack_size = replace_pseudos(&mut asm_func, static_vars, types, array_sizes);
-                fixup_instructions(&mut asm_func, stack_size);
+
+                // Phase 3: fix up instructions + callee-saved register handling
+                fixup_instructions(&mut asm_func, stack_size, &regalloc_result.callee_saved);
                 top_level.push(AsmTopLevel::Function(asm_func));
             }
             TackyTopLevel::StaticVar(sv) => {

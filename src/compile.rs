@@ -7,7 +7,7 @@ use crate::resolve;
 use crate::tacky;
 use crate::types::*;
 
-pub fn compile(stage: &Stage, src_file: &str, platform: &Platform, opt_flags: &optimize::OptimizationFlags) {
+pub fn compile(stage: &Stage, src_file: &str, platform: &Platform, opt_flags: &optimize::OptimizationFlags, no_coalescing: bool) {
     // Read source file
     let source = std::fs::read_to_string(src_file)
         .unwrap_or_else(|_| panic!("Could not read file: {}", src_file));
@@ -40,7 +40,7 @@ pub fn compile(stage: &Stage, src_file: &str, platform: &Platform, opt_flags: &o
     optimize::optimize_program(&mut tacky_program, opt_flags);
 
     // Generate assembly IR and emit
-    let asm_program = codegen::gen(&tacky_program);
+    let asm_program = codegen::gen(&tacky_program, no_coalescing);
     if *stage == Stage::Codegen {
         return;
     }

@@ -82,6 +82,10 @@ impl Resolver {
                 return unique.clone();
             }
         }
+        // Also check function names (for function-to-pointer decay: &func_name)
+        if self.functions.contains_key(name) {
+            return name.to_string();
+        }
         panic!("Undeclared variable: '{}'", name);
     }
 
@@ -157,10 +161,13 @@ impl Resolver {
             ),
             Exp::FunctionCall(name, args) => {
                 let resolved_args = args.into_iter().map(|a| self.resolve_exp(a)).collect();
-                if !self.functions.contains_key(&name) {
-                    panic!("Undeclared function: '{}'", name);
+                if self.functions.contains_key(&name) {
+                    Exp::FunctionCall(name, resolved_args)
+                } else {
+                    // Could be an indirect call through a function pointer variable
+                    let resolved_name = self.resolve_var(&name);
+                    Exp::FunctionCall(resolved_name, resolved_args)
                 }
-                Exp::FunctionCall(name, resolved_args)
             }
             Exp::SizeOf(inner) => Exp::SizeOf(Box::new(self.resolve_exp(*inner))),
             Exp::SizeOfType(ct, ft) => Exp::SizeOfType(ct, self.resolve_struct_tags_in_ft(ft)),

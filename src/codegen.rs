@@ -510,7 +510,7 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
         TackyInstr::Label(label) => {
             out.push(AsmInstr::Label(label.clone()));
         }
-        TackyInstr::FunCall { name, args, dst, stack_arg_indices, struct_arg_groups } => {
+        TackyInstr::FunCall { name, args, dst, stack_arg_indices, struct_arg_groups, indirect } => {
             // Pre-compute which args must go on stack due to struct group overflow
             let mut force_stack_args: std::collections::HashSet<usize> = std::collections::HashSet::new();
             {
@@ -611,7 +611,11 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
                 out.push(AsmInstr::Mov(AsmType::Double, src, AsmOperand::Xmm(XMM_ARG_REGISTERS[*i].clone())));
             }
 
-            out.push(AsmInstr::Call(name.clone(), int_reg_args.len(), xmm_reg_args.len()));
+            if *indirect {
+                // Load function pointer into R10 before call
+                out.push(AsmInstr::Mov(AsmType::Quadword, AsmOperand::Pseudo(name.clone()), AsmOperand::Reg(Reg::R10)));
+            }
+            out.push(AsmInstr::Call(name.clone(), int_reg_args.len(), xmm_reg_args.len(), *indirect));
             let bytes_to_dealloc = (stack_count * 8 + padding) as i32;
             if bytes_to_dealloc > 0 {
                 out.push(AsmInstr::DeallocateStack(bytes_to_dealloc));

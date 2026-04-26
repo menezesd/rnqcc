@@ -1127,7 +1127,8 @@ impl TackyGen {
                     let shifted_stack = stack_arg_indices.iter().map(|&i| i + 1).collect();
                     let shifted_groups: Vec<(usize, usize, Vec<bool>)> = struct_arg_groups.iter()
                         .map(|(s, c, v)| (s + 1, *c, v.clone())).collect();
-                    self.emit(TackyInstr::FunCall { name, args: tacky_args, dst: tmp.clone(), stack_arg_indices: shifted_stack, struct_arg_groups: shifted_groups });
+                    let is_indirect = !self.func_types.contains_key(&name);
+                    self.emit(TackyInstr::FunCall { name, args: tacky_args, dst: tmp.clone(), stack_arg_indices: shifted_stack, struct_arg_groups: shifted_groups, indirect: is_indirect });
                     if let Some(pi) = ret_pi {
                         if let TackyVal::Var(ref dst_name) = tmp {
                             self.ptr_info.insert(dst_name.clone(), pi);
@@ -1152,7 +1153,8 @@ impl TackyGen {
                 } else {
                     self.fresh_tmp(ret_type)
                 };
-                self.emit(TackyInstr::FunCall { name, args: tacky_args, dst: dst.clone(), stack_arg_indices, struct_arg_groups });
+                let is_indirect = !self.func_types.contains_key(&name);
+                self.emit(TackyInstr::FunCall { name, args: tacky_args, dst: dst.clone(), stack_arg_indices, struct_arg_groups, indirect: is_indirect });
                 // Propagate return pointer info
                 if let Some(pi) = ret_pi {
                     if let TackyVal::Var(ref dst_name) = dst {
@@ -3865,6 +3867,7 @@ pub fn generate(program: Program) -> TackyProgram {
         match decl {
             Declaration::FunDecl(fd) => {
                 let fname = fd.name.clone();
+                global_vars.insert(fname.clone()); // Function names are global symbols (for &func)
                 if let Some(mut tf) = gen.emit_function(fd) {
                     tf.global = *linkage.get(&fname).unwrap_or(&true);
                     top_level.push(TackyTopLevel::Function(tf));

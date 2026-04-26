@@ -357,11 +357,16 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Platform) ->
         AsmInstr::Pop(reg) => {
             writeln!(w, "\tpopq {}", reg_name(reg, AsmType::Quadword))
         }
-        AsmInstr::Call(name, _, _) => {
-            let label = platform.show_label(name);
-            match platform {
-                Platform::OsX => writeln!(w, "\tcall {}", label),
-                Platform::Linux => writeln!(w, "\tcall {}@PLT", label),
+        AsmInstr::Call(name, _, _, indirect) => {
+            if *indirect {
+                // Indirect call through R10 (function pointer already loaded there)
+                writeln!(w, "\tcall *%r10")
+            } else {
+                let label = platform.show_label(name);
+                match platform {
+                    Platform::OsX => writeln!(w, "\tcall {}", label),
+                    Platform::Linux => writeln!(w, "\tcall {}@PLT", label),
+                }
             }
         }
         AsmInstr::Ret => {

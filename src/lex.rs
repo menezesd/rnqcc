@@ -278,6 +278,25 @@ impl Lexer {
             "restrict" => Token::KWRestrict,
             "__restrict" => Token::KWRestrict,
             "__restrict__" => Token::KWRestrict,
+            "short" => Token::KWShort,
+            "_Noreturn" => Token::KWNoreturn,
+            "__attribute__" | "__attribute" => {
+                // Skip __attribute__((...)) entirely — consume matching parens
+                self.skip_whitespace_and_comments();
+                if self.peek() == Some('(') {
+                    let mut depth = 0;
+                    loop {
+                        match self.advance() {
+                            Some('(') => depth += 1,
+                            Some(')') => { depth -= 1; if depth == 0 { break; } }
+                            None => break,
+                            _ => {}
+                        }
+                    }
+                }
+                // Return dummy token that lex_all will filter out
+                return Token::KWNoreturn; // harmless no-op token
+            }
             "char" => Token::KWChar,
             "sizeof" => Token::KWSizeOf,
             "struct" => Token::KWStruct,

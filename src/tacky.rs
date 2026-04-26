@@ -52,6 +52,34 @@ impl TackyGen {
         }
     }
 
+    fn fresh_var_name(&mut self) -> String {
+        let name = format!("tmp.{}", self.tmp_counter);
+        self.tmp_counter += 1;
+        name
+    }
+
+    fn zero_init_local(&mut self, name: &str, total_bytes: usize) {
+        let mut off = 0usize;
+        while off + 8 <= total_bytes {
+            let z = self.fresh_tmp(CType::Long);
+            self.emit(TackyInstr::Copy { src: TackyVal::Constant(0), dst: z.clone() });
+            self.emit(TackyInstr::CopyToOffset { src: z, dst_name: name.to_string(), offset: off as i64 });
+            off += 8;
+        }
+        while off + 4 <= total_bytes {
+            let z = self.fresh_tmp(CType::Int);
+            self.emit(TackyInstr::Copy { src: TackyVal::Constant(0), dst: z.clone() });
+            self.emit(TackyInstr::CopyToOffset { src: z, dst_name: name.to_string(), offset: off as i64 });
+            off += 4;
+        }
+        while off < total_bytes {
+            let z = self.fresh_tmp(CType::Char);
+            self.emit(TackyInstr::Copy { src: TackyVal::Constant(0), dst: z.clone() });
+            self.emit(TackyInstr::CopyToOffset { src: z, dst_name: name.to_string(), offset: off as i64 });
+            off += 1;
+        }
+    }
+
     fn fresh_tmp(&mut self, t: CType) -> TackyVal {
         let name = format!("tmp.{}", self.tmp_counter);
         self.tmp_counter += 1;
@@ -269,6 +297,7 @@ impl TackyGen {
                 let e = self.typeof_exp(else_e);
                 if t.byte_size_with(&self.struct_defs) >= e.byte_size_with(&self.struct_defs) { t } else { e }
             }
+            Exp::Comma(_, right) => self.typeof_exp(right),
             _ => FullType::Scalar(CType::Int),
         }
     }
@@ -453,6 +482,46 @@ impl TackyGen {
                 }
                 let t = ft.to_ctype();
                 (TackyVal::Var(name), t)
+            }
+            Exp::Cast(target_type, cast_ft, inner) if matches!(*inner, Exp::ArrayInit(_)) => {
+                // Compound literal: (Type){init}
+                // Create a temp variable and initialize it
+                if let Some(ref ft) = cast_ft {
+                    let tmp_name = self.fresh_var_name();
+                    self.var_types.insert(tmp_name.clone(), target_type);
+                    self.symbol_types.insert(tmp_name.clone(), target_type);
+                    self.full_types.insert(tmp_name.clone(), ft.clone());
+                    if let FullType::Struct(ref tag) = ft {
+                        let size = self.struct_defs.get(tag).map(|d| d.size).unwrap_or(8);
+                        self.array_sizes.insert(tmp_name.clone(), size);
+                        // Zero-initialize then fill
+                        self.zero_init_local(&tmp_name, size);
+                        self.emit_struct_init_at(&tmp_name, &inner, tag, 0);
+                    } else if ft.is_array() {
+                        let size = ft.byte_size_with(&self.struct_defs);
+                        self.array_sizes.insert(tmp_name.clone(), size);
+                        self.zero_init_local(&tmp_name, size);
+                        let elem_sizes = Self::compute_elem_sizes(ft, &self.struct_defs);
+                        let inner_scalar = { let mut t: &FullType = ft; while let FullType::Array { elem: e, .. } = t { t = e; } t.to_ctype() };
+                        self.emit_array_init_flat(&tmp_name, &inner, inner_scalar, 0, &elem_sizes);
+                    }
+                    // Return pointer to the temp (for arrays) or the temp var
+                    if ft.is_array() {
+                        let ptr = self.fresh_tmp(CType::Pointer);
+                        self.emit(TackyInstr::GetAddress { src: TackyVal::Var(tmp_name), dst: ptr.clone() });
+                        return (ptr, CType::Pointer);
+                    }
+                    return (TackyVal::Var(tmp_name), target_type);
+                }
+                // Scalar compound literal: (int){5} — just use the first element
+                if let Exp::ArrayInit(elems) = *inner {
+                    if let Some(first) = elems.into_iter().next() {
+                        let (val, from_type) = self.emit_exp(first);
+                        let converted = self.convert_to(val, from_type, target_type);
+                        return (converted, target_type);
+                    }
+                }
+                (TackyVal::Constant(0), target_type)
             }
             Exp::Cast(target_type, cast_ft, inner) => {
                 let (val, from_type) = self.emit_exp(*inner);
@@ -1147,8 +1216,13 @@ impl TackyGen {
                 self.emit(TackyInstr::Load { src_ptr: ptr, dst: result.clone() });
                 (result, elem_ctype)
             }
-            Exp::ArrayInit(elems) => {
-                // Array initializer — this is handled during variable declaration, not standalone
+            Exp::Comma(left, right) => {
+                // Evaluate left for side effects, discard result
+                self.emit_exp(*left);
+                // Evaluate right and return its value
+                self.emit_exp(*right)
+            }
+            Exp::ArrayInit(_) => {
                 panic!("Array initializer not allowed in expression context");
             }
             Exp::Dot(inner, member) => {

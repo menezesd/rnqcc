@@ -427,7 +427,19 @@ impl Lexer {
                     self.pos -= 1; // unget the '.'
                     self.read_number()
                 }
-                '.' => Token::Dot,
+                '.' => {
+                    if self.peek() == Some('.') {
+                        self.advance(); // consume second .
+                        if self.peek() == Some('.') {
+                            self.advance(); // consume third .
+                            Token::Ellipsis
+                        } else {
+                            panic!("Expected '...' (three dots)");
+                        }
+                    } else {
+                        Token::Dot
+                    }
+                }
                 _ if c.is_ascii_digit() => {
                     self.pos -= 1; // unget
                     self.read_number()

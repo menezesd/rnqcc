@@ -262,7 +262,7 @@ fn resolve_constants(instr: &TackyInstr, const_map: &std::collections::HashMap<S
                 dst: dst.clone(),
             }
         }
-        TackyInstr::FunCall { name, args, dst, stack_arg_indices, struct_arg_groups } => {
+        TackyInstr::FunCall { name, args, dst, stack_arg_indices, struct_arg_groups, indirect } => {
             let new_args: Vec<TackyVal> = args.iter().map(|a| resolve_val(a, const_map)).collect();
             TackyInstr::FunCall {
                 name: name.clone(),
@@ -270,6 +270,7 @@ fn resolve_constants(instr: &TackyInstr, const_map: &std::collections::HashMap<S
                 dst: dst.clone(),
                 stack_arg_indices: stack_arg_indices.clone(),
                 struct_arg_groups: struct_arg_groups.clone(),
+                indirect: *indirect,
             }
         }
         other => other.clone(),

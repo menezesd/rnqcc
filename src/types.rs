@@ -536,6 +536,8 @@ pub enum Token {
     KWRestrict,
     KWShort,
     KWNoreturn,
+    Ellipsis, // ...
+
     // Punctuation
     OpenParen,
     CloseParen,
@@ -849,6 +851,8 @@ pub enum TackyInstr {
         stack_arg_indices: std::collections::HashSet<usize>,
         /// Groups of consecutive args that form struct eightbytes (start_idx, count, is_sse_vec)
         struct_arg_groups: Vec<(usize, usize, Vec<bool>)>,
+        /// True if calling through a function pointer variable
+        indirect: bool,
     },
     SignExtend {
         src: TackyVal,
@@ -1082,7 +1086,7 @@ pub enum AsmInstr {
     SetCC(CondCode, AsmOperand),
     Label(String),
     Push(AsmOperand),
-    Call(String, usize, usize), // name, int_reg_args, sse_reg_args
+    Call(String, usize, usize, bool), // name, int_reg_args, sse_reg_args, indirect
     Pop(Reg),
     Cvtsi2sd(AsmType, AsmOperand, AsmOperand), // int/long → double
     Cvttsd2si(AsmType, AsmOperand, AsmOperand), // double → int/long (truncate)

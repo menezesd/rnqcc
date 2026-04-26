@@ -568,9 +568,9 @@ fn rewrite_instruction(instr: &TackyInstr, reaching: &HashSet<CopyInstr>, types:
         }
         // Don't rewrite GetAddress (uses address, not value; changing address breaks aliasing)
         TackyInstr::GetAddress { .. } => Some(instr.clone()),
-        TackyInstr::FunCall { name, args, dst, stack_arg_indices, struct_arg_groups } => {
+        TackyInstr::FunCall { name, args, dst, stack_arg_indices, struct_arg_groups, indirect } => {
             let new_args: Vec<TackyVal> = args.iter().map(|a| replace_operand(a, reaching)).collect();
-            Some(TackyInstr::FunCall { name: name.clone(), args: new_args, dst: dst.clone(), stack_arg_indices: stack_arg_indices.clone(), struct_arg_groups: struct_arg_groups.clone() })
+            Some(TackyInstr::FunCall { name: name.clone(), args: new_args, dst: dst.clone(), stack_arg_indices: stack_arg_indices.clone(), struct_arg_groups: struct_arg_groups.clone(), indirect: *indirect })
         }
         TackyInstr::AddPtr { ptr, index, scale, dst } => {
             Some(TackyInstr::AddPtr { ptr: replace_operand(ptr, reaching), index: replace_operand(index, reaching), scale: *scale, dst: dst.clone() })

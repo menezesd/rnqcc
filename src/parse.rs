@@ -467,7 +467,10 @@ impl Parser {
                 if let Declarator::Ident(name) = inner.as_ref() {
                     (name.clone(), base_ft, Some(params.clone()))
                 } else {
-                    panic!("Function pointer types not supported");
+                    // Function pointer: int (*fp)(int, int)
+                    // The inner is PointerDeclarator(...) — extract name and make it a pointer type
+                    let fp_type = FullType::Pointer(Box::new(base_ft));
+                    Self::process_declarator_with_type(inner, fp_type)
                 }
             }
         }
@@ -484,19 +487,22 @@ impl Parser {
                 let derived = FullType::Array { elem: Box::new(current_type), size: *size };
                 Self::process_declarator_with_type(inner, derived)
             }
-            Declarator::FunDeclarator(params, _pfts, inner) => {
-                if let Declarator::Ident(name) = inner.as_ref() {
-                    // Function returning current_type
-                    (name.clone(), current_type, Some(params.clone()))
-                } else {
-                    panic!("Complex function declarators not supported");
-                }
+            Declarator::FunDeclarator(_params, _pfts, inner) => {
+                // Function pointer in nested context: treat as pointer
+                let fp_type = FullType::Pointer(Box::new(current_type));
+                Self::process_declarator_with_type(inner, fp_type)
             }
         }
     }
 
     /// Parse a declarator into a tree structure
     fn parse_declarator_tree(&mut self) -> Declarator {
+        self.parse_declarator_tree_inner(false)
+    }
+
+    /// Parse a declarator tree. If `allow_abstract` is true, the name is optional
+    /// (for function pointer param lists and abstract declarators).
+    fn parse_declarator_tree_inner(&mut self, allow_abstract: bool) -> Declarator {
         // Count leading * (skip const/volatile/restrict after each star)
         let mut stars = 0;
         while self.eat(&Token::Star) {
@@ -506,18 +512,55 @@ impl Parser {
             }
         }
 
-        // Direct declarator: identifier or (declarator)
+        // Direct declarator: identifier, (declarator), or abstract (no name)
         let mut decl = if self.eat(&Token::OpenParen) {
-            if self.is_type_keyword_at_pos() || self.at(&Token::CloseParen) {
-                // This looks like function params, not a grouped declarator
-                // But we haven't seen the name yet — this shouldn't happen at this level
-                panic!("Unexpected parameter list in declarator");
+            // Check if this is a grouped declarator like (*fp) or just (params)
+            if self.at(&Token::Star) || matches!(self.peek(), Some(Token::Identifier(_))) {
+                // Could be grouped declarator: (*name) or (name)
+                // But only if NOT followed by a type keyword inside (which would indicate params)
+                let save = self.pos;
+                // Peek ahead: skip stars, check for identifier
+                let mut temp_stars = 0;
+                while self.eat(&Token::Star) { temp_stars += 1; }
+                let is_grouped = matches!(self.peek(), Some(Token::Identifier(_))) ||
+                    (temp_stars > 0 && (self.at(&Token::CloseParen) || self.at(&Token::OpenParen)));
+                self.pos = save;
+
+                if is_grouped {
+                    let inner = self.parse_declarator_tree_inner(allow_abstract);
+                    self.expect(Token::CloseParen);
+                    inner
+                } else {
+                    // It's a parameter list, not a grouped declarator
+                    if allow_abstract {
+                        // Abstract declarator with no name — put back '(' and stop
+                        self.pos -= 1; // un-eat the '('
+                        Declarator::Ident(String::new())
+                    } else {
+                        panic!("Unexpected parameter list in declarator");
+                    }
+                }
+            } else if allow_abstract && (self.is_type_keyword_at_pos() || self.at(&Token::CloseParen)) {
+                // Abstract: (int, int) — this is a function parameter list, not a grouped decl
+                self.pos -= 1; // un-eat the '('
+                Declarator::Ident(String::new())
+            } else if self.at(&Token::CloseParen) {
+                // Empty parens in grouped declarator — abstract
+                self.pos -= 1;
+                Declarator::Ident(String::new())
+            } else {
+                let inner = self.parse_declarator_tree_inner(allow_abstract);
+                self.expect(Token::CloseParen);
+                inner
             }
-            let inner = self.parse_declarator_tree();
-            self.expect(Token::CloseParen);
-            inner
-        } else {
+        } else if let Some(Token::Identifier(_)) = self.peek() {
             let name = self.parse_identifier();
+            Declarator::Ident(name)
+        } else if allow_abstract {
+            // No name — abstract declarator
+            Declarator::Ident(String::new())
+        } else {
+            let name = self.parse_identifier(); // will panic with good error
             Declarator::Ident(name)
         };
 
@@ -1012,7 +1055,12 @@ impl Parser {
         let mut param_fts = Vec::new();
         let parse_one_param = |s: &mut Self, fts: &mut Vec<FullType>| -> (String, CType, Option<(CType, usize)>) {
             let base = s.parse_type();
-            let (name, full_type, _) = s.parse_declarator_full(base);
+            // Use abstract declarator parsing (name optional) for params
+            let tree = s.parse_declarator_tree_inner(true);
+            let td_ft = s.last_typedef_full_type.take();
+            let (name, full_type, _) = Self::process_declarator(&tree, base, td_ft.as_ref());
+            // Generate a dummy name for unnamed params
+            let name = if name.is_empty() { format!("__unnamed_{}", s.pos) } else { name };
             // Replace Scalar(Struct) with FullType::Struct(tag)
             let full_type = if base == CType::Struct {
                 if let Some(ref tag) = s.last_struct_tag {
@@ -1034,6 +1082,10 @@ impl Parser {
         };
         params.push(parse_one_param(self, &mut param_fts));
         while self.eat(&Token::Comma) {
+            // Check for ... (variadic)
+            if self.eat(&Token::Ellipsis) {
+                break;
+            }
             params.push(parse_one_param(self, &mut param_fts));
         }
         (params, param_fts)

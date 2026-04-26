@@ -63,7 +63,7 @@ pub struct Parser {
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Parser {
+        let mut p = Parser {
             tokens,
             pos: 0,
             last_struct_tag: None,
@@ -73,7 +73,15 @@ impl Parser {
             enum_scopes: vec![std::collections::HashMap::new()],
             pending_block_items: Vec::new(),
             pending_declarations: Vec::new(),
-        }
+        };
+        // Pre-register GCC builtin types as typedefs
+        p.add_typedef("__builtin_va_list".to_string(), TypedefInfo {
+            base_type: CType::Pointer, full_type: FullType::Pointer(Box::new(FullType::Scalar(CType::Char))), struct_tag: None,
+        });
+        p.add_typedef("__gnuc_va_list".to_string(), TypedefInfo {
+            base_type: CType::Pointer, full_type: FullType::Pointer(Box::new(FullType::Scalar(CType::Char))), struct_tag: None,
+        });
+        p
     }
 
     fn push_typedef_scope(&mut self) {
@@ -282,9 +290,9 @@ impl Parser {
                     self.advance();
                     has_int = true;
                 }
-                Some(Token::KWLong) if !has_long && !has_void && !has_char => {
+                Some(Token::KWLong) if !has_void && !has_char => {
                     self.advance();
-                    has_long = true;
+                    has_long = true; // long long is the same as long (both 64-bit)
                 }
                 Some(Token::KWChar) if !has_char && !has_int && !has_long && !has_void => {
                     self.advance();
@@ -419,10 +427,11 @@ impl Parser {
         let mut has_char = false;
         let mut has_unsigned = false;
         let mut has_signed = false;
-        for _ in 0..3 {
+        for _ in 0..5 {
             match self.peek() {
+                Some(Token::KWConst) | Some(Token::KWVolatile) | Some(Token::KWRestrict) => { self.advance(); continue; }
                 Some(Token::KWInt) if !has_int && !has_char => { self.advance(); has_int = true; }
-                Some(Token::KWLong) if !has_long && !has_char => { self.advance(); has_long = true; }
+                Some(Token::KWLong) if !has_char => { self.advance(); has_long = true; }
                 Some(Token::KWChar) if !has_char && !has_int && !has_long => { self.advance(); has_char = true; }
                 Some(Token::KWShort) if !has_long && !has_char => { self.advance(); /* treat as int */ }
                 Some(Token::KWUnsigned) if !has_unsigned && !has_signed => { self.advance(); has_unsigned = true; }

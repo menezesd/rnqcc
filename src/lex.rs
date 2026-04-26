@@ -280,7 +280,9 @@ impl Lexer {
             "__restrict__" => Token::KWRestrict,
             "short" => Token::KWShort,
             "_Noreturn" => Token::KWNoreturn,
-            "__extension__" => Token::KWNoreturn, // GCC extension marker — ignored
+            "__extension__" | "__asm__" | "__asm" | "asm" |
+            "_Nullable" | "_Nonnull" | "_Null_unspecified" |
+            "__signed" | "__signed__" => Token::KWNoreturn, // gcc/clang extensions — skip
             "__attribute__" | "__attribute" => {
                 // Skip __attribute__((...)) entirely — consume matching parens
                 self.skip_whitespace_and_comments();
@@ -452,7 +454,10 @@ impl Lexer {
                 _ => panic!("Unexpected character '{}' at position {}", c, self.pos - 1),
             };
 
-            tokens.push(tok);
+            // Filter out KWNoreturn used as skip token for __extension__, __asm__, etc.
+            if tok != Token::KWNoreturn {
+                tokens.push(tok);
+            }
         }
 
         tokens

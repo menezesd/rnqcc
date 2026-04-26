@@ -56,26 +56,6 @@ fn reg_name(reg: &Reg, t: AsmType) -> &'static str {
     }
 }
 
-fn reg_name_8(reg: &Reg) -> &'static str {
-    match reg {
-        Reg::AX => "%al",
-        Reg::BX => "%bl",
-        Reg::CX => "%cl",
-        Reg::DX => "%dl",
-        Reg::DI => "%dil",
-        Reg::SI => "%sil",
-        Reg::R8 => "%r8b",
-        Reg::R9 => "%r9b",
-        Reg::R10 => "%r10b",
-        Reg::R11 => "%r11b",
-        Reg::R12 => "%r12b",
-        Reg::R13 => "%r13b",
-        Reg::R14 => "%r14b",
-        Reg::R15 => "%r15b",
-        Reg::SP => "%spl",
-        Reg::BP => "%bpl",
-    }
-}
 
 fn xmm_name(reg: &XmmReg) -> &'static str {
     match reg {
@@ -110,7 +90,7 @@ fn show_operand(op: &AsmOperand, t: AsmType, platform: &Platform) -> String {
 
 fn show_operand_byte(op: &AsmOperand, platform: &Platform) -> String {
     match op {
-        AsmOperand::Reg(reg) => reg_name_8(reg).to_string(),
+        AsmOperand::Reg(reg) => reg_name(reg, AsmType::Byte).to_string(),
         AsmOperand::Stack(offset) => format!("{}(%rbp)", offset),
         AsmOperand::Data(name) => format!("{}(%rip)", platform.show_label(name)),
         other => panic!("Cannot get byte-sized version of {:?}", other),

@@ -54,24 +54,25 @@ fn is_comparison(op: &TackyBinaryOp, is_unsigned: bool) -> Option<CondCode> {
 }
 
 // Double constants need to be emitted as static data and referenced by label
-static DOUBLE_CONST_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-fn double_const_label() -> String {
-    let n = DOUBLE_CONST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    format!("__double_const_{}", n)
+fn double_const_label(static_doubles: &Vec<(String, f64)>) -> String {
+    format!("__double_const_{}", static_doubles.len())
 }
 
 /// Convert a TackyVal for doubles, emitting a data label for double constants
 fn convert_double_val(val: &TackyVal, static_doubles: &mut Vec<(String, f64)>) -> AsmOperand {
     match val {
         TackyVal::DoubleConstant(d) => {
-            let label = double_const_label();
+            let label = double_const_label(static_doubles);
             static_doubles.push((label.clone(), *d));
             AsmOperand::Data(label)
         }
         TackyVal::Constant(c) => AsmOperand::Imm(*c),
         TackyVal::Var(name) => AsmOperand::Pseudo(name.clone()),
     }
+}
+
+fn get_struct_def<'a>(name: &str, var_struct_tags: &HashMap<String, String>, struct_defs: &'a HashMap<String, StructDef>) -> Option<&'a StructDef> {
+    var_struct_tags.get(name).and_then(|tag| struct_defs.get(tag))
 }
 
 fn get_struct_classes(name: &str, var_struct_tags: &HashMap<String, String>, struct_defs: &HashMap<String, StructDef>) -> Option<Vec<ParamClass>> {
@@ -89,10 +90,8 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
         TackyInstr::Nop => { /* skip */ }
         TackyInstr::CopyStruct { src_name, dst_name } => {
             // Emit bytewise copy for struct-to-struct assignment
-            let struct_size = var_struct_tags.get(dst_name)
-                .and_then(|tag| struct_defs.get(tag))
-                .map(|d| d.size)
-                .unwrap_or(0);
+            let struct_size = get_struct_def(dst_name, var_struct_tags, struct_defs)
+                .map(|d| d.size).unwrap_or(0);
             let mut off = 0i32;
             while (off as usize) + 8 <= struct_size {
                 out.push(AsmInstr::Mov(AsmType::Quadword, AsmOperand::PseudoMem(src_name.clone(), off), AsmOperand::Reg(Reg::R10)));
@@ -117,7 +116,7 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
                 if types.get(name).copied() == Some(CType::Struct) {
                     if let Some(classes) = get_struct_classes(name, var_struct_tags, struct_defs) {
                         let struct_size = arr_sizes.get(name).copied()
-                            .or_else(|| var_struct_tags.get(name).and_then(|t| struct_defs.get(t)).map(|d| d.size))
+                            .or_else(|| get_struct_def(name, var_struct_tags, struct_defs).map(|d| d.size))
                             .unwrap_or(8);
                         let mut int_ret_idx = 0;
                         let mut sse_ret_idx = 0;
@@ -209,7 +208,7 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
             if t == AsmType::Double && matches!(op, TackyUnaryOp::Negate) {
                 // Double negation: XOR with sign bit mask (bit 63)
                 // Emit a static constant with just the sign bit set
-                let sign_mask_label = double_const_label();
+                let sign_mask_label = double_const_label(static_doubles);
                 let sign_bit: u64 = 1u64 << 63;
                 static_doubles.push((sign_mask_label.clone(), f64::from_bits(sign_bit)));
                 let src_op = convert_double_val(src, static_doubles);
@@ -263,81 +262,7 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
             out.push(AsmInstr::Binary(t, asm_op, AsmOperand::Reg(Reg::CX), convert_val(dst)));
         }
         TackyInstr::Binary { op, left, right, dst } => {
-            let left_ctype = match left {
-                TackyVal::Var(n) => types.get(n).copied().unwrap_or(CType::Int),
-                TackyVal::Constant(_) => CType::Int,
-                TackyVal::DoubleConstant(_) => CType::Double,
-            };
-            let right_ctype = match right {
-                TackyVal::Var(n) => types.get(n).copied().unwrap_or(CType::Int),
-                TackyVal::Constant(_) => CType::Int,
-                TackyVal::DoubleConstant(_) => CType::Double,
-            };
-            // Double comparisons use unsigned condition codes (comisd sets CF/ZF)
-            // Use unsigned if either operand is unsigned
-            let is_unsigned = !left_ctype.is_signed() || !right_ctype.is_signed() || left_ctype == CType::Double;
-
-            if let Some(cc) = is_comparison(op, is_unsigned) {
-                // Determine comparison type from variable types, not constant apparent sizes
-                let var_type = |v: &TackyVal| -> Option<AsmType> {
-                    match v {
-                        TackyVal::Var(n) => Some(match types.get(n).copied().unwrap_or(CType::Int) {
-                            CType::Long | CType::ULong | CType::Pointer => AsmType::Quadword,
-                            CType::Double => AsmType::Double,
-                            _ => AsmType::Longword,
-                        }),
-                        TackyVal::DoubleConstant(_) => Some(AsmType::Double),
-                        _ => None,
-                    }
-                };
-                let cmp_type = match (var_type(left), var_type(right)) {
-                    (Some(AsmType::Double), _) | (_, Some(AsmType::Double)) => AsmType::Double,
-                    (Some(AsmType::Quadword), _) | (_, Some(AsmType::Quadword)) => AsmType::Quadword,
-                    (Some(t), _) => t,
-                    (_, Some(t)) => t,
-                    _ => {
-                        // Both constants: use val_type
-                        let lt = val_type(left, types);
-                        let rt = val_type(right, types);
-                        if lt == AsmType::Quadword || rt == AsmType::Quadword { AsmType::Quadword } else { AsmType::Longword }
-                    }
-                };
-                if cmp_type == AsmType::Double {
-                    let l = convert_double_val(left, static_doubles);
-                    let r = convert_double_val(right, static_doubles);
-                    out.push(AsmInstr::Cmp(AsmType::Double, r, l));
-                } else {
-                    out.push(AsmInstr::Cmp(cmp_type, convert_val(right), convert_val(left)));
-                }
-                out.push(AsmInstr::Mov(AsmType::Longword, AsmOperand::Imm(0), convert_val(dst)));
-                out.push(AsmInstr::SetCC(cc, convert_val(dst)));
-            } else {
-                let t = val_type(dst, types);
-                if t == AsmType::Double {
-                    let asm_op = match op {
-                        TackyBinaryOp::Add => AsmBinaryOp::Add,
-                        TackyBinaryOp::Sub => AsmBinaryOp::Sub,
-                        TackyBinaryOp::Mul => AsmBinaryOp::Mul,
-                        _ => unreachable!("Unsupported double binary op: {:?}", op),
-                    };
-                    let l = convert_double_val(left, static_doubles);
-                    let r = convert_double_val(right, static_doubles);
-                    out.push(AsmInstr::Mov(AsmType::Double, l, convert_val(dst)));
-                    out.push(AsmInstr::Binary(AsmType::Double, asm_op, r, convert_val(dst)));
-                } else {
-                    let asm_op = match op {
-                        TackyBinaryOp::Add => AsmBinaryOp::Add,
-                        TackyBinaryOp::Sub => AsmBinaryOp::Sub,
-                        TackyBinaryOp::Mul => AsmBinaryOp::Mul,
-                        TackyBinaryOp::BitwiseAnd => AsmBinaryOp::And,
-                        TackyBinaryOp::BitwiseOr => AsmBinaryOp::Or,
-                        TackyBinaryOp::BitwiseXor => AsmBinaryOp::Xor,
-                        _ => unreachable!(),
-                    };
-                    out.push(AsmInstr::Mov(t, convert_val(left), convert_val(dst)));
-                    out.push(AsmInstr::Binary(t, asm_op, convert_val(right), convert_val(dst)));
-                }
-            }
+            convert_binary(op, left, right, dst, types, out, static_doubles);
         }
         TackyInstr::Copy { src, dst } => {
             let t = val_type(dst, types);
@@ -383,8 +308,8 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
                 // Algorithm: test if negative (as signed); if not, cvtsi2sdq directly
                 // If so: shift right 1, save LSB, OR LSB into shifted value,
                 // cvtsi2sdq, then addsd result to itself
-                let ok_label = double_const_label();
-                let end_label = double_const_label();
+                let ok_label = double_const_label(static_doubles);
+                let end_label = double_const_label(static_doubles);
                 out.push(AsmInstr::Cmp(AsmType::Quadword, AsmOperand::Imm(0), convert_val(src)));
                 out.push(AsmInstr::JmpCC(CondCode::GE, ok_label.clone()));
                 // Negative as signed = >= LONG_MAX as unsigned
@@ -511,6 +436,16 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
             out.push(AsmInstr::Label(label.clone()));
         }
         TackyInstr::FunCall { name, args, dst, stack_arg_indices, struct_arg_groups, indirect } => {
+            convert_funcall(name, args, dst, stack_arg_indices, struct_arg_groups, *indirect, types, arr_sizes, out, static_doubles, var_struct_tags, struct_defs);
+        }
+    }
+}
+
+fn convert_funcall(name: &str, args: &[TackyVal], dst: &TackyVal, stack_arg_indices: &std::collections::HashSet<usize>,
+    struct_arg_groups: &[(usize, usize, Vec<bool>)], indirect: bool,
+    types: &HashMap<String, CType>, arr_sizes: &HashMap<String, usize>, out: &mut Vec<AsmInstr>, static_doubles: &mut Vec<(String, f64)>,
+    var_struct_tags: &HashMap<String, String>, struct_defs: &HashMap<String, StructDef>) {
+    {
             // Pre-compute which args must go on stack due to struct group overflow
             let mut force_stack_args: std::collections::HashSet<usize> = std::collections::HashSet::new();
             {
@@ -611,11 +546,10 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
                 out.push(AsmInstr::Mov(AsmType::Double, src, AsmOperand::Xmm(XMM_ARG_REGISTERS[*i].clone())));
             }
 
-            if *indirect {
-                // Load function pointer into R10 before call
-                out.push(AsmInstr::Mov(AsmType::Quadword, AsmOperand::Pseudo(name.clone()), AsmOperand::Reg(Reg::R10)));
+            if indirect {
+                out.push(AsmInstr::Mov(AsmType::Quadword, AsmOperand::Pseudo(name.to_string()), AsmOperand::Reg(Reg::R10)));
             }
-            out.push(AsmInstr::Call(name.clone(), int_reg_args.len(), xmm_reg_args.len(), *indirect));
+            out.push(AsmInstr::Call(name.to_string(), int_reg_args.len(), xmm_reg_args.len(), indirect));
             let bytes_to_dealloc = (stack_count * 8 + padding) as i32;
             if bytes_to_dealloc > 0 {
                 out.push(AsmInstr::DeallocateStack(bytes_to_dealloc));
@@ -626,7 +560,7 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
                 if types.get(dst_name).copied() == Some(CType::Struct) {
                     if let Some(classes) = get_struct_classes(dst_name, var_struct_tags, struct_defs) {
                         let struct_size = arr_sizes.get(dst_name).copied()
-                            .or_else(|| var_struct_tags.get(dst_name).and_then(|t| struct_defs.get(t)).map(|d| d.size))
+                            .or_else(|| get_struct_def(dst_name, var_struct_tags, struct_defs).map(|d| d.size))
                             .unwrap_or(8);
                         let mut int_ret_idx = 0;
                         let mut sse_ret_idx = 0;
@@ -665,6 +599,80 @@ fn convert_instruction(instr: &TackyInstr, types: &HashMap<String, CType>, arr_s
             } else {
                 out.push(AsmInstr::Mov(ret_t, AsmOperand::Reg(Reg::AX), convert_val(dst)));
             }
+        }
+}
+
+fn convert_binary(op: &TackyBinaryOp, left: &TackyVal, right: &TackyVal, dst: &TackyVal,
+    types: &HashMap<String, CType>, out: &mut Vec<AsmInstr>, static_doubles: &mut Vec<(String, f64)>) {
+    let left_ctype = match left {
+        TackyVal::Var(n) => types.get(n).copied().unwrap_or(CType::Int),
+        TackyVal::Constant(_) => CType::Int,
+        TackyVal::DoubleConstant(_) => CType::Double,
+    };
+    let right_ctype = match right {
+        TackyVal::Var(n) => types.get(n).copied().unwrap_or(CType::Int),
+        TackyVal::Constant(_) => CType::Int,
+        TackyVal::DoubleConstant(_) => CType::Double,
+    };
+    let is_unsigned = !left_ctype.is_signed() || !right_ctype.is_signed() || left_ctype == CType::Double;
+
+    if let Some(cc) = is_comparison(op, is_unsigned) {
+        let var_type = |v: &TackyVal| -> Option<AsmType> {
+            match v {
+                TackyVal::Var(n) => Some(match types.get(n).copied().unwrap_or(CType::Int) {
+                    CType::Long | CType::ULong | CType::Pointer => AsmType::Quadword,
+                    CType::Double => AsmType::Double,
+                    _ => AsmType::Longword,
+                }),
+                TackyVal::DoubleConstant(_) => Some(AsmType::Double),
+                _ => None,
+            }
+        };
+        let cmp_type = match (var_type(left), var_type(right)) {
+            (Some(AsmType::Double), _) | (_, Some(AsmType::Double)) => AsmType::Double,
+            (Some(AsmType::Quadword), _) | (_, Some(AsmType::Quadword)) => AsmType::Quadword,
+            (Some(t), _) => t,
+            (_, Some(t)) => t,
+            _ => {
+                let lt = val_type(left, types);
+                let rt = val_type(right, types);
+                if lt == AsmType::Quadword || rt == AsmType::Quadword { AsmType::Quadword } else { AsmType::Longword }
+            }
+        };
+        if cmp_type == AsmType::Double {
+            let l = convert_double_val(left, static_doubles);
+            let r = convert_double_val(right, static_doubles);
+            out.push(AsmInstr::Cmp(AsmType::Double, r, l));
+        } else {
+            out.push(AsmInstr::Cmp(cmp_type, convert_val(right), convert_val(left)));
+        }
+        out.push(AsmInstr::Mov(AsmType::Longword, AsmOperand::Imm(0), convert_val(dst)));
+        out.push(AsmInstr::SetCC(cc, convert_val(dst)));
+    } else {
+        let t = val_type(dst, types);
+        if t == AsmType::Double {
+            let asm_op = match op {
+                TackyBinaryOp::Add => AsmBinaryOp::Add,
+                TackyBinaryOp::Sub => AsmBinaryOp::Sub,
+                TackyBinaryOp::Mul => AsmBinaryOp::Mul,
+                _ => unreachable!("Unsupported double binary op: {:?}", op),
+            };
+            let l = convert_double_val(left, static_doubles);
+            let r = convert_double_val(right, static_doubles);
+            out.push(AsmInstr::Mov(AsmType::Double, l, convert_val(dst)));
+            out.push(AsmInstr::Binary(AsmType::Double, asm_op, r, convert_val(dst)));
+        } else {
+            let asm_op = match op {
+                TackyBinaryOp::Add => AsmBinaryOp::Add,
+                TackyBinaryOp::Sub => AsmBinaryOp::Sub,
+                TackyBinaryOp::Mul => AsmBinaryOp::Mul,
+                TackyBinaryOp::BitwiseAnd => AsmBinaryOp::And,
+                TackyBinaryOp::BitwiseOr => AsmBinaryOp::Or,
+                TackyBinaryOp::BitwiseXor => AsmBinaryOp::Xor,
+                _ => unreachable!(),
+            };
+            out.push(AsmInstr::Mov(t, convert_val(left), convert_val(dst)));
+            out.push(AsmInstr::Binary(t, asm_op, convert_val(right), convert_val(dst)));
         }
     }
 }

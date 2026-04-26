@@ -526,6 +526,7 @@ pub enum Token {
     KWDefault,
     KWStatic,
     KWExtern,
+    KWTypedef,
     // Punctuation
     OpenParen,
     CloseParen,
@@ -711,6 +712,7 @@ pub enum BlockItem {
 pub enum StorageClass {
     Static,
     Extern,
+    Typedef,
 }
 
 #[derive(Debug)]
@@ -760,6 +762,7 @@ pub enum Declaration {
     FunDecl(FunctionDeclaration),
     VarDecl(VarDeclaration),
     StructDecl(StructDeclaration),
+    TypedefDecl, // No-op: fully resolved at parse time
 }
 
 #[derive(Debug)]

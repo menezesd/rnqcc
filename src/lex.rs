@@ -266,6 +266,7 @@ impl Lexer {
             "default" => Token::KWDefault,
             "static" => Token::KWStatic,
             "extern" => Token::KWExtern,
+            "typedef" => Token::KWTypedef,
             "char" => Token::KWChar,
             "sizeof" => Token::KWSizeOf,
             "struct" => Token::KWStruct,

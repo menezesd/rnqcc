@@ -35,15 +35,62 @@ fn ptr_info_from_full(ft: &FullType) -> (CType, usize) {
 // Parser
 // ============================================================
 
+/// Stored typedef: the base CType, the optional struct tag, and the FullType.
+#[derive(Debug, Clone)]
+struct TypedefInfo {
+    base_type: CType,
+    full_type: FullType,
+    struct_tag: Option<String>,
+}
+
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     last_struct_tag: Option<String>,
+    /// Scoped typedef table: each scope maps typedef names to their resolved type info.
+    typedef_scopes: Vec<std::collections::HashMap<String, TypedefInfo>>,
+    /// Struct/union definitions encountered during type specifier parsing
+    /// (e.g., `typedef struct S { ... } S;` — the struct def parsed inside specifiers).
+    pending_struct_decls: Vec<StructDeclaration>,
+    /// Full type from the last typedef used as a type specifier (for proper type resolution).
+    last_typedef_full_type: Option<FullType>,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, pos: 0, last_struct_tag: None }
+        Parser {
+            tokens,
+            pos: 0,
+            last_struct_tag: None,
+            typedef_scopes: vec![std::collections::HashMap::new()],
+            pending_struct_decls: Vec::new(),
+            last_typedef_full_type: None,
+        }
+    }
+
+    fn push_typedef_scope(&mut self) {
+        self.typedef_scopes.push(std::collections::HashMap::new());
+    }
+
+    fn pop_typedef_scope(&mut self) {
+        self.typedef_scopes.pop();
+    }
+
+    fn add_typedef(&mut self, name: String, info: TypedefInfo) {
+        self.typedef_scopes.last_mut().unwrap().insert(name, info);
+    }
+
+    fn lookup_typedef(&self, name: &str) -> Option<&TypedefInfo> {
+        for scope in self.typedef_scopes.iter().rev() {
+            if let Some(info) = scope.get(name) {
+                return Some(info);
+            }
+        }
+        None
+    }
+
+    fn is_typedef_name(&self, name: &str) -> bool {
+        self.lookup_typedef(name).is_some()
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -85,7 +132,12 @@ impl Parser {
     pub fn parse_program(&mut self) -> Program {
         let mut declarations = Vec::new();
         while self.peek().is_some() {
-            declarations.push(self.parse_declaration());
+            let decl = self.parse_declaration();
+            // Emit any pending struct/union definitions from type specifier parsing
+            for sd in self.pending_struct_decls.drain(..) {
+                declarations.push(Declaration::StructDecl(sd));
+            }
+            declarations.push(decl);
         }
         Program { declarations }
     }
@@ -102,7 +154,7 @@ impl Parser {
         let mut has_signed = false;
         let mut has_void = false;
 
-        for _ in 0..4 {
+        for _ in 0..5 {
             match self.peek() {
                 Some(Token::KWStatic) if sc.is_none() => {
                     self.advance();
@@ -111,6 +163,10 @@ impl Parser {
                 Some(Token::KWExtern) if sc.is_none() => {
                     self.advance();
                     sc = Some(StorageClass::Extern);
+                }
+                Some(Token::KWTypedef) if sc.is_none() => {
+                    self.advance();
+                    sc = Some(StorageClass::Typedef);
                 }
                 Some(Token::KWInt) if !has_int && !has_void && !has_char => {
                     self.advance();
@@ -134,11 +190,11 @@ impl Parser {
                 }
                 Some(Token::KWDouble) if !has_int && !has_void && !has_unsigned && !has_signed && !has_char => {
                     self.advance();
-                    return (sc, CType::Double); // handles both 'double' and 'long double'
+                    return (sc, CType::Double);
                 }
                 Some(Token::KWFloat) if !has_int && !has_long && !has_void && !has_unsigned && !has_signed && !has_char => {
                     self.advance();
-                    return (sc, CType::Double); // float promoted to double
+                    return (sc, CType::Double);
                 }
                 Some(Token::KWVoid) if !has_int && !has_long && !has_void && !has_unsigned && !has_signed && !has_char => {
                     self.advance();
@@ -154,8 +210,23 @@ impl Parser {
                 let ct_ft = self.parse_struct_type_specifier();
                 return (sc, ct_ft.0);
             }
+            // Check for typedef name
+            if let Some(Token::Identifier(name)) = self.peek() {
+                if let Some(info) = self.lookup_typedef(name) {
+                    let ct = info.base_type;
+                    let tag = info.struct_tag.clone();
+                    let ft = info.full_type.clone();
+                    self.advance();
+                    if let Some(tag) = tag {
+                        self.last_struct_tag = Some(tag);
+                    }
+                    self.last_typedef_full_type = Some(ft);
+                    return (sc, ct);
+                }
+            }
             panic!("Expected type specifier");
         }
+        self.last_typedef_full_type = None;
 
         let ctype = if has_void {
             CType::Void
@@ -186,6 +257,21 @@ impl Parser {
         }
         if self.at(&Token::KWDouble) { self.advance(); return CType::Double; }
         if self.at(&Token::KWFloat) { self.advance(); return CType::Double; }
+        // Check for typedef name before parsing int/long/etc.
+        if let Some(Token::Identifier(name)) = self.peek() {
+            if let Some(info) = self.lookup_typedef(name) {
+                let ct = info.base_type;
+                let tag = info.struct_tag.clone();
+                let ft = info.full_type.clone();
+                self.advance();
+                if let Some(tag) = tag {
+                    self.last_struct_tag = Some(tag);
+                }
+                self.last_typedef_full_type = Some(ft);
+                return ct;
+            }
+        }
+        self.last_typedef_full_type = None;
         let mut has_int = false;
         let mut has_long = false;
         let mut has_char = false;
@@ -210,26 +296,31 @@ impl Parser {
         else { CType::Int }
     }
 
-    fn is_type_keyword(tok: &Token) -> bool {
-        matches!(tok, Token::KWInt | Token::KWLong | Token::KWVoid | Token::KWUnsigned | Token::KWSigned | Token::KWDouble | Token::KWFloat | Token::KWChar | Token::KWStruct | Token::KWUnion)
+    fn is_type_keyword(&self, tok: &Token) -> bool {
+        match tok {
+            Token::KWInt | Token::KWLong | Token::KWVoid | Token::KWUnsigned | Token::KWSigned |
+            Token::KWDouble | Token::KWFloat | Token::KWChar | Token::KWStruct | Token::KWUnion => true,
+            Token::Identifier(name) => self.is_typedef_name(name),
+            _ => false,
+        }
     }
 
     /// Process a declarator tree to extract name, derived type, and params
-    fn process_declarator(decl: &Declarator, base_type: CType) -> (String, FullType, Option<Vec<(String, CType, Option<(CType, usize)>)>>) {
+    fn process_declarator(decl: &Declarator, base_type: CType, base_full_type: Option<&FullType>) -> (String, FullType, Option<Vec<(String, CType, Option<(CType, usize)>)>>) {
+        let base_ft = base_full_type.cloned().unwrap_or(FullType::Scalar(base_type));
         match decl {
-            Declarator::Ident(name) => (name.clone(), FullType::Scalar(base_type), None),
+            Declarator::Ident(name) => (name.clone(), base_ft, None),
             Declarator::PointerDeclarator(inner) => {
-                let derived = FullType::Pointer(Box::new(FullType::Scalar(base_type)));
+                let derived = FullType::Pointer(Box::new(base_ft));
                 Self::process_declarator_with_type(inner, derived)
             }
             Declarator::ArrayDeclarator(inner, size) => {
-                let derived = FullType::Array { elem: Box::new(FullType::Scalar(base_type)), size: *size };
+                let derived = FullType::Array { elem: Box::new(base_ft), size: *size };
                 Self::process_declarator_with_type(inner, derived)
             }
             Declarator::FunDeclarator(params, _pfts, inner) => {
-                // Inner must be Ident for valid function declarations
                 if let Declarator::Ident(name) = inner.as_ref() {
-                    (name.clone(), FullType::Scalar(base_type), Some(params.clone()))
+                    (name.clone(), base_ft, Some(params.clone()))
                 } else {
                     panic!("Function pointer types not supported");
                 }
@@ -313,7 +404,8 @@ impl Parser {
     /// Returns (name, FullType, optional_params)
     fn parse_declarator_full(&mut self, base_type: CType) -> (String, FullType, Option<Vec<(String, CType, Option<(CType, usize)>)>>) {
         let tree = self.parse_declarator_tree();
-        Self::process_declarator(&tree, base_type)
+        let td_ft = self.last_typedef_full_type.take();
+        Self::process_declarator(&tree, base_type, td_ft.as_ref())
     }
 
     /// Parse a declarator (backward-compatible wrapper)
@@ -463,7 +555,7 @@ impl Parser {
 
     fn is_type_keyword_at_pos(&self) -> bool {
         match self.peek() {
-            Some(tok) => Self::is_type_keyword(tok),
+            Some(tok) => self.is_type_keyword(tok),
             None => false,
         }
     }
@@ -505,14 +597,20 @@ impl Parser {
     }
 
     fn parse_struct_type_specifier(&mut self) -> (CType, String) {
-        if self.at(&Token::KWUnion) {
+        let is_union = self.at(&Token::KWUnion);
+        if is_union {
             self.advance();
         } else {
             self.expect(Token::KWStruct);
         }
         let tag = self.parse_identifier();
+        // If followed by { members }, parse the struct body and record a pending definition
+        if self.at(&Token::OpenBrace) {
+            let members = self.parse_struct_members();
+            self.pending_struct_decls.push(StructDeclaration { tag: tag.clone(), members, is_union });
+        }
         self.last_struct_tag = Some(tag.clone());
-        (CType::Struct, tag)  // Unions use same CType::Struct internally
+        (CType::Struct, tag)
     }
 
     fn parse_declaration(&mut self) -> Declaration {
@@ -540,7 +638,8 @@ impl Parser {
         let saved_struct_tag = if base_type == CType::Struct { self.last_struct_tag.clone() } else { None };
 
         let decl_tree = self.parse_declarator_tree();
-        let (name, full_type, decl_params) = Self::process_declarator(&decl_tree, base_type);
+        let td_ft = self.last_typedef_full_type.take();
+        let (name, full_type, decl_params) = Self::process_declarator(&decl_tree, base_type, td_ft.as_ref());
 
         // Replace Scalar(Struct) with FullType::Struct(tag) if applicable
         let full_type = if base_type == CType::Struct {
@@ -548,6 +647,17 @@ impl Parser {
                 Self::replace_scalar_struct(&full_type, tag)
             } else { full_type }
         } else { full_type };
+
+        // Handle typedef declarations
+        if sc == Some(StorageClass::Typedef) {
+            self.expect(Token::Semicolon);
+            self.add_typedef(name, TypedefInfo {
+                base_type,
+                full_type: full_type.clone(),
+                struct_tag: saved_struct_tag,
+            });
+            return Declaration::TypedefDecl;
+        }
 
         // Extract backward-compat fields from FullType
         let ctype = full_type.to_ctype();
@@ -728,30 +838,31 @@ impl Parser {
 
     fn parse_block(&mut self) -> Block {
         self.expect(Token::OpenBrace);
+        self.push_typedef_scope();
         let mut items = Vec::new();
         while !self.at(&Token::CloseBrace) {
-            items.push(self.parse_block_item());
+            let item = self.parse_block_item();
+            // Emit any pending struct/union definitions from type specifier parsing
+            for sd in self.pending_struct_decls.drain(..) {
+                items.push(BlockItem::Declaration(Declaration::StructDecl(sd)));
+            }
+            items.push(item);
         }
         self.expect(Token::CloseBrace);
+        self.pop_typedef_scope();
         items
     }
 
     fn is_declaration_start(&self) -> bool {
-        matches!(
-            self.peek(),
-            Some(Token::KWInt)
-                | Some(Token::KWLong)
-                | Some(Token::KWUnsigned)
-                | Some(Token::KWSigned)
-                | Some(Token::KWDouble)
-                | Some(Token::KWFloat)
-                | Some(Token::KWVoid)
-                | Some(Token::KWChar)
-                | Some(Token::KWStruct)
-                | Some(Token::KWUnion)
-                | Some(Token::KWStatic)
-                | Some(Token::KWExtern)
-        )
+        match self.peek() {
+            Some(Token::KWInt) | Some(Token::KWLong) | Some(Token::KWUnsigned) |
+            Some(Token::KWSigned) | Some(Token::KWDouble) | Some(Token::KWFloat) |
+            Some(Token::KWVoid) | Some(Token::KWChar) | Some(Token::KWStruct) |
+            Some(Token::KWUnion) | Some(Token::KWStatic) | Some(Token::KWExtern) |
+            Some(Token::KWTypedef) => true,
+            Some(Token::Identifier(name)) => self.is_typedef_name(name),
+            _ => false,
+        }
     }
 
     fn parse_block_item(&mut self) -> BlockItem {
@@ -783,6 +894,18 @@ impl Parser {
                     Self::replace_scalar_struct(&full_type, tag)
                 } else { full_type }
             } else { full_type };
+
+            // Handle typedef declarations
+            if sc == Some(StorageClass::Typedef) {
+                self.expect(Token::Semicolon);
+                self.add_typedef(name, TypedefInfo {
+                    base_type,
+                    full_type: full_type.clone(),
+                    struct_tag: saved_struct_tag,
+                });
+                return BlockItem::Declaration(Declaration::TypedefDecl);
+            }
+
             let ctype = full_type.to_ctype();
             let pi = match &full_type {
                 FullType::Pointer(inner) => Some(ptr_info_from_full(inner)),
@@ -1263,7 +1386,7 @@ impl Parser {
                 // sizeof(type) — check for ( followed by type keyword
                 if self.at(&Token::OpenParen)
                     && self.pos + 1 < self.tokens.len()
-                    && Self::is_type_keyword(&self.tokens[self.pos + 1])
+                    && self.is_type_keyword(&self.tokens[self.pos + 1])
                 {
                     self.advance(); // consume '('
                     let base_type = self.parse_type();
@@ -1285,7 +1408,7 @@ impl Parser {
             // Cast expression: (type) unary or (type *) unary
             Some(Token::OpenParen)
                 if self.pos + 1 < self.tokens.len()
-                    && Self::is_type_keyword(&self.tokens[self.pos + 1]) =>
+                    && self.is_type_keyword(&self.tokens[self.pos + 1]) =>
             {
                 self.advance(); // consume '('
                 let base_type = self.parse_type();

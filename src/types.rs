@@ -653,6 +653,7 @@ pub enum Exp {
     Dot(Box<Exp>, String),         // expr.member
     Arrow(Box<Exp>, String),       // expr->member
     Comma(Box<Exp>, Box<Exp>),     // a, b — evaluate both, result is b
+    IndirectCall(Box<Exp>, Vec<Exp>), // expr(args) — call through function pointer expression
 }
 
 #[derive(Debug)]

@@ -249,6 +249,7 @@ impl Parser {
         let mut sc = None;
         let mut has_int = false;
         let mut has_long = false;
+        let mut has_short = false;
         let mut has_char = false;
         let mut has_unsigned = false;
         let mut has_signed = false;
@@ -258,7 +259,7 @@ impl Parser {
             match self.peek() {
                 // Ignored qualifiers/specifiers
                 Some(Token::KWConst) | Some(Token::KWVolatile) | Some(Token::KWRestrict) |
-                Some(Token::KWInline) => {
+                Some(Token::KWInline) | Some(Token::KWNoreturn) => {
                     self.advance();
                     continue;
                 }
@@ -289,6 +290,10 @@ impl Parser {
                     self.advance();
                     has_char = true;
                 }
+                Some(Token::KWShort) if !has_long && !has_char && !has_void && !has_short => {
+                    self.advance();
+                    has_short = true;
+                }
                 Some(Token::KWUnsigned) if !has_unsigned && !has_signed && !has_void => {
                     self.advance();
                     has_unsigned = true;
@@ -317,7 +322,7 @@ impl Parser {
             }
         }
 
-        if !has_int && !has_long && !has_void && !has_unsigned && !has_signed && !has_char {
+        if !has_int && !has_long && !has_short && !has_void && !has_unsigned && !has_signed && !has_char {
             // Check for struct or union
             if self.at(&Token::KWStruct) || self.at(&Token::KWUnion) {
                 let ct_ft = self.parse_struct_type_specifier();
@@ -419,6 +424,7 @@ impl Parser {
                 Some(Token::KWInt) if !has_int && !has_char => { self.advance(); has_int = true; }
                 Some(Token::KWLong) if !has_long && !has_char => { self.advance(); has_long = true; }
                 Some(Token::KWChar) if !has_char && !has_int && !has_long => { self.advance(); has_char = true; }
+                Some(Token::KWShort) if !has_long && !has_char => { self.advance(); /* treat as int */ }
                 Some(Token::KWUnsigned) if !has_unsigned && !has_signed => { self.advance(); has_unsigned = true; }
                 Some(Token::KWSigned) if !has_signed && !has_unsigned => { self.advance(); has_signed = true; }
                 _ => break,
@@ -437,7 +443,8 @@ impl Parser {
         match tok {
             Token::KWInt | Token::KWLong | Token::KWVoid | Token::KWUnsigned | Token::KWSigned |
             Token::KWDouble | Token::KWFloat | Token::KWChar | Token::KWStruct | Token::KWUnion |
-            Token::KWEnum | Token::KWConst | Token::KWVolatile | Token::KWRestrict | Token::KWBool => true,
+            Token::KWEnum | Token::KWConst | Token::KWVolatile | Token::KWRestrict | Token::KWBool |
+            Token::KWShort | Token::KWNoreturn => true,
             Token::Identifier(name) => self.is_typedef_name(name),
             _ => false,
         }
@@ -663,22 +670,53 @@ impl Parser {
         self.expect(Token::OpenBrace);
         let mut elems = Vec::new();
         if !self.at(&Token::CloseBrace) {
-            if self.at(&Token::OpenBrace) {
-                elems.push(self.parse_array_init());
-            } else {
-                elems.push(self.parse_assignment());
-            }
+            elems.push(self.parse_init_element());
             while self.eat(&Token::Comma) {
                 if self.at(&Token::CloseBrace) { break; } // trailing comma
-                if self.at(&Token::OpenBrace) {
-                    elems.push(self.parse_array_init());
-                } else {
-                    elems.push(self.parse_assignment());
-                }
+                elems.push(self.parse_init_element());
             }
         }
         self.expect(Token::CloseBrace);
         Exp::ArrayInit(elems)
+    }
+
+    /// Parse one element of an initializer list, skipping any designators.
+    fn parse_init_element(&mut self) -> Exp {
+        // Skip designators: .field = or [index] =
+        self.skip_designators();
+        if self.at(&Token::OpenBrace) {
+            self.parse_array_init()
+        } else {
+            self.parse_assignment()
+        }
+    }
+
+    /// Skip designator sequences like `.field =`, `[index] =`, or chains like `.a.b[0] =`
+    fn skip_designators(&mut self) {
+        let mut has_designator = false;
+        loop {
+            if self.eat(&Token::Dot) {
+                // .field designator
+                self.parse_identifier(); // consume field name
+                has_designator = true;
+            } else if self.eat(&Token::OpenBracket) {
+                // [index] designator — skip to closing bracket
+                let mut depth = 1;
+                while depth > 0 {
+                    match self.advance() {
+                        Token::OpenBracket => depth += 1,
+                        Token::CloseBracket => depth -= 1,
+                        _ => {}
+                    }
+                }
+                has_designator = true;
+            } else {
+                break;
+            }
+        }
+        if has_designator {
+            self.expect(Token::Assign);
+        }
     }
 
     fn extract_array_dims(ft: &FullType) -> Option<Vec<usize>> {
@@ -746,7 +784,14 @@ impl Parser {
         } else {
             self.expect(Token::KWStruct);
         }
-        let tag = self.parse_identifier();
+        // Tag is optional for anonymous structs/unions
+        let tag = if let Some(Token::Identifier(_)) = self.peek() {
+            self.parse_identifier()
+        } else {
+            // Anonymous struct/union — generate a unique tag
+            let tag = format!("__anon_{}", self.pos);
+            tag
+        };
         // If followed by { members }, parse the struct body and record a pending definition
         if self.at(&Token::OpenBrace) {
             let members = self.parse_struct_members();
@@ -1032,7 +1077,8 @@ impl Parser {
             Some(Token::KWUnion) | Some(Token::KWEnum) | Some(Token::KWStatic) |
             Some(Token::KWExtern) | Some(Token::KWTypedef) | Some(Token::KWConst) |
             Some(Token::KWVolatile) | Some(Token::KWInline) | Some(Token::KWRegister) |
-            Some(Token::KWRestrict) | Some(Token::KWBool) => true,
+            Some(Token::KWRestrict) | Some(Token::KWBool) | Some(Token::KWShort) |
+            Some(Token::KWNoreturn) => true,
             Some(Token::Identifier(name)) => self.is_typedef_name(name),
             _ => false,
         }
@@ -1334,7 +1380,12 @@ impl Parser {
     // --------------------------------------------------------
 
     fn parse_expression(&mut self) -> Exp {
-        self.parse_assignment()
+        let mut left = self.parse_assignment();
+        while self.eat(&Token::Comma) {
+            let right = self.parse_assignment();
+            left = Exp::Comma(Box::new(left), Box::new(right));
+        }
+        left
     }
 
     fn parse_assignment(&mut self) -> Exp {
@@ -1602,7 +1653,7 @@ impl Parser {
                     Exp::SizeOf(Box::new(operand))
                 }
             }
-            // Cast expression: (type) unary or (type *) unary
+            // Cast expression or compound literal: (type) unary or (type){init}
             Some(Token::OpenParen)
                 if self.pos + 1 < self.tokens.len()
                     && self.is_type_keyword(&self.tokens[self.pos + 1]) =>
@@ -1616,10 +1667,19 @@ impl Parser {
                     } else { full_type }
                 } else { full_type };
                 self.expect(Token::CloseParen);
-                let target_type = full_type.to_ctype();
-                let operand = self.parse_unary();
-                let cast_ft = if target_type == CType::Pointer || target_type == CType::Struct { Some(full_type) } else { None };
-                Exp::Cast(target_type, cast_ft, Box::new(operand))
+                if self.at(&Token::OpenBrace) {
+                    // Compound literal: (Type){init}
+                    let init = self.parse_array_init();
+                    // Treat as a cast of the initializer to the target type
+                    let target_type = full_type.to_ctype();
+                    let cast_ft = if target_type == CType::Pointer || target_type == CType::Struct { Some(full_type) } else { None };
+                    Exp::Cast(target_type, cast_ft, Box::new(init))
+                } else {
+                    let target_type = full_type.to_ctype();
+                    let operand = self.parse_unary();
+                    let cast_ft = if target_type == CType::Pointer || target_type == CType::Struct { Some(full_type) } else { None };
+                    Exp::Cast(target_type, cast_ft, Box::new(operand))
+                }
             }
             _ => self.parse_postfix(),
         }

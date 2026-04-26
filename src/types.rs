@@ -534,6 +534,8 @@ pub enum Token {
     KWRegister,
     KWBool,
     KWRestrict,
+    KWShort,
+    KWNoreturn,
     // Punctuation
     OpenParen,
     CloseParen,
@@ -648,6 +650,7 @@ pub enum Exp {
     SizeOfType(CType, FullType),   // sizeof(type)
     Dot(Box<Exp>, String),         // expr.member
     Arrow(Box<Exp>, String),       // expr->member
+    Comma(Box<Exp>, Box<Exp>),     // a, b — evaluate both, result is b
 }
 
 #[derive(Debug)]

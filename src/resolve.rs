@@ -166,6 +166,7 @@ impl Resolver {
             Exp::SizeOfType(ct, ft) => Exp::SizeOfType(ct, self.resolve_struct_tags_in_ft(ft)),
             Exp::Dot(inner, member) => Exp::Dot(Box::new(self.resolve_exp(*inner)), member),
             Exp::Arrow(inner, member) => Exp::Arrow(Box::new(self.resolve_exp(*inner)), member),
+            Exp::Comma(left, right) => Exp::Comma(Box::new(self.resolve_exp(*left)), Box::new(self.resolve_exp(*right))),
         }
     }
 

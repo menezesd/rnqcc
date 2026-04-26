@@ -114,7 +114,7 @@ impl Parser {
     fn make_var_decl(&mut self, name: String, full_type: &FullType, ctype: CType, pi: Option<(CType, usize)>, sc: Option<StorageClass>) -> VarDeclaration {
         let array_dims = Self::extract_array_dims(full_type);
         if ctype == CType::Void && array_dims.is_none() {
-            panic!("Cannot declare variable with void type");
+            self.error("cannot declare variable with void type");
         }
         let init = if self.eat(&Token::Assign) {
             if self.at(&Token::OpenBrace) {
@@ -203,9 +203,20 @@ impl Parser {
         self.tokens.get(self.pos)
     }
 
+    fn error(&self, msg: &str) -> ! {
+        // Show context: the 3 tokens around the current position
+        let start = if self.pos >= 2 { self.pos - 2 } else { 0 };
+        let end = std::cmp::min(self.pos + 3, self.tokens.len());
+        let context: Vec<String> = self.tokens[start..end].iter().enumerate()
+            .map(|(i, t)| {
+                if start + i == self.pos { format!(">>>{:?}<<<", t) } else { format!("{:?}", t) }
+            }).collect();
+        panic!("Parse error at token {}: {}\n  Context: {}", self.pos, msg, context.join(" "))
+    }
+
     fn advance(&mut self) -> Token {
         let tok = self.tokens.get(self.pos).cloned().unwrap_or_else(|| {
-            panic!("Unexpected end of tokens");
+            self.error("unexpected end of input");
         });
         self.pos += 1;
         tok
@@ -214,7 +225,8 @@ impl Parser {
     fn expect(&mut self, expected: Token) {
         let actual = self.advance();
         if actual != expected {
-            panic!("Expected {:?} but found {:?}", expected, actual);
+            self.pos -= 1; // point at the unexpected token
+            self.error(&format!("expected {:?} but found {:?}", expected, actual));
         }
     }
 
@@ -263,7 +275,7 @@ impl Parser {
         let mut has_signed = false;
         let mut has_void = false;
 
-        for _ in 0..8 {
+        loop {
             match self.peek() {
                 // Ignored qualifiers/specifiers
                 Some(Token::KWConst) | Some(Token::KWVolatile) | Some(Token::KWRestrict) |
@@ -363,7 +375,7 @@ impl Parser {
                     return (sc, ct);
                 }
             }
-            panic!("Expected type specifier");
+            self.error("expected type specifier");
         }
         self.last_typedef_full_type = None;
 
@@ -427,7 +439,7 @@ impl Parser {
         let mut has_char = false;
         let mut has_unsigned = false;
         let mut has_signed = false;
-        for _ in 0..5 {
+        loop {
             match self.peek() {
                 Some(Token::KWConst) | Some(Token::KWVolatile) | Some(Token::KWRestrict) => { self.advance(); continue; }
                 Some(Token::KWInt) if !has_int && !has_char => { self.advance(); has_int = true; }
@@ -551,7 +563,7 @@ impl Parser {
                         self.pos -= 1; // un-eat the '('
                         Declarator::Ident(String::new())
                     } else {
-                        panic!("Unexpected parameter list in declarator");
+                        self.error("unexpected parameter list in declarator");
                     }
                 }
             } else if allow_abstract && (self.is_type_keyword_at_pos() || self.at(&Token::CloseParen)) {
@@ -1032,7 +1044,7 @@ impl Parser {
         };
         let array_dims = Self::extract_array_dims(&full_type);
         if ctype == CType::Void && array_dims.is_none() {
-            panic!("Cannot declare variable with void type");
+            self.error("cannot declare variable with void type");
         }
         let init = if self.eat(&Token::Assign) {
             if self.at(&Token::OpenBrace) {
@@ -1108,7 +1120,7 @@ impl Parser {
     fn parse_identifier(&mut self) -> String {
         match self.advance() {
             Token::Identifier(name) => name,
-            other => panic!("Expected identifier, found {:?}", other),
+            other => { self.pos -= 1; self.error(&format!("expected identifier, found {:?}", other)); }
         }
     }
 
@@ -1235,7 +1247,7 @@ impl Parser {
                 };
 
                 if body.is_some() {
-                    panic!("Function definitions not allowed inside blocks");
+                    self.error("function definitions not allowed inside blocks");
                 }
 
                 BlockItem::Declaration(Declaration::FunDecl(FunctionDeclaration {
@@ -1861,7 +1873,7 @@ impl Parser {
                 self.expect(Token::CloseParen);
                 exp
             }
-            other => panic!("Expected expression, found {:?}", other),
+            other => { self.pos -= 1; self.error(&format!("expected expression, found {:?}", other)); }
         }
     }
 

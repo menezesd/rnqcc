@@ -1817,6 +1817,20 @@ impl TackyGen {
                     let (ptr, _elem_type, _elem_ft2) = self.emit_subscript_addr(*first, *second);
                     return (ptr, CType::Pointer);
                 }
+                // &func_name — function-to-pointer decay
+                if let Exp::Var(ref name) = inner {
+                    if self.func_types.contains_key(name) {
+                        let dst = self.fresh_tmp(CType::Pointer);
+                        // GetAddress of a function name: codegen will use leaq label(%rip)
+                        self.emit(TackyInstr::GetAddress {
+                            src: TackyVal::Var(name.clone()),
+                            dst: dst.clone(),
+                        });
+                        // Mark this function name as needing a global label
+                        self.extern_vars.push(name.clone());
+                        return (dst, CType::Pointer);
+                    }
+                }
                 // &x — get address of variable
                 let pointee_type = self.lvalue_type(&inner);
                 let var = self.emit_lvalue(inner);
@@ -3867,7 +3881,6 @@ pub fn generate(program: Program) -> TackyProgram {
         match decl {
             Declaration::FunDecl(fd) => {
                 let fname = fd.name.clone();
-                global_vars.insert(fname.clone()); // Function names are global symbols (for &func)
                 if let Some(mut tf) = gen.emit_function(fd) {
                     tf.global = *linkage.get(&fname).unwrap_or(&true);
                     top_level.push(TackyTopLevel::Function(tf));

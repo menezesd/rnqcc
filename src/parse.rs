@@ -487,10 +487,15 @@ impl Parser {
                 let derived = FullType::Array { elem: Box::new(current_type), size: *size };
                 Self::process_declarator_with_type(inner, derived)
             }
-            Declarator::FunDeclarator(_params, _pfts, inner) => {
-                // Function pointer in nested context: treat as pointer
-                let fp_type = FullType::Pointer(Box::new(current_type));
-                Self::process_declarator_with_type(inner, fp_type)
+            Declarator::FunDeclarator(params, _pfts, inner) => {
+                if let Declarator::Ident(name) = inner.as_ref() {
+                    // Function returning current_type: void *func() or int *func()
+                    (name.clone(), current_type, Some(params.clone()))
+                } else {
+                    // Function pointer in nested context: void (*fp)()
+                    let fp_type = FullType::Pointer(Box::new(current_type));
+                    Self::process_declarator_with_type(inner, fp_type)
+                }
             }
         }
     }

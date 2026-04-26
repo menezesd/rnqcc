@@ -55,6 +55,10 @@ pub struct Parser {
     last_typedef_full_type: Option<FullType>,
     /// Scoped enum constant table: maps constant names to their integer values.
     enum_scopes: Vec<std::collections::HashMap<String, i64>>,
+    /// Extra block items from multi-declarator parsing (e.g., `int x, y;`)
+    pending_block_items: Vec<BlockItem>,
+    /// Extra top-level declarations from multi-declarator parsing
+    pending_declarations: Vec<Declaration>,
 }
 
 impl Parser {
@@ -67,6 +71,8 @@ impl Parser {
             pending_struct_decls: Vec::new(),
             last_typedef_full_type: None,
             enum_scopes: vec![std::collections::HashMap::new()],
+            pending_block_items: Vec::new(),
+            pending_declarations: Vec::new(),
         }
     }
 
@@ -95,6 +101,33 @@ impl Parser {
 
     fn is_typedef_name(&self, name: &str) -> bool {
         self.lookup_typedef(name).is_some()
+    }
+
+    fn make_var_decl(&mut self, name: String, full_type: &FullType, ctype: CType, pi: Option<(CType, usize)>, sc: Option<StorageClass>) -> VarDeclaration {
+        let array_dims = Self::extract_array_dims(full_type);
+        if ctype == CType::Void && array_dims.is_none() {
+            panic!("Cannot declare variable with void type");
+        }
+        let init = if self.eat(&Token::Assign) {
+            if self.at(&Token::OpenBrace) {
+                Some(self.parse_array_init())
+            } else {
+                Some(self.parse_expression())
+            }
+        } else {
+            None
+        };
+        let var_type = if array_dims.is_some() {
+            let mut t = full_type;
+            while let FullType::Array { elem, .. } = t { t = elem; }
+            t.to_ctype()
+        } else {
+            ctype
+        };
+        VarDeclaration {
+            name, var_type, ptr_info: pi, array_dims,
+            decl_full_type: Some(full_type.clone()), init, storage_class: sc,
+        }
     }
 
     fn add_enum_constant(&mut self, name: String, value: i64) {
@@ -203,6 +236,8 @@ impl Parser {
                 declarations.push(Declaration::StructDecl(sd));
             }
             declarations.push(decl);
+            // Emit extra declarations from multi-declarator parsing
+            declarations.extend(self.pending_declarations.drain(..));
         }
         Program { declarations }
     }
@@ -219,8 +254,14 @@ impl Parser {
         let mut has_signed = false;
         let mut has_void = false;
 
-        for _ in 0..5 {
+        for _ in 0..8 {
             match self.peek() {
+                // Ignored qualifiers/specifiers
+                Some(Token::KWConst) | Some(Token::KWVolatile) | Some(Token::KWRestrict) |
+                Some(Token::KWInline) => {
+                    self.advance();
+                    continue;
+                }
                 Some(Token::KWStatic) if sc.is_none() => {
                     self.advance();
                     sc = Some(StorageClass::Static);
@@ -232,6 +273,9 @@ impl Parser {
                 Some(Token::KWTypedef) if sc.is_none() => {
                     self.advance();
                     sc = Some(StorageClass::Typedef);
+                }
+                Some(Token::KWRegister) if sc.is_none() => {
+                    self.advance(); // ignore register storage class
                 }
                 Some(Token::KWInt) if !has_int && !has_void && !has_char => {
                     self.advance();
@@ -264,6 +308,10 @@ impl Parser {
                 Some(Token::KWVoid) if !has_int && !has_long && !has_void && !has_unsigned && !has_signed && !has_char => {
                     self.advance();
                     has_void = true;
+                }
+                Some(Token::KWBool) if !has_int && !has_long && !has_void && !has_unsigned && !has_signed && !has_char => {
+                    self.advance();
+                    return (sc, CType::UChar); // _Bool is 1-byte unsigned
                 }
                 _ => break,
             }
@@ -328,6 +376,10 @@ impl Parser {
     }
 
     fn parse_type(&mut self) -> CType {
+        // Skip type qualifiers
+        while matches!(self.peek(), Some(Token::KWConst) | Some(Token::KWVolatile) | Some(Token::KWRestrict)) {
+            self.advance();
+        }
         if self.at(&Token::KWVoid) { self.advance(); return CType::Void; }
         if self.at(&Token::KWStruct) || self.at(&Token::KWUnion) {
             let (ct, _) = self.parse_struct_type_specifier();
@@ -335,6 +387,7 @@ impl Parser {
         }
         if self.at(&Token::KWDouble) { self.advance(); return CType::Double; }
         if self.at(&Token::KWFloat) { self.advance(); return CType::Double; }
+        if self.at(&Token::KWBool) { self.advance(); return CType::UChar; }
         if self.at(&Token::KWEnum) {
             self.advance();
             if let Some(Token::Identifier(_)) = self.peek() { self.advance(); }
@@ -384,7 +437,7 @@ impl Parser {
         match tok {
             Token::KWInt | Token::KWLong | Token::KWVoid | Token::KWUnsigned | Token::KWSigned |
             Token::KWDouble | Token::KWFloat | Token::KWChar | Token::KWStruct | Token::KWUnion |
-            Token::KWEnum => true,
+            Token::KWEnum | Token::KWConst | Token::KWVolatile | Token::KWRestrict | Token::KWBool => true,
             Token::Identifier(name) => self.is_typedef_name(name),
             _ => false,
         }
@@ -437,9 +490,14 @@ impl Parser {
 
     /// Parse a declarator into a tree structure
     fn parse_declarator_tree(&mut self) -> Declarator {
-        // Count leading *
+        // Count leading * (skip const/volatile/restrict after each star)
         let mut stars = 0;
-        while self.eat(&Token::Star) { stars += 1; }
+        while self.eat(&Token::Star) {
+            stars += 1;
+            while matches!(self.peek(), Some(Token::KWConst) | Some(Token::KWVolatile) | Some(Token::KWRestrict)) {
+                self.advance();
+            }
+        }
 
         // Direct declarator: identifier or (declarator)
         let mut decl = if self.eat(&Token::OpenParen) {
@@ -828,28 +886,33 @@ impl Parser {
             });
         }
 
-        if ctype == CType::Void && array_dims.is_none() {
-            panic!("Cannot declare variable with void type");
-        }
-
-        let init = if self.eat(&Token::Assign) {
-            if self.at(&Token::OpenBrace) {
-                Some(self.parse_array_init())
-            } else {
-                Some(self.parse_expression())
+        let first = self.make_var_decl(name, &full_type, ctype, pi, sc.clone());
+        // Check for multiple declarators
+        if self.eat(&Token::Comma) {
+            let mut extra = Vec::new();
+            loop {
+                let (name2, full_type2, _) = self.parse_declarator_full(base_type);
+                let full_type2 = if base_type == CType::Struct {
+                    if let Some(ref tag) = saved_struct_tag {
+                        Self::replace_scalar_struct(&full_type2, tag)
+                    } else { full_type2 }
+                } else { full_type2 };
+                let ctype2 = full_type2.to_ctype();
+                let pi2 = match &full_type2 {
+                    FullType::Pointer(inner) => Some(ptr_info_from_full(inner)),
+                    _ => None,
+                };
+                extra.push(Declaration::VarDecl(
+                    self.make_var_decl(name2, &full_type2, ctype2, pi2, sc.clone())
+                ));
+                if !self.eat(&Token::Comma) { break; }
             }
+            self.expect(Token::Semicolon);
+            self.pending_declarations.extend(extra);
         } else {
-            None
-        };
-        self.expect(Token::Semicolon);
-        Declaration::VarDecl(VarDeclaration {
-            name,
-            var_type: if array_dims.is_some() { let mut t = &full_type; while let FullType::Array { elem, .. } = t { t = elem; } t.to_ctype() } else { ctype },
-            ptr_info: pi,
-            array_dims, decl_full_type: Some(full_type.clone()),
-            init,
-            storage_class: sc,
-        })
+            self.expect(Token::Semicolon);
+        }
+        Declaration::VarDecl(first)
     }
 
     fn parse_var_declaration(&mut self) -> VarDeclaration {
@@ -953,6 +1016,8 @@ impl Parser {
                 items.push(BlockItem::Declaration(Declaration::StructDecl(sd)));
             }
             items.push(item);
+            // Emit extra items from multi-declarator parsing
+            items.extend(self.pending_block_items.drain(..));
         }
         self.expect(Token::CloseBrace);
         self.pop_typedef_scope();
@@ -965,7 +1030,9 @@ impl Parser {
             Some(Token::KWSigned) | Some(Token::KWDouble) | Some(Token::KWFloat) |
             Some(Token::KWVoid) | Some(Token::KWChar) | Some(Token::KWStruct) |
             Some(Token::KWUnion) | Some(Token::KWEnum) | Some(Token::KWStatic) |
-            Some(Token::KWExtern) | Some(Token::KWTypedef) => true,
+            Some(Token::KWExtern) | Some(Token::KWTypedef) | Some(Token::KWConst) |
+            Some(Token::KWVolatile) | Some(Token::KWInline) | Some(Token::KWRegister) |
+            Some(Token::KWRestrict) | Some(Token::KWBool) => true,
             Some(Token::Identifier(name)) => self.is_typedef_name(name),
             _ => false,
         }
@@ -1067,28 +1134,34 @@ impl Parser {
                     param_full_types: vec![],
                 }))
             } else {
-                let array_dims = Self::extract_array_dims(&full_type);
-                if ctype == CType::Void && array_dims.is_none() {
-                    panic!("Cannot declare variable with void type");
-                }
-                let init = if self.eat(&Token::Assign) {
-                    if self.at(&Token::OpenBrace) {
-                        Some(self.parse_array_init())
-                    } else {
-                        Some(self.parse_expression())
+                let first = self.make_var_decl(name, &full_type, ctype, pi, sc.clone());
+                // Check for multiple declarators: int x = 1, y, *z;
+                if self.eat(&Token::Comma) {
+                    let mut extra = Vec::new();
+                    loop {
+                        let (name2, full_type2, _) = self.parse_declarator_full(base_type);
+                        let full_type2 = if base_type == CType::Struct {
+                            if let Some(ref tag) = saved_struct_tag {
+                                Self::replace_scalar_struct(&full_type2, tag)
+                            } else { full_type2 }
+                        } else { full_type2 };
+                        let ctype2 = full_type2.to_ctype();
+                        let pi2 = match &full_type2 {
+                            FullType::Pointer(inner) => Some(ptr_info_from_full(inner)),
+                            _ => None,
+                        };
+                        extra.push(BlockItem::Declaration(Declaration::VarDecl(
+                            self.make_var_decl(name2, &full_type2, ctype2, pi2, sc.clone())
+                        )));
+                        if !self.eat(&Token::Comma) { break; }
                     }
+                    self.expect(Token::Semicolon);
+                    // Stash extras for parse_block to collect
+                    self.pending_block_items.extend(extra);
                 } else {
-                    None
-                };
-                self.expect(Token::Semicolon);
-                BlockItem::Declaration(Declaration::VarDecl(VarDeclaration {
-                    name,
-                    var_type: if array_dims.is_some() { let mut t = &full_type; while let FullType::Array { elem, .. } = t { t = elem; } t.to_ctype() } else { ctype },
-                    ptr_info: pi,
-                    array_dims, decl_full_type: Some(full_type.clone()),
-                    init,
-                    storage_class: sc,
-                }))
+                    self.expect(Token::Semicolon);
+                }
+                BlockItem::Declaration(Declaration::VarDecl(first))
             }
         } else {
             BlockItem::Statement(self.parse_statement())

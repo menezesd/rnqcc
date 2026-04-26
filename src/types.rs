@@ -528,6 +528,12 @@ pub enum Token {
     KWExtern,
     KWTypedef,
     KWEnum,
+    KWConst,
+    KWVolatile,
+    KWInline,
+    KWRegister,
+    KWBool,
+    KWRestrict,
     // Punctuation
     OpenParen,
     CloseParen,

@@ -50,10 +50,11 @@ pub struct Parser {
     /// Scoped typedef table: each scope maps typedef names to their resolved type info.
     typedef_scopes: Vec<std::collections::HashMap<String, TypedefInfo>>,
     /// Struct/union definitions encountered during type specifier parsing
-    /// (e.g., `typedef struct S { ... } S;` — the struct def parsed inside specifiers).
     pending_struct_decls: Vec<StructDeclaration>,
-    /// Full type from the last typedef used as a type specifier (for proper type resolution).
+    /// Full type from the last typedef used as a type specifier
     last_typedef_full_type: Option<FullType>,
+    /// Scoped enum constant table: maps constant names to their integer values.
+    enum_scopes: Vec<std::collections::HashMap<String, i64>>,
 }
 
 impl Parser {
@@ -65,15 +66,18 @@ impl Parser {
             typedef_scopes: vec![std::collections::HashMap::new()],
             pending_struct_decls: Vec::new(),
             last_typedef_full_type: None,
+            enum_scopes: vec![std::collections::HashMap::new()],
         }
     }
 
     fn push_typedef_scope(&mut self) {
         self.typedef_scopes.push(std::collections::HashMap::new());
+        self.enum_scopes.push(std::collections::HashMap::new());
     }
 
     fn pop_typedef_scope(&mut self) {
         self.typedef_scopes.pop();
+        self.enum_scopes.pop();
     }
 
     fn add_typedef(&mut self, name: String, info: TypedefInfo) {
@@ -91,6 +95,67 @@ impl Parser {
 
     fn is_typedef_name(&self, name: &str) -> bool {
         self.lookup_typedef(name).is_some()
+    }
+
+    fn add_enum_constant(&mut self, name: String, value: i64) {
+        self.enum_scopes.last_mut().unwrap().insert(name, value);
+    }
+
+    fn lookup_enum_constant(&self, name: &str) -> Option<i64> {
+        for scope in self.enum_scopes.iter().rev() {
+            if let Some(&val) = scope.get(name) {
+                return Some(val);
+            }
+        }
+        None
+    }
+
+    /// Parse enum body: { A, B = 5, C }
+    /// Records constants in the enum scope and returns CType::Int.
+    fn parse_enum_body(&mut self) {
+        self.expect(Token::OpenBrace);
+        let mut next_val: i64 = 0;
+        loop {
+            if self.at(&Token::CloseBrace) { break; }
+            let name = self.parse_identifier();
+            if self.eat(&Token::Assign) {
+                // Explicit value
+                let val = match self.peek() {
+                    Some(Token::IntLiteral(_)) | Some(Token::LongLiteral(_)) |
+                    Some(Token::UIntLiteral(_)) | Some(Token::ULongLiteral(_)) |
+                    Some(Token::CharLiteral(_)) => {
+                        match self.advance() {
+                            Token::IntLiteral(v) | Token::LongLiteral(v) |
+                            Token::UIntLiteral(v) | Token::ULongLiteral(v) |
+                            Token::CharLiteral(v) => v,
+                            _ => unreachable!(),
+                        }
+                    }
+                    Some(Token::Minus) => {
+                        self.advance();
+                        match self.advance() {
+                            Token::IntLiteral(v) | Token::LongLiteral(v) => -v,
+                            other => panic!("Expected integer after '-' in enum, got {:?}", other),
+                        }
+                    }
+                    Some(Token::Identifier(n)) => {
+                        let n = n.clone();
+                        if let Some(v) = self.lookup_enum_constant(&n) {
+                            self.advance();
+                            v
+                        } else {
+                            panic!("Unknown enum constant: {}", n);
+                        }
+                    }
+                    other => panic!("Expected integer constant in enum, got {:?}", other),
+                };
+                next_val = val;
+            }
+            self.add_enum_constant(name, next_val);
+            next_val += 1;
+            if !self.eat(&Token::Comma) { break; }
+        }
+        self.expect(Token::CloseBrace);
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -210,6 +275,19 @@ impl Parser {
                 let ct_ft = self.parse_struct_type_specifier();
                 return (sc, ct_ft.0);
             }
+            // Check for enum
+            if self.at(&Token::KWEnum) {
+                self.advance();
+                // Optional tag name
+                if let Some(Token::Identifier(_)) = self.peek() {
+                    self.advance(); // consume tag (we don't track enum tags)
+                }
+                // Optional body
+                if self.at(&Token::OpenBrace) {
+                    self.parse_enum_body();
+                }
+                return (sc, CType::Int);
+            }
             // Check for typedef name
             if let Some(Token::Identifier(name)) = self.peek() {
                 if let Some(info) = self.lookup_typedef(name) {
@@ -257,6 +335,12 @@ impl Parser {
         }
         if self.at(&Token::KWDouble) { self.advance(); return CType::Double; }
         if self.at(&Token::KWFloat) { self.advance(); return CType::Double; }
+        if self.at(&Token::KWEnum) {
+            self.advance();
+            if let Some(Token::Identifier(_)) = self.peek() { self.advance(); }
+            if self.at(&Token::OpenBrace) { self.parse_enum_body(); }
+            return CType::Int;
+        }
         // Check for typedef name before parsing int/long/etc.
         if let Some(Token::Identifier(name)) = self.peek() {
             if let Some(info) = self.lookup_typedef(name) {
@@ -299,7 +383,8 @@ impl Parser {
     fn is_type_keyword(&self, tok: &Token) -> bool {
         match tok {
             Token::KWInt | Token::KWLong | Token::KWVoid | Token::KWUnsigned | Token::KWSigned |
-            Token::KWDouble | Token::KWFloat | Token::KWChar | Token::KWStruct | Token::KWUnion => true,
+            Token::KWDouble | Token::KWFloat | Token::KWChar | Token::KWStruct | Token::KWUnion |
+            Token::KWEnum => true,
             Token::Identifier(name) => self.is_typedef_name(name),
             _ => false,
         }
@@ -614,6 +699,27 @@ impl Parser {
     }
 
     fn parse_declaration(&mut self) -> Declaration {
+        // Check for standalone enum declaration: enum Tag { ... };
+        if self.at(&Token::KWEnum) {
+            let save_pos = self.pos;
+            self.advance(); // consume 'enum'
+            // Optional tag
+            if let Some(Token::Identifier(_)) = self.peek() { self.advance(); }
+            if self.at(&Token::OpenBrace) {
+                self.pos = save_pos;
+                // Parse through parse_specifiers which handles enum body
+                let (_sc, _base_type) = self.parse_specifiers();
+                self.last_typedef_full_type = None;
+                if self.at(&Token::Semicolon) {
+                    self.advance();
+                    return Declaration::TypedefDecl; // no-op, constants already registered
+                }
+                // Not a standalone enum — has a variable name after. Put back and re-parse.
+                self.pos = save_pos;
+            } else {
+                self.pos = save_pos;
+            }
+        }
         // Check for struct/union declaration: struct/union tag { members };
         if self.at(&Token::KWStruct) || self.at(&Token::KWUnion) {
             let is_union = self.at(&Token::KWUnion);
@@ -858,8 +964,8 @@ impl Parser {
             Some(Token::KWInt) | Some(Token::KWLong) | Some(Token::KWUnsigned) |
             Some(Token::KWSigned) | Some(Token::KWDouble) | Some(Token::KWFloat) |
             Some(Token::KWVoid) | Some(Token::KWChar) | Some(Token::KWStruct) |
-            Some(Token::KWUnion) | Some(Token::KWStatic) | Some(Token::KWExtern) |
-            Some(Token::KWTypedef) => true,
+            Some(Token::KWUnion) | Some(Token::KWEnum) | Some(Token::KWStatic) |
+            Some(Token::KWExtern) | Some(Token::KWTypedef) => true,
             Some(Token::Identifier(name)) => self.is_typedef_name(name),
             _ => false,
         }
@@ -867,6 +973,24 @@ impl Parser {
 
     fn parse_block_item(&mut self) -> BlockItem {
         if self.is_declaration_start() {
+            // Check for standalone enum declaration: enum Tag { ... };
+            if self.at(&Token::KWEnum) {
+                let save_pos = self.pos;
+                self.advance();
+                if let Some(Token::Identifier(_)) = self.peek() { self.advance(); }
+                if self.at(&Token::OpenBrace) {
+                    self.pos = save_pos;
+                    let (_sc, _base_type) = self.parse_specifiers();
+                    self.last_typedef_full_type = None;
+                    if self.at(&Token::Semicolon) {
+                        self.advance();
+                        return BlockItem::Declaration(Declaration::TypedefDecl);
+                    }
+                    self.pos = save_pos;
+                } else {
+                    self.pos = save_pos;
+                }
+            }
             // Check for struct declaration
             if self.at(&Token::KWStruct) || self.at(&Token::KWUnion) {
                 let is_union = self.at(&Token::KWUnion);
@@ -1515,6 +1639,9 @@ impl Parser {
                     let args = self.parse_arg_list();
                     self.expect(Token::CloseParen);
                     Exp::FunctionCall(name, args)
+                } else if let Some(val) = self.lookup_enum_constant(&name) {
+                    // Enum constant — resolve to integer literal
+                    Exp::Constant(val)
                 } else {
                     Exp::Var(name)
                 }

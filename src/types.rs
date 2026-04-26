@@ -527,6 +527,7 @@ pub enum Token {
     KWStatic,
     KWExtern,
     KWTypedef,
+    KWEnum,
     // Punctuation
     OpenParen,
     CloseParen,

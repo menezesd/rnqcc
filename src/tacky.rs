@@ -3169,6 +3169,7 @@ impl TackyGen {
                         self.struct_defs.insert(sd.tag.clone(), def);
                     }
                 }
+                BlockItem::Declaration(Declaration::TypedefDecl) => {}
                 BlockItem::Statement(stmt) => self.emit_statement(stmt),
             }
         }
@@ -3380,7 +3381,7 @@ pub fn generate(program: Program) -> TackyProgram {
         let (name, sc) = match decl {
             Declaration::FunDecl(fd) => (fd.name.clone(), &fd.storage_class),
             Declaration::VarDecl(vd) => (vd.name.clone(), &vd.storage_class),
-            Declaration::StructDecl(_) => continue,
+            Declaration::StructDecl(_) | Declaration::TypedefDecl => continue,
         };
         if !linkage.contains_key(&name) {
             linkage.insert(name, *sc != Some(StorageClass::Static));
@@ -3418,6 +3419,7 @@ pub fn generate(program: Program) -> TackyProgram {
                     gen.struct_defs.insert(sd.tag.clone(), def);
                 }
             }
+            Declaration::TypedefDecl => {}
         }
     }
 
@@ -3807,6 +3809,7 @@ pub fn generate(program: Program) -> TackyProgram {
             }
             Declaration::VarDecl(_) => {}
             Declaration::StructDecl(_) => {}
+            Declaration::TypedefDecl => {}
         }
     }
 

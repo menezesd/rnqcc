@@ -345,12 +345,14 @@ impl Resolver {
                 }
                 BlockItem::Declaration(Declaration::StructDecl(sd)) => {
                     let unique_tag = self.declare_tag(&sd.tag);
-                    // Resolve member types (for struct members that reference other structs)
                     let resolved_members: Vec<MemberDeclaration> = sd.members.into_iter().map(|m| {
                         let resolved_ft = self.resolve_struct_tags_in_ft(m.member_full_type);
                         MemberDeclaration { name: m.name, member_type: m.member_type, member_full_type: resolved_ft }
                     }).collect();
                     BlockItem::Declaration(Declaration::StructDecl(StructDeclaration { tag: unique_tag, members: resolved_members, is_union: sd.is_union }))
+                }
+                BlockItem::Declaration(Declaration::TypedefDecl) => {
+                    BlockItem::Declaration(Declaration::TypedefDecl)
                 }
                 BlockItem::Statement(stmt) => {
                     BlockItem::Statement(self.resolve_statement(stmt))
@@ -459,6 +461,7 @@ pub fn resolve(program: Program) -> Program {
             Declaration::StructDecl(sd) => {
                 resolver.declare_tag(&sd.tag);
             }
+            Declaration::TypedefDecl => {}
         }
     }
 
@@ -490,6 +493,7 @@ pub fn resolve(program: Program) -> Program {
                 }).collect();
                 Declaration::StructDecl(StructDeclaration { tag: unique_tag, members: resolved_members, is_union: sd.is_union })
             }
+            Declaration::TypedefDecl => Declaration::TypedefDecl,
         })
         .collect();
 

@@ -280,6 +280,7 @@ impl Lexer {
             "__restrict__" => Token::KWRestrict,
             "short" => Token::KWShort,
             "_Noreturn" => Token::KWNoreturn,
+            "__extension__" => Token::KWNoreturn, // GCC extension marker — ignored
             "__attribute__" | "__attribute" => {
                 // Skip __attribute__((...)) entirely — consume matching parens
                 self.skip_whitespace_and_comments();

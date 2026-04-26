@@ -1219,10 +1219,34 @@ impl TackyGen {
                 (result, elem_ctype)
             }
             Exp::Comma(left, right) => {
-                // Evaluate left for side effects, discard result
                 self.emit_exp(*left);
-                // Evaluate right and return its value
                 self.emit_exp(*right)
+            }
+            Exp::IndirectCall(callee, args) => {
+                // Evaluate callee to get function pointer
+                let (ptr_val, _ptr_type) = self.emit_exp(*callee);
+                let ptr_name = if let TackyVal::Var(ref n) = ptr_val { n.clone() } else {
+                    let tmp = self.fresh_tmp(CType::Pointer);
+                    self.emit(TackyInstr::Copy { src: ptr_val, dst: tmp.clone() });
+                    if let TackyVal::Var(n) = tmp { n } else { unreachable!() }
+                };
+                // Emit args and build FunCall with indirect=true
+                let mut tacky_args = Vec::new();
+                for arg in args {
+                    let (val, _) = self.emit_exp(arg);
+                    tacky_args.push(val);
+                }
+                let ret_type = CType::Int; // default return type for indirect calls
+                let dst = self.fresh_tmp(ret_type);
+                self.emit(TackyInstr::FunCall {
+                    name: ptr_name,
+                    args: tacky_args,
+                    dst: dst.clone(),
+                    stack_arg_indices: std::collections::HashSet::new(),
+                    struct_arg_groups: Vec::new(),
+                    indirect: true,
+                });
+                (dst, ret_type)
             }
             Exp::ArrayInit(_) => {
                 panic!("Array initializer not allowed in expression context");

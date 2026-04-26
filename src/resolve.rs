@@ -174,6 +174,11 @@ impl Resolver {
             Exp::Dot(inner, member) => Exp::Dot(Box::new(self.resolve_exp(*inner)), member),
             Exp::Arrow(inner, member) => Exp::Arrow(Box::new(self.resolve_exp(*inner)), member),
             Exp::Comma(left, right) => Exp::Comma(Box::new(self.resolve_exp(*left)), Box::new(self.resolve_exp(*right))),
+            Exp::IndirectCall(callee, args) => {
+                let resolved_callee = self.resolve_exp(*callee);
+                let resolved_args = args.into_iter().map(|a| self.resolve_exp(a)).collect();
+                Exp::IndirectCall(Box::new(resolved_callee), resolved_args)
+            }
         }
     }
 

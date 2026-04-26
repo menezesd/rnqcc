@@ -477,9 +477,9 @@ impl Parser {
                     (name.clone(), base_ft, Some(params.clone()))
                 } else {
                     // Function pointer: int (*fp)(int, int)
-                    // The inner is PointerDeclarator(...) — extract name and make it a pointer type
-                    let fp_type = FullType::Pointer(Box::new(base_ft));
-                    Self::process_declarator_with_type(inner, fp_type)
+                    // base_ft is the return type. The (*) makes it a pointer.
+                    // Don't add another Pointer here — let the PointerDeclarator do it.
+                    Self::process_declarator_with_type(inner, base_ft)
                 }
             }
         }
@@ -1780,6 +1780,14 @@ impl Parser {
                     self.advance();
                     let member = self.parse_identifier();
                     expr = Exp::Arrow(Box::new(expr), member);
+                }
+                Some(Token::OpenParen) if !matches!(expr, Exp::Var(_) | Exp::FunctionCall(_, _)) => {
+                    // Indirect call through expression: expr(args)
+                    // e.g., ops[0](1,2) or get_func()(args)
+                    self.advance();
+                    let args = self.parse_arg_list();
+                    self.expect(Token::CloseParen);
+                    expr = Exp::IndirectCall(Box::new(expr), args);
                 }
                 _ => break,
             }

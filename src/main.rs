@@ -1498,6 +1498,18 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
         guard: Some("__rnqcc_sys_socket_h"),
     },
     VirtualHeaderInfo {
+        name: "sys/ioctl.h",
+        guard: Some("__rnqcc_sys_ioctl_h"),
+    },
+    VirtualHeaderInfo {
+        name: "sys/mman.h",
+        guard: Some("__rnqcc_sys_mman_h"),
+    },
+    VirtualHeaderInfo {
+        name: "sys/resource.h",
+        guard: Some("__rnqcc_sys_resource_h"),
+    },
+    VirtualHeaderInfo {
         name: "sys/time.h",
         guard: Some("__rnqcc_sys_time_h"),
     },
@@ -1526,6 +1538,10 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
         guard: Some("__rnqcc_netinet_in_h"),
     },
     VirtualHeaderInfo {
+        name: "netdb.h",
+        guard: Some("__rnqcc_netdb_h"),
+    },
+    VirtualHeaderInfo {
         name: "time.h",
         guard: Some("__rnqcc_time_h"),
     },
@@ -1540,6 +1556,10 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
     VirtualHeaderInfo {
         name: "pwd.h",
         guard: Some("__rnqcc_pwd_h"),
+    },
+    VirtualHeaderInfo {
+        name: "termios.h",
+        guard: Some("__rnqcc_termios_h"),
     },
     VirtualHeaderInfo {
         name: "unistd.h",
@@ -2124,6 +2144,74 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 include_str!("virtual_headers/sys/uio.h")
             )
         }
+        "sys/ioctl.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("TIOCGWINSZ", "0x5413"),
+                    ("TIOCSWINSZ", "0x5414"),
+                    ("FIONBIO", "0x5421"),
+                ],
+            );
+            if virtual_header_include_once(macros, "sys/ioctl.h") {
+                return String::new();
+            }
+            include_str!("virtual_headers/sys/ioctl.h").to_string()
+        }
+        "sys/mman.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("PROT_NONE", "0x0"),
+                    ("PROT_READ", "0x1"),
+                    ("PROT_WRITE", "0x2"),
+                    ("PROT_EXEC", "0x4"),
+                    ("MAP_SHARED", "0x01"),
+                    ("MAP_PRIVATE", "0x02"),
+                    ("MAP_FIXED", "0x10"),
+                    ("MAP_ANON", "0x20"),
+                    ("MAP_ANONYMOUS", "MAP_ANON"),
+                    ("MAP_FAILED", "((void *)-1)"),
+                    ("MS_ASYNC", "0x1"),
+                    ("MS_INVALIDATE", "0x2"),
+                    ("MS_SYNC", "0x4"),
+                ],
+            );
+            if virtual_header_include_once(macros, "sys/mman.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}",
+                include_virtual_compat_header("sys/types.h", macros),
+                include_str!("virtual_headers/sys/mman.h")
+            )
+        }
+        "sys/resource.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("RUSAGE_SELF", "0"),
+                    ("RUSAGE_CHILDREN", "-1"),
+                    ("RLIM_INFINITY", "((rlim_t)-1)"),
+                    ("RLIMIT_CPU", "0"),
+                    ("RLIMIT_FSIZE", "1"),
+                    ("RLIMIT_DATA", "2"),
+                    ("RLIMIT_STACK", "3"),
+                    ("RLIMIT_CORE", "4"),
+                    ("RLIMIT_NOFILE", "7"),
+                    ("RLIMIT_AS", "9"),
+                ],
+            );
+            if virtual_header_include_once(macros, "sys/resource.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}{}",
+                include_virtual_compat_header("sys/types.h", macros),
+                include_virtual_compat_header("sys/time.h", macros),
+                include_str!("virtual_headers/sys/resource.h")
+            )
+        }
         "sys/utsname.h" => {
             if virtual_header_include_once(macros, "sys/utsname.h") {
                 return String::new();
@@ -2198,6 +2286,36 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 include_str!("virtual_headers/arpa/inet.h")
             )
         }
+        "netdb.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("AI_PASSIVE", "0x0001"),
+                    ("AI_CANONNAME", "0x0002"),
+                    ("AI_NUMERICHOST", "0x0004"),
+                    ("AI_NUMERICSERV", "0x0400"),
+                    ("NI_MAXHOST", "1025"),
+                    ("NI_MAXSERV", "32"),
+                    ("NI_NUMERICHOST", "0x0001"),
+                    ("NI_NUMERICSERV", "0x0002"),
+                    ("EAI_BADFLAGS", "-1"),
+                    ("EAI_NONAME", "-2"),
+                    ("EAI_AGAIN", "-3"),
+                    ("EAI_FAIL", "-4"),
+                    ("EAI_MEMORY", "-10"),
+                    ("EAI_SYSTEM", "-11"),
+                ],
+            );
+            if virtual_header_include_once(macros, "netdb.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}{}",
+                include_virtual_compat_header("sys/socket.h", macros),
+                include_virtual_compat_header("netinet/in.h", macros),
+                include_str!("virtual_headers/netdb.h")
+            )
+        }
         "pthread.h" => {
             define_virtual_object_macros(
                 macros,
@@ -2233,6 +2351,42 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 include_virtual_compat_header("sys/types.h", macros),
                 include_str!("virtual_headers/pwd.h")
             )
+        }
+        "termios.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("NCCS", "32"),
+                    ("VINTR", "0"),
+                    ("VQUIT", "1"),
+                    ("VERASE", "2"),
+                    ("VKILL", "3"),
+                    ("VEOF", "4"),
+                    ("VMIN", "5"),
+                    ("VTIME", "6"),
+                    ("BRKINT", "0x0002"),
+                    ("ICRNL", "0x0100"),
+                    ("IXON", "0x0400"),
+                    ("OPOST", "0x0001"),
+                    ("CS8", "0x0030"),
+                    ("CREAD", "0x0080"),
+                    ("CLOCAL", "0x0800"),
+                    ("ECHO", "0x0008"),
+                    ("ICANON", "0x0002"),
+                    ("ISIG", "0x0001"),
+                    ("TCSANOW", "0"),
+                    ("TCSADRAIN", "1"),
+                    ("TCSAFLUSH", "2"),
+                    ("B0", "0"),
+                    ("B9600", "9600"),
+                    ("B38400", "38400"),
+                    ("B115200", "115200"),
+                ],
+            );
+            if virtual_header_include_once(macros, "termios.h") {
+                return String::new();
+            }
+            include_str!("virtual_headers/termios.h").to_string()
         }
         "wchar.h" => {
             virtual_null_macro(macros);

@@ -6230,6 +6230,81 @@ fn internal_cpp_provides_networking_virtual_headers() {
 }
 
 #[test]
+fn internal_cpp_provides_more_unix_probe_virtual_headers() {
+    let src = temp_file("internal-cpp-more-unix-probe-headers", "c");
+    let exe = temp_file("internal-cpp-more-unix-probe-headers", "bin");
+    std::fs::write(
+        &src,
+        "#include <sys/types.h>\n\
+         #include <sys/mman.h>\n\
+         #include <sys/resource.h>\n\
+         #include <sys/ioctl.h>\n\
+         #include <termios.h>\n\
+         #include <netdb.h>\n\
+         int main(void) {\n\
+             struct rlimit limit;\n\
+             struct rusage usage;\n\
+             struct winsize window;\n\
+             struct termios term;\n\
+             struct addrinfo hints;\n\
+             struct hostent host;\n\
+             limit.rlim_cur = 64;\n\
+             limit.rlim_max = RLIM_INFINITY;\n\
+             usage.ru_utime.tv_sec = 1;\n\
+             usage.ru_stime.tv_usec = 2;\n\
+             window.ws_row = 24;\n\
+             window.ws_col = 80;\n\
+             term.c_iflag = ICRNL | IXON;\n\
+             term.c_cflag = CS8 | CREAD;\n\
+             term.c_lflag = ICANON | ECHO | ISIG;\n\
+             term.c_cc[VMIN] = 1;\n\
+             term.c_ispeed = B9600;\n\
+             term.c_ospeed = B115200;\n\
+             hints.ai_flags = AI_PASSIVE | AI_NUMERICHOST;\n\
+             hints.ai_family = AF_INET;\n\
+             hints.ai_socktype = SOCK_STREAM;\n\
+             hints.ai_addrlen = sizeof(struct sockaddr_in);\n\
+             host.h_addrtype = AF_INET;\n\
+             host.h_length = 4;\n\
+             int mman_ok = PROT_READ == 1 && (PROT_WRITE | PROT_EXEC) == 6 &&\n\
+                           MAP_ANONYMOUS == MAP_ANON && MAP_FAILED != 0;\n\
+             int resource_ok = sizeof(rlim_t) == sizeof(unsigned long) &&\n\
+                               limit.rlim_cur == 64 && limit.rlim_max == RLIM_INFINITY &&\n\
+                               usage.ru_utime.tv_sec + usage.ru_stime.tv_usec == 3 &&\n\
+                               RUSAGE_CHILDREN < RUSAGE_SELF;\n\
+             int ioctl_ok = sizeof(struct winsize) == 4 * sizeof(unsigned short) &&\n\
+                            window.ws_row == 24 && window.ws_col == 80 && TIOCGWINSZ != TIOCSWINSZ;\n\
+             int term_ok = sizeof(cc_t) == sizeof(unsigned char) && sizeof(speed_t) == sizeof(unsigned int) &&\n\
+                           sizeof(term.c_cc) == NCCS * sizeof(cc_t) && term.c_cc[VMIN] == 1 &&\n\
+                           term.c_ispeed == B9600 && term.c_ospeed == B115200;\n\
+             int netdb_ok = sizeof(socklen_t) == sizeof(unsigned int) && hints.ai_family == AF_INET &&\n\
+                            hints.ai_socktype == SOCK_STREAM && hints.ai_addrlen > 0 &&\n\
+                            host.h_addrtype == AF_INET && host.h_length == 4 && NI_MAXHOST > NI_MAXSERV;\n\
+             return mman_ok && resource_ok && ioctl_ok && term_ok && netdb_ok ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-nostdinc")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn internal_cpp_virtual_headers_tolerate_repeated_includes() {
     let src = temp_file("internal-cpp-repeat-virtual-headers", "c");
     let exe = temp_file("internal-cpp-repeat-virtual-headers", "bin");
@@ -6410,6 +6485,7 @@ fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
         "limits.h",
         "locale.h",
         "math.h",
+        "netdb.h",
         "poll.h",
         "pthread.h",
         "pwd.h",
@@ -6429,12 +6505,16 @@ fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
         "netinet/in.h",
         "sys/select.h",
         "sys/socket.h",
+        "sys/ioctl.h",
+        "sys/mman.h",
+        "sys/resource.h",
         "sys/stat.h",
         "sys/time.h",
         "sys/types.h",
         "sys/uio.h",
         "sys/utsname.h",
         "sys/wait.h",
+        "termios.h",
         "time.h",
         "unistd.h",
         "wchar.h",

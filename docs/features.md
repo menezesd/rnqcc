@@ -42,7 +42,9 @@ The internal preprocessor supports:
 - `__has_include(...)` and `__has_include_next(...)`
 - `__has_builtin(...)`, `__has_attribute(...)`, `__has_c_attribute(...)`,
   `__has_declspec_attribute(...)`, `__has_feature(...)`,
-  `__has_extension(...)`, and `__has_warning(...)`
+  `__has_extension(...)`, and `__has_warning(...)`, including common GNU/Clang
+  attribute probes such as `nonnull`, `warn_unused_result`, `returns_nonnull`,
+  `noinline`, `pure`, `const`, `malloc`, `cold`, and `hot`
 - integer `#if` expressions using unary, arithmetic, shift, comparison,
   equality, bitwise, logical, conditional, and parenthesized operators, including
   decimal, octal, hexadecimal, binary, character constants, and common integer

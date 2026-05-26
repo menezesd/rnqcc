@@ -1453,6 +1453,30 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
         guard: Some("__rnqcc_math_h"),
     },
     VirtualHeaderInfo {
+        name: "regex.h",
+        guard: Some("__rnqcc_regex_h"),
+    },
+    VirtualHeaderInfo {
+        name: "glob.h",
+        guard: Some("__rnqcc_glob_h"),
+    },
+    VirtualHeaderInfo {
+        name: "fnmatch.h",
+        guard: Some("__rnqcc_fnmatch_h"),
+    },
+    VirtualHeaderInfo {
+        name: "dlfcn.h",
+        guard: Some("__rnqcc_dlfcn_h"),
+    },
+    VirtualHeaderInfo {
+        name: "syslog.h",
+        guard: Some("__rnqcc_syslog_h"),
+    },
+    VirtualHeaderInfo {
+        name: "utime.h",
+        guard: Some("__rnqcc_utime_h"),
+    },
+    VirtualHeaderInfo {
         name: "fcntl.h",
         guard: Some("__rnqcc_fcntl_h"),
     },
@@ -1505,6 +1529,10 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
         guard: Some("__rnqcc_sys_socket_h"),
     },
     VirtualHeaderInfo {
+        name: "sys/un.h",
+        guard: Some("__rnqcc_sys_un_h"),
+    },
+    VirtualHeaderInfo {
         name: "sys/ioctl.h",
         guard: Some("__rnqcc_sys_ioctl_h"),
     },
@@ -1543,6 +1571,18 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
     VirtualHeaderInfo {
         name: "netinet/in.h",
         guard: Some("__rnqcc_netinet_in_h"),
+    },
+    VirtualHeaderInfo {
+        name: "netinet/tcp.h",
+        guard: Some("__rnqcc_netinet_tcp_h"),
+    },
+    VirtualHeaderInfo {
+        name: "net/if.h",
+        guard: Some("__rnqcc_net_if_h"),
+    },
+    VirtualHeaderInfo {
+        name: "ifaddrs.h",
+        guard: Some("__rnqcc_ifaddrs_h"),
     },
     VirtualHeaderInfo {
         name: "netdb.h",
@@ -1884,6 +1924,142 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
             }
             include_str!("virtual_headers/math.h").to_string()
         }
+        "regex.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("REG_EXTENDED", "1"),
+                    ("REG_ICASE", "2"),
+                    ("REG_NOSUB", "4"),
+                    ("REG_NEWLINE", "8"),
+                    ("REG_NOTBOL", "1"),
+                    ("REG_NOTEOL", "2"),
+                    ("REG_NOMATCH", "1"),
+                    ("REG_BADPAT", "2"),
+                ],
+            );
+            if virtual_header_include_once(macros, "regex.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}",
+                virtual_size_t_typedef(macros),
+                include_str!("virtual_headers/regex.h")
+            )
+        }
+        "glob.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("GLOB_ERR", "1"),
+                    ("GLOB_MARK", "2"),
+                    ("GLOB_NOSORT", "4"),
+                    ("GLOB_DOOFFS", "8"),
+                    ("GLOB_NOCHECK", "16"),
+                    ("GLOB_APPEND", "32"),
+                    ("GLOB_NOESCAPE", "64"),
+                    ("GLOB_NOSPACE", "1"),
+                    ("GLOB_ABORTED", "2"),
+                    ("GLOB_NOMATCH", "3"),
+                ],
+            );
+            if virtual_header_include_once(macros, "glob.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}",
+                virtual_size_t_typedef(macros),
+                include_str!("virtual_headers/glob.h")
+            )
+        }
+        "fnmatch.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("FNM_NOMATCH", "1"),
+                    ("FNM_PATHNAME", "1"),
+                    ("FNM_NOESCAPE", "2"),
+                    ("FNM_PERIOD", "4"),
+                ],
+            );
+            if virtual_header_include_once(macros, "fnmatch.h") {
+                return String::new();
+            }
+            include_str!("virtual_headers/fnmatch.h").to_string()
+        }
+        "dlfcn.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("RTLD_LAZY", "1"),
+                    ("RTLD_NOW", "2"),
+                    ("RTLD_LOCAL", "0"),
+                    ("RTLD_GLOBAL", "0x100"),
+                    ("RTLD_DEFAULT", "((void *)0)"),
+                    ("RTLD_NEXT", "((void *)-1)"),
+                ],
+            );
+            if virtual_header_include_once(macros, "dlfcn.h") {
+                return String::new();
+            }
+            include_str!("virtual_headers/dlfcn.h").to_string()
+        }
+        "syslog.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("LOG_PID", "0x01"),
+                    ("LOG_CONS", "0x02"),
+                    ("LOG_NDELAY", "0x08"),
+                    ("LOG_PERROR", "0x20"),
+                    ("LOG_EMERG", "0"),
+                    ("LOG_ALERT", "1"),
+                    ("LOG_CRIT", "2"),
+                    ("LOG_ERR", "3"),
+                    ("LOG_WARNING", "4"),
+                    ("LOG_NOTICE", "5"),
+                    ("LOG_INFO", "6"),
+                    ("LOG_DEBUG", "7"),
+                    ("LOG_KERN", "(0 << 3)"),
+                    ("LOG_USER", "(1 << 3)"),
+                    ("LOG_DAEMON", "(3 << 3)"),
+                    ("LOG_AUTH", "(4 << 3)"),
+                    ("LOG_LOCAL0", "(16 << 3)"),
+                    ("LOG_LOCAL7", "(23 << 3)"),
+                ],
+            );
+            for (name, body) in [
+                ("LOG_MASK", "(1 << (pri))"),
+                ("LOG_UPTO", "((1 << ((pri) + 1)) - 1)"),
+            ] {
+                macros.insert(
+                    name.to_string(),
+                    MacroDef::Function {
+                        params: vec!["pri".to_string()],
+                        variadic: false,
+                        body: body.to_string(),
+                    },
+                );
+            }
+            if virtual_header_include_once(macros, "syslog.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}",
+                include_virtual_compat_header("stdarg.h", macros),
+                include_str!("virtual_headers/syslog.h")
+            )
+        }
+        "utime.h" => {
+            if virtual_header_include_once(macros, "utime.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}",
+                include_virtual_compat_header("time.h", macros),
+                include_str!("virtual_headers/utime.h")
+            )
+        }
         "signal.h" => {
             define_virtual_object_macros(
                 macros,
@@ -2168,6 +2344,17 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 include_str!("virtual_headers/sys/socket.h")
             )
         }
+        "sys/un.h" => {
+            define_virtual_object_macros(macros, &[("AF_UNIX", "1"), ("PF_UNIX", "1")]);
+            if virtual_header_include_once(macros, "sys/un.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}",
+                include_virtual_compat_header("sys/socket.h", macros),
+                include_str!("virtual_headers/sys/un.h")
+            )
+        }
         "sys/uio.h" => {
             if virtual_header_include_once(macros, "sys/uio.h") {
                 return String::new();
@@ -2308,6 +2495,55 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 "{}{}",
                 include_virtual_compat_header("sys/socket.h", macros),
                 include_str!("virtual_headers/netinet/in.h")
+            )
+        }
+        "netinet/tcp.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("TCP_NODELAY", "1"),
+                    ("TCP_MAXSEG", "2"),
+                    ("TCP_KEEPIDLE", "4"),
+                    ("TCP_KEEPINTVL", "5"),
+                    ("TCP_KEEPCNT", "6"),
+                ],
+            );
+            if virtual_header_include_once(macros, "netinet/tcp.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}",
+                include_virtual_compat_header("netinet/in.h", macros),
+                include_str!("virtual_headers/netinet/tcp.h")
+            )
+        }
+        "net/if.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("IF_NAMESIZE", "16"),
+                    ("IFF_UP", "0x1"),
+                    ("IFF_BROADCAST", "0x2"),
+                    ("IFF_LOOPBACK", "0x8"),
+                    ("IFF_POINTOPOINT", "0x10"),
+                    ("IFF_RUNNING", "0x40"),
+                    ("IFF_MULTICAST", "0x1000"),
+                ],
+            );
+            if virtual_header_include_once(macros, "net/if.h") {
+                return String::new();
+            }
+            include_str!("virtual_headers/net/if.h").to_string()
+        }
+        "ifaddrs.h" => {
+            if virtual_header_include_once(macros, "ifaddrs.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}{}",
+                include_virtual_compat_header("sys/socket.h", macros),
+                include_virtual_compat_header("net/if.h", macros),
+                include_str!("virtual_headers/ifaddrs.h")
             )
         }
         "arpa/inet.h" => {
@@ -4069,14 +4305,32 @@ fn internal_has_attribute(name: &str) -> bool {
             | "__fallthrough__"
             | "format"
             | "__format__"
+            | "cold"
+            | "__cold__"
+            | "const"
+            | "__const__"
+            | "hot"
+            | "__hot__"
+            | "malloc"
+            | "__malloc__"
+            | "noinline"
+            | "__noinline__"
+            | "nonnull"
+            | "__nonnull__"
             | "noreturn"
             | "__noreturn__"
             | "packed"
             | "__packed__"
+            | "pure"
+            | "__pure__"
+            | "returns_nonnull"
+            | "__returns_nonnull__"
             | "unused"
             | "__unused__"
             | "visibility"
             | "__visibility__"
+            | "warn_unused_result"
+            | "__warn_unused_result__"
     )
 }
 
@@ -4111,7 +4365,7 @@ fn internal_has_extension(name: &str) -> bool {
 fn internal_has_warning(name: &str) -> bool {
     matches!(
         name,
-        "-Wall" | "-Wunreachable" | "-Wmissing-return" | "-Werror"
+        "-Wall" | "-Wunreachable" | "-Wmissing-return" | "-Werror" | "-Wunknown-pragmas"
     )
 }
 

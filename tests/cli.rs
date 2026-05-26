@@ -5966,6 +5966,16 @@ fn internal_cpp_handles_common_has_attribute_predicates() {
          #else\n\
          int has_attrs = 0;\n\
          #endif\n\
+         #if __has_attribute(nonnull) && __has_attribute(__warn_unused_result__) && __has_attribute(returns_nonnull) && __has_attribute(__noinline__)\n\
+         int has_common_function_attrs = 1;\n\
+         #else\n\
+         int has_common_function_attrs = 0;\n\
+         #endif\n\
+         #if __has_attribute(pure) && __has_attribute(__const__) && __has_attribute(malloc) && __has_attribute(cold) && __has_attribute(__hot__)\n\
+         int has_optimizer_attrs = 1;\n\
+         #else\n\
+         int has_optimizer_attrs = 0;\n\
+         #endif\n\
          #if __has_declspec_attribute(dllexport)\n\
          int has_declspec = 1;\n\
          #else\n\
@@ -5989,6 +5999,11 @@ fn internal_cpp_handles_common_has_attribute_predicates() {
     assert!(output.status.success(), "{}", stderr(output));
     let stdout = stdout(output);
     assert!(stdout.contains("int has_attrs = 1;"), "{stdout}");
+    assert!(
+        stdout.contains("int has_common_function_attrs = 1;"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("int has_optimizer_attrs = 1;"), "{stdout}");
     assert!(stdout.contains("int has_declspec = 1;"), "{stdout}");
     assert!(stdout.contains("int has_features = 1;"), "{stdout}");
 
@@ -6042,6 +6057,11 @@ fn internal_cpp_handles_has_warning_predicates() {
          int missing_warning = 1;\n\
          #else\n\
          int missing_warning = 0;\n\
+         #endif\n\
+         #if __has_warning(\"-Wunknown-pragmas\")\n\
+         int has_unknown_pragmas_warning = 1;\n\
+         #else\n\
+         int has_unknown_pragmas_warning = 0;\n\
          #endif\n",
     )
     .expect("failed to write source");
@@ -6057,6 +6077,10 @@ fn internal_cpp_handles_has_warning_predicates() {
     let stdout = stdout(output);
     assert!(stdout.contains("int has_warning = 1;"), "{stdout}");
     assert!(stdout.contains("int missing_warning = 0;"), "{stdout}");
+    assert!(
+        stdout.contains("int has_unknown_pragmas_warning = 1;"),
+        "{stdout}"
+    );
 
     let _ = std::fs::remove_file(src);
 }
@@ -6562,6 +6586,79 @@ fn internal_cpp_provides_more_unix_probe_virtual_headers() {
                             hints.ai_socktype == SOCK_STREAM && hints.ai_addrlen > 0 &&\n\
                             host.h_addrtype == AF_INET && host.h_length == 4 && NI_MAXHOST > NI_MAXSERV;\n\
              return mman_ok && resource_ok && ioctl_ok && term_ok && netdb_ok ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-nostdinc")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_provides_additional_posix_probe_virtual_headers() {
+    let src = temp_file("internal-cpp-additional-posix-probe-headers", "c");
+    let exe = temp_file("internal-cpp-additional-posix-probe-headers", "bin");
+    std::fs::write(
+        &src,
+        "#include <regex.h>\n\
+         #include <glob.h>\n\
+         #include <fnmatch.h>\n\
+         #include <dlfcn.h>\n\
+         #include <syslog.h>\n\
+         #include <utime.h>\n\
+         #include <sys/un.h>\n\
+         #include <ifaddrs.h>\n\
+         #include <net/if.h>\n\
+         #include <netinet/tcp.h>\n\
+         int main(void) {\n\
+             regex_t regex;\n\
+             regmatch_t match;\n\
+             glob_t glob_result;\n\
+             struct utimbuf times;\n\
+             struct sockaddr_un un;\n\
+             struct ifaddrs addrs;\n\
+             struct if_nameindex nameindex;\n\
+             regex.re_nsub = 2;\n\
+             match.rm_so = 1;\n\
+             match.rm_eo = 3;\n\
+             glob_result.gl_pathc = 0;\n\
+             glob_result.gl_offs = 0;\n\
+             times.actime = 4;\n\
+             times.modtime = 5;\n\
+             un.sun_family = AF_UNIX;\n\
+             un.sun_path[0] = 'x';\n\
+             addrs.ifa_next = 0;\n\
+             addrs.ifa_name = \"lo\";\n\
+             addrs.ifa_flags = IFF_UP | IFF_LOOPBACK;\n\
+             addrs.ifa_addr = (struct sockaddr *)&un;\n\
+             nameindex.if_index = 1;\n\
+             nameindex.if_name = \"lo\";\n\
+             int regex_ok = REG_EXTENDED == 1 && REG_NOMATCH != REG_BADPAT &&\n\
+                            sizeof(regex_t) >= sizeof(size_t) && match.rm_eo - match.rm_so == 2;\n\
+             int glob_ok = GLOB_NOMATCH != GLOB_ABORTED && sizeof(glob_result.gl_pathv) == sizeof(char **);\n\
+             int fnmatch_ok = FNM_NOMATCH == 1 && (FNM_PATHNAME | FNM_PERIOD) != 0;\n\
+             int dlfcn_ok = RTLD_NOW != RTLD_LAZY && RTLD_DEFAULT == (void *)0 && RTLD_NEXT != (void *)0;\n\
+             int syslog_ok = LOG_MASK(LOG_ERR) == (1 << LOG_ERR) && LOG_UPTO(LOG_WARNING) >= LOG_MASK(LOG_WARNING) && LOG_LOCAL7 > LOG_LOCAL0;\n\
+             int unix_ok = un.sun_family == AF_UNIX && sizeof(un.sun_path) >= 100;\n\
+             int if_ok = IF_NAMESIZE >= 16 && addrs.ifa_flags == (IFF_UP | IFF_LOOPBACK) && nameindex.if_index == 1;\n\
+             int tcp_ok = TCP_NODELAY != TCP_MAXSEG && TCP_KEEPIDLE != TCP_KEEPINTVL;\n\
+             return regex_ok && glob_ok && fnmatch_ok && dlfcn_ok && syslog_ok &&\n\
+                    times.actime + times.modtime == 9 && unix_ok && if_ok && tcp_ok ? 42 : 1;\n\
          }\n",
     )
     .expect("failed to write source");

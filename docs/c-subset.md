@@ -127,20 +127,22 @@ assembly/linking.
   object/function/variadic macros, stringification, token pasting,
   `__FILE__`, `__LINE__`, stateful/source builtins, common predefined ABI macros,
   `#undef`, conditional directives including `#elifdef`/`#elifndef`,
-  `defined`, `__has_include`, richer integer `#if` expressions, comments,
+  `defined`, `__has_include`, `__has_attribute` / `__has_warning` probes for
+  common GNU/Clang compatibility attributes and warnings, richer integer `#if` expressions, comments,
   continued lines, `#line`, GCC line markers, `#error`, `#warning`, ignored
   pragmas, `#pragma once`, and common `#pragma pack` push/pop alignments
   for subsequent struct/union definitions. Angle includes search user include paths,
   include-related environment variables, and common system include directories;
   macro-expanded includes, `#include_next`, virtual compatibility headers
-  including `assert.h`, `arpa/inet.h`, `ctype.h`, `dirent.h`, `errno.h`,
-  `fcntl.h`, `grp.h`, `iso646.h`, `locale.h`, `math.h`, `netdb.h`,
-  `netinet/in.h`, `poll.h`, `pthread.h`, `pwd.h`, `setjmp.h`, `signal.h`,
+  including `assert.h`, `arpa/inet.h`, `ctype.h`, `dirent.h`, `dlfcn.h`,
+  `errno.h`, `fcntl.h`, `fnmatch.h`, `glob.h`, `grp.h`, `ifaddrs.h`,
+  `iso646.h`, `locale.h`, `math.h`, `net/if.h`, `netdb.h`, `netinet/in.h`,
+  `netinet/tcp.h`, `poll.h`, `pthread.h`, `pwd.h`, `regex.h`, `setjmp.h`, `signal.h`,
   `stdalign.h`, `stdatomic.h`,
   `stdnoreturn.h`, `stdio.h`, `stdlib.h`, `string.h`, `strings.h`,
   `sys/ioctl.h`, `sys/mman.h`, `sys/resource.h`, `sys/select.h`,
   `sys/socket.h`, `sys/stat.h`, `sys/time.h`, `sys/types.h`, `sys/uio.h`,
-  `sys/utsname.h`, `sys/wait.h`, `termios.h`, `time.h`, `unistd.h`,
+  `sys/un.h`, `sys/utsname.h`, `sys/wait.h`, `syslog.h`, `termios.h`, `time.h`, `unistd.h`, `utime.h`,
   `wchar.h`, `wctype.h`, and common C library typedef/macro headers, `-D`, `-U`,
   `-iquote`, `-isystem`,
   `-idirafter`, and `-nostdinc` are supported.

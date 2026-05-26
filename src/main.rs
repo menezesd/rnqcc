@@ -1326,6 +1326,13 @@ fn raw_directive_name(trimmed: &str) -> Option<&str> {
     (end > 0).then_some(&rest[..end])
 }
 
+fn trim_preprocessor_prefix(trimmed: &str) -> Option<&str> {
+    trimmed
+        .strip_prefix('#')
+        .or_else(|| trimmed.strip_prefix("%:"))
+        .map(str::trim_start)
+}
+
 fn is_conditional_control_directive(name: &str) -> bool {
     matches!(
         name,
@@ -3062,6 +3069,8 @@ struct InternalPreprocessContext<'a> {
     once_files: &'a mut HashSet<PathBuf>,
     system_header_files: &'a mut HashSet<PathBuf>,
     poisoned_identifiers: &'a mut HashSet<String>,
+    pragma_pack_stack: &'a mut Vec<Option<usize>>,
+    pragma_pack_alignment: &'a mut Option<usize>,
     include_paths: &'a IncludePaths,
     dependencies: &'a mut Vec<PathBuf>,
     user_dependencies_only: bool,
@@ -3080,6 +3089,41 @@ fn trace_include(path: &Path, context: &InternalPreprocessContext<'_>) {
         let depth = context.include_stack.len().max(1);
         eprintln!("{} {}", ".".repeat(depth), path.display());
     }
+}
+
+fn inactive_recursive_include_guard(source: &str, macros: &HashMap<String, MacroDef>) -> bool {
+    let Some(line) = source.lines().find(|line| !line.trim().is_empty()) else {
+        return false;
+    };
+    let Some(rest) = trim_preprocessor_prefix(line.trim_start()) else {
+        return false;
+    };
+    if let Some(name) = rest.strip_prefix("ifndef").and_then(|rest| {
+        let rest = rest.trim_start();
+        let end = rest
+            .char_indices()
+            .find(|(_, ch)| !is_ident_continue(*ch))
+            .map(|(index, _)| index)
+            .unwrap_or(rest.len());
+        (end > 0).then_some(&rest[..end])
+    }) {
+        return macros.contains_key(name);
+    }
+    let Some(expr) = rest.strip_prefix("if").map(str::trim_start) else {
+        return false;
+    };
+    let Some(defined_operand) = expr.strip_prefix("!defined").map(str::trim_start) else {
+        return false;
+    };
+    let name = if let Some(inner) = defined_operand
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        inner.trim()
+    } else {
+        defined_operand.trim()
+    };
+    !name.is_empty() && macros.contains_key(name)
 }
 
 fn is_marked_system_header(path: &Path, context: &InternalPreprocessContext<'_>) -> bool {
@@ -3116,6 +3160,128 @@ fn poison_identifiers_from_pragma(pragma: &str, context: &mut InternalPreprocess
             context.poisoned_identifiers.insert(name.to_string());
         }
     }
+}
+
+enum PragmaPackAction {
+    Set(Option<usize>),
+    Push(Option<usize>),
+    Pop,
+}
+
+fn parse_pack_alignment(text: &str) -> Option<usize> {
+    let value = text.trim().parse::<usize>().ok()?;
+    if matches!(value, 1 | 2 | 4 | 8 | 16) {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn parse_pragma_pack(pragma: &str) -> Option<PragmaPackAction> {
+    let rest = pragma.trim().strip_prefix("pack")?.trim();
+    let inner = rest.strip_prefix('(')?.strip_suffix(')')?.trim();
+    if inner.is_empty() || inner == "0" {
+        return Some(PragmaPackAction::Set(None));
+    }
+    let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+    match parts.as_slice() {
+        ["push"] => Some(PragmaPackAction::Push(None)),
+        ["push", value] => {
+            parse_pack_alignment(value).map(|value| PragmaPackAction::Push(Some(value)))
+        }
+        ["pop"] => Some(PragmaPackAction::Pop),
+        [value] => parse_pack_alignment(value).map(|value| PragmaPackAction::Set(Some(value))),
+        _ => None,
+    }
+}
+
+fn handle_internal_pragma(
+    pragma: &str,
+    canonical: &Path,
+    context: &mut InternalPreprocessContext<'_>,
+) {
+    if pragma == "once" {
+        context.once_files.insert(canonical.to_path_buf());
+    } else if pragma == "GCC system_header" || pragma == "clang system_header" {
+        context.system_header_files.insert(canonical.to_path_buf());
+    } else if let Some(action) = parse_pragma_pack(pragma) {
+        match action {
+            PragmaPackAction::Set(alignment) => *context.pragma_pack_alignment = alignment,
+            PragmaPackAction::Push(alignment) => {
+                context
+                    .pragma_pack_stack
+                    .push(*context.pragma_pack_alignment);
+                if let Some(alignment) = alignment {
+                    *context.pragma_pack_alignment = Some(alignment);
+                }
+            }
+            PragmaPackAction::Pop => {
+                *context.pragma_pack_alignment = context.pragma_pack_stack.pop().unwrap_or(None);
+            }
+        }
+    } else {
+        poison_identifiers_from_pragma(pragma, context);
+    }
+}
+
+fn inject_pack_attributes(text: &str, alignment: usize) -> String {
+    let mut out = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = 0usize;
+    let mut in_string = false;
+    let mut in_char = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if in_string || in_char {
+            out.push(ch);
+            if ch == '\\' {
+                index += 1;
+                if let Some(next) = chars.get(index) {
+                    out.push(*next);
+                }
+            } else if in_string && ch == '"' {
+                in_string = false;
+            } else if in_char && ch == '\'' {
+                in_char = false;
+            }
+            index += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        if ch == '\'' {
+            in_char = true;
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        if ch.is_ascii_alphabetic() || ch == '_' {
+            let start = index;
+            index += 1;
+            while index < chars.len()
+                && (chars[index].is_ascii_alphanumeric() || chars[index] == '_')
+            {
+                index += 1;
+            }
+            let ident: String = chars[start..index].iter().collect();
+            out.push_str(&ident);
+            if ident == "struct" || ident == "union" {
+                if alignment == 1 {
+                    out.push_str(" __attribute__((packed))");
+                } else {
+                    out.push_str(&format!(" __attribute__((packed, aligned({alignment})))"));
+                }
+            }
+            continue;
+        }
+        out.push(ch);
+        index += 1;
+    }
+    out
 }
 
 fn check_poisoned_tokens(
@@ -3644,14 +3810,12 @@ fn flush_pending_source(
     )?;
     let (expanded, pragmas) = process_pragma_operators(&expanded)?;
     for pragma in pragmas {
-        if pragma.trim() == "once" {
-            context.once_files.insert(canonical.to_path_buf());
-        } else if pragma.trim() == "GCC system_header" {
-            context.system_header_files.insert(canonical.to_path_buf());
-        } else {
-            poison_identifiers_from_pragma(pragma.trim(), context);
-        }
+        handle_internal_pragma(pragma.trim(), canonical, context);
     }
+    let expanded = context
+        .pragma_pack_alignment
+        .map(|alignment| inject_pack_attributes(&expanded, alignment))
+        .unwrap_or(expanded);
     check_poisoned_line(&expanded, context)
         .map_err(|err| pp_location(&pending_source.logical_file, pending_source.start_line, err))?;
     if !expanded.trim().is_empty() {
@@ -3955,6 +4119,17 @@ fn define_builtin_macro(macros: &mut HashMap<String, MacroDef>, name: &str, valu
     macros.insert(name.to_string(), MacroDef::Object(value.to_string()));
 }
 
+fn define_empty_function_macro(macros: &mut HashMap<String, MacroDef>, name: &str, variadic: bool) {
+    macros.insert(
+        name.to_string(),
+        MacroDef::Function {
+            params: Vec::new(),
+            variadic,
+            body: String::new(),
+        },
+    );
+}
+
 fn seed_internal_predefined_macros(macros: &mut HashMap<String, MacroDef>, target: &Target) {
     define_builtin_macro(macros, "__RNQCC__", "1");
     define_builtin_macro(macros, "__STDC__", "1");
@@ -4059,6 +4234,7 @@ fn seed_internal_predefined_macros(macros: &mut HashMap<String, MacroDef>, targe
     define_builtin_macro(macros, "__ORDER_LITTLE_ENDIAN__", "1234");
     define_builtin_macro(macros, "__ORDER_BIG_ENDIAN__", "4321");
     define_builtin_macro(macros, "__BYTE_ORDER__", "__ORDER_LITTLE_ENDIAN__");
+    define_builtin_macro(macros, "__LITTLE_ENDIAN__", "1");
     define_builtin_macro(macros, "__GNUC__", "4");
     define_builtin_macro(macros, "__GNUC_MINOR__", "2");
     define_builtin_macro(macros, "__GNUC_PATCHLEVEL__", "1");
@@ -4087,6 +4263,54 @@ fn seed_internal_predefined_macros(macros: &mut HashMap<String, MacroDef>, targe
             define_builtin_macro(macros, "__MACH__", "1");
             define_builtin_macro(macros, "__APPLE_CC__", "6000");
             define_builtin_macro(macros, "__APPLE_CPP__", "1");
+            for name in [
+                "__OSX_AVAILABLE",
+                "__IOS_AVAILABLE",
+                "__TVOS_AVAILABLE",
+                "__WATCHOS_AVAILABLE",
+                "__API_AVAILABLE",
+                "__API_DEPRECATED",
+                "__API_DEPRECATED_WITH_REPLACEMENT",
+                "__API_OBSOLETED",
+                "__API_OBSOLETED_WITH_REPLACEMENT",
+                "__API_UNAVAILABLE",
+                "API_AVAILABLE",
+                "API_DEPRECATED",
+                "API_DEPRECATED_WITH_REPLACEMENT",
+                "API_OBSOLETED",
+                "API_OBSOLETED_WITH_REPLACEMENT",
+                "API_UNAVAILABLE",
+            ] {
+                define_empty_function_macro(macros, name, true);
+            }
+            for name in [
+                "__API_AVAILABLE_BEGIN",
+                "__API_AVAILABLE_END",
+                "__API_DEPRECATED_BEGIN",
+                "__API_DEPRECATED_END",
+                "__API_DEPRECATED_WITH_REPLACEMENT_BEGIN",
+                "__API_DEPRECATED_WITH_REPLACEMENT_END",
+                "__API_OBSOLETED_BEGIN",
+                "__API_OBSOLETED_END",
+                "__API_OBSOLETED_WITH_REPLACEMENT_BEGIN",
+                "__API_OBSOLETED_WITH_REPLACEMENT_END",
+                "__API_UNAVAILABLE_BEGIN",
+                "__API_UNAVAILABLE_END",
+                "API_AVAILABLE_BEGIN",
+                "API_AVAILABLE_END",
+                "API_DEPRECATED_BEGIN",
+                "API_DEPRECATED_END",
+                "API_DEPRECATED_WITH_REPLACEMENT_BEGIN",
+                "API_DEPRECATED_WITH_REPLACEMENT_END",
+                "API_OBSOLETED_BEGIN",
+                "API_OBSOLETED_END",
+                "API_OBSOLETED_WITH_REPLACEMENT_BEGIN",
+                "API_OBSOLETED_WITH_REPLACEMENT_END",
+                "API_UNAVAILABLE_BEGIN",
+                "API_UNAVAILABLE_END",
+            ] {
+                define_builtin_macro(macros, name, "");
+            }
         }
     }
 }
@@ -4145,16 +4369,19 @@ fn internal_preprocess_source(
     if context.once_files.contains(&canonical) {
         return Ok(String::new());
     }
-    if context.include_stack.contains(&canonical) {
-        return Err(format!("recursive include of {}", src.display()));
-    }
-    context.include_stack.push(canonical.clone());
-
     let source = std::fs::read_to_string(src)
         .map_err(|err| format!("could not read {}: {}", src.display(), err))?;
     let source = strip_comments(&splice_continued_lines(
         &preprocess::lexer::replace_trigraphs(&source),
     ))?;
+    if context.include_stack.contains(&canonical) {
+        if inactive_recursive_include_guard(&source, macros) {
+            return Ok(String::new());
+        }
+        return Err(format!("recursive include of {}", src.display()));
+    }
+    context.include_stack.push(canonical.clone());
+
     let mut out = String::new();
     let base_dir = src.parent().unwrap_or_else(|| Path::new("."));
     let mut conditionals: Vec<ConditionalFrame> = Vec::new();
@@ -4455,13 +4682,7 @@ fn internal_preprocess_source(
                         )?;
                         let pragma = preprocess::emit::emit_tokens(&expanded);
                         let pragma = pragma.trim();
-                        if pragma == "once" {
-                            context.once_files.insert(canonical.clone());
-                        } else if pragma == "GCC system_header" || pragma == "clang system_header" {
-                            context.system_header_files.insert(canonical.clone());
-                        } else {
-                            poison_identifiers_from_pragma(pragma, context);
-                        }
+                        handle_internal_pragma(pragma, &canonical, context);
                         continue;
                     }
                     Directive::Ident => continue,
@@ -4571,6 +4792,8 @@ fn internal_preprocess(
     let mut once_files = HashSet::new();
     let mut system_header_files = HashSet::new();
     let mut poisoned_identifiers = HashSet::new();
+    let mut pragma_pack_stack = Vec::new();
+    let mut pragma_pack_alignment = None;
     let mut state = PreprocessorState::new(invocation.src.to_string());
     let mut effective_include_paths = invocation.include_paths.clone();
     effective_include_paths.append_system_defaults(invocation.target);
@@ -4580,6 +4803,8 @@ fn internal_preprocess(
         once_files: &mut once_files,
         system_header_files: &mut system_header_files,
         poisoned_identifiers: &mut poisoned_identifiers,
+        pragma_pack_stack: &mut pragma_pack_stack,
+        pragma_pack_alignment: &mut pragma_pack_alignment,
         include_paths: &effective_include_paths,
         dependencies: &mut dependencies,
         user_dependencies_only: invocation.user_dependencies_only,

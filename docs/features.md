@@ -54,7 +54,9 @@ The internal preprocessor supports:
 - `#warning`
 - ignored unknown `#pragma` directives
 - `#pragma once`, `_Pragma("once")`, `#pragma GCC system_header`,
-  `#pragma clang system_header`, and `#pragma GCC poison`
+  `#pragma clang system_header`, `#pragma GCC poison`, and
+  common `#pragma pack` push/pop alignments for subsequent struct/union
+  definitions
 
 Known internal preprocessor gaps:
 

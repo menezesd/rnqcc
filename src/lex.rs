@@ -234,19 +234,84 @@ impl Lexer {
             self.advance();
             self.advance();
             radix = 16;
+            let mut value = 0.0f64;
             let digit_start = self.pos;
             while let Some(c) = self.peek() {
-                if c.is_ascii_hexdigit() {
+                if let Some(digit) = c.to_digit(16) {
                     self.advance();
+                    value = value * 16.0 + f64::from(digit);
                 } else {
                     break;
                 }
             }
-            if self.pos == digit_start {
+            let mut saw_digit = self.pos != digit_start;
+            let mut is_hex_float = false;
+            if self.peek() == Some('.') {
+                is_hex_float = true;
+                self.advance();
+                let mut scale = 1.0f64;
+                while let Some(c) = self.peek() {
+                    if let Some(digit) = c.to_digit(16) {
+                        self.advance();
+                        scale *= 16.0;
+                        value += f64::from(digit) / scale;
+                        saw_digit = true;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            if !saw_digit {
+                return Err(format!("invalid hexadecimal literal at position {}", start));
+            }
+            if matches!(self.peek(), Some('p' | 'P')) {
+                is_hex_float = true;
+                self.advance();
+                let exponent_sign = if self.peek() == Some('-') {
+                    self.advance();
+                    -1
+                } else {
+                    if self.peek() == Some('+') {
+                        self.advance();
+                    }
+                    1
+                };
+                let exponent_start = self.pos;
+                let mut exponent = 0i32;
+                while let Some(c) = self.peek() {
+                    if let Some(digit) = c.to_digit(10) {
+                        self.advance();
+                        exponent = exponent.saturating_mul(10).saturating_add(digit as i32);
+                    } else {
+                        break;
+                    }
+                }
+                if self.pos == exponent_start {
+                    return Err(format!(
+                        "missing exponent digits in hexadecimal float literal at position {}",
+                        start
+                    ));
+                }
+                value *= 2.0f64.powi(exponent_sign * exponent);
+            } else if is_hex_float {
                 return Err(format!(
-                    "invalid hexadecimal integer literal at position {}",
+                    "missing binary exponent in hexadecimal float literal at position {}",
                     start
                 ));
+            }
+            if is_hex_float {
+                if matches!(self.peek(), Some('f' | 'F' | 'l' | 'L')) {
+                    self.advance();
+                }
+                if let Some(c) = self.peek() {
+                    if c.is_ascii_alphabetic() || c == '_' {
+                        return Err(format!(
+                            "invalid float literal suffix at position {}",
+                            self.pos
+                        ));
+                    }
+                }
+                return Ok(Token::DoubleLiteral(value));
             }
         } else if self.peek() == Some('0') && matches!(self.peek_ahead(1), Some('b' | 'B')) {
             self.advance();
@@ -975,6 +1040,25 @@ mod tests {
         let tokens = lex("double x = 0.0; double y = 09.5;")?;
         assert!(tokens.contains(&Token::DoubleLiteral(0.0)));
         assert!(tokens.contains(&Token::DoubleLiteral(9.5)));
+        Ok(())
+    }
+
+    #[test]
+    fn lexes_hexadecimal_float_literals() -> Result<(), String> {
+        let tokens = lex("double x = 0x1p2; double y = 0x1.8p+1F; double z = 0x.8p-1L;")?;
+        assert!(tokens.contains(&Token::DoubleLiteral(4.0)));
+        assert!(tokens.contains(&Token::DoubleLiteral(3.0)));
+        assert!(tokens.contains(&Token::DoubleLiteral(0.25)));
+        Ok(())
+    }
+
+    #[test]
+    fn reports_invalid_hexadecimal_float_literals() -> Result<(), String> {
+        let err = require_err(lex("double x = 0x1.;"), "lexing should fail")?;
+        assert!(err.contains("missing binary exponent"));
+
+        let err = require_err(lex("double x = 0x1p;"), "lexing should fail")?;
+        assert!(err.contains("missing exponent digits"));
         Ok(())
     }
 

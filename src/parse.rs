@@ -3474,17 +3474,7 @@ impl Parser {
                     && self.is_type_keyword(&self.tokens[self.pos + 1])
                 {
                     self.advance()?; // consume '('
-                    let base_type = self.parse_type()?;
-                    let full_type = self.parse_abstract_declarator_type(base_type)?;
-                    let full_type = if base_type == CType::Struct {
-                        if let Some(ref tag) = self.last_struct_tag {
-                            Self::replace_scalar_struct(&full_type, tag)
-                        } else {
-                            full_type
-                        }
-                    } else {
-                        full_type
-                    };
+                    let full_type = self.parse_type_name_full()?;
                     self.expect_token(Token::CloseParen)?;
                     let ctype = full_type.to_ctype();
                     Ok(Exp::SizeOfType(ctype, full_type))
@@ -3501,17 +3491,7 @@ impl Parser {
                     && self.is_type_keyword(&self.tokens[self.pos + 1])
                 {
                     self.advance()?;
-                    let base_type = self.parse_type()?;
-                    let full_type = self.parse_abstract_declarator_type(base_type)?;
-                    let full_type = if base_type == CType::Struct {
-                        if let Some(ref tag) = self.last_struct_tag {
-                            Self::replace_scalar_struct(&full_type, tag)
-                        } else {
-                            full_type
-                        }
-                    } else {
-                        full_type
-                    };
+                    let full_type = self.parse_type_name_full()?;
                     self.expect_token(Token::CloseParen)?;
                     Ok(Exp::AlignOfType(full_type))
                 } else {
@@ -3526,17 +3506,7 @@ impl Parser {
                     && self.is_type_keyword(&self.tokens[self.pos + 1]) =>
             {
                 self.advance()?; // consume '('
-                let base_type = self.parse_type()?;
-                let full_type = self.parse_abstract_declarator_type(base_type)?;
-                let full_type = if base_type == CType::Struct {
-                    if let Some(ref tag) = self.last_struct_tag {
-                        Self::replace_scalar_struct(&full_type, tag)
-                    } else {
-                        full_type
-                    }
-                } else {
-                    full_type
-                };
+                let full_type = self.parse_type_name_full()?;
                 self.expect_token(Token::CloseParen)?;
                 if self.at(&Token::OpenBrace) {
                     // Compound literal: (Type){init}

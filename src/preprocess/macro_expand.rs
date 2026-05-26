@@ -339,11 +339,21 @@ fn join_variadic_args(args: &[Vec<PpToken>]) -> Vec<PpToken> {
 fn trim_tokens(tokens: &[PpToken]) -> Vec<PpToken> {
     let start = tokens
         .iter()
-        .position(|token| !matches!(token.kind, PpTokenKind::Whitespace(_)))
+        .position(|token| {
+            !matches!(
+                token.kind,
+                PpTokenKind::Whitespace(_) | PpTokenKind::Newline(_)
+            )
+        })
         .unwrap_or(tokens.len());
     let end = tokens
         .iter()
-        .rposition(|token| !matches!(token.kind, PpTokenKind::Whitespace(_)))
+        .rposition(|token| {
+            !matches!(
+                token.kind,
+                PpTokenKind::Whitespace(_) | PpTokenKind::Newline(_)
+            )
+        })
         .map(|index| index + 1)
         .unwrap_or(start);
     tokens[start..end].to_vec()
@@ -352,7 +362,7 @@ fn trim_tokens(tokens: &[PpToken]) -> Vec<PpToken> {
 fn skip_ws(tokens: &[PpToken], mut index: usize) -> usize {
     while matches!(
         tokens.get(index).map(|token| &token.kind),
-        Some(PpTokenKind::Whitespace(_))
+        Some(PpTokenKind::Whitespace(_) | PpTokenKind::Newline(_))
     ) {
         index += 1;
     }
@@ -509,6 +519,27 @@ mod tests {
             },
         );
         assert_eq!(text(&expand_macros(&lex("ADD(A, 2)")?, &macros)?), "40 + 2");
+        Ok(())
+    }
+
+    #[test]
+    fn expands_function_macros_across_newline_before_arguments() -> Result<(), String> {
+        let mut macros = MacroTable::new();
+        macros.insert(
+            "EMPTY".to_string(),
+            MacroDef::Function {
+                params: Vec::new(),
+                variadic: true,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(
+            text(&expand_macros(
+                &lex("value EMPTY\n(ignored)\n= 1")?,
+                &macros
+            )?),
+            "value \n= 1"
+        );
         Ok(())
     }
 

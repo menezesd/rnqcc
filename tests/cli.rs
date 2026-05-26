@@ -3980,6 +3980,36 @@ int main(void) {
 }
 
 #[test]
+fn compiles_hexadecimal_float_literals() {
+    let src = temp_file("hex-float-literals", "c");
+    let exe = temp_file("hex-float-literals", "bin");
+    std::fs::write(
+        &src,
+        "int main(void) {\n\
+             double a = 0x1p2;\n\
+             double b = 0x1.8p+1;\n\
+             double c = 0x.8p-1;\n\
+             return (int)(a + b + c) == 7 ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn emits_aarch64_assembly_for_float_operations() {
     let src = temp_file("aarch64-float-ops", "c");
     let out = temp_file("aarch64-float-ops", "s");
@@ -7007,7 +7037,7 @@ fn internal_cpp_handles_predefined_target_macros_and_if_literals() {
          #else\n\
          #define BASE 0\n\
          #endif\n\
-         #if __aarch64__ && !defined(__x86_64__) && (__CHAR_BIT__ == 8) && (__SIZEOF_POINTER__ == 8) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__) && ('*' == 42) && (010 == 8) && (0b10 ? 1 : 0)\n\
+         #if __aarch64__ && !defined(__x86_64__) && (__CHAR_BIT__ == 8) && (__SIZEOF_POINTER__ == 8) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__) && __LITTLE_ENDIAN__ && ('*' == 42) && (010 == 8) && (0b10 ? 1 : 0)\n\
          int main(void) { return BASE + 10; }\n\
          #else\n\
          int main(void) { return 1; }\n\
@@ -7032,6 +7062,71 @@ fn internal_cpp_handles_predefined_target_macros_and_if_literals() {
     );
 
     let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn internal_cpp_elides_apple_availability_macros() {
+    let src = temp_file("internal-cpp-apple-availability", "c");
+    std::fs::write(
+        &src,
+        "__OSX_AVAILABLE(14.0) __IOS_AVAILABLE(17.0)\n\
+         extern int f(void) API_AVAILABLE(macos(14.0), ios(17.0));\n\
+         __API_AVAILABLE(macos(14.0)) extern int g(void);\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-t")
+        .arg("aarch64-apple-darwin")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("extern int f(void) ;"), "{stdout}");
+    assert!(stdout.contains("extern int g(void);"), "{stdout}");
+    assert!(!stdout.contains("AVAILABLE"), "{stdout}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn preserves_typedef_pointer_aliases_in_type_names() {
+    let src = temp_file("typedef-pointer-alias-type-name", "c");
+    let exe = temp_file("typedef-pointer-alias-type-name", "bin");
+    std::fs::write(
+        &src,
+        "typedef struct s *ptr_t;\n\
+         typedef ptr_t alias_t;\n\
+         struct s { int value; };\n\
+         struct s obj;\n\
+         static alias_t f(void) { return ((alias_t)&obj); }\n\
+         int main(void) {\n\
+             return sizeof(alias_t) == sizeof(void *) &&\n\
+                    _Alignof(alias_t) == _Alignof(void *) &&\n\
+                    f() == &obj\n\
+                        ? 42\n\
+                        : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
 }
 
 #[test]
@@ -9292,6 +9387,82 @@ fn internal_cpp_ignores_unknown_pragmas_without_emitting_them() {
 }
 
 #[test]
+fn internal_cpp_honors_pragma_pack_push_one_and_pop() {
+    let src = temp_file("internal-cpp-pragma-pack", "c");
+    let exe = temp_file("internal-cpp-pragma-pack", "bin");
+    std::fs::write(
+        &src,
+        "#pragma pack(push, 1)\n\
+         struct Packed { char c; int i; };\n\
+         #pragma pack(pop)\n\
+         struct Natural { char c; int i; };\n\
+         int main(void) {\n\
+             return sizeof(struct Packed) == 5 &&\n\
+                    __builtin_offsetof(struct Packed, i) == 1 &&\n\
+                    sizeof(struct Natural) == 8 &&\n\
+                    __builtin_offsetof(struct Natural, i) == 4\n\
+                        ? 42\n\
+                        : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_honors_pragma_pack_push_four_and_pop() {
+    let src = temp_file("internal-cpp-pragma-pack-four", "c");
+    let exe = temp_file("internal-cpp-pragma-pack-four", "bin");
+    std::fs::write(
+        &src,
+        "#pragma pack(push, 4)\n\
+         struct PackedFour { int i; unsigned long p; };\n\
+         #pragma pack(pop)\n\
+         struct NaturalEight { int i; unsigned long p; };\n\
+         int main(void) {\n\
+             return sizeof(struct PackedFour) == 12 &&\n\
+                    _Alignof(struct PackedFour) == 4 &&\n\
+                    __builtin_offsetof(struct PackedFour, p) == 4 &&\n\
+                    sizeof(struct NaturalEight) == 16 &&\n\
+                    _Alignof(struct NaturalEight) == 8 &&\n\
+                    __builtin_offsetof(struct NaturalEight, p) == 8\n\
+                        ? 42\n\
+                        : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn internal_cpp_honors_standalone_pragma_operator_once() {
     let header = temp_file("internal-cpp-pragma-operator-once", "h");
     let src = temp_file("internal-cpp-pragma-operator-once", "c");
@@ -9806,6 +9977,76 @@ fn internal_cpp_handles_include_next() {
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_dir(first_dir);
     let _ = std::fs::remove_dir(second_dir);
+}
+
+#[test]
+fn internal_cpp_allows_guarded_recursive_include() {
+    let include_dir = temp_file("internal-cpp-guarded-recursive-include", "d");
+    let src = temp_file("internal-cpp-guarded-recursive-include", "c");
+    std::fs::create_dir(&include_dir).expect("failed to create include dir");
+    let header = include_dir.join("guarded.h");
+    std::fs::write(
+        &header,
+        "#ifndef RNQCC_GUARDED_H\n\
+         #define RNQCC_GUARDED_H\n\
+         #include <guarded.h>\n\
+         #define GUARDED_VALUE 42\n\
+         #endif\n",
+    )
+    .expect("failed to write guarded header");
+    std::fs::write(
+        &src,
+        "#include <guarded.h>\nint main(void) { return GUARDED_VALUE; }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-I")
+        .arg(&include_dir)
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("int main(void) { return 42; }"), "{stdout}");
+
+    let _ = std::fs::remove_file(header);
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_dir(include_dir);
+}
+
+#[test]
+fn internal_cpp_rejects_unguarded_recursive_include() {
+    let include_dir = temp_file("internal-cpp-unguarded-recursive-include", "d");
+    let src = temp_file("internal-cpp-unguarded-recursive-include", "c");
+    std::fs::create_dir(&include_dir).expect("failed to create include dir");
+    let header = include_dir.join("unguarded.h");
+    std::fs::write(&header, "#include <unguarded.h>\n#define VALUE 42\n")
+        .expect("failed to write unguarded header");
+    std::fs::write(&src, "#include <unguarded.h>\nint value = VALUE;\n")
+        .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-I")
+        .arg(&include_dir)
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    assert!(
+        stderr(output).contains("recursive include"),
+        "expected recursive include diagnostic"
+    );
+
+    let _ = std::fs::remove_file(header);
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_dir(include_dir);
 }
 
 #[test]

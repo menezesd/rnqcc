@@ -9,6 +9,7 @@ single target.
 - integer scalars and decimal/hex/octal/GNU binary integer literals: `char`, `short`,
   `int`, `long`, signed and unsigned variants; `long long` suffixes are
   accepted as aliases for the 64-bit `long` model
+- decimal and hexadecimal floating literals for `float`/`double` expressions
 - `_Bool`, pointers, arrays, inferred first dimensions for initialized arrays,
   string literals with common C byte escapes, and pointer arithmetic
 - `_Alignas` / `alignas` on objects and struct members; `_Alignof` / `alignof`
@@ -119,7 +120,8 @@ assembly/linking.
   `#undef`, conditional directives including `#elifdef`/`#elifndef`,
   `defined`, `__has_include`, richer integer `#if` expressions, comments,
   continued lines, `#line`, GCC line markers, `#error`, `#warning`, ignored
-  pragmas, and `#pragma once`. Angle includes search user include paths,
+  pragmas, `#pragma once`, and common `#pragma pack` push/pop alignments
+  for subsequent struct/union definitions. Angle includes search user include paths,
   include-related environment variables, and common system include directories;
   macro-expanded includes, `#include_next`, virtual compatibility headers
   including `assert.h`, `arpa/inet.h`, `ctype.h`, `dirent.h`, `errno.h`,

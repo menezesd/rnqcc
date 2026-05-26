@@ -1477,6 +1477,18 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
         guard: Some("__rnqcc_utime_h"),
     },
     VirtualHeaderInfo {
+        name: "libgen.h",
+        guard: Some("__rnqcc_libgen_h"),
+    },
+    VirtualHeaderInfo {
+        name: "paths.h",
+        guard: None,
+    },
+    VirtualHeaderInfo {
+        name: "sysexits.h",
+        guard: None,
+    },
+    VirtualHeaderInfo {
         name: "fcntl.h",
         guard: Some("__rnqcc_fcntl_h"),
     },
@@ -1537,8 +1549,16 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
         guard: Some("__rnqcc_sys_ioctl_h"),
     },
     VirtualHeaderInfo {
+        name: "sys/file.h",
+        guard: Some("__rnqcc_sys_file_h"),
+    },
+    VirtualHeaderInfo {
         name: "sys/mman.h",
         guard: Some("__rnqcc_sys_mman_h"),
+    },
+    VirtualHeaderInfo {
+        name: "sys/param.h",
+        guard: Some("__rnqcc_sys_param_h"),
     },
     VirtualHeaderInfo {
         name: "sys/resource.h",
@@ -1555,6 +1575,10 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
     VirtualHeaderInfo {
         name: "sys/uio.h",
         guard: Some("__rnqcc_sys_uio_h"),
+    },
+    VirtualHeaderInfo {
+        name: "sys/sysmacros.h",
+        guard: None,
     },
     VirtualHeaderInfo {
         name: "sys/utsname.h",
@@ -2060,6 +2084,50 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 include_str!("virtual_headers/utime.h")
             )
         }
+        "libgen.h" => {
+            if virtual_header_include_once(macros, "libgen.h") {
+                return String::new();
+            }
+            include_str!("virtual_headers/libgen.h").to_string()
+        }
+        "paths.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("_PATH_BSHELL", "\"/bin/sh\""),
+                    ("_PATH_CSHELL", "\"/bin/csh\""),
+                    ("_PATH_DEV", "\"/dev/\""),
+                    ("_PATH_DEVNULL", "\"/dev/null\""),
+                    ("_PATH_TMP", "\"/tmp/\""),
+                    ("_PATH_VARDB", "\"/var/db/\""),
+                ],
+            );
+            String::new()
+        }
+        "sysexits.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("EX_OK", "0"),
+                    ("EX_USAGE", "64"),
+                    ("EX_DATAERR", "65"),
+                    ("EX_NOINPUT", "66"),
+                    ("EX_NOUSER", "67"),
+                    ("EX_NOHOST", "68"),
+                    ("EX_UNAVAILABLE", "69"),
+                    ("EX_SOFTWARE", "70"),
+                    ("EX_OSERR", "71"),
+                    ("EX_OSFILE", "72"),
+                    ("EX_CANTCREAT", "73"),
+                    ("EX_IOERR", "74"),
+                    ("EX_TEMPFAIL", "75"),
+                    ("EX_PROTOCOL", "76"),
+                    ("EX_NOPERM", "77"),
+                    ("EX_CONFIG", "78"),
+                ],
+            );
+            String::new()
+        }
         "signal.h" => {
             define_virtual_object_macros(
                 macros,
@@ -2379,6 +2447,21 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
             }
             include_str!("virtual_headers/sys/ioctl.h").to_string()
         }
+        "sys/file.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("LOCK_SH", "1"),
+                    ("LOCK_EX", "2"),
+                    ("LOCK_NB", "4"),
+                    ("LOCK_UN", "8"),
+                ],
+            );
+            if virtual_header_include_once(macros, "sys/file.h") {
+                return String::new();
+            }
+            include_str!("virtual_headers/sys/file.h").to_string()
+        }
         "sys/mman.h" => {
             define_virtual_object_macros(
                 macros,
@@ -2406,6 +2489,40 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 include_virtual_compat_header("sys/types.h", macros),
                 include_str!("virtual_headers/sys/mman.h")
             )
+        }
+        "sys/param.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("MAXPATHLEN", "1024"),
+                    ("MAXHOSTNAMELEN", "256"),
+                    ("NBBY", "8"),
+                    ("NGROUPS", "16"),
+                ],
+            );
+            for (name, params, body) in [
+                ("MIN", vec!["a", "b"], "((a) < (b) ? (a) : (b))"),
+                ("MAX", vec!["a", "b"], "((a) > (b) ? (a) : (b))"),
+                ("howmany", vec!["x", "y"], "(((x) + ((y) - 1)) / (y))"),
+                (
+                    "roundup",
+                    vec!["x", "y"],
+                    "((((x) + ((y) - 1)) / (y)) * (y))",
+                ),
+            ] {
+                macros.insert(
+                    name.to_string(),
+                    MacroDef::Function {
+                        params: params.into_iter().map(str::to_string).collect(),
+                        variadic: false,
+                        body: body.to_string(),
+                    },
+                );
+            }
+            if virtual_header_include_once(macros, "sys/param.h") {
+                return String::new();
+            }
+            include_str!("virtual_headers/sys/param.h").to_string()
         }
         "sys/resource.h" => {
             define_virtual_object_macros(
@@ -2473,6 +2590,23 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 include_virtual_compat_header("sys/types.h", macros),
                 include_str!("virtual_headers/sys/wait.h")
             )
+        }
+        "sys/sysmacros.h" => {
+            for (name, params, body) in [
+                ("major", vec!["dev"], "(((dev) >> 8) & 0xfff)"),
+                ("minor", vec!["dev"], "((dev) & 0xff)"),
+                ("makedev", vec!["maj", "min"], "(((maj) << 8) | (min))"),
+            ] {
+                macros.insert(
+                    name.to_string(),
+                    MacroDef::Function {
+                        params: params.into_iter().map(str::to_string).collect(),
+                        variadic: false,
+                        body: body.to_string(),
+                    },
+                );
+            }
+            String::new()
         }
         "netinet/in.h" => {
             define_virtual_object_macros(

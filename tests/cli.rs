@@ -6683,6 +6683,53 @@ fn internal_cpp_provides_additional_posix_probe_virtual_headers() {
 }
 
 #[test]
+fn internal_cpp_provides_autoconf_probe_virtual_headers() {
+    let src = temp_file("internal-cpp-autoconf-probe-headers", "c");
+    let exe = temp_file("internal-cpp-autoconf-probe-headers", "bin");
+    std::fs::write(
+        &src,
+        "#include <libgen.h>\n\
+         #include <paths.h>\n\
+         #include <sysexits.h>\n\
+         #include <sys/file.h>\n\
+         #include <sys/param.h>\n\
+         #include <sys/sysmacros.h>\n\
+         int main(void) {\n\
+             char path[] = \"/tmp/file\";\n\
+             char *base = basename(path);\n\
+             char *dir = dirname(path);\n\
+             int path_ok = _PATH_DEVNULL[0] == '/' && _PATH_TMP[0] == '/';\n\
+             int exit_ok = EX_OK == 0 && EX_USAGE < EX_CONFIG;\n\
+             int lock_ok = LOCK_SH != LOCK_EX && LOCK_UN != LOCK_NB;\n\
+             int param_ok = MAXPATHLEN >= 1024 && MIN(3, 5) == 3 && MAX(3, 5) == 5 &&\n\
+                            howmany(17, 8) == 3 && roundup(17, 8) == 24;\n\
+             int dev = makedev(3, 7);\n\
+             int sysmacros_ok = major(dev) == 3 && minor(dev) == 7;\n\
+             return base && dir && path_ok && exit_ok && lock_ok && param_ok && sysmacros_ok ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-nostdinc")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn internal_cpp_virtual_headers_tolerate_repeated_includes() {
     let src = temp_file("internal-cpp-repeat-virtual-headers", "c");
     let exe = temp_file("internal-cpp-repeat-virtual-headers", "bin");
@@ -6860,13 +6907,16 @@ fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
         "grp.h",
         "inttypes.h",
         "iso646.h",
+        "libgen.h",
         "limits.h",
         "locale.h",
         "math.h",
+        "paths.h",
         "netdb.h",
         "poll.h",
         "pthread.h",
         "pwd.h",
+        "regex.h",
         "setjmp.h",
         "signal.h",
         "stdalign.h",
@@ -6879,22 +6929,35 @@ fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
         "stdlib.h",
         "string.h",
         "strings.h",
+        "sysexits.h",
         "arpa/inet.h",
+        "dlfcn.h",
+        "fnmatch.h",
+        "glob.h",
+        "ifaddrs.h",
+        "net/if.h",
         "netinet/in.h",
+        "netinet/tcp.h",
+        "sys/file.h",
         "sys/select.h",
         "sys/socket.h",
         "sys/ioctl.h",
         "sys/mman.h",
+        "sys/param.h",
         "sys/resource.h",
         "sys/stat.h",
+        "sys/sysmacros.h",
         "sys/time.h",
         "sys/types.h",
         "sys/uio.h",
+        "sys/un.h",
         "sys/utsname.h",
         "sys/wait.h",
+        "syslog.h",
         "termios.h",
         "time.h",
         "unistd.h",
+        "utime.h",
         "wchar.h",
         "wctype.h",
     ];

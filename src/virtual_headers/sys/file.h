@@ -1,0 +1,1 @@
+int flock(int, int);

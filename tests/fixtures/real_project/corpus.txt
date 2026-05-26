@@ -1,0 +1,6 @@
+# source | extra compiler flags | optional expected failure
+tests/fixtures/real_project/configure_probes.c | | expect-fail: __darwin_arm_neon_state64
+tests/fixtures/smoke/project/main.c | -I tests/fixtures/smoke/include
+tests/fixtures/smoke/project/util.c | -I tests/fixtures/smoke/include
+tests/fixtures/smoke/staticlib/lib.c
+tests/fixtures/smoke/staticlib/main.c

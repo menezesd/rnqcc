@@ -146,3 +146,6 @@ into fixtures under `tests/fixtures/smoke` or configure-style probes under
 `scripts/layout_oracle.py` additionally compares selected aggregate layout
 checks against the host C compiler so packing/alignment changes are
 regression-tested against the platform ABI.
+`scripts/real_project_corpus.py` compiles a manifest of representative
+translation units with `--internal-cpp` and supports expected-failure entries so
+external project reductions can be tracked as a compatibility ratchet.

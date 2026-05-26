@@ -6086,6 +6086,33 @@ fn internal_cpp_handles_has_warning_predicates() {
 }
 
 #[test]
+fn internal_cpp_if_handles_prefixed_character_constants() {
+    let src = temp_file("internal-cpp-prefixed-character-constants", "c");
+    std::fs::write(
+        &src,
+        "#if L'\\0' - 1 < 0 && u'a' == 'a' && U'\\n' == 10 && u8'x' == 'x'\n\
+         int prefixed_chars = 1;\n\
+         #else\n\
+         int prefixed_chars = 0;\n\
+         #endif\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("int prefixed_chars = 1;"), "{stdout}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn internal_cpp_provides_basic_virtual_compatibility_headers() {
     let src = temp_file("internal-cpp-virtual-headers", "c");
     let exe = temp_file("internal-cpp-virtual-headers", "bin");

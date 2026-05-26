@@ -1948,6 +1948,32 @@ fn fixup_instructions(func: &mut AsmFunction, stack_size: i32, callee_saved: &[R
                     ));
                 }
             }
+            // cvtsi2ss with immediate src
+            AsmInstr::Cvtsi2ss(t, AsmOperand::Imm(val), ref dst) => {
+                new_instructions.push(AsmInstr::Mov(
+                    t,
+                    AsmOperand::Imm(val),
+                    AsmOperand::Reg(Reg::R10),
+                ));
+                if is_memory(dst) {
+                    new_instructions.push(AsmInstr::Cvtsi2ss(
+                        t,
+                        AsmOperand::Reg(Reg::R10),
+                        AsmOperand::Xmm(XmmReg::XMM14),
+                    ));
+                    new_instructions.push(AsmInstr::Mov(
+                        AsmType::Float,
+                        AsmOperand::Xmm(XmmReg::XMM14),
+                        dst.clone(),
+                    ));
+                } else {
+                    new_instructions.push(AsmInstr::Cvtsi2ss(
+                        t,
+                        AsmOperand::Reg(Reg::R10),
+                        dst.clone(),
+                    ));
+                }
+            }
             // cvtsi2sd with memory dst
             AsmInstr::Cvtsi2sd(t, ref src, ref dst) if is_memory(dst) => {
                 new_instructions.push(AsmInstr::Cvtsi2sd(
@@ -1957,6 +1983,19 @@ fn fixup_instructions(func: &mut AsmFunction, stack_size: i32, callee_saved: &[R
                 ));
                 new_instructions.push(AsmInstr::Mov(
                     AsmType::Double,
+                    AsmOperand::Xmm(XmmReg::XMM14),
+                    dst.clone(),
+                ));
+            }
+            // cvtsi2ss with memory dst
+            AsmInstr::Cvtsi2ss(t, ref src, ref dst) if is_memory(dst) => {
+                new_instructions.push(AsmInstr::Cvtsi2ss(
+                    t,
+                    src.clone(),
+                    AsmOperand::Xmm(XmmReg::XMM14),
+                ));
+                new_instructions.push(AsmInstr::Mov(
+                    AsmType::Float,
                     AsmOperand::Xmm(XmmReg::XMM14),
                     dst.clone(),
                 ));
@@ -1975,8 +2014,30 @@ fn fixup_instructions(func: &mut AsmFunction, stack_size: i32, callee_saved: &[R
                 ));
                 new_instructions.push(AsmInstr::Mov(t, AsmOperand::Reg(Reg::R10), dst.clone()));
             }
+            // cvttss2si with memory src AND memory dst
+            AsmInstr::Cvttss2si(t, ref src, ref dst) if is_memory(src) && is_memory(dst) => {
+                new_instructions.push(AsmInstr::Mov(
+                    AsmType::Float,
+                    src.clone(),
+                    AsmOperand::Xmm(XmmReg::XMM14),
+                ));
+                new_instructions.push(AsmInstr::Cvttss2si(
+                    t,
+                    AsmOperand::Xmm(XmmReg::XMM14),
+                    AsmOperand::Reg(Reg::R10),
+                ));
+                new_instructions.push(AsmInstr::Mov(t, AsmOperand::Reg(Reg::R10), dst.clone()));
+            }
             AsmInstr::Cvttsd2si(t, ref src, ref dst) if is_memory(dst) => {
                 new_instructions.push(AsmInstr::Cvttsd2si(
+                    t,
+                    src.clone(),
+                    AsmOperand::Reg(Reg::R10),
+                ));
+                new_instructions.push(AsmInstr::Mov(t, AsmOperand::Reg(Reg::R10), dst.clone()));
+            }
+            AsmInstr::Cvttss2si(t, ref src, ref dst) if is_memory(dst) => {
+                new_instructions.push(AsmInstr::Cvttss2si(
                     t,
                     src.clone(),
                     AsmOperand::Reg(Reg::R10),

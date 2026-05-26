@@ -896,7 +896,14 @@ fn rewrite_coalesced(instrs: &mut Vec<AsmInstr>, uf: &UnionFind) {
             AsmInstr::Push(op) => {
                 rewrite_op(op, uf);
             }
-            AsmInstr::Cvtsi2sd(_, src, dst) | AsmInstr::Cvttsd2si(_, src, dst) => {
+            AsmInstr::Cvtsi2sd(_, src, dst)
+            | AsmInstr::Cvtsi2ss(_, src, dst)
+            | AsmInstr::Cvttsd2si(_, src, dst)
+            | AsmInstr::Cvttss2si(_, src, dst) => {
+                rewrite_op(src, uf);
+                rewrite_op(dst, uf);
+            }
+            AsmInstr::Cvtss2sd(src, dst) | AsmInstr::Cvtsd2ss(src, dst) => {
                 rewrite_op(src, uf);
                 rewrite_op(dst, uf);
             }
@@ -909,6 +916,12 @@ fn rewrite_coalesced(instrs: &mut Vec<AsmInstr>, uf: &UnionFind) {
             }
             AsmInstr::StoreIndirect(_, src, _) => {
                 rewrite_op(src, uf);
+            }
+            AsmInstr::AtomicRmw(_, _, _, dst)
+            | AsmInstr::AtomicExchange(_, dst)
+            | AsmInstr::AtomicCompareExchange(_, dst)
+            | AsmInstr::AtomicCompareSwap(_, _, dst) => {
+                rewrite_op(dst, uf);
             }
             _ => {}
         }
@@ -996,7 +1009,14 @@ fn apply_register_map(instrs: &mut Vec<AsmInstr>, map: &HashMap<String, RegId>) 
             AsmInstr::Push(op) => {
                 replace_op(op, map);
             }
-            AsmInstr::Cvtsi2sd(_, src, dst) | AsmInstr::Cvttsd2si(_, src, dst) => {
+            AsmInstr::Cvtsi2sd(_, src, dst)
+            | AsmInstr::Cvtsi2ss(_, src, dst)
+            | AsmInstr::Cvttsd2si(_, src, dst)
+            | AsmInstr::Cvttss2si(_, src, dst) => {
+                replace_op(src, map);
+                replace_op(dst, map);
+            }
+            AsmInstr::Cvtss2sd(src, dst) | AsmInstr::Cvtsd2ss(src, dst) => {
                 replace_op(src, map);
                 replace_op(dst, map);
             }
@@ -1009,6 +1029,12 @@ fn apply_register_map(instrs: &mut Vec<AsmInstr>, map: &HashMap<String, RegId>) 
             }
             AsmInstr::StoreIndirect(_, src, _) => {
                 replace_op(src, map);
+            }
+            AsmInstr::AtomicRmw(_, _, _, dst)
+            | AsmInstr::AtomicExchange(_, dst)
+            | AsmInstr::AtomicCompareExchange(_, dst)
+            | AsmInstr::AtomicCompareSwap(_, _, dst) => {
+                replace_op(dst, map);
             }
             _ => {}
         }
@@ -1167,7 +1193,14 @@ fn visit_operands<F: FnMut(&AsmOperand)>(instr: &AsmInstr, mut f: F) {
         AsmInstr::Push(op) => {
             f(op);
         }
-        AsmInstr::Cvtsi2sd(_, src, dst) | AsmInstr::Cvttsd2si(_, src, dst) => {
+        AsmInstr::Cvtsi2sd(_, src, dst)
+        | AsmInstr::Cvtsi2ss(_, src, dst)
+        | AsmInstr::Cvttsd2si(_, src, dst)
+        | AsmInstr::Cvttss2si(_, src, dst) => {
+            f(src);
+            f(dst);
+        }
+        AsmInstr::Cvtss2sd(src, dst) | AsmInstr::Cvtsd2ss(src, dst) => {
             f(src);
             f(dst);
         }
@@ -1180,6 +1213,12 @@ fn visit_operands<F: FnMut(&AsmOperand)>(instr: &AsmInstr, mut f: F) {
         }
         AsmInstr::StoreIndirect(_, src, _) => {
             f(src);
+        }
+        AsmInstr::AtomicRmw(_, _, _, dst)
+        | AsmInstr::AtomicExchange(_, dst)
+        | AsmInstr::AtomicCompareExchange(_, dst)
+        | AsmInstr::AtomicCompareSwap(_, _, dst) => {
+            f(dst);
         }
         _ => {}
     }

@@ -3984,10 +3984,25 @@ impl<'a> IfExprParser<'a> {
 
     fn char_constant(&mut self) -> Result<Option<i128>, String> {
         self.skip_ws();
-        if self.pos >= self.chars.len() || self.chars[self.pos] != '\'' {
+        if self.pos >= self.chars.len() {
             return Ok(None);
         }
-        self.pos += 1;
+        if self.chars[self.pos] == '\'' {
+            self.pos += 1;
+        } else if matches!(self.chars[self.pos], 'L' | 'u' | 'U')
+            && self.pos + 1 < self.chars.len()
+            && self.chars[self.pos + 1] == '\''
+        {
+            self.pos += 2;
+        } else if self.chars[self.pos] == 'u'
+            && self.pos + 2 < self.chars.len()
+            && self.chars[self.pos + 1] == '8'
+            && self.chars[self.pos + 2] == '\''
+        {
+            self.pos += 3;
+        } else {
+            return Ok(None);
+        }
         let mut value = 0i128;
         let mut saw_char = false;
         loop {
@@ -5665,6 +5680,14 @@ fn assemble_and_link(invocation: LinkInvocation<'_>) -> Result<(), String> {
     }
     if invocation.nodefaultlibs {
         args.push(OsString::from("-nodefaultlibs"));
+    }
+    if invocation.target.os == TargetOs::Linux
+        && !invocation
+            .linker_args
+            .iter()
+            .any(|arg| arg == "-pie" || arg == "-no-pie" || arg == "-shared")
+    {
+        args.push(OsString::from("-no-pie"));
     }
     args.extend(invocation.linker_args.iter().cloned());
     args.extend([OsString::from("-o"), OsString::from(invocation.output)]);

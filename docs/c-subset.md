@@ -104,6 +104,10 @@ assembly/linking.
   emit full backend memory fences.
 - GCC-style builtin floating names are parsed as compatibility aliases, not as
   separate IEEE formats.
+- C99 `_Complex` / GNU `__complex__` type specifiers are parsed as compatibility
+  modifiers over the existing `float`/`double` representation for header
+  declarations; complex arithmetic and ABI-accurate complex object layout are
+  not implemented.
 - `__builtin_va_list` and `__gnuc_va_list` are recognized as pointer-like typedefs
   so common preprocessed headers can be parsed farther.
   `stdarg.h` exposes `va_start`, `va_end`, `va_copy`, and `va_arg` compatibility

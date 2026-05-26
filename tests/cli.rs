@@ -424,6 +424,63 @@ fn rejects_extreme_alignment_without_panic() {
 }
 
 #[test]
+fn compiles_struct_scope_static_asserts() {
+    let src = temp_file("struct-static-assert", "c");
+    let exe = temp_file("struct-static-assert", "bin");
+    std::fs::write(
+        &src,
+        "struct probe {\n\
+             _Static_assert(sizeof(int) == 4, \"int size\");\n\
+             int value;\n\
+             static_assert(1);\n\
+         };\n\
+         int main(void) { struct probe p; p.value = 42; return p.value; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn rejects_failed_struct_scope_static_asserts_without_panic() {
+    let src = temp_file("bad-struct-static-assert", "c");
+    std::fs::write(
+        &src,
+        "struct probe { _Static_assert(0, \"bad\"); int value; };\n\
+         int main(void) { return 0; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--stage")
+        .arg("parse")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("static assertion failed"), "{stderr}");
+    assert!(!stderr.contains("thread 'main' panicked"), "{stderr}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn matches_parse_diagnostic_snapshot() {
     let output = Command::new(rnqcc())
         .arg("--stage")
@@ -7615,6 +7672,49 @@ fn compiles_comma_separated_struct_bit_fields() {
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn packs_adjacent_bit_fields_with_compatible_storage_units() {
+    let src = temp_file("compatible-bit-field-storage", "c");
+    let rnqcc_exe = temp_file("compatible-bit-field-storage-rnqcc", "bin");
+    let cc_exe = temp_file("compatible-bit-field-storage-cc", "bin");
+    std::fs::write(
+        &src,
+        "typedef unsigned int flag_t;\n\
+         typedef int signed_flag_t;\n\
+         struct flags { flag_t a:8; signed_flag_t b:8; unsigned int c:8; int d:8; };\n\
+         int main(void) { return sizeof(struct flags); }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&rnqcc_exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let output = Command::new("cc")
+        .arg(&src)
+        .arg("-o")
+        .arg(&cc_exe)
+        .output()
+        .expect("failed to run host cc");
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let rnqcc_status = Command::new(&rnqcc_exe)
+        .status()
+        .expect("failed to run rnqcc executable");
+    let cc_status = Command::new(&cc_exe)
+        .status()
+        .expect("failed to run cc executable");
+    assert_eq!(rnqcc_status.code(), cc_status.code());
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(rnqcc_exe);
+    let _ = std::fs::remove_file(cc_exe);
 }
 
 #[test]

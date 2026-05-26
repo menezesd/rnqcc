@@ -211,6 +211,10 @@ impl Parser {
         )
     }
 
+    fn is_complex_type_name(name: &str) -> bool {
+        name == "_Complex" || name == "__complex" || name == "__complex__"
+    }
+
     fn make_var_decl(
         &mut self,
         name: String,
@@ -1222,6 +1226,8 @@ impl Parser {
         let mut has_unsigned = false;
         let mut has_signed = false;
         let mut has_void = false;
+        let mut has_float = false;
+        let mut has_double = false;
 
         loop {
             match self.peek().cloned() {
@@ -1230,6 +1236,10 @@ impl Parser {
                 | Some(Token::KWVolatile)
                 | Some(Token::KWRestrict)
                 | Some(Token::KWInline) => {
+                    self.advance()?;
+                    continue;
+                }
+                Some(Token::Identifier(name)) if Self::is_complex_type_name(&name) => {
                     self.advance()?;
                     continue;
                 }
@@ -1356,7 +1366,7 @@ impl Parser {
                     if !has_int && !has_void && !has_unsigned && !has_signed && !has_char =>
                 {
                     self.advance()?;
-                    return Ok((sc, CType::Double));
+                    has_double = true;
                 }
                 Some(Token::KWFloat)
                     if !has_int
@@ -1367,7 +1377,7 @@ impl Parser {
                         && !has_char =>
                 {
                     self.advance()?;
-                    return Ok((sc, CType::Float));
+                    has_float = true;
                 }
                 Some(Token::KWVoid)
                     if !has_int
@@ -1402,6 +1412,8 @@ impl Parser {
             && !has_unsigned
             && !has_signed
             && !has_char
+            && !has_float
+            && !has_double
         {
             // Check for struct or union
             if self.at(&Token::KWStruct) || self.at(&Token::KWUnion) {
@@ -1460,6 +1472,10 @@ impl Parser {
             CType::ULong
         } else if has_unsigned {
             CType::UInt
+        } else if has_float {
+            CType::Float
+        } else if has_double {
+            CType::Double
         } else if has_long {
             CType::Long
         } else {
@@ -1501,11 +1517,35 @@ impl Parser {
         }
         if self.at(&Token::KWDouble) {
             self.advance()?;
+            if self.peek().is_some_and(
+                |tok| matches!(tok, Token::Identifier(name) if Self::is_complex_type_name(name)),
+            ) {
+                self.advance()?;
+            }
             return Ok(CType::Double);
         }
         if self.at(&Token::KWFloat) {
             self.advance()?;
+            if self.peek().is_some_and(
+                |tok| matches!(tok, Token::Identifier(name) if Self::is_complex_type_name(name)),
+            ) {
+                self.advance()?;
+            }
             return Ok(CType::Float);
+        }
+        if self.peek().is_some_and(
+            |tok| matches!(tok, Token::Identifier(name) if Self::is_complex_type_name(name)),
+        ) {
+            self.advance()?;
+            if self.at(&Token::KWFloat) {
+                self.advance()?;
+                return Ok(CType::Float);
+            }
+            if self.at(&Token::KWDouble) {
+                self.advance()?;
+                return Ok(CType::Double);
+            }
+            return Ok(CType::Double);
         }
         if self.at(&Token::KWBool) {
             self.advance()?;
@@ -1554,6 +1594,10 @@ impl Parser {
                 | Some(Token::KWVolatile)
                 | Some(Token::KWRestrict)
                 | Some(Token::KWThreadLocal) => {
+                    self.advance()?;
+                    continue;
+                }
+                Some(Token::Identifier(name)) if Self::is_complex_type_name(name) => {
                     self.advance()?;
                     continue;
                 }
@@ -1660,7 +1704,9 @@ impl Parser {
             | Token::AttributeNoreturn
             | Token::KWNoreturn => true,
             Token::Identifier(name) => {
-                self.is_typedef_name(name) || Self::is_builtin_float_type_name(name)
+                self.is_typedef_name(name)
+                    || Self::is_builtin_float_type_name(name)
+                    || Self::is_complex_type_name(name)
             }
             _ => false,
         }
@@ -2087,6 +2133,10 @@ impl Parser {
             if self.peek().is_none() {
                 return Err(self.format_error("expected CloseBrace but found end of input"));
             }
+            if self.at(&Token::KWStaticAssert) {
+                self.parse_static_assert_declaration()?;
+                continue;
+            }
             let member_attrs = self.consume_member_attributes()?;
             let base_type = self.parse_type()?;
             let base_typedef_full_type = self.last_typedef_full_type.clone();
@@ -2196,10 +2246,10 @@ impl Parser {
     fn parse_static_assert_declaration(&mut self) -> ParseResult<()> {
         self.expect_token(Token::KWStaticAssert)?;
         self.expect_token(Token::OpenParen)?;
-        let condition = self.parse_expression()?;
+        let condition = self.parse_assignment()?;
         let value = self
             .eval_integer_constant_exp_with_layout(&condition)
-            .unwrap_or(1);
+            .ok_or_else(|| self.format_error("static assertion condition must be constant"))?;
         if self.eat(&Token::Comma) {
             match self.peek() {
                 Some(Token::StringLiteral(_)) => {
@@ -4049,6 +4099,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_static_asserts_inside_struct_members() -> Result<(), String> {
+        let program = parse_source(
+            "struct s { _Static_assert(sizeof(int) == 4, \"int size\"); int x; static_assert(1); };\n",
+        )?;
+        let Declaration::StructDecl(decl) = &program.declarations[0] else {
+            return Err("expected struct declaration".to_string());
+        };
+
+        assert_eq!(decl.members.len(), 1);
+        assert_eq!(decl.members[0].name, "x");
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_failed_static_asserts_inside_struct_members() -> Result<(), String> {
+        let err = parse_source("struct s { _Static_assert(0, \"bad\"); int x; };\n")
+            .expect_err("expected static assertion failure");
+
+        if !err.contains("static assertion failed") {
+            return Err(format!("unexpected error: {err}"));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn parse_expression_reports_missing_rhs() -> Result<(), String> {
         let mut parser = parser_source("1 +")?;
         let err = require_err(parser.parse_expression(), "expression should fail")?;
@@ -4341,6 +4416,25 @@ mod tests {
         };
         assert_eq!(func.return_type, CType::Double);
         assert_eq!(func.params[0].1, CType::Double);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_complex_type_specifiers_as_float_compatibility_aliases() -> Result<(), String> {
+        let program = parse_source(
+            "extern float _Complex cacosf(float _Complex x);\nextern _Complex double cacos(_Complex z);\n",
+        )?;
+        let Declaration::FunDecl(cacosf) = &program.declarations[0] else {
+            return Err("expected cacosf declaration".to_string());
+        };
+        let Declaration::FunDecl(cacos) = &program.declarations[1] else {
+            return Err("expected cacos declaration".to_string());
+        };
+
+        assert_eq!(cacosf.return_type, CType::Float);
+        assert_eq!(cacosf.params[0].1, CType::Float);
+        assert_eq!(cacos.return_type, CType::Double);
+        assert_eq!(cacos.params[0].1, CType::Double);
         Ok(())
     }
 

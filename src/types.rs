@@ -810,7 +810,6 @@ impl StructDef {
         let mut bit_unit_offset = 0usize;
         let mut bit_unit_size = 0usize;
         let mut bit_unit_align = 1usize;
-        let mut bit_unit_type = CType::Int;
         let mut next_bit_offset = 0usize;
 
         for m in members {
@@ -875,7 +874,6 @@ impl StructDef {
                     next_bit_offset = 0;
                     bit_unit_size = 0;
                     bit_unit_align = zero_width_align;
-                    bit_unit_type = storage_type;
                     max_align = max_align.max(m_align);
                     continue;
                 }
@@ -900,14 +898,12 @@ impl StructDef {
                 let needs_new_unit = bit_unit_size == 0
                     || bit_unit_size != storage_size
                     || bit_unit_align != storage_align
-                    || bit_unit_type != storage_type
                     || next_bit_offset + width as usize > storage_bits;
                 if needs_new_unit {
                     offset = round_up_to(offset, storage_align)?;
                     bit_unit_offset = offset;
                     bit_unit_size = storage_size;
                     bit_unit_align = storage_align;
-                    bit_unit_type = storage_type;
                     next_bit_offset = 0;
                     offset = offset
                         .checked_add(storage_size)

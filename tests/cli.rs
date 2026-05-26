@@ -6114,6 +6114,61 @@ fn internal_cpp_provides_common_posix_virtual_headers() {
 }
 
 #[test]
+fn internal_cpp_provides_more_posix_virtual_headers() {
+    let src = temp_file("internal-cpp-more-posix-headers", "c");
+    let exe = temp_file("internal-cpp-more-posix-headers", "bin");
+    std::fs::write(
+        &src,
+        "#include <sys/types.h>\n\
+         #include <sys/wait.h>\n\
+         #include <sys/utsname.h>\n\
+         #include <pwd.h>\n\
+         #include <grp.h>\n\
+         #include <strings.h>\n\
+         int main(void) {\n\
+             int status = 42 << 8;\n\
+             struct utsname uts;\n\
+             struct passwd pw;\n\
+             struct group gr;\n\
+             char buf[8];\n\
+             uts.sysname[0] = 'r';\n\
+             pw.pw_uid = 7;\n\
+             pw.pw_gid = 8;\n\
+             pw.pw_name = \"user\";\n\
+             gr.gr_gid = 9;\n\
+             gr.gr_name = \"group\";\n\
+             bzero(buf, sizeof(buf));\n\
+             int wait_ok = WIFEXITED(status) && WEXITSTATUS(status) == 42 &&\n\
+                           !WIFSIGNALED(status) && WNOHANG == 1;\n\
+             int type_ok = sizeof(uid_t) == sizeof(unsigned int) &&\n\
+                           sizeof(gid_t) == sizeof(unsigned int) && sizeof(pid_t) == sizeof(int);\n\
+             int struct_ok = sizeof(uts.sysname) >= 64 && pw.pw_uid == 7 && gr.gr_gid == 9;\n\
+             int proto_ok = sizeof(ffs(16)) == sizeof(int) && sizeof(strcasecmp(\"a\", \"A\")) == sizeof(int);\n\
+             return wait_ok && type_ok && struct_ok && proto_ok ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-nostdinc")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn internal_cpp_provides_networking_virtual_headers() {
     let src = temp_file("internal-cpp-networking-headers", "c");
     let exe = temp_file("internal-cpp-networking-headers", "bin");
@@ -6349,6 +6404,7 @@ fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
         "errno.h",
         "fcntl.h",
         "float.h",
+        "grp.h",
         "inttypes.h",
         "iso646.h",
         "limits.h",
@@ -6356,6 +6412,7 @@ fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
         "math.h",
         "poll.h",
         "pthread.h",
+        "pwd.h",
         "setjmp.h",
         "signal.h",
         "stdalign.h",
@@ -6367,6 +6424,7 @@ fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
         "stdio.h",
         "stdlib.h",
         "string.h",
+        "strings.h",
         "arpa/inet.h",
         "netinet/in.h",
         "sys/select.h",
@@ -6375,6 +6433,8 @@ fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
         "sys/time.h",
         "sys/types.h",
         "sys/uio.h",
+        "sys/utsname.h",
+        "sys/wait.h",
         "time.h",
         "unistd.h",
         "wchar.h",

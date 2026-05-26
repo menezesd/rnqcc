@@ -1474,6 +1474,10 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
         guard: Some("__rnqcc_string_h"),
     },
     VirtualHeaderInfo {
+        name: "strings.h",
+        guard: Some("__rnqcc_strings_h"),
+    },
+    VirtualHeaderInfo {
         name: "stdalign.h",
         guard: None,
     },
@@ -1506,6 +1510,14 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
         guard: Some("__rnqcc_sys_uio_h"),
     },
     VirtualHeaderInfo {
+        name: "sys/utsname.h",
+        guard: Some("__rnqcc_sys_utsname_h"),
+    },
+    VirtualHeaderInfo {
+        name: "sys/wait.h",
+        guard: Some("__rnqcc_sys_wait_h"),
+    },
+    VirtualHeaderInfo {
         name: "arpa/inet.h",
         guard: Some("__rnqcc_arpa_inet_h"),
     },
@@ -1520,6 +1532,14 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
     VirtualHeaderInfo {
         name: "pthread.h",
         guard: Some("__rnqcc_pthread_h"),
+    },
+    VirtualHeaderInfo {
+        name: "grp.h",
+        guard: Some("__rnqcc_grp_h"),
+    },
+    VirtualHeaderInfo {
+        name: "pwd.h",
+        guard: Some("__rnqcc_pwd_h"),
     },
     VirtualHeaderInfo {
         name: "unistd.h",
@@ -1739,6 +1759,16 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 "{}{}",
                 virtual_size_t_typedef(macros),
                 include_str!("virtual_headers/string.h")
+            )
+        }
+        "strings.h" => {
+            if virtual_header_include_once(macros, "strings.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}",
+                virtual_size_t_typedef(macros),
+                include_str!("virtual_headers/strings.h")
             )
         }
         "ctype.h" => {
@@ -2094,6 +2124,47 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 include_str!("virtual_headers/sys/uio.h")
             )
         }
+        "sys/utsname.h" => {
+            if virtual_header_include_once(macros, "sys/utsname.h") {
+                return String::new();
+            }
+            include_str!("virtual_headers/sys/utsname.h").to_string()
+        }
+        "sys/wait.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[("WNOHANG", "1"), ("WUNTRACED", "2"), ("WCONTINUED", "8")],
+            );
+            for (name, body) in [
+                ("WEXITSTATUS", "(((status) >> 8) & 0xff)"),
+                ("WTERMSIG", "((status) & 0x7f)"),
+                ("WSTOPSIG", "WEXITSTATUS(status)"),
+                ("WIFEXITED", "(WTERMSIG(status) == 0)"),
+                (
+                    "WIFSIGNALED",
+                    "(WTERMSIG(status) != 0 && WTERMSIG(status) != 0x7f)",
+                ),
+                ("WIFSTOPPED", "(WTERMSIG(status) == 0x7f)"),
+                ("WIFCONTINUED", "((status) == 0xffff)"),
+            ] {
+                macros.insert(
+                    name.to_string(),
+                    MacroDef::Function {
+                        params: vec!["status".to_string()],
+                        variadic: false,
+                        body: body.to_string(),
+                    },
+                );
+            }
+            if virtual_header_include_once(macros, "sys/wait.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}",
+                include_virtual_compat_header("sys/types.h", macros),
+                include_str!("virtual_headers/sys/wait.h")
+            )
+        }
         "netinet/in.h" => {
             define_virtual_object_macros(
                 macros,
@@ -2142,6 +2213,26 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
             } else {
                 include_str!("virtual_headers/pthread.h").to_string()
             }
+        }
+        "grp.h" => {
+            if virtual_header_include_once(macros, "grp.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}",
+                include_virtual_compat_header("sys/types.h", macros),
+                include_str!("virtual_headers/grp.h")
+            )
+        }
+        "pwd.h" => {
+            if virtual_header_include_once(macros, "pwd.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}",
+                include_virtual_compat_header("sys/types.h", macros),
+                include_str!("virtual_headers/pwd.h")
+            )
         }
         "wchar.h" => {
             virtual_null_macro(macros);

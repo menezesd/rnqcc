@@ -7914,6 +7914,44 @@ fn compiles_hex_and_octal_string_escapes_as_bytes() {
 }
 
 #[test]
+fn compiles_braced_string_char_array_initializers() {
+    let src = temp_file("braced-string-char-array-init", "c");
+    let exe = temp_file("braced-string-char-array-init", "bin");
+    std::fs::write(
+        &src,
+        "char global_unsized[] = {\"hi\"};\n\
+         char global_sized[5] = {\"ok\"};\n\
+         static char static_unsized[] = {\"ab\"};\n\
+         int main(void) {\n\
+             char local_unsized[] = {\"xy\"};\n\
+             char local_sized[4] = {\"z\"};\n\
+             return sizeof(global_unsized) == 3 && global_unsized[0] == 'h' && global_unsized[2] == 0 &&\n\
+                    sizeof(global_sized) == 5 && global_sized[1] == 'k' && global_sized[2] == 0 && global_sized[4] == 0 &&\n\
+                    sizeof(static_unsized) == 3 && static_unsized[1] == 'b' && static_unsized[2] == 0 &&\n\
+                    sizeof(local_unsized) == 3 && local_unsized[0] == 'x' && local_unsized[2] == 0 &&\n\
+                    sizeof(local_sized) == 4 && local_sized[0] == 'z' && local_sized[1] == 0 ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn compiles_long_long_integer_suffixes_as_64_bit_integers() {
     let src = temp_file("long-long-suffixes", "c");
     let exe = temp_file("long-long-suffixes", "bin");

@@ -297,6 +297,10 @@ impl Parser {
         };
         let inferred = match init {
             Exp::StringLiteral(s) if elem.to_ctype().is_char() => c_string_byte_len(s) + 1,
+            Exp::ArrayInit(elems) if elem.to_ctype().is_char() => match elems.as_slice() {
+                [Exp::StringLiteral(s)] => c_string_byte_len(s) + 1,
+                _ => self.infer_array_init_len(elems)?,
+            },
             Exp::ArrayInit(elems) => self.infer_array_init_len(elems)?,
             _ => 0,
         };

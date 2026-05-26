@@ -126,6 +126,28 @@ impl TackyGen {
         }
     }
 
+    fn string_array_initializer(init: &Exp) -> Option<&String> {
+        match init {
+            Exp::StringLiteral(s) => Some(s),
+            Exp::ArrayInit(elems) => match elems.as_slice() {
+                [Exp::StringLiteral(s)] => Some(s),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn is_one_dimensional_char_array(ft: &FullType) -> bool {
+        matches!(
+            ft,
+            FullType::Array { elem, .. }
+                if matches!(
+                    elem.as_ref(),
+                    FullType::Scalar(CType::Char | CType::SChar | CType::UChar)
+                )
+        )
+    }
+
     fn fresh_var_name(&mut self) -> String {
         let name = format!("tmp.{}", self.tmp_counter);
         self.tmp_counter += 1;
@@ -4971,6 +4993,19 @@ impl TackyGen {
         base_offset: usize,
     ) -> TackyResult<()> {
         match (base_ft, init) {
+            (FullType::Array { .. }, Exp::ArrayInit(_))
+                if Self::is_one_dimensional_char_array(base_ft)
+                    && Self::string_array_initializer(init).is_some() =>
+            {
+                let s = Self::string_array_initializer(init)
+                    .ok_or_else(|| "expected string array initializer".to_string())?;
+                self.put_static_initializer(
+                    builder,
+                    base_ft,
+                    &Exp::StringLiteral(s.clone()),
+                    base_offset,
+                )?;
+            }
             (FullType::Array { elem, size }, Exp::ArrayInit(elems)) => {
                 let elem_size = elem.byte_size_with(&self.struct_defs);
                 let mut positional_index = 0usize;
@@ -5220,7 +5255,12 @@ impl TackyGen {
                     off += 1;
                 }
             }
-            if let Some(Exp::StringLiteral(ref s)) = vd.init {
+            if let Some(s) = vd
+                .init
+                .as_ref()
+                .and_then(Self::string_array_initializer)
+                .filter(|_| Self::is_one_dimensional_char_array(&full_type))
+            {
                 // String literal initializer for local char array: emit byte by byte
                 let bytes = c_string_bytes(s);
                 let chars_to_copy = std::cmp::min(bytes.len(), total_bytes);
@@ -6268,8 +6308,13 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
                 }));
                 continue;
             }
-            // Global char array initialized with string literal
-            if let (Some(ref dims), Some(Exp::StringLiteral(ref s))) = (&vd.array_dims, &vd.init) {
+            // Global char array initialized with string literal, including `char a[] = {"x"}`.
+            if let (Some(ref dims), Some(s)) = (
+                &vd.array_dims,
+                vd.init
+                    .as_ref()
+                    .and_then(TackyGen::string_array_initializer),
+            ) {
                 let base_type = vd.var_type;
                 let total_elems: usize = dims.iter().product();
                 let total_bytes = total_elems * base_type.size() as usize;
@@ -6281,6 +6326,9 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
                 let align = vd.alignment.map_or(align, |a| a.get().max(align));
                 let is_global = *linkage.get(&vd.name).unwrap_or(&true);
                 let ft = FullType::from_decl(base_type, vd.ptr_info, &vd.array_dims);
+                if !TackyGen::is_one_dimensional_char_array(&ft) {
+                    return Err("string initializer requires one-dimensional char array".into());
+                }
                 gen.register_var(&vd.name, ft);
                 global_array_names.insert(vd.name.clone());
                 file_scope_vars.remove(&vd.name);

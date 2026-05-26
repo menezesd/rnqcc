@@ -149,6 +149,14 @@ impl TackyGen {
         }
     }
 
+    fn static_aggregate_initializer(init: &Exp) -> Option<&Exp> {
+        match init {
+            Exp::ArrayInit(_) => Some(init),
+            Exp::Cast(_, _, inner) if matches!(inner.as_ref(), Exp::ArrayInit(_)) => Some(inner),
+            _ => None,
+        }
+    }
+
     fn is_one_dimensional_char_array(ft: &FullType) -> bool {
         matches!(
             ft,
@@ -5004,6 +5012,16 @@ impl TackyGen {
         init: &Exp,
         base_offset: usize,
     ) -> TackyResult<()> {
+        if let Exp::Cast(_, _, inner) = init {
+            if let Exp::ArrayInit(elems) = inner.as_ref() {
+                if base_ft.is_array() || base_ft.is_struct() {
+                    return self.put_static_initializer(builder, base_ft, inner, base_offset);
+                }
+                if let [value] = elems.as_slice() {
+                    return self.put_static_initializer(builder, base_ft, value, base_offset);
+                }
+            }
+        }
         match (base_ft, init) {
             (FullType::Array { .. }, Exp::ArrayInit(_))
                 if Self::is_one_dimensional_char_array(base_ft)
@@ -6048,7 +6066,16 @@ fn eval_static_integer_constant_exp(exp: &Exp) -> Option<(i64, bool, bool)> {
         Exp::Constant(c) | Exp::LongConstant(c) => Some((*c, false, false)),
         Exp::UIntConstant(c) | Exp::ULongConstant(c) => Some((*c, false, true)),
         Exp::DoubleConstant(d) => Some((d.to_bits() as i64, true, false)),
-        Exp::Cast(_, _, inner) => eval_static_integer_constant_exp(inner),
+        Exp::Cast(_, _, inner) => {
+            if let Exp::ArrayInit(elems) = inner.as_ref() {
+                let [value] = elems.as_slice() else {
+                    return None;
+                };
+                eval_static_integer_constant_exp(value)
+            } else {
+                eval_static_integer_constant_exp(inner)
+            }
+        }
         Exp::Unary(op, inner) => {
             let (value, is_double, is_unsigned) = eval_static_integer_constant_exp(inner)?;
             match op {
@@ -6231,7 +6258,13 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
                 continue;
             }
             let init_val: Option<(i64, bool, bool)> = match &vd.init {
-                Some(Exp::ArrayInit(_)) => None,     // Array init handled separately
+                Some(exp)
+                    if (vd.array_dims.is_some()
+                        || matches!(vd.decl_full_type, Some(FullType::Struct(_))))
+                        && TackyGen::static_aggregate_initializer(exp).is_some() =>
+                {
+                    None // Aggregate init handled separately
+                }
                 Some(Exp::StringLiteral(_)) => None, // String init handled separately
                 Some(exp)
                     if vd.var_type == CType::Pointer
@@ -6315,6 +6348,10 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
                     &vd.init,
                     Some(Exp::ArrayInit(_)) | Some(Exp::StringLiteral(_))
                 )
+                && vd
+                    .init
+                    .as_ref()
+                    .is_none_or(|init| TackyGen::static_aggregate_initializer(init).is_none())
                 && !vd
                     .storage_class
                     .as_ref()
@@ -6452,7 +6489,12 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
                 global_array_names.insert(vd.name.clone());
                 continue;
             }
-            if let (Some(_), Some(init_exp @ Exp::ArrayInit(_))) = (&vd.array_dims, &vd.init) {
+            if let (Some(_), Some(init_exp)) = (
+                &vd.array_dims,
+                vd.init
+                    .as_ref()
+                    .and_then(TackyGen::static_aggregate_initializer),
+            ) {
                 let base_type = vd.var_type;
                 let ft = vd
                     .decl_full_type

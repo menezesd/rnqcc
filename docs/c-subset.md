@@ -24,6 +24,8 @@ single target.
   anonymous aggregate members, aggregate definitions with declarators, and
   aggregate arguments/returns; trailing flexible array members are supported in
   struct layout
+- C99 compound literals for automatic objects and static aggregate/scalar
+  initializers
 - integer bit-fields that fit within their declared storage unit, including
   signed reads/writes, zero-width alignment fields, and host-checked mixed
   storage-unit layout cases

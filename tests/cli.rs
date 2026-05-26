@@ -2289,6 +2289,44 @@ fn compiles_static_pointer_designator_initializers() {
 }
 
 #[test]
+fn compiles_static_compound_literal_initializers() {
+    let src = temp_file("static-compound-literal-initializers", "c");
+    let exe = temp_file("static-compound-literal-initializers", "bin");
+    std::fs::write(
+        &src,
+        "struct Pair { int x; int y; };\n\
+         struct Pair pair = (struct Pair){ 20, 22 };\n\
+         int values[2] = (int[2]){ 19, 23 };\n\
+         int scalar = (int){ 42 };\n\
+         struct Holder { struct Pair pair; int values[2]; int scalar; } holder = { (struct Pair){ 10, 11 }, (int[2]){ 12, 9 }, (int){ 21 } };\n\
+         int main(void) {\n\
+             return pair.x + pair.y == 42 &&\n\
+                    values[0] + values[1] == 42 &&\n\
+                    scalar == 42 &&\n\
+                    holder.pair.x + holder.pair.y + holder.values[0] + holder.values[1] == 42 &&\n\
+                    holder.scalar == 21\n\
+                        ? 42\n\
+                        : 1;\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn indirect_function_pointer_uses_declared_return_type() {
     let src = temp_file("indirect-return-type", "i");
     let exe = temp_file("indirect-return-type", "bin");

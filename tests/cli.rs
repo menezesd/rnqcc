@@ -7538,6 +7538,35 @@ fn internal_cpp_dump_macros_formats_variadic_function_macro_signature() {
 }
 
 #[test]
+fn internal_cpp_exposes_darwin_apple_compiler_markers() {
+    let src = temp_file("internal-cpp-darwin-apple-markers", "c");
+    std::fs::write(
+        &src,
+        "#if __APPLE__ && __MACH__ && __APPLE_CC__ >= 1 && __APPLE_CPP__ && __arm64__\n\
+         int target_ok = 42;\n\
+         #else\n\
+         int target_ok = 1;\n\
+         #endif\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-t")
+        .arg("aarch64-macos")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("int target_ok = 42;"), "{stdout}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn internal_cpp_accepts_separated_cli_define_and_undefine_operands() {
     let src = temp_file("internal-cpp-separated-cli-macros", "c");
     std::fs::write(

@@ -4085,6 +4085,8 @@ fn seed_internal_predefined_macros(macros: &mut HashMap<String, MacroDef>, targe
         TargetOs::MacOs => {
             define_builtin_macro(macros, "__APPLE__", "1");
             define_builtin_macro(macros, "__MACH__", "1");
+            define_builtin_macro(macros, "__APPLE_CC__", "6000");
+            define_builtin_macro(macros, "__APPLE_CPP__", "1");
         }
     }
 }

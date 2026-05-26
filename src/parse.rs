@@ -1806,6 +1806,15 @@ impl Parser {
     /// Parse a declarator tree. If `allow_abstract` is true, the name is optional
     /// (for function pointer param lists and abstract declarators).
     fn parse_declarator_tree_inner(&mut self, allow_abstract: bool) -> ParseResult<Declarator> {
+        while matches!(
+            self.peek(),
+            Some(Token::KWConst)
+                | Some(Token::KWVolatile)
+                | Some(Token::KWRestrict)
+                | Some(Token::KWAtomic)
+        ) {
+            self.advance()?;
+        }
         // Count leading * (skip const/volatile/restrict after each star)
         let mut stars = 0;
         while self.eat(&Token::Star) {
@@ -4061,6 +4070,27 @@ mod tests {
             func.param_full_types[2],
             FullType::Pointer(Box::new(FullType::Scalar(CType::Long)))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn parses_post_typedef_parameter_qualifiers_before_pointer() -> Result<(), String> {
+        let program = parse_source(
+            "typedef unsigned char u_char;\nextern int f(u_char const *, u_char volatile *);\n",
+        )?;
+        let Declaration::FunDecl(func) = &program.declarations[1] else {
+            return Err("expected function declaration".to_string());
+        };
+
+        assert_eq!(func.params.len(), 2);
+        assert!(matches!(
+            &func.param_full_types[0],
+            FullType::Pointer(inner) if matches!(inner.as_ref(), FullType::Scalar(CType::UChar))
+        ));
+        assert!(matches!(
+            &func.param_full_types[1],
+            FullType::Pointer(inner) if matches!(inner.as_ref(), FullType::Scalar(CType::UChar))
+        ));
         Ok(())
     }
 

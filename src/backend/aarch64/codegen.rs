@@ -711,7 +711,7 @@ fn convert_function(
                         src
                     }
                 } else {
-                    let src = AsmOperand::Stack(stack_arg_offset(stack_size, stack_param_count));
+                    let src = AsmOperand::Stack(stack_arg_offset(frame_size, stack_param_count));
                     stack_param_count += 1;
                     src
                 };
@@ -737,7 +737,7 @@ fn convert_function(
                 fp_param_count += 1;
                 src
             } else {
-                let src = AsmOperand::Stack(stack_arg_offset(stack_size, stack_param_count));
+                let src = AsmOperand::Stack(stack_arg_offset(frame_size, stack_param_count));
                 stack_param_count += 1;
                 src
             }
@@ -746,7 +746,7 @@ fn convert_function(
             gp_param_count += 1;
             src
         } else {
-            let src = AsmOperand::Stack(stack_arg_offset(stack_size, stack_param_count));
+            let src = AsmOperand::Stack(stack_arg_offset(frame_size, stack_param_count));
             stack_param_count += 1;
             src
         };

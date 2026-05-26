@@ -1690,6 +1690,40 @@ fn emits_aarch64_assembly_for_ninth_integer_argument() -> Result<(), String> {
 }
 
 #[test]
+fn aarch64_stack_parameters_account_for_link_register_save() -> Result<(), String> {
+    let src = temp_file("aarch64-stack-param-with-call", "i");
+    let out = temp_file("aarch64-stack-param-with-call", "s");
+    std::fs::write(
+        &src,
+        "int side(void) { return 1; }\n\
+         int f(int a,int b,int c,int d,int e,int f,int g,int h,int i) { return side() + i; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
+    assert!(asm.contains("sub sp, sp, #64"), "{asm}");
+    assert!(asm.contains("str x30, [sp, #56]"), "{asm}");
+    assert!(asm.contains("ldr w9, [sp, #64]"), "{asm}");
+    assert!(!asm.contains("ldr w9, [sp, #48]"), "{asm}");
+    assert_contains_in_order(
+        &asm,
+        &["str x30, [sp, #56]", "ldr w9, [sp, #64]", "bl side"],
+    )?;
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+    Ok(())
+}
+
+#[test]
 fn emits_aarch64_assembly_for_multiple_stack_arguments() -> Result<(), String> {
     let src = temp_file("aarch64-multiple-stack-args", "i");
     let out = temp_file("aarch64-multiple-stack-args", "s");

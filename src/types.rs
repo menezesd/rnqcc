@@ -845,11 +845,7 @@ impl StructDef {
                     ));
                 }
                 let (storage_size, storage_align, storage_type) = if member_packed {
-                    (
-                        usize::from(width).div_ceil(8).max(1),
-                        1,
-                        m.member_type,
-                    )
+                    (usize::from(width).div_ceil(8).max(1), 1, m.member_type)
                 } else if m_size > 4 && width <= 32 {
                     (
                         4,
@@ -871,7 +867,7 @@ impl StructDef {
                 let storage_bits = storage_size * 8;
                 if width == 0 {
                     if !m.name.is_empty() {
-                    return Err("zero-width bit-field may not have a name".to_string());
+                        return Err("zero-width bit-field may not have a name".to_string());
                     }
                     if !is_union {
                         offset = round_up_to(offset, zero_width_align)?;
@@ -970,10 +966,10 @@ impl StructDef {
                         if let Some(nested) = struct_defs.get(nested_tag) {
                             for nested_member in &nested.members {
                                 let mut flattened = nested_member.clone();
-                                flattened.offset = flattened
-                                    .offset
-                                    .checked_add(offset)
-                                    .ok_or_else(|| format!("struct '{}' layout is too large", tag))?;
+                                flattened.offset =
+                                    flattened.offset.checked_add(offset).ok_or_else(|| {
+                                        format!("struct '{}' layout is too large", tag)
+                                    })?;
                                 laid_out.push(flattened);
                             }
                         }

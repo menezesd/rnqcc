@@ -342,6 +342,41 @@ fn reports_parse_errors_without_rust_panic_output() {
 }
 
 #[test]
+fn rejects_extreme_alignment_without_panic() {
+    for (name, source) in [
+        (
+            "huge-gnu-alignment",
+            "struct __attribute__((aligned(9223372036854775807))) S { char a; char b; };\nint main(void) { return sizeof(struct S); }\n",
+        ),
+        (
+            "huge-alignas",
+            "_Alignas(9223372036854775807) int x;\nint main(void) { return 0; }\n",
+        ),
+        (
+            "non-power-two-alignment",
+            "struct __attribute__((aligned(3))) S { char a; };\nint main(void) { return sizeof(struct S); }\n",
+        ),
+    ] {
+        let src = temp_file(name, "i");
+        std::fs::write(&src, source).expect("failed to write input");
+
+        let output = Command::new(rnqcc())
+            .arg("--stage")
+            .arg("parse")
+            .arg(&src)
+            .output()
+            .expect("failed to run rnqcc");
+
+        assert!(!output.status.success(), "{name}");
+        let stderr = stderr(output);
+        assert!(stderr.contains("alignment"), "{stderr}");
+        assert!(!stderr.contains("thread 'main' panicked"), "{stderr}");
+
+        let _ = std::fs::remove_file(src);
+    }
+}
+
+#[test]
 fn matches_parse_diagnostic_snapshot() {
     let output = Command::new(rnqcc())
         .arg("--stage")
@@ -9951,6 +9986,30 @@ fn internal_cpp_line_markers_can_be_enabled() {
     assert!(stdout.contains("# 1 \""));
     assert!(stdout.contains("marker.h"));
     assert!(stdout.contains("int from_source = 2;"));
+}
+
+#[test]
+fn internal_cpp_line_marker_output_can_feed_compiler_stages() {
+    let src = temp_file("internal-cpp-line-markers-compile", "c");
+    let asm = temp_file("internal-cpp-line-markers-compile", "s");
+    std::fs::write(&src, "int main(void) { return 42; }\n").expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("--line-markers")
+        .arg("-S")
+        .arg("-o")
+        .arg(&asm)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let assembly = std::fs::read_to_string(&asm).expect("failed to read assembly");
+    assert!(assembly.contains("main"), "{assembly}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(asm);
 }
 
 #[test]

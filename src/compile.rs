@@ -300,6 +300,7 @@ pub fn compile(
     let source_bytes =
         std::fs::read(src_file).map_err(|err| format!("could not read {}: {}", src_file, err))?;
     let source: String = source_bytes.into_iter().map(char::from).collect();
+    let source = strip_preprocessor_line_markers(&source);
 
     // Lex
     let spanned_tokens = lex::lex_spanned(&source).map_err(|err| format!("lex failed: {}", err))?;
@@ -382,6 +383,37 @@ pub fn compile(
     Ok(())
 }
 
+fn strip_preprocessor_line_markers(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if is_preprocessor_line_marker(trimmed) {
+            if line.ends_with('\n') {
+                out.push('\n');
+            }
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+fn is_preprocessor_line_marker(trimmed_line: &str) -> bool {
+    if let Some(rest) = trimmed_line.strip_prefix("#line") {
+        return match rest.chars().next() {
+            Some(ch) => ch.is_ascii_whitespace(),
+            None => true,
+        };
+    }
+    let Some(rest) = trimmed_line.strip_prefix('#') else {
+        return false;
+    };
+    rest.trim_start()
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_digit())
+}
+
 fn prepend_source_comment(asm_filename: &str, src_file: &str) -> Result<(), String> {
     let body = std::fs::read_to_string(asm_filename)
         .map_err(|err| format!("could not read {}: {}", asm_filename, err))?;
@@ -450,5 +482,12 @@ mod tests {
         )?;
         assert!(err.contains("unresolved pseudo operand"));
         Ok(())
+    }
+
+    #[test]
+    fn strips_preprocessor_line_markers_before_lexing() {
+        let source = "# 1 \"input.c\"\n#line 20 \"generated.c\"\nint main(void) { return 0; }\n";
+        let stripped = strip_preprocessor_line_markers(source);
+        assert_eq!(stripped, "\n\nint main(void) { return 0; }\n");
     }
 }

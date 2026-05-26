@@ -1,0 +1,2 @@
+rnqcc: parse failed at 1:10: Parse error at token 3: expected type specifier
+  Context: Identifier("main") OpenParen

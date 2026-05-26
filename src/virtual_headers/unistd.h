@@ -1,0 +1,12 @@
+int access(const char *, int);
+int chdir(const char *);
+int close(int);
+int dup(int);
+int dup2(int, int);
+int fsync(int);
+char *getcwd(char *, size_t);
+pid_t getpid(void);
+off_t lseek(int, off_t, int);
+ssize_t read(int, void *, size_t);
+ssize_t write(int, const void *, size_t);
+int unlink(const char *);

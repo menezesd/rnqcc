@@ -1,0 +1,8 @@
+	.text
+	.globl main
+main:
+	movz w0, #42
+	ret
+	mov w0, #0
+	ret
+	.section .note.GNU-stack,"",@progbits

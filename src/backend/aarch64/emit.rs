@@ -1,0 +1,1542 @@
+use crate::types::*;
+use std::io::{self, Write};
+
+fn invalid_input<T>(message: impl Into<String>) -> io::Result<T> {
+    Err(io::Error::new(io::ErrorKind::InvalidInput, message.into()))
+}
+
+fn reg_name(reg: Reg, ty: AsmType) -> io::Result<&'static str> {
+    match (reg, ty) {
+        (Reg::AX, AsmType::Byte | AsmType::Word | AsmType::Longword) => Ok("w0"),
+        (Reg::AX, AsmType::Quadword) => Ok("x0"),
+        (Reg::DI, AsmType::Byte | AsmType::Word | AsmType::Longword) => Ok("w1"),
+        (Reg::DI, AsmType::Quadword) => Ok("x1"),
+        (Reg::SI, AsmType::Byte | AsmType::Word | AsmType::Longword) => Ok("w2"),
+        (Reg::SI, AsmType::Quadword) => Ok("x2"),
+        (Reg::DX, AsmType::Byte | AsmType::Word | AsmType::Longword) => Ok("w3"),
+        (Reg::DX, AsmType::Quadword) => Ok("x3"),
+        (Reg::CX, AsmType::Byte | AsmType::Word | AsmType::Longword) => Ok("w4"),
+        (Reg::CX, AsmType::Quadword) => Ok("x4"),
+        (Reg::R8, AsmType::Byte | AsmType::Word | AsmType::Longword) => Ok("w5"),
+        (Reg::R8, AsmType::Quadword) => Ok("x5"),
+        (Reg::R9, AsmType::Byte | AsmType::Word | AsmType::Longword) => Ok("w6"),
+        (Reg::R9, AsmType::Quadword) => Ok("x6"),
+        (Reg::R12, AsmType::Byte | AsmType::Word | AsmType::Longword) => Ok("w7"),
+        (Reg::R12, AsmType::Quadword) => Ok("x7"),
+        (Reg::R13, AsmType::Byte | AsmType::Word | AsmType::Longword) => Ok("w11"),
+        (Reg::R13, AsmType::Quadword) => Ok("x11"),
+        (Reg::R10, AsmType::Byte | AsmType::Word | AsmType::Longword) => Ok("w9"),
+        (Reg::R10, AsmType::Quadword) => Ok("x9"),
+        (Reg::R11, AsmType::Byte | AsmType::Word | AsmType::Longword) => Ok("w10"),
+        (Reg::R11, AsmType::Quadword) => Ok("x10"),
+        (_, AsmType::Float | AsmType::Double) => {
+            invalid_input("AArch64 integer register requested for floating type")
+        }
+        _ => invalid_input(format!(
+            "AArch64 backend does not map register {:?} yet",
+            reg
+        )),
+    }
+}
+
+fn fp_name(reg: XmmReg) -> &'static str {
+    match reg {
+        XmmReg::XMM0 => "d0",
+        XmmReg::XMM1 => "d1",
+        XmmReg::XMM2 => "d2",
+        XmmReg::XMM3 => "d3",
+        XmmReg::XMM4 => "d4",
+        XmmReg::XMM5 => "d5",
+        XmmReg::XMM6 => "d6",
+        XmmReg::XMM7 => "d7",
+        XmmReg::XMM8 => "d8",
+        XmmReg::XMM9 => "d9",
+        XmmReg::XMM10 => "d10",
+        XmmReg::XMM11 => "d11",
+        XmmReg::XMM12 => "d12",
+        XmmReg::XMM13 => "d13",
+        XmmReg::XMM14 => "d14",
+        XmmReg::XMM15 => "d15",
+    }
+}
+
+fn fp_name_typed(reg: XmmReg, ty: AsmType) -> io::Result<&'static str> {
+    if ty == AsmType::Float {
+        Ok(match reg {
+            XmmReg::XMM0 => "s0",
+            XmmReg::XMM1 => "s1",
+            XmmReg::XMM2 => "s2",
+            XmmReg::XMM3 => "s3",
+            XmmReg::XMM4 => "s4",
+            XmmReg::XMM5 => "s5",
+            XmmReg::XMM6 => "s6",
+            XmmReg::XMM7 => "s7",
+            XmmReg::XMM8 => "s8",
+            XmmReg::XMM9 => "s9",
+            XmmReg::XMM10 => "s10",
+            XmmReg::XMM11 => "s11",
+            XmmReg::XMM12 => "s12",
+            XmmReg::XMM13 => "s13",
+            XmmReg::XMM14 => "s14",
+            XmmReg::XMM15 => "s15",
+        })
+    } else {
+        Ok(fp_name(reg))
+    }
+}
+
+fn fp_scratch_name_typed(reg: Reg, ty: AsmType) -> io::Result<&'static str> {
+    if ty == AsmType::Float {
+        return match reg {
+            Reg::R10 => Ok("s9"),
+            Reg::R11 => Ok("s10"),
+            Reg::R13 => Ok("s11"),
+            _ => invalid_input(format!(
+                "AArch64 backend does not map {:?} as FP scratch",
+                reg
+            )),
+        };
+    }
+    match reg {
+        Reg::R10 => Ok("d9"),
+        Reg::R11 => Ok("d10"),
+        Reg::R13 => Ok("d11"),
+        _ => invalid_input(format!(
+            "AArch64 backend does not map {:?} as FP scratch",
+            reg
+        )),
+    }
+}
+
+fn load_mnemonic(ty: AsmType) -> &'static str {
+    match ty {
+        AsmType::Byte => "ldrb",
+        AsmType::Word => "ldrh",
+        AsmType::Longword => "ldr",
+        AsmType::Quadword => "ldr",
+        AsmType::Float => "ldr",
+        AsmType::Double => "ldr",
+    }
+}
+
+fn store_mnemonic(ty: AsmType) -> &'static str {
+    match ty {
+        AsmType::Byte => "strb",
+        AsmType::Word => "strh",
+        AsmType::Longword => "str",
+        AsmType::Quadword => "str",
+        AsmType::Float => "str",
+        AsmType::Double => "str",
+    }
+}
+
+fn signed_load_mnemonic(src_ty: AsmType, dst_ty: AsmType) -> io::Result<&'static str> {
+    match (src_ty, dst_ty) {
+        (AsmType::Byte, AsmType::Longword) => Ok("ldrsb"),
+        (AsmType::Byte, AsmType::Quadword) => Ok("ldrsb"),
+        (AsmType::Word, AsmType::Longword) => Ok("ldrsh"),
+        (AsmType::Word, AsmType::Quadword) => Ok("ldrsh"),
+        (AsmType::Longword, AsmType::Quadword) => Ok("ldrsw"),
+        _ => invalid_input(format!(
+            "AArch64 backend does not support sign extension from {:?} to {:?}",
+            src_ty, dst_ty
+        )),
+    }
+}
+
+fn condition_name(cc: &CondCode) -> &'static str {
+    match cc {
+        CondCode::E => "eq",
+        CondCode::NE => "ne",
+        CondCode::L => "lt",
+        CondCode::LE => "le",
+        CondCode::G => "gt",
+        CondCode::GE => "ge",
+        CondCode::A => "hi",
+        CondCode::AE => "hs",
+        CondCode::B => "lo",
+        CondCode::BE => "ls",
+    }
+}
+
+fn stack_addr(offset: i32) -> String {
+    if offset == 0 {
+        "[sp]".to_string()
+    } else {
+        format!("[sp, #{}]", offset)
+    }
+}
+
+fn stack_offset_fits_unsigned(ty: AsmType, offset: i32) -> bool {
+    if offset < 0 {
+        return false;
+    }
+    match ty {
+        AsmType::Byte => offset <= 4095,
+        AsmType::Word => offset % 2 == 0 && offset / 2 <= 4095,
+        AsmType::Longword => offset % 4 == 0 && offset / 4 <= 4095,
+        AsmType::Float => offset % 4 == 0 && offset / 4 <= 4095,
+        AsmType::Quadword | AsmType::Double => offset % 8 == 0 && offset / 8 <= 4095,
+    }
+}
+
+fn emit_stack_address_into(
+    w: &mut dyn Write,
+    dst_reg: &'static str,
+    offset: i32,
+) -> std::io::Result<()> {
+    if offset == 0 {
+        writeln!(w, "\tmov {}, sp", dst_reg)
+    } else if (0..=4095).contains(&offset) {
+        writeln!(w, "\tadd {}, sp, #{}", dst_reg, offset)
+    } else {
+        emit_load_immediate(w, AsmType::Quadword, dst_reg, offset as i64)?;
+        writeln!(w, "\tadd {}, sp, {}", dst_reg, dst_reg)
+    }
+}
+
+fn emit_load_stack(
+    w: &mut dyn Write,
+    ty: AsmType,
+    dst_reg: &str,
+    offset: i32,
+) -> std::io::Result<()> {
+    if stack_offset_fits_unsigned(ty, offset) {
+        writeln!(
+            w,
+            "\t{} {}, {}",
+            load_mnemonic(ty),
+            dst_reg,
+            stack_addr(offset)
+        )
+    } else {
+        emit_stack_address_into(w, "x16", offset)?;
+        writeln!(w, "\t{} {}, [x16]", load_mnemonic(ty), dst_reg)
+    }
+}
+
+fn emit_store_stack(
+    w: &mut dyn Write,
+    ty: AsmType,
+    src_reg: &str,
+    offset: i32,
+) -> std::io::Result<()> {
+    if stack_offset_fits_unsigned(ty, offset) {
+        writeln!(
+            w,
+            "\t{} {}, {}",
+            store_mnemonic(ty),
+            src_reg,
+            stack_addr(offset)
+        )
+    } else {
+        emit_stack_address_into(w, "x16", offset)?;
+        writeln!(w, "\t{} {}, [x16]", store_mnemonic(ty), src_reg)
+    }
+}
+
+fn emit_stack_pointer_adjust(w: &mut dyn Write, op: &str, bytes: i32) -> std::io::Result<()> {
+    if bytes <= 4095 {
+        writeln!(w, "\t{} sp, sp, #{}", op, bytes)
+    } else {
+        emit_load_immediate(w, AsmType::Quadword, "x16", bytes as i64)?;
+        writeln!(w, "\t{} sp, sp, x16", op)
+    }
+}
+
+fn data_label(target: &Target, name: &str) -> String {
+    target.show_label(name)
+}
+
+fn emit_load_data_address(
+    w: &mut dyn Write,
+    target: &Target,
+    name: &str,
+    dst_reg: &'static str,
+) -> std::io::Result<()> {
+    let label = data_label(target, name);
+    match target.os {
+        TargetOs::Linux => {
+            writeln!(w, "\tadrp {}, {}", dst_reg, label)?;
+            writeln!(w, "\tadd {}, {}, :lo12:{}", dst_reg, dst_reg, label)
+        }
+        TargetOs::MacOs => {
+            writeln!(w, "\tadrp {}, {}@GOTPAGE", dst_reg, label)?;
+            writeln!(w, "\tldr {}, [{}, {}@GOTPAGEOFF]", dst_reg, dst_reg, label)
+        }
+    }
+}
+
+fn emit_load_tls_address(
+    w: &mut dyn Write,
+    target: &Target,
+    name: &str,
+    offset: i32,
+    dst_reg: &'static str,
+) -> std::io::Result<()> {
+    let label = data_label(target, name);
+    match target.os {
+        TargetOs::Linux => {
+            writeln!(w, "\tmrs {}, tpidr_el0", dst_reg)?;
+            writeln!(w, "\tadd {}, {}, :tprel_hi12:{}", dst_reg, dst_reg, label)?;
+            writeln!(
+                w,
+                "\tadd {}, {}, :tprel_lo12_nc:{}",
+                dst_reg, dst_reg, label
+            )?;
+            if offset != 0 {
+                emit_load_immediate(w, AsmType::Quadword, "x17", offset as i64)?;
+                writeln!(w, "\tadd {}, {}, x17", dst_reg, dst_reg)?;
+            }
+            Ok(())
+        }
+        TargetOs::MacOs => {
+            writeln!(w, "\tadrp x0, {}@TLVPPAGE", label)?;
+            writeln!(w, "\tldr x0, [x0, {}@TLVPPAGEOFF]", label)?;
+            writeln!(w, "\tldr x8, [x0]")?;
+            writeln!(w, "\tstp x9, x10, [sp, #-64]!")?;
+            writeln!(w, "\tstp x11, x12, [sp, #16]")?;
+            writeln!(w, "\tstp x13, x14, [sp, #32]")?;
+            writeln!(w, "\tstp x15, x30, [sp, #48]")?;
+            writeln!(w, "\tblr x8")?;
+            writeln!(w, "\tldp x11, x12, [sp, #16]")?;
+            writeln!(w, "\tldp x13, x14, [sp, #32]")?;
+            writeln!(w, "\tldp x15, x30, [sp, #48]")?;
+            writeln!(w, "\tldp x9, x10, [sp], #64")?;
+            if dst_reg != "x0" {
+                writeln!(w, "\tmov {}, x0", dst_reg)?;
+            }
+            if offset != 0 {
+                emit_load_immediate(w, AsmType::Quadword, "x17", offset as i64)?;
+                writeln!(w, "\tadd {}, {}, x17", dst_reg, dst_reg)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn emit_load_tls_data(
+    w: &mut dyn Write,
+    target: &Target,
+    ty: AsmType,
+    name: &str,
+    offset: i32,
+    dst_reg: &'static str,
+) -> std::io::Result<()> {
+    emit_load_tls_address(w, target, name, offset, "x16")?;
+    writeln!(w, "\t{} {}, [x16]", load_mnemonic(ty), dst_reg)
+}
+
+fn exclusive_load_mnemonic(ty: AsmType) -> io::Result<&'static str> {
+    match ty {
+        AsmType::Byte => Ok("ldaxrb"),
+        AsmType::Word => Ok("ldaxrh"),
+        AsmType::Longword | AsmType::Quadword => Ok("ldaxr"),
+        _ => invalid_input(format!("unsupported atomic load type: {:?}", ty)),
+    }
+}
+
+fn exclusive_store_mnemonic(ty: AsmType) -> io::Result<&'static str> {
+    match ty {
+        AsmType::Byte => Ok("stlxrb"),
+        AsmType::Word => Ok("stlxrh"),
+        AsmType::Longword | AsmType::Quadword => Ok("stlxr"),
+        _ => invalid_input(format!("unsupported atomic store type: {:?}", ty)),
+    }
+}
+
+fn emit_atomic_rmw(
+    w: &mut dyn Write,
+    target: &Target,
+    ty: AsmType,
+    op: &AsmBinaryOp,
+    return_old: bool,
+    dst: &AsmOperand,
+) -> std::io::Result<()> {
+    let load = exclusive_load_mnemonic(ty)?;
+    let store = exclusive_store_mnemonic(ty)?;
+    let old = if ty == AsmType::Quadword {
+        "x12"
+    } else {
+        "w12"
+    };
+    let arg = reg_name(Reg::R10, ty)?;
+    let new = if ty == AsmType::Quadword {
+        "x14"
+    } else {
+        "w14"
+    };
+    let status = "w13";
+    let ptr = "x10";
+    writeln!(w, "1:")?;
+    writeln!(w, "\t{} {}, [{}]", load, old, ptr)?;
+    match op {
+        AsmBinaryOp::Add => writeln!(w, "\tadd {}, {}, {}", new, old, arg)?,
+        AsmBinaryOp::Sub => writeln!(w, "\tsub {}, {}, {}", new, old, arg)?,
+        AsmBinaryOp::And => writeln!(w, "\tand {}, {}, {}", new, old, arg)?,
+        AsmBinaryOp::Nand => {
+            writeln!(w, "\tand {}, {}, {}", new, old, arg)?;
+            writeln!(w, "\tmvn {}, {}", new, new)?
+        }
+        AsmBinaryOp::Or => writeln!(w, "\torr {}, {}, {}", new, old, arg)?,
+        AsmBinaryOp::Xor => writeln!(w, "\teor {}, {}, {}", new, old, arg)?,
+        _ => return invalid_input(format!("unsupported atomic rmw op: {:?}", op)),
+    }
+    writeln!(w, "\t{} {}, {}, [{}]", store, status, new, ptr)?;
+    writeln!(w, "\tcbnz {}, 1b", status)?;
+    store_operand(w, target, ty, if return_old { old } else { new }, dst)
+}
+
+fn emit_atomic_exchange(
+    w: &mut dyn Write,
+    target: &Target,
+    ty: AsmType,
+    dst: &AsmOperand,
+) -> std::io::Result<()> {
+    let load = exclusive_load_mnemonic(ty)?;
+    let store = exclusive_store_mnemonic(ty)?;
+    let old = if ty == AsmType::Quadword {
+        "x12"
+    } else {
+        "w12"
+    };
+    let value = reg_name(Reg::R10, ty)?;
+    let status = "w13";
+    let ptr = "x10";
+    writeln!(w, "1:")?;
+    writeln!(w, "\t{} {}, [{}]", load, old, ptr)?;
+    writeln!(w, "\t{} {}, {}, [{}]", store, status, value, ptr)?;
+    writeln!(w, "\tcbnz {}, 1b", status)?;
+    store_operand(w, target, ty, old, dst)
+}
+
+fn emit_atomic_compare_exchange(
+    w: &mut dyn Write,
+    target: &Target,
+    ty: AsmType,
+    dst: &AsmOperand,
+) -> std::io::Result<()> {
+    let load = exclusive_load_mnemonic(ty)?;
+    let store_exclusive = exclusive_store_mnemonic(ty)?;
+    let load_expected = load_mnemonic(ty);
+    let store_expected = store_mnemonic(ty);
+    let old = if ty == AsmType::Quadword {
+        "x12"
+    } else {
+        "w12"
+    };
+    let expected = if ty == AsmType::Quadword {
+        "x14"
+    } else {
+        "w14"
+    };
+    let desired = reg_name(Reg::R10, ty)?;
+    let status = "w13";
+    let ptr = "x10";
+    let expected_ptr = "x7";
+    writeln!(w, "\t{} {}, [{}]", load_expected, expected, expected_ptr)?;
+    writeln!(w, "1:")?;
+    writeln!(w, "\t{} {}, [{}]", load, old, ptr)?;
+    writeln!(w, "\tcmp {}, {}", old, expected)?;
+    writeln!(w, "\tb.ne 2f")?;
+    writeln!(
+        w,
+        "\t{} {}, {}, [{}]",
+        store_exclusive, status, desired, ptr
+    )?;
+    writeln!(w, "\tcbnz {}, 1b", status)?;
+    writeln!(w, "\tmov w15, #1")?;
+    writeln!(w, "\tb 3f")?;
+    writeln!(w, "2:")?;
+    writeln!(w, "\tclrex")?;
+    writeln!(w, "\t{} {}, [{}]", store_expected, old, expected_ptr)?;
+    writeln!(w, "\tmov w15, #0")?;
+    writeln!(w, "3:")?;
+    store_operand(w, target, AsmType::Byte, "w15", dst)
+}
+
+fn emit_atomic_compare_swap(
+    w: &mut dyn Write,
+    target: &Target,
+    ty: AsmType,
+    return_old: bool,
+    dst: &AsmOperand,
+) -> std::io::Result<()> {
+    let load = exclusive_load_mnemonic(ty)?;
+    let store = exclusive_store_mnemonic(ty)?;
+    let old = if ty == AsmType::Quadword {
+        "x12"
+    } else {
+        "w12"
+    };
+    let expected = reg_name(Reg::R12, ty)?;
+    let desired = reg_name(Reg::R10, ty)?;
+    let status = "w13";
+    let ptr = "x10";
+    writeln!(w, "1:")?;
+    writeln!(w, "\t{} {}, [{}]", load, old, ptr)?;
+    writeln!(w, "\tcmp {}, {}", old, expected)?;
+    writeln!(w, "\tb.ne 2f")?;
+    writeln!(w, "\t{} {}, {}, [{}]", store, status, desired, ptr)?;
+    writeln!(w, "\tcbnz {}, 1b", status)?;
+    if !return_old {
+        writeln!(w, "\tmov w15, #1")?;
+        writeln!(w, "\tb 3f")?;
+    }
+    writeln!(w, "2:")?;
+    writeln!(w, "\tclrex")?;
+    if return_old {
+        return store_operand(w, target, ty, old, dst);
+    }
+    writeln!(w, "\tmov w15, #0")?;
+    writeln!(w, "3:")?;
+    store_operand(w, target, AsmType::Byte, "w15", dst)
+}
+
+fn emit_store_tls_data(
+    w: &mut dyn Write,
+    target: &Target,
+    ty: AsmType,
+    src_reg: &'static str,
+    name: &str,
+    offset: i32,
+) -> std::io::Result<()> {
+    if target.os == TargetOs::MacOs {
+        writeln!(w, "\tsub sp, sp, #16")?;
+        writeln!(w, "\t{} {}, [sp]", store_mnemonic(ty), src_reg)?;
+        emit_load_tls_address(w, target, name, offset, "x16")?;
+        let scratch = match ty {
+            AsmType::Float => "s16",
+            AsmType::Double => "d16",
+            AsmType::Byte | AsmType::Word | AsmType::Longword => "w17",
+            AsmType::Quadword => "x17",
+        };
+        writeln!(w, "\t{} {}, [sp]", load_mnemonic(ty), scratch)?;
+        writeln!(w, "\t{} {}, [x16]", store_mnemonic(ty), scratch)?;
+        return writeln!(w, "\tadd sp, sp, #16");
+    }
+    emit_load_tls_address(w, target, name, offset, "x16")?;
+    writeln!(w, "\t{} {}, [x16]", store_mnemonic(ty), src_reg)
+}
+
+fn emit_load_data(
+    w: &mut dyn Write,
+    target: &Target,
+    ty: AsmType,
+    name: &str,
+    dst_reg: &'static str,
+) -> std::io::Result<()> {
+    let label = data_label(target, name);
+    let addr_reg = "x16";
+    match target.os {
+        TargetOs::Linux => {
+            writeln!(w, "\tadrp {}, {}", addr_reg, label)?;
+            writeln!(
+                w,
+                "\t{} {}, [{}, :lo12:{}]",
+                load_mnemonic(ty),
+                dst_reg,
+                addr_reg,
+                label
+            )
+        }
+        TargetOs::MacOs => {
+            writeln!(w, "\tadrp {}, {}@PAGE", addr_reg, label)?;
+            writeln!(
+                w,
+                "\t{} {}, [{}, {}@PAGEOFF]",
+                load_mnemonic(ty),
+                dst_reg,
+                addr_reg,
+                label
+            )
+        }
+    }
+}
+
+fn emit_store_data(
+    w: &mut dyn Write,
+    target: &Target,
+    ty: AsmType,
+    src_reg: &'static str,
+    name: &str,
+) -> std::io::Result<()> {
+    let label = data_label(target, name);
+    let addr_reg = "x16";
+    match target.os {
+        TargetOs::Linux => {
+            writeln!(w, "\tadrp {}, {}", addr_reg, label)?;
+            writeln!(
+                w,
+                "\t{} {}, [{}, :lo12:{}]",
+                store_mnemonic(ty),
+                src_reg,
+                addr_reg,
+                label
+            )
+        }
+        TargetOs::MacOs => {
+            writeln!(w, "\tadrp {}, {}@PAGE", addr_reg, label)?;
+            writeln!(
+                w,
+                "\t{} {}, [{}, {}@PAGEOFF]",
+                store_mnemonic(ty),
+                src_reg,
+                addr_reg,
+                label
+            )
+        }
+    }
+}
+
+fn emit_load_data_extended(
+    w: &mut dyn Write,
+    target: &Target,
+    src_ty: AsmType,
+    dst_ty: AsmType,
+    name: &str,
+    dst_reg: &'static str,
+) -> std::io::Result<()> {
+    let label = data_label(target, name);
+    let mnemonic = signed_load_mnemonic(src_ty, dst_ty)?;
+    let addr_reg = "x16";
+    match target.os {
+        TargetOs::Linux => {
+            writeln!(w, "\tadrp {}, {}", addr_reg, label)?;
+            writeln!(
+                w,
+                "\t{} {}, [{}, :lo12:{}]",
+                mnemonic, dst_reg, addr_reg, label
+            )
+        }
+        TargetOs::MacOs => {
+            writeln!(w, "\tadrp {}, {}@PAGE", addr_reg, label)?;
+            writeln!(
+                w,
+                "\t{} {}, [{}, {}@PAGEOFF]",
+                mnemonic, dst_reg, addr_reg, label
+            )
+        }
+    }
+}
+
+fn emit_load_immediate(
+    w: &mut dyn Write,
+    ty: AsmType,
+    reg: &'static str,
+    value: i64,
+) -> std::io::Result<()> {
+    if value == 0 {
+        return writeln!(w, "\tmov {}, #0", reg);
+    }
+
+    let width = match ty {
+        AsmType::Byte | AsmType::Word | AsmType::Longword => 32,
+        AsmType::Quadword => 64,
+        AsmType::Float => 32,
+        AsmType::Double => 64,
+    };
+    let bits = if width == 32 {
+        value as u32 as u64
+    } else {
+        value as u64
+    };
+
+    let mut wrote = false;
+    for shift in (0..width).step_by(16) {
+        let chunk = ((bits >> shift) & 0xffff) as u16;
+        if chunk == 0 && wrote {
+            continue;
+        }
+        let op = if wrote { "movk" } else { "movz" };
+        if shift == 0 {
+            writeln!(w, "\t{} {}, #{}", op, reg, chunk)?;
+        } else {
+            writeln!(w, "\t{} {}, #{}, lsl #{}", op, reg, chunk, shift)?;
+        }
+        wrote = true;
+    }
+
+    Ok(())
+}
+
+fn load_operand(
+    w: &mut dyn Write,
+    target: &Target,
+    ty: AsmType,
+    operand: &AsmOperand,
+    scratch: Reg,
+) -> std::io::Result<&'static str> {
+    let reg = if matches!(ty, AsmType::Float | AsmType::Double) {
+        fp_scratch_name_typed(scratch, ty)?
+    } else {
+        reg_name(scratch, ty)?
+    };
+    match operand {
+        AsmOperand::Imm(value) => {
+            if matches!(ty, AsmType::Float | AsmType::Double) {
+                let int_ty = if ty == AsmType::Float {
+                    AsmType::Longword
+                } else {
+                    AsmType::Quadword
+                };
+                let int_reg = reg_name(scratch, int_ty)?;
+                emit_load_immediate(w, int_ty, int_reg, *value)?;
+                writeln!(w, "\tfmov {}, {}", reg, int_reg)?;
+            } else {
+                emit_load_immediate(w, ty, reg, *value)?;
+            }
+        }
+        AsmOperand::Reg(reg) => return reg_name(*reg, ty),
+        AsmOperand::Xmm(reg) => return fp_name_typed(*reg, ty),
+        AsmOperand::Stack(offset) => {
+            emit_load_stack(w, ty, reg, *offset)?;
+        }
+        AsmOperand::Data(name) => emit_load_data(w, target, ty, name, reg)?,
+        AsmOperand::TlsData(name, offset) => emit_load_tls_data(w, target, ty, name, *offset, reg)?,
+        other => {
+            return invalid_input(format!(
+                "AArch64 backend cannot load operand yet: {:?}",
+                other
+            ))
+        }
+    }
+    Ok(reg)
+}
+
+fn store_operand(
+    w: &mut dyn Write,
+    target: &Target,
+    ty: AsmType,
+    src_reg: &'static str,
+    dst: &AsmOperand,
+) -> std::io::Result<()> {
+    match dst {
+        AsmOperand::Reg(reg) => writeln!(w, "\tmov {}, {}", reg_name(*reg, ty)?, src_reg),
+        AsmOperand::Xmm(reg) => writeln!(w, "\tfmov {}, {}", fp_name_typed(*reg, ty)?, src_reg),
+        AsmOperand::Stack(offset) => emit_store_stack(w, ty, src_reg, *offset),
+        AsmOperand::Data(name) => emit_store_data(w, target, ty, src_reg, name),
+        AsmOperand::TlsData(name, offset) => {
+            emit_store_tls_data(w, target, ty, src_reg, name, *offset)
+        }
+        other => invalid_input(format!(
+            "AArch64 backend cannot store operand yet: {:?}",
+            other
+        )),
+    }
+}
+
+fn emit_mov(
+    w: &mut dyn Write,
+    target: &Target,
+    ty: AsmType,
+    src: &AsmOperand,
+    dst: &AsmOperand,
+) -> std::io::Result<()> {
+    match (src, dst) {
+        (AsmOperand::Imm(value), AsmOperand::Xmm(reg))
+            if matches!(ty, AsmType::Float | AsmType::Double) =>
+        {
+            let int_ty = if ty == AsmType::Float {
+                AsmType::Longword
+            } else {
+                AsmType::Quadword
+            };
+            let int_reg = if ty == AsmType::Float { "w9" } else { "x9" };
+            emit_load_immediate(w, int_ty, int_reg, *value)?;
+            writeln!(w, "\tfmov {}, {}", fp_name_typed(*reg, ty)?, int_reg)
+        }
+        (AsmOperand::Imm(value), AsmOperand::Reg(reg)) => {
+            emit_load_immediate(w, ty, reg_name(*reg, ty)?, *value)
+        }
+        (AsmOperand::Xmm(src), AsmOperand::Xmm(dst))
+            if matches!(ty, AsmType::Float | AsmType::Double) =>
+        {
+            writeln!(
+                w,
+                "\tfmov {}, {}",
+                fp_name_typed(*dst, ty)?,
+                fp_name_typed(*src, ty)?
+            )
+        }
+        (AsmOperand::Stack(offset), AsmOperand::Xmm(reg))
+            if matches!(ty, AsmType::Float | AsmType::Double) =>
+        {
+            emit_load_stack(w, ty, fp_name_typed(*reg, ty)?, *offset)
+        }
+        (AsmOperand::Xmm(reg), AsmOperand::Stack(offset))
+            if matches!(ty, AsmType::Float | AsmType::Double) =>
+        {
+            emit_store_stack(w, ty, fp_name_typed(*reg, ty)?, *offset)
+        }
+        (AsmOperand::Data(name), AsmOperand::Xmm(reg))
+            if matches!(ty, AsmType::Float | AsmType::Double) =>
+        {
+            emit_load_data(w, target, ty, name, fp_name_typed(*reg, ty)?)
+        }
+        (AsmOperand::TlsData(name, offset), AsmOperand::Xmm(reg))
+            if matches!(ty, AsmType::Float | AsmType::Double) =>
+        {
+            emit_load_tls_data(w, target, ty, name, *offset, fp_name_typed(*reg, ty)?)
+        }
+        (AsmOperand::Xmm(reg), AsmOperand::Data(name))
+            if matches!(ty, AsmType::Float | AsmType::Double) =>
+        {
+            emit_store_data(w, target, ty, fp_name_typed(*reg, ty)?, name)
+        }
+        (AsmOperand::Xmm(reg), AsmOperand::TlsData(name, offset))
+            if matches!(ty, AsmType::Float | AsmType::Double) =>
+        {
+            emit_store_tls_data(w, target, ty, fp_name_typed(*reg, ty)?, name, *offset)
+        }
+        (AsmOperand::Reg(src), AsmOperand::Reg(dst)) => {
+            writeln!(w, "\tmov {}, {}", reg_name(*dst, ty)?, reg_name(*src, ty)?)
+        }
+        (AsmOperand::Stack(offset), AsmOperand::Reg(reg)) => {
+            emit_load_stack(w, ty, reg_name(*reg, ty)?, *offset)
+        }
+        (AsmOperand::Reg(reg), AsmOperand::Stack(offset)) => {
+            emit_store_stack(w, ty, reg_name(*reg, ty)?, *offset)
+        }
+        (AsmOperand::Data(name), AsmOperand::Reg(reg)) => {
+            emit_load_data(w, target, ty, name, reg_name(*reg, ty)?)
+        }
+        (AsmOperand::Reg(reg), AsmOperand::Data(name)) => {
+            emit_store_data(w, target, ty, reg_name(*reg, ty)?, name)
+        }
+        _ => {
+            let scratch = load_operand(w, target, ty, src, Reg::R10)?;
+            store_operand(w, target, ty, scratch, dst)
+        }
+    }
+}
+
+fn emit_movsx(
+    w: &mut dyn Write,
+    target: &Target,
+    src_ty: AsmType,
+    dst_ty: AsmType,
+    src: &AsmOperand,
+    dst: &AsmOperand,
+) -> std::io::Result<()> {
+    let dst_reg = reg_name(Reg::R10, dst_ty)?;
+    match src {
+        AsmOperand::Stack(offset) => {
+            let mnemonic = signed_load_mnemonic(src_ty, dst_ty)?;
+            if stack_offset_fits_unsigned(src_ty, *offset) {
+                writeln!(w, "\t{} {}, {}", mnemonic, dst_reg, stack_addr(*offset))?;
+            } else {
+                emit_stack_address_into(w, "x16", *offset)?;
+                writeln!(w, "\t{} {}, [x16]", mnemonic, dst_reg)?;
+            }
+        }
+        AsmOperand::Data(name) => {
+            emit_load_data_extended(w, target, src_ty, dst_ty, name, dst_reg)?;
+        }
+        AsmOperand::TlsData(name, offset) => {
+            emit_load_tls_address(w, target, name, *offset, "x16")?;
+            writeln!(
+                w,
+                "\t{} {}, [x16]",
+                signed_load_mnemonic(src_ty, dst_ty)?,
+                dst_reg
+            )?;
+        }
+        AsmOperand::Reg(reg) => {
+            let src_reg = reg_name(*reg, src_ty)?;
+            let mnemonic = match (src_ty, dst_ty) {
+                (AsmType::Byte, AsmType::Longword) | (AsmType::Byte, AsmType::Quadword) => "sxtb",
+                (AsmType::Word, AsmType::Longword) | (AsmType::Word, AsmType::Quadword) => "sxth",
+                (AsmType::Longword, AsmType::Quadword) => "sxtw",
+                _ => {
+                    return invalid_input(format!(
+                        "AArch64 backend does not support sign extension from {:?} to {:?}",
+                        src_ty, dst_ty
+                    ))
+                }
+            };
+            writeln!(w, "\t{} {}, {}", mnemonic, dst_reg, src_reg)?;
+        }
+        AsmOperand::Imm(value) => {
+            emit_load_immediate(w, dst_ty, dst_reg, *value)?;
+        }
+        other => {
+            return invalid_input(format!(
+                "AArch64 backend cannot sign-extend operand yet: {:?}",
+                other
+            ))
+        }
+    }
+    store_operand(w, target, dst_ty, dst_reg, dst)
+}
+
+fn emit_mov_zero_extend(
+    w: &mut dyn Write,
+    target: &Target,
+    src_ty: AsmType,
+    dst_ty: AsmType,
+    src: &AsmOperand,
+    dst: &AsmOperand,
+) -> std::io::Result<()> {
+    if let AsmOperand::Reg(reg) = src {
+        let src_reg = reg_name(*reg, src_ty)?;
+        match src_ty {
+            AsmType::Byte => {
+                writeln!(w, "\tand w9, {}, #255", src_reg)?;
+            }
+            AsmType::Word => {
+                writeln!(w, "\tand w9, {}, #65535", src_reg)?;
+            }
+            AsmType::Longword if dst_ty == AsmType::Quadword => {
+                writeln!(w, "\tmov w9, {}", src_reg)?;
+            }
+            _ => {
+                writeln!(w, "\tmov {}, {}", reg_name(Reg::R10, dst_ty)?, src_reg)?;
+            }
+        }
+        return store_operand(w, target, dst_ty, reg_name(Reg::R10, dst_ty)?, dst);
+    }
+
+    let src_reg = load_operand(w, target, src_ty, src, Reg::R10)?;
+    let store_reg = match dst_ty {
+        AsmType::Byte | AsmType::Word | AsmType::Longword => reg_name(Reg::R10, AsmType::Longword)?,
+        AsmType::Quadword => reg_name(Reg::R10, AsmType::Quadword)?,
+        AsmType::Float | AsmType::Double => {
+            return invalid_input("AArch64 backend does not support double zero extension")
+        }
+    };
+    if src_reg != store_reg && dst_ty != AsmType::Quadword {
+        writeln!(w, "\tmov {}, {}", store_reg, src_reg)?;
+    }
+    store_operand(w, target, dst_ty, store_reg, dst)
+}
+
+fn emit_unary(
+    w: &mut dyn Write,
+    target: &Target,
+    ty: AsmType,
+    op: &AsmUnaryOp,
+    dst: &AsmOperand,
+) -> std::io::Result<()> {
+    let reg = load_operand(w, target, ty, dst, Reg::R10)?;
+    if ty == AsmType::Double {
+        let mnemonic = match op {
+            AsmUnaryOp::Neg => "fneg",
+            AsmUnaryOp::Not => {
+                return invalid_input(
+                    "AArch64 backend does not support bitwise-not on double values",
+                )
+            }
+        };
+        writeln!(w, "\t{} {}, {}", mnemonic, reg, reg)?;
+        return store_operand(w, target, ty, reg, dst);
+    }
+    let mnemonic = match op {
+        AsmUnaryOp::Neg => "neg",
+        AsmUnaryOp::Not => "mvn",
+    };
+    writeln!(w, "\t{} {}, {}", mnemonic, reg, reg)?;
+    store_operand(w, target, ty, reg, dst)
+}
+
+fn emit_binary(
+    w: &mut dyn Write,
+    target: &Target,
+    ty: AsmType,
+    op: &AsmBinaryOp,
+    src: &AsmOperand,
+    dst: &AsmOperand,
+) -> std::io::Result<()> {
+    if matches!(ty, AsmType::Float | AsmType::Double) {
+        let dst_reg = load_operand(w, target, ty, dst, Reg::R10)?;
+        let src_reg = load_operand(w, target, ty, src, Reg::R11)?;
+        let mnemonic = match op {
+            AsmBinaryOp::Add => "fadd",
+            AsmBinaryOp::Sub => "fsub",
+            AsmBinaryOp::Mul => "fmul",
+            AsmBinaryOp::DivDouble => "fdiv",
+            other => {
+                return invalid_input(format!(
+                    "AArch64 backend does not support floating binary op yet: {:?}",
+                    other
+                ))
+            }
+        };
+        writeln!(w, "\t{} {}, {}, {}", mnemonic, dst_reg, dst_reg, src_reg)?;
+        return store_operand(w, target, ty, dst_reg, dst);
+    }
+
+    let dst_reg = load_operand(w, target, ty, dst, Reg::R10)?;
+    let src_reg = load_operand(w, target, ty, src, Reg::R11)?;
+    let mnemonic = match op {
+        AsmBinaryOp::Add => "add",
+        AsmBinaryOp::Sub => "sub",
+        AsmBinaryOp::Mul => "mul",
+        AsmBinaryOp::SDiv => "sdiv",
+        AsmBinaryOp::UDiv => "udiv",
+        AsmBinaryOp::And => "and",
+        AsmBinaryOp::Or => "orr",
+        AsmBinaryOp::Xor => "eor",
+        AsmBinaryOp::Sal => "lsl",
+        AsmBinaryOp::Sar => "asr",
+        AsmBinaryOp::Shr => "lsr",
+        other => {
+            return invalid_input(format!(
+                "AArch64 backend does not support binary op yet: {:?}",
+                other
+            ))
+        }
+    };
+    writeln!(w, "\t{} {}, {}, {}", mnemonic, dst_reg, dst_reg, src_reg)?;
+    store_operand(w, target, ty, dst_reg, dst)
+}
+
+fn emit_cmp(
+    w: &mut dyn Write,
+    target: &Target,
+    ty: AsmType,
+    src: &AsmOperand,
+    dst: &AsmOperand,
+) -> std::io::Result<()> {
+    if matches!(ty, AsmType::Float | AsmType::Double) {
+        let dst_reg = load_operand(w, target, ty, dst, Reg::R10)?;
+        let src_reg = load_operand(w, target, ty, src, Reg::R11)?;
+        return writeln!(w, "\tfcmp {}, {}", dst_reg, src_reg);
+    }
+
+    let dst_reg = load_operand(w, target, ty, dst, Reg::R10)?;
+    let src_reg = load_operand(w, target, ty, src, Reg::R11)?;
+    writeln!(w, "\tcmp {}, {}", dst_reg, src_reg)
+}
+
+fn emit_lea(
+    w: &mut dyn Write,
+    target: &Target,
+    src: &AsmOperand,
+    dst: &AsmOperand,
+) -> std::io::Result<()> {
+    match src {
+        AsmOperand::Stack(offset) => {
+            if *offset == 0 {
+                writeln!(w, "\tmov x9, sp")?;
+            } else {
+                emit_stack_address_into(w, "x9", *offset)?;
+            }
+            store_operand(w, target, AsmType::Quadword, "x9", dst)
+        }
+        AsmOperand::Data(name) => {
+            emit_load_data_address(w, target, name, "x9")?;
+            store_operand(w, target, AsmType::Quadword, "x9", dst)
+        }
+        AsmOperand::TlsData(name, offset) => {
+            emit_load_tls_address(w, target, name, *offset, "x9")?;
+            store_operand(w, target, AsmType::Quadword, "x9", dst)
+        }
+        other => invalid_input(format!(
+            "AArch64 backend cannot take address of operand yet: {:?}",
+            other
+        )),
+    }
+}
+
+fn emit_load_indirect(
+    w: &mut dyn Write,
+    target: &Target,
+    ty: AsmType,
+    base: Reg,
+    dst: &AsmOperand,
+) -> std::io::Result<()> {
+    let base_reg = reg_name(base, AsmType::Quadword)?;
+    let scratch = if matches!(ty, AsmType::Float | AsmType::Double) {
+        fp_scratch_name_typed(Reg::R10, ty)?
+    } else {
+        reg_name(Reg::R10, ty)?
+    };
+    writeln!(w, "\t{} {}, [{}]", load_mnemonic(ty), scratch, base_reg)?;
+    store_operand(w, target, ty, scratch, dst)
+}
+
+fn emit_store_indirect(
+    w: &mut dyn Write,
+    target: &Target,
+    ty: AsmType,
+    src: &AsmOperand,
+    base: Reg,
+) -> std::io::Result<()> {
+    let base_reg = reg_name(base, AsmType::Quadword)?;
+    let scratch = load_operand(w, target, ty, src, Reg::R10)?;
+    writeln!(w, "\t{} {}, [{}]", store_mnemonic(ty), scratch, base_reg)
+}
+
+fn emit_add_ptr(
+    w: &mut dyn Write,
+    target: &Target,
+    ptr: &AsmOperand,
+    index: &AsmOperand,
+    scale: i64,
+    dst: &AsmOperand,
+) -> std::io::Result<()> {
+    let ptr_reg = load_operand(w, target, AsmType::Quadword, ptr, Reg::R10)?;
+    let index_reg = load_operand(w, target, AsmType::Quadword, index, Reg::R11)?;
+    if scale != 1 {
+        emit_load_immediate(w, AsmType::Quadword, "x11", scale)?;
+        writeln!(w, "\tmul {}, {}, x11", index_reg, index_reg)?;
+    }
+    writeln!(w, "\tadd {}, {}, {}", ptr_reg, ptr_reg, index_reg)?;
+    store_operand(w, target, AsmType::Quadword, ptr_reg, dst)
+}
+
+fn load_operand_rebased(
+    w: &mut dyn Write,
+    target: &Target,
+    ty: AsmType,
+    operand: &AsmOperand,
+    scratch: Reg,
+    stack_rebase: i32,
+) -> std::io::Result<&'static str> {
+    match operand {
+        AsmOperand::Stack(offset) => {
+            let reg = if matches!(ty, AsmType::Float | AsmType::Double) {
+                fp_scratch_name_typed(scratch, ty)?
+            } else {
+                reg_name(scratch, ty)?
+            };
+            emit_load_stack(w, ty, reg, *offset + stack_rebase)?;
+            Ok(reg)
+        }
+        _ => load_operand(w, target, ty, operand, scratch),
+    }
+}
+
+fn emit_store_outgoing_arg(
+    w: &mut dyn Write,
+    target: &Target,
+    ty: AsmType,
+    src: &AsmOperand,
+    outgoing_offset: i32,
+    stack_rebase: i32,
+) -> std::io::Result<()> {
+    let scratch = load_operand_rebased(w, target, ty, src, Reg::R10, stack_rebase)?;
+    emit_store_stack(w, ty, scratch, outgoing_offset)
+}
+
+fn emit_load_adjusted(
+    w: &mut dyn Write,
+    target: &Target,
+    ty: AsmType,
+    src: &AsmOperand,
+    dst: Reg,
+    stack_rebase: i32,
+) -> std::io::Result<()> {
+    let loaded = load_operand_rebased(w, target, ty, src, dst, stack_rebase)?;
+    let dst_reg = reg_name(dst, ty)?;
+    if loaded == dst_reg {
+        Ok(())
+    } else {
+        writeln!(w, "\tmov {}, {}", dst_reg, loaded)
+    }
+}
+
+fn emit_int_to_double(
+    w: &mut dyn Write,
+    target: &Target,
+    src_ty: AsmType,
+    src: &AsmOperand,
+    dst: &AsmOperand,
+    unsigned: bool,
+    dst_ty: AsmType,
+) -> std::io::Result<()> {
+    let src_reg = load_operand(w, target, src_ty, src, Reg::R10)?;
+    let dst_reg = fp_scratch_name_typed(Reg::R10, dst_ty)?;
+    let mnemonic = if unsigned { "ucvtf" } else { "scvtf" };
+    writeln!(w, "\t{} {}, {}", mnemonic, dst_reg, src_reg)?;
+    store_operand(w, target, dst_ty, dst_reg, dst)
+}
+
+fn emit_double_to_int(
+    w: &mut dyn Write,
+    target: &Target,
+    dst_ty: AsmType,
+    src: &AsmOperand,
+    dst: &AsmOperand,
+    unsigned: bool,
+    src_ty: AsmType,
+) -> std::io::Result<()> {
+    let src_reg = load_operand(w, target, src_ty, src, Reg::R10)?;
+    let dst_reg = reg_name(Reg::R10, dst_ty)?;
+    let mnemonic = if unsigned { "fcvtzu" } else { "fcvtzs" };
+    writeln!(w, "\t{} {}, {}", mnemonic, dst_reg, src_reg)?;
+    store_operand(w, target, dst_ty, dst_reg, dst)
+}
+
+fn emit_float_convert(
+    w: &mut dyn Write,
+    target: &Target,
+    src_ty: AsmType,
+    dst_ty: AsmType,
+    src: &AsmOperand,
+    dst: &AsmOperand,
+) -> std::io::Result<()> {
+    let src_reg = load_operand(w, target, src_ty, src, Reg::R10)?;
+    let dst_reg = fp_scratch_name_typed(Reg::R11, dst_ty)?;
+    writeln!(w, "\tfcvt {}, {}", dst_reg, src_reg)?;
+    store_operand(w, target, dst_ty, dst_reg, dst)
+}
+
+fn emit_remainder(
+    w: &mut dyn Write,
+    target: &Target,
+    ty: AsmType,
+    is_unsigned: bool,
+    left: &AsmOperand,
+    right: &AsmOperand,
+    dst: &AsmOperand,
+) -> std::io::Result<()> {
+    let left_reg = load_operand(w, target, ty, left, Reg::R10)?;
+    let right_reg = load_operand(w, target, ty, right, Reg::R11)?;
+    let quotient_reg = reg_name(Reg::R13, ty)?;
+    let div_mnemonic = if is_unsigned { "udiv" } else { "sdiv" };
+    writeln!(
+        w,
+        "\t{} {}, {}, {}",
+        div_mnemonic, quotient_reg, left_reg, right_reg
+    )?;
+    writeln!(
+        w,
+        "\tmsub {}, {}, {}, {}",
+        left_reg, quotient_reg, right_reg, left_reg
+    )?;
+    store_operand(w, target, ty, left_reg, dst)
+}
+
+fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, target: &Target) -> std::io::Result<()> {
+    match instr {
+        AsmInstr::Mov(ty, src, dst) => emit_mov(w, target, *ty, src, dst),
+        AsmInstr::Movsx(src_ty, dst_ty, src, dst) => {
+            emit_movsx(w, target, *src_ty, *dst_ty, src, dst)
+        }
+        AsmInstr::MovZeroExtend(src_ty, dst_ty, src, dst) => {
+            emit_mov_zero_extend(w, target, *src_ty, *dst_ty, src, dst)
+        }
+        AsmInstr::Cvtsi2sd(src_ty, src, dst) => {
+            emit_int_to_double(w, target, *src_ty, src, dst, false, AsmType::Double)
+        }
+        AsmInstr::Cvtsi2ss(src_ty, src, dst) => {
+            emit_int_to_double(w, target, *src_ty, src, dst, false, AsmType::Float)
+        }
+        AsmInstr::Cvttsd2si(dst_ty, src, dst) => {
+            emit_double_to_int(w, target, *dst_ty, src, dst, false, AsmType::Double)
+        }
+        AsmInstr::Cvttss2si(dst_ty, src, dst) => {
+            emit_double_to_int(w, target, *dst_ty, src, dst, false, AsmType::Float)
+        }
+        AsmInstr::AArch64UIntToDouble(src_ty, src, dst) => {
+            emit_int_to_double(w, target, *src_ty, src, dst, true, AsmType::Double)
+        }
+        AsmInstr::AArch64UIntToFloat(src_ty, src, dst) => {
+            emit_int_to_double(w, target, *src_ty, src, dst, true, AsmType::Float)
+        }
+        AsmInstr::AArch64DoubleToUInt(dst_ty, src, dst) => {
+            emit_double_to_int(w, target, *dst_ty, src, dst, true, AsmType::Double)
+        }
+        AsmInstr::AArch64FloatToUInt(dst_ty, src, dst) => {
+            emit_double_to_int(w, target, *dst_ty, src, dst, true, AsmType::Float)
+        }
+        AsmInstr::AArch64FloatToDouble(src, dst) => {
+            emit_float_convert(w, target, AsmType::Float, AsmType::Double, src, dst)
+        }
+        AsmInstr::AArch64DoubleToFloat(src, dst) => {
+            emit_float_convert(w, target, AsmType::Double, AsmType::Float, src, dst)
+        }
+        AsmInstr::Cvtss2sd(..) | AsmInstr::Cvtsd2ss(..) => {
+            invalid_input("x86 floating conversion instruction reached AArch64 emitter")
+        }
+        AsmInstr::Unary(ty, op, dst) => emit_unary(w, target, *ty, op, dst),
+        AsmInstr::Binary(ty, op, src, dst) => emit_binary(w, target, *ty, op, src, dst),
+        AsmInstr::AtomicRmw(ty, op, return_old, dst) => {
+            emit_atomic_rmw(w, target, *ty, op, *return_old, dst)
+        }
+        AsmInstr::AtomicExchange(ty, dst) => emit_atomic_exchange(w, target, *ty, dst),
+        AsmInstr::AtomicCompareExchange(ty, dst) => {
+            emit_atomic_compare_exchange(w, target, *ty, dst)
+        }
+        AsmInstr::AtomicCompareSwap(ty, return_old, dst) => {
+            emit_atomic_compare_swap(w, target, *ty, *return_old, dst)
+        }
+        AsmInstr::Cmp(ty, src, dst) => emit_cmp(w, target, *ty, src, dst),
+        AsmInstr::Lea(src, dst) => emit_lea(w, target, src, dst),
+        AsmInstr::LoadIndirect(ty, base, dst) => emit_load_indirect(w, target, *ty, *base, dst),
+        AsmInstr::StoreIndirect(ty, src, base) => emit_store_indirect(w, target, *ty, src, *base),
+        AsmInstr::Jmp(label) => writeln!(w, "\tb .L{}", label),
+        AsmInstr::JmpCC(cc, label) => writeln!(w, "\tb.{} .L{}", condition_name(cc), label),
+        AsmInstr::SetCC(cc, dst) => {
+            writeln!(w, "\tcset w9, {}", condition_name(cc))?;
+            store_operand(w, target, AsmType::Longword, "w9", dst)
+        }
+        AsmInstr::Label(label) => writeln!(w, ".L{}:", label),
+        AsmInstr::Call(name, _, _, false) => writeln!(w, "\tbl {}", target.show_label(name)),
+        AsmInstr::Call(_, _, _, true) => writeln!(w, "\tblr x9"),
+        AsmInstr::AArch64AddPtr(ptr, index, scale, dst) => {
+            emit_add_ptr(w, target, ptr, index, *scale, dst)
+        }
+        AsmInstr::AArch64LoadAdjusted(ty, src, dst, stack_rebase) => {
+            emit_load_adjusted(w, target, *ty, src, *dst, *stack_rebase)
+        }
+        AsmInstr::AArch64StoreOutgoingArg(ty, src, outgoing_offset, stack_rebase) => {
+            emit_store_outgoing_arg(w, target, *ty, src, *outgoing_offset, *stack_rebase)
+        }
+        AsmInstr::AArch64Rem(ty, is_unsigned, left, right, dst) => {
+            emit_remainder(w, target, *ty, *is_unsigned, left, right, dst)
+        }
+        AsmInstr::X86SetVarargsXmmCount(_) => {
+            invalid_input("x86-64 varargs instruction reached AArch64 emitter")
+        }
+        AsmInstr::AArch64SaveLink(offset) => emit_store_stack(w, AsmType::Quadword, "x30", *offset),
+        AsmInstr::AArch64RestoreLink(offset) => {
+            emit_load_stack(w, AsmType::Quadword, "x30", *offset)
+        }
+        AsmInstr::AtomicFence => writeln!(w, "\tdmb ish"),
+        AsmInstr::AllocateStack(bytes) if *bytes > 0 => emit_stack_pointer_adjust(w, "sub", *bytes),
+        AsmInstr::DeallocateStack(bytes) if *bytes > 0 => {
+            emit_stack_pointer_adjust(w, "add", *bytes)
+        }
+        AsmInstr::AllocateStack(_) | AsmInstr::DeallocateStack(_) => Ok(()),
+        AsmInstr::Unreachable => writeln!(w, "\tbrk #0"),
+        AsmInstr::Ret => writeln!(w, "\tret"),
+        other => invalid_input(format!(
+            "AArch64 backend cannot emit instruction yet: {:?}",
+            other
+        )),
+    }
+}
+
+fn emit_function(
+    w: &mut dyn Write,
+    function: &AsmFunction,
+    target: &Target,
+) -> std::io::Result<()> {
+    let name = target.show_label(&function.name);
+    writeln!(w, "\t.text")?;
+    if function.global {
+        writeln!(w, "\t.globl {}", name)?;
+    }
+    writeln!(w, "{}:", name)?;
+    for instr in &function.instructions {
+        emit_instruction(w, instr, target)?;
+    }
+    Ok(())
+}
+
+fn escape_string_for_asm(s: &str) -> String {
+    let mut out = String::new();
+    for b in c_string_bytes(s) {
+        match b {
+            b'\\' => out.push_str("\\\\"),
+            b'"' => out.push_str("\\\""),
+            b'\n' => out.push_str("\\n"),
+            b'\t' => out.push_str("\\t"),
+            b'\r' => out.push_str("\\r"),
+            0 => out.push_str("\\0"),
+            b if (0x20..0x7f).contains(&b) => out.push(b as char),
+            b => out.push_str(&format!("\\{:03o}", b)),
+        }
+    }
+    out
+}
+
+fn static_init_size(init: &StaticInit) -> usize {
+    match init {
+        StaticInit::CharInit(_) | StaticInit::UCharInit(_) => 1,
+        StaticInit::ShortInit(_) | StaticInit::UShortInit(_) => 2,
+        StaticInit::IntInit(_) | StaticInit::UIntInit(_) => 4,
+        StaticInit::LongInit(_)
+        | StaticInit::ULongInit(_)
+        | StaticInit::DoubleInit(_)
+        | StaticInit::PointerInit(_) => 8,
+        StaticInit::FloatInit(_) => 4,
+        StaticInit::ZeroInit(n) => *n,
+        StaticInit::StringInit(s, null_terminated) => {
+            c_string_byte_len(s) + usize::from(*null_terminated)
+        }
+    }
+}
+
+fn alignment_log2(alignment: usize) -> usize {
+    alignment.next_power_of_two().trailing_zeros() as usize
+}
+
+fn emit_macho_tls_static_var(
+    w: &mut dyn Write,
+    sv: &AsmStaticVar,
+    target: &Target,
+    all_zero: bool,
+) -> std::io::Result<()> {
+    let label = target.show_label(&sv.name);
+    let init_label = format!("{}$tlv$init", label);
+    let size: usize = sv.init_values.iter().map(static_init_size).sum();
+
+    if all_zero {
+        writeln!(
+            w,
+            "\t.tbss {},{},{}",
+            init_label,
+            size,
+            alignment_log2(sv.alignment)
+        )?;
+    } else {
+        writeln!(w, "\t.section __DATA,__thread_data,thread_local_regular")?;
+        writeln!(w, "\t.balign {}", sv.alignment)?;
+        writeln!(w, "{}:", init_label)?;
+        for init in &sv.init_values {
+            emit_static_init(w, init, target)?;
+        }
+    }
+
+    writeln!(w, "\t.section __DATA,__thread_vars,thread_local_variables")?;
+    if sv.global {
+        writeln!(w, "\t.globl {}", label)?;
+    }
+    writeln!(w, "\t.balign 8")?;
+    writeln!(w, "{}:", label)?;
+    writeln!(w, "\t.quad __tlv_bootstrap")?;
+    writeln!(w, "\t.quad 0")?;
+    writeln!(w, "\t.quad {}", init_label)
+}
+
+fn emit_static_init(w: &mut dyn Write, init: &StaticInit, target: &Target) -> std::io::Result<()> {
+    match init {
+        StaticInit::CharInit(v) => writeln!(w, "\t.byte {}", *v as u8),
+        StaticInit::UCharInit(v) => writeln!(w, "\t.byte {}", v),
+        StaticInit::ShortInit(v) => writeln!(w, "\t.short {}", v),
+        StaticInit::UShortInit(v) => writeln!(w, "\t.short {}", v),
+        StaticInit::IntInit(v) => writeln!(w, "\t.long {}", v),
+        StaticInit::UIntInit(v) => writeln!(w, "\t.long {}", v),
+        StaticInit::LongInit(v) => writeln!(w, "\t.quad {}", v),
+        StaticInit::ULongInit(v) => writeln!(w, "\t.quad {}", v),
+        StaticInit::FloatInit(v) => writeln!(w, "\t.long {}", v.to_bits()),
+        StaticInit::DoubleInit(v) => writeln!(w, "\t.quad {}", v.to_bits()),
+        StaticInit::ZeroInit(n) => writeln!(w, "\t.zero {}", n),
+        StaticInit::StringInit(s, null_terminated) => {
+            let escaped = escape_string_for_asm(s);
+            if *null_terminated {
+                writeln!(w, "\t.asciz \"{}\"", escaped)
+            } else {
+                writeln!(w, "\t.ascii \"{}\"", escaped)
+            }
+        }
+        StaticInit::PointerInit(label) => writeln!(w, "\t.quad {}", target.show_label(label)),
+    }
+}
+
+fn emit_static_var(w: &mut dyn Write, sv: &AsmStaticVar, target: &Target) -> std::io::Result<()> {
+    let label = target.show_label(&sv.name);
+    let all_zero = !sv.init_values.is_empty()
+        && sv
+            .init_values
+            .iter()
+            .all(|init| matches!(init, StaticInit::ZeroInit(_)));
+
+    if sv.thread_local && target.os == TargetOs::Linux {
+        if all_zero {
+            writeln!(w, "\t.section .tbss,\"awT\",@nobits")?;
+        } else {
+            writeln!(w, "\t.section .tdata,\"awT\",@progbits")?;
+        }
+    } else if sv.thread_local && target.os == TargetOs::MacOs {
+        return emit_macho_tls_static_var(w, sv, target, all_zero);
+    } else if all_zero && target.os == TargetOs::MacOs {
+        if sv.global {
+            writeln!(w, "\t.globl {}", label)?;
+        }
+        let size: usize = sv.init_values.iter().map(static_init_size).sum();
+        return writeln!(
+            w,
+            "\t.zerofill __DATA,__bss,{},{},{}",
+            label,
+            size,
+            alignment_log2(sv.alignment)
+        );
+    }
+
+    if all_zero {
+        writeln!(w, "\t.bss")?;
+    } else {
+        writeln!(w, "\t.data")?;
+    }
+    if sv.global {
+        writeln!(w, "\t.globl {}", label)?;
+    }
+    writeln!(w, "\t.balign {}", sv.alignment)?;
+    writeln!(w, "{}:", label)?;
+    for init in &sv.init_values {
+        emit_static_init(w, init, target)?;
+    }
+    Ok(())
+}
+
+fn emit_static_constant(
+    w: &mut dyn Write,
+    sc: &AsmStaticConstant,
+    target: &Target,
+) -> std::io::Result<()> {
+    match target.os {
+        TargetOs::Linux => writeln!(w, "\t.section .rodata")?,
+        TargetOs::MacOs => writeln!(w, "\t.section __TEXT,__cstring,cstring_literals")?,
+    }
+    if sc.alignment > 1 {
+        writeln!(w, "\t.balign {}", sc.alignment)?;
+    }
+    writeln!(w, "{}:", target.show_label(&sc.name))?;
+    emit_static_init(w, &sc.init, target)
+}
+
+fn emit_stack_note(w: &mut dyn Write, target: &Target) -> std::io::Result<()> {
+    match target.os {
+        TargetOs::Linux => writeln!(w, "\t.section .note.GNU-stack,\"\",@progbits"),
+        TargetOs::MacOs => Ok(()),
+    }
+}
+
+pub fn emit(assembly_file: &str, program: &AsmProgram, target: &Target) -> std::io::Result<()> {
+    let mut file = std::fs::File::create(assembly_file)?;
+    for item in &program.top_level {
+        match item {
+            AsmTopLevel::Function(function) => emit_function(&mut file, function, target)?,
+            AsmTopLevel::StaticVar(sv) => emit_static_var(&mut file, sv, target)?,
+            AsmTopLevel::StaticConstant(sc) => emit_static_constant(&mut file, sc, target)?,
+        }
+    }
+    emit_stack_note(&mut file, target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn large_stack_offsets_use_materialized_address() -> Result<(), String> {
+        let mut out = Vec::new();
+        let function = AsmFunction {
+            name: "main".to_string(),
+            global: true,
+            instructions: vec![
+                AsmInstr::AllocateStack(100_048),
+                AsmInstr::AArch64SaveLink(100_040),
+                AsmInstr::AArch64RestoreLink(100_040),
+                AsmInstr::DeallocateStack(100_048),
+                AsmInstr::Ret,
+            ],
+        };
+
+        emit_function(&mut out, &function, &Target::aarch64_linux())
+            .map_err(|err| err.to_string())?;
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert!(asm.contains("sub sp, sp, x16"));
+        assert!(asm.contains("add x16, sp, x16"));
+        assert!(asm.contains("str x30, [x16]"));
+        assert!(asm.contains("ldr x30, [x16]"));
+        assert!(asm.contains("add sp, sp, x16"));
+        Ok(())
+    }
+}

@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""Deterministic black-box fuzz smoke runner for rnqcc.
+
+This intentionally avoids external fuzzing tools. It generates small valid C
+programs from a seed and invokes the rnqcc CLI through its public stages.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import random
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+STAGES = ("lex", "parse", "validate", "tacky", "codegen")
+
+
+class ProgramGenerator:
+    def __init__(self, seed: int, case: int) -> None:
+        self.seed = seed
+        self.case = case
+        self.rng = random.Random((seed << 32) ^ case)
+
+    def const(self) -> str:
+        return str(self.rng.randint(-20, 20))
+
+    def expr(self, vars: list[str], depth: int) -> str:
+        if depth <= 0 or self.rng.random() < 0.35:
+            return self.rng.choice(vars + [self.const()])
+
+        op = self.rng.choice(["+", "-", "*", "&", "|", "^", "<", "<=", ">", ">=", "==", "!="])
+        left = self.expr(vars, depth - 1)
+        right = self.expr(vars, depth - 1)
+        return f"({left} {op} {right})"
+
+    def assignment(self, vars: list[str], depth: int) -> str:
+        dst = self.rng.choice(vars)
+        return f"{dst} = {self.expr(vars, depth)};"
+
+    def function(self) -> str:
+        vars = ["x", "y", "z"]
+        lines = [
+            "int helper(int x, int y) {",
+            f"    int z = {self.expr(['x', 'y'], 2)};",
+        ]
+        for _ in range(self.rng.randint(1, 3)):
+            lines.append(f"    {self.assignment(vars, 2)}")
+        lines.extend(
+            [
+                f"    if ({self.expr(vars, 2)}) {{",
+                f"        {self.assignment(vars, 2)}",
+                "    } else {",
+                f"        {self.assignment(vars, 2)}",
+                "    }",
+                f"    return {self.expr(vars, 2)};",
+                "}",
+            ]
+        )
+        return "\n".join(lines)
+
+    def main(self) -> str:
+        vars = ["a", "b", "c", "i"]
+        loop_limit = self.rng.randint(1, 5)
+        lines = [
+            "int main(void) {",
+            f"    int a = {self.const()};",
+            f"    int b = {self.const()};",
+            f"    int c = helper(a, b);",
+            "    int i = 0;",
+            f"    while (i < {loop_limit}) {{",
+            f"        {self.assignment(vars, 2)}",
+            "        i = i + 1;",
+            "    }",
+            f"    if ({self.expr(vars, 2)}) {{",
+            f"        {self.assignment(vars, 2)}",
+            "    } else {",
+            f"        {self.assignment(vars, 2)}",
+            "    }",
+            f"    return {self.expr(vars, 3)};",
+            "}",
+        ]
+        return "\n".join(lines)
+
+    def generate(self) -> str:
+        return "\n\n".join(
+            [
+                f"/* rnqcc fuzz smoke seed={self.seed} case={self.case} */",
+                self.function(),
+                self.main(),
+                "",
+            ]
+        )
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate deterministic small C programs and compile them through rnqcc stages."
+    )
+    parser.add_argument("--seed", type=int, required=True, help="integer seed for generated cases")
+    parser.add_argument("--cases", type=int, default=8, help="number of cases to generate")
+    parser.add_argument(
+        "--rnqcc",
+        default=os.environ.get("RNQCC", "target/debug/rnqcc"),
+        help="path to rnqcc binary, or set RNQCC",
+    )
+    parser.add_argument(
+        "--target",
+        action="append",
+        dest="targets",
+        help="target triple/alias to exercise; repeatable. Defaults to rnqcc --print-targets.",
+    )
+    parser.add_argument(
+        "--work-dir",
+        type=Path,
+        help="directory for generated sources and assembly outputs",
+    )
+    parser.add_argument(
+        "--keep-successes",
+        action="store_true",
+        help="keep generated sources for passing cases",
+    )
+    parser.add_argument(
+        "--emit-only",
+        action="store_true",
+        help="only write generated C inputs; do not run rnqcc",
+    )
+    return parser.parse_args(argv)
+
+
+def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, check=False)
+
+
+def discover_targets(rnqcc: str, cwd: Path) -> list[str]:
+    result = run([rnqcc, "--print-targets"], cwd)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "could not discover targets with --print-targets\n"
+            + result.stderr.strip()
+        )
+    targets = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not targets:
+        raise RuntimeError("rnqcc --print-targets returned no targets")
+    return targets
+
+
+def compile_case(rnqcc: str, src: Path, targets: list[str], cwd: Path) -> None:
+    for stage in STAGES:
+        if stage == "codegen":
+            for target in targets:
+                check_run([rnqcc, "--target", target, "--stage", stage, str(src)], cwd)
+        else:
+            check_run([rnqcc, "--stage", stage, str(src)], cwd)
+
+    for target in targets:
+        asm = src.with_suffix(f".{target}.s")
+        check_run([rnqcc, "--target", target, "-S", "-o", str(asm), str(src)], cwd)
+
+
+def check_run(cmd: list[str], cwd: Path) -> None:
+    result = run(cmd, cwd)
+    if result.returncode == 0:
+        return
+
+    rendered = " ".join(cmd)
+    message = [f"command failed: {rendered}"]
+    if result.stderr.strip():
+        message.append(result.stderr.rstrip())
+    if result.stdout.strip():
+        message.append(result.stdout.rstrip())
+    raise RuntimeError("\n".join(message))
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    repo = Path.cwd()
+    work_dir = args.work_dir or Path(tempfile.gettempdir()) / f"rnqcc-fuzz-smoke-{args.seed}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    rnqcc = args.rnqcc
+    targets = args.targets or ([] if args.emit_only else discover_targets(rnqcc, repo))
+
+    for case in range(args.cases):
+        src = work_dir / f"seed_{args.seed}_case_{case}.i"
+        src.write_text(ProgramGenerator(args.seed, case).generate(), encoding="utf-8")
+
+        try:
+            if not args.emit_only:
+                compile_case(rnqcc, src, targets, repo)
+        except Exception as exc:
+            print(f"FAIL seed={args.seed} case={case} src={src}", file=sys.stderr)
+            print(exc, file=sys.stderr)
+            return 1
+
+        if not args.keep_successes and not args.emit_only:
+            src.unlink(missing_ok=True)
+            for asm in work_dir.glob(f"{src.stem}.*.s"):
+                asm.unlink(missing_ok=True)
+
+    if not args.keep_successes and not args.emit_only:
+        try:
+            work_dir.rmdir()
+        except OSError:
+            pass
+
+    print(f"ok seed={args.seed} cases={args.cases} targets={','.join(targets) if targets else 'none'}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

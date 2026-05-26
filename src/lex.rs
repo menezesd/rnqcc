@@ -1,5 +1,25 @@
 use crate::types::Token;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceLocation {
+    pub line: usize,
+    pub column: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceSpan {
+    pub start: SourceLocation,
+    pub end: SourceLocation,
+    pub start_offset: usize,
+    pub end_offset: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpannedToken {
+    pub token: Token,
+    pub span: SourceSpan,
+}
+
 pub struct Lexer {
     chars: Vec<char>,
     pos: usize,
@@ -29,7 +49,7 @@ impl Lexer {
         c
     }
 
-    fn skip_whitespace_and_comments(&mut self) {
+    fn skip_whitespace_and_comments(&mut self) -> Result<(), String> {
         loop {
             // Skip whitespace
             while let Some(c) = self.peek() {
@@ -61,7 +81,7 @@ impl Lexer {
                             self.advance();
                             break;
                         }
-                        None => panic!("Unterminated block comment"),
+                        None => return Err("unterminated block comment".to_string()),
                         _ => {}
                     }
                 }
@@ -69,84 +89,256 @@ impl Lexer {
             }
             break;
         }
+        Ok(())
     }
 
-    fn read_number(&mut self) -> Token {
+    fn parse_aligned_attribute(text: &str) -> Option<String> {
+        let chars: Vec<char> = text.chars().collect();
+        let mut pos = 0;
+        while pos < chars.len() {
+            if chars[pos].is_ascii_alphabetic() || chars[pos] == '_' {
+                let start = pos;
+                pos += 1;
+                while pos < chars.len() && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_')
+                {
+                    pos += 1;
+                }
+                let name: String = chars[start..pos].iter().collect();
+                if name != "aligned" && name != "align" {
+                    continue;
+                }
+                while pos < chars.len() && chars[pos].is_whitespace() {
+                    pos += 1;
+                }
+                if chars.get(pos) != Some(&'(') {
+                    continue;
+                }
+                pos += 1;
+                let mut depth = 1;
+                let mut expression = String::new();
+                while pos < chars.len() {
+                    match chars[pos] {
+                        '(' => {
+                            depth += 1;
+                            expression.push(chars[pos]);
+                        }
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                            expression.push(chars[pos]);
+                        }
+                        c => expression.push(c),
+                    }
+                    pos += 1;
+                }
+                let expression = expression.trim();
+                if depth == 0 && !expression.is_empty() {
+                    return Some(expression.to_string());
+                }
+            } else {
+                pos += 1;
+            }
+        }
+        None
+    }
+
+    fn contains_noreturn_attribute(text: &str) -> bool {
+        let chars: Vec<char> = text.chars().collect();
+        let mut pos = 0;
+        while pos < chars.len() {
+            if chars[pos].is_ascii_alphabetic() || chars[pos] == '_' {
+                let start = pos;
+                pos += 1;
+                while pos < chars.len() && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_')
+                {
+                    pos += 1;
+                }
+                let name: String = chars[start..pos].iter().collect();
+                if matches!(name.as_str(), "noreturn" | "__noreturn__") {
+                    return true;
+                }
+            } else {
+                pos += 1;
+            }
+        }
+        false
+    }
+
+    fn read_number(&mut self) -> Result<Token, String> {
         let start = self.pos;
 
         // Handle leading '.' for floats like .5
         let mut is_float = false;
         if self.peek() == Some('.') {
-            is_float = true;
             self.advance();
             while let Some(c) = self.peek() {
-                if c.is_ascii_digit() { self.advance(); } else { break; }
+                if c.is_ascii_digit() {
+                    self.advance();
+                } else {
+                    break;
+                }
             }
             if matches!(self.peek(), Some('e' | 'E')) {
                 self.advance();
-                if matches!(self.peek(), Some('+' | '-')) { self.advance(); }
+                if matches!(self.peek(), Some('+' | '-')) {
+                    self.advance();
+                }
                 while let Some(c) = self.peek() {
-                    if c.is_ascii_digit() { self.advance(); } else { break; }
+                    if c.is_ascii_digit() {
+                        self.advance();
+                    } else {
+                        break;
+                    }
                 }
             }
             let num_str: String = self.chars[start..self.pos].iter().collect();
-            let value = num_str.parse::<f64>().unwrap();
-            if matches!(self.peek(), Some('f' | 'F' | 'l' | 'L')) { self.advance(); }
-            return Token::DoubleLiteral(value);
+            let value = num_str
+                .parse::<f64>()
+                .map_err(|_| format!("invalid float literal: {}", num_str))?;
+            if matches!(self.peek(), Some('f' | 'F' | 'l' | 'L')) {
+                self.advance();
+            }
+            return Ok(Token::DoubleLiteral(value));
         }
 
-        while let Some(c) = self.peek() {
-            if c.is_ascii_digit() {
-                self.advance();
-            } else {
-                break;
+        let mut radix = 10;
+        let mut invalid_octal_digit = false;
+        if self.peek() == Some('0') && matches!(self.peek_ahead(1), Some('x' | 'X')) {
+            self.advance();
+            self.advance();
+            radix = 16;
+            let digit_start = self.pos;
+            while let Some(c) = self.peek() {
+                if c.is_ascii_hexdigit() {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            if self.pos == digit_start {
+                return Err(format!(
+                    "invalid hexadecimal integer literal at position {}",
+                    start
+                ));
+            }
+        } else if self.peek() == Some('0') && matches!(self.peek_ahead(1), Some('b' | 'B')) {
+            self.advance();
+            self.advance();
+            radix = 2;
+            let digit_start = self.pos;
+            while let Some(c) = self.peek() {
+                if matches!(c, '0' | '1') {
+                    self.advance();
+                } else if c.is_ascii_digit() {
+                    return Err(format!(
+                        "invalid binary integer literal at position {}",
+                        start
+                    ));
+                } else {
+                    break;
+                }
+            }
+            if self.pos == digit_start {
+                return Err(format!(
+                    "invalid binary integer literal at position {}",
+                    start
+                ));
+            }
+        } else if self.peek() == Some('0') {
+            self.advance();
+            radix = 8;
+            while let Some(c) = self.peek() {
+                if c.is_ascii_digit() {
+                    if !('0'..='7').contains(&c) {
+                        invalid_octal_digit = true;
+                    }
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        } else {
+            while let Some(c) = self.peek() {
+                if c.is_ascii_digit() {
+                    self.advance();
+                } else {
+                    break;
+                }
             }
         }
 
-        // Check if this is a floating-point number
-        if self.peek() == Some('.') {
+        // Check if this is a floating-point number. Leading-zero floats are
+        // decimal floats, not octal integers followed by a separate suffix.
+        if radix == 8 && matches!(self.peek(), Some('.' | 'e' | 'E')) {
+            radix = 10;
+        }
+        if radix == 10 && self.peek() == Some('.') {
             is_float = true;
             self.advance(); // consume '.'
             while let Some(c) = self.peek() {
-                if c.is_ascii_digit() { self.advance(); } else { break; }
+                if c.is_ascii_digit() {
+                    self.advance();
+                } else {
+                    break;
+                }
             }
         }
-        if matches!(self.peek(), Some('e' | 'E')) {
+        if radix == 10 && matches!(self.peek(), Some('e' | 'E')) {
             is_float = true;
             self.advance(); // consume 'e'/'E'
             if matches!(self.peek(), Some('+' | '-')) {
                 self.advance(); // consume sign
             }
             while let Some(c) = self.peek() {
-                if c.is_ascii_digit() { self.advance(); } else { break; }
+                if c.is_ascii_digit() {
+                    self.advance();
+                } else {
+                    break;
+                }
             }
         }
 
         if is_float {
             let num_str: String = self.chars[start..self.pos].iter().collect();
-            let value = num_str.parse::<f64>()
-                .unwrap_or_else(|_| panic!("Invalid float literal: {}", num_str));
+            let value = num_str
+                .parse::<f64>()
+                .map_err(|_| format!("invalid float literal: {}", num_str))?;
             // Consume optional f/F/l/L suffix (all treated as double)
             if matches!(self.peek(), Some('f' | 'F' | 'l' | 'L')) {
                 self.advance();
             }
             if let Some(c) = self.peek() {
                 if c.is_ascii_alphabetic() || c == '_' {
-                    panic!("Invalid float literal suffix at position {}", self.pos);
+                    return Err(format!(
+                        "invalid float literal suffix at position {}",
+                        self.pos
+                    ));
                 }
             }
-            return Token::DoubleLiteral(value);
+            return Ok(Token::DoubleLiteral(value));
         }
 
         let num_end = self.pos;
+        if radix == 8 && invalid_octal_digit {
+            return Err(format!(
+                "invalid octal integer literal at position {}",
+                start
+            ));
+        }
 
-        // Check for suffixes: u/U, l/L, ul/UL, lu/LU (case insensitive)
+        // Check for suffixes: u/U, l/L, ll/LL, ul/UL, ull/ULL, lu/LU, llu/LLU.
+        // rnqcc models both long and long long as the same 64-bit type.
         let mut is_long = false;
         let mut is_unsigned = false;
-        for _ in 0..2 {
+        loop {
             match self.peek() {
                 Some('L' | 'l') if !is_long => {
                     self.advance();
+                    if matches!(self.peek(), Some('L' | 'l')) {
+                        self.advance();
+                    }
                     is_long = true;
                 }
                 Some('U' | 'u') if !is_unsigned => {
@@ -160,81 +352,119 @@ impl Lexer {
         // Check that the number is not immediately followed by an identifier char
         if let Some(c) = self.peek() {
             if c.is_ascii_alphabetic() || c == '_' {
-                panic!(
-                    "Invalid number literal at position {}: digit followed by '{}'",
+                return Err(format!(
+                    "invalid number literal at position {}: digit followed by '{}'",
                     start, c
-                );
+                ));
             }
         }
         let num_str: String = self.chars[start..num_end].iter().collect();
         // Parse as u64 first to handle large unsigned constants, then transmute to i64
-        let value = if is_unsigned {
-            num_str.parse::<u64>()
-                .unwrap_or_else(|_| panic!("Invalid integer literal: {}", num_str))
-                as i64
+        let digits = if radix == 16 || radix == 2 {
+            &num_str[2..]
         } else {
-            num_str.parse::<i64>()
-                .or_else(|_| num_str.parse::<u64>().map(|v| v as i64))
-                .unwrap_or_else(|_| panic!("Invalid integer literal: {}", num_str))
+            num_str.as_str()
         };
-        match (is_unsigned, is_long) {
+        // Parse as u64 first to handle large unsigned constants, then transmute to i64.
+        let value = if is_unsigned {
+            u64::from_str_radix(digits, radix)
+                .map_err(|_| format!("invalid integer literal: {}", num_str))? as i64
+        } else {
+            i64::from_str_radix(digits, radix)
+                .or_else(|_| u64::from_str_radix(digits, radix).map(|v| v as i64))
+                .map_err(|_| format!("invalid integer literal: {}", num_str))?
+        };
+        Ok(match (is_unsigned, is_long) {
             (true, true) => Token::ULongLiteral(value),
             (true, false) => Token::UIntLiteral(value),
             (false, true) => Token::LongLiteral(value),
             (false, false) => Token::IntLiteral(value),
-        }
+        })
     }
 
-    fn unescape_char(&mut self) -> char {
+    fn unescape_char(&mut self) -> Result<char, String> {
         match self.advance() {
             Some('\\') => match self.advance() {
-                Some('n') => '\n',
-                Some('t') => '\t',
-                Some('r') => '\r',
-                Some('\\') => '\\',
-                Some('\'') => '\'',
-                Some('"') => '"',
-                Some('?') => '?',
-                Some('a') => '\x07',
-                Some('b') => '\x08',
-                Some('f') => '\x0C',
-                Some('v') => '\x0B',
-                Some('0') => '\0',
-                Some(c) => panic!("Unknown escape sequence: \\{}", c),
-                None => panic!("Unexpected end of input in escape sequence"),
+                Some('x') => {
+                    let mut value = 0u32;
+                    let mut digits = 0usize;
+                    while let Some(c) = self.peek() {
+                        let Some(digit) = c.to_digit(16) else {
+                            break;
+                        };
+                        self.advance();
+                        value = (value << 4) | digit;
+                        digits += 1;
+                    }
+                    if digits == 0 {
+                        return Err("expected hexadecimal digits after \\x escape".to_string());
+                    }
+                    char::from_u32(value & 0xff)
+                        .ok_or_else(|| "invalid hexadecimal escape value".to_string())
+                }
+                Some(c @ '0'..='7') => {
+                    let mut value = c.to_digit(8).unwrap_or(0);
+                    for _ in 0..2 {
+                        match self.peek() {
+                            Some(next @ '0'..='7') => {
+                                self.advance();
+                                value = (value << 3) | next.to_digit(8).unwrap_or(0);
+                            }
+                            _ => break,
+                        }
+                    }
+                    char::from_u32(value & 0xff)
+                        .ok_or_else(|| "invalid octal escape value".to_string())
+                }
+                Some('n') => Ok('\n'),
+                Some('t') => Ok('\t'),
+                Some('r') => Ok('\r'),
+                Some('\\') => Ok('\\'),
+                Some('\'') => Ok('\''),
+                Some('"') => Ok('"'),
+                Some('?') => Ok('?'),
+                Some('a') => Ok('\x07'),
+                Some('b') => Ok('\x08'),
+                Some('f') => Ok('\x0C'),
+                Some('v') => Ok('\x0B'),
+                Some(c) => Err(format!("unknown escape sequence: \\{}", c)),
+                None => Err("unexpected end of input in escape sequence".to_string()),
             },
-            Some(c) => c,
-            None => panic!("Unexpected end of input in character/string literal"),
+            Some(c) => Ok(c),
+            None => Err("unexpected end of input in character/string literal".to_string()),
         }
     }
 
-    fn read_char_constant(&mut self) -> Token {
+    fn read_char_constant(&mut self) -> Result<Token, String> {
         // Opening ' already consumed
-        let c = self.unescape_char();
+        let c = self.unescape_char()?;
         match self.advance() {
             Some('\'') => {}
-            _ => panic!("Expected closing single quote"),
+            _ => return Err("expected closing single quote".to_string()),
         }
-        Token::CharLiteral(c as i64)
+        Ok(Token::CharLiteral(c as i64))
     }
 
-    fn read_string_literal(&mut self) -> Token {
+    fn read_string_literal(&mut self) -> Result<Token, String> {
         // Opening " already consumed
         let mut s = String::new();
         loop {
             match self.peek() {
-                Some('"') => { self.advance(); break; }
-                Some('\n') | None => panic!("Unterminated string literal"),
+                Some('"') => {
+                    self.advance();
+                    break;
+                }
+                Some('\n') | None => return Err("unterminated string literal".to_string()),
                 _ => {
-                    let c = self.unescape_char();
+                    let c = self.unescape_char()?;
                     s.push(c);
                 }
             }
         }
-        Token::StringLiteral(s)
+        Ok(Token::StringLiteral(s))
     }
 
-    fn read_identifier_or_keyword(&mut self) -> Token {
+    fn read_identifier_or_keyword(&mut self) -> Result<Token, String> {
         let start = self.pos;
         while let Some(c) = self.peek() {
             if c.is_ascii_alphanumeric() || c == '_' {
@@ -244,7 +474,7 @@ impl Lexer {
             }
         }
         let word: String = self.chars[start..self.pos].iter().collect();
-        match word.as_str() {
+        let token = match word.as_str() {
             "int" => Token::KWInt,
             "long" => Token::KWLong,
             "unsigned" => Token::KWUnsigned,
@@ -273,6 +503,9 @@ impl Lexer {
             "inline" => Token::KWInline,
             "__inline" => Token::KWInline,
             "__inline__" => Token::KWInline,
+            "_Atomic" => Token::KWAtomic,
+            "_Thread_local" | "thread_local" | "__thread" => Token::KWThreadLocal,
+            "_Static_assert" | "static_assert" => Token::KWStaticAssert,
             "register" => Token::KWRegister,
             "_Bool" => Token::KWBool,
             "restrict" => Token::KWRestrict,
@@ -280,32 +513,94 @@ impl Lexer {
             "__restrict__" => Token::KWRestrict,
             "short" => Token::KWShort,
             "_Noreturn" => Token::KWNoreturn,
-            "__extension__" | "__asm__" | "__asm" | "asm" |
-            "_Nullable" | "_Nonnull" | "_Null_unspecified" |
-            "__signed" | "__signed__" => Token::KWNoreturn, // gcc/clang extensions — skip
-            "__attribute__" | "__attribute" => {
-                // Skip __attribute__((...)) entirely — consume matching parens
-                self.skip_whitespace_and_comments();
+            "_Generic" => Token::KWGeneric,
+            "__auto_type" => Token::KWAutoType,
+            "__extension__" | "_Nullable" | "_Nonnull" | "_Null_unspecified" | "__signed"
+            | "__signed__" => Token::Skip, // gcc/clang extensions — skip
+            "__asm__" | "__asm" | "asm" => {
+                self.skip_whitespace_and_comments()?;
+                loop {
+                    let save = self.pos;
+                    while self
+                        .peek()
+                        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    {
+                        self.advance();
+                    }
+                    let word: String = self.chars[save..self.pos].iter().collect();
+                    if !matches!(
+                        word.as_str(),
+                        "volatile" | "__volatile__" | "goto" | "inline"
+                    ) {
+                        self.pos = save;
+                        break;
+                    }
+                    self.skip_whitespace_and_comments()?;
+                }
                 if self.peek() == Some('(') {
                     let mut depth = 0;
                     loop {
                         match self.advance() {
                             Some('(') => depth += 1,
-                            Some(')') => { depth -= 1; if depth == 0 { break; } }
+                            Some(')') => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
                             None => break,
                             _ => {}
                         }
                     }
                 }
+                Token::Skip
+            }
+            "__attribute__" | "__attribute" | "__declspec" => {
+                // Skip common attribute annotations entirely — consume matching parens.
+                self.skip_whitespace_and_comments()?;
+                let attr_start = self.pos;
+                if self.peek() == Some('(') {
+                    let mut depth = 0;
+                    loop {
+                        match self.advance() {
+                            Some('(') => depth += 1,
+                            Some(')') => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            None => break,
+                            _ => {}
+                        }
+                    }
+                }
+                let text: String = self.chars[attr_start..self.pos].iter().collect();
+                let alignment = Self::parse_aligned_attribute(&text);
+                let noreturn = Self::contains_noreturn_attribute(&text);
+                if let Some(alignment) = alignment {
+                    return Ok(if noreturn {
+                        Token::AttributeAlignedNoreturn(alignment)
+                    } else {
+                        Token::AttributeAligned(alignment)
+                    });
+                }
+                if noreturn {
+                    return Ok(Token::AttributeNoreturn);
+                }
                 // Return dummy token that lex_all will filter out
-                return Token::KWNoreturn; // harmless no-op token
+                Token::Skip // harmless no-op token
             }
             "char" => Token::KWChar,
             "sizeof" => Token::KWSizeOf,
+            "typeof" | "__typeof" | "__typeof__" => Token::KWTypeOf,
+            "_Alignof" | "alignof" | "__alignof" | "__alignof__" => Token::KWAlignOf,
+            "_Alignas" | "alignas" => Token::KWAlignAs,
             "struct" => Token::KWStruct,
             "union" => Token::KWUnion,
             _ => Token::Identifier(word),
-        }
+        };
+        Ok(token)
     }
 
     /// Try to match a second character; if it matches, consume it and return `yes`,
@@ -319,11 +614,35 @@ impl Lexer {
         }
     }
 
-    pub fn lex_all(&mut self) -> Vec<Token> {
+    fn location_for_offset(&self, offset: usize) -> SourceLocation {
+        let mut line = 1;
+        let mut column = 1;
+        for ch in self.chars.iter().take(offset) {
+            if *ch == '\n' {
+                line += 1;
+                column = 1;
+            } else {
+                column += 1;
+            }
+        }
+        SourceLocation { line, column }
+    }
+
+    fn span_for_offsets(&self, start_offset: usize, end_offset: usize) -> SourceSpan {
+        SourceSpan {
+            start: self.location_for_offset(start_offset),
+            end: self.location_for_offset(end_offset),
+            start_offset,
+            end_offset,
+        }
+    }
+
+    pub fn lex_all_spanned(&mut self) -> Result<Vec<SpannedToken>, String> {
         let mut tokens = Vec::new();
 
         loop {
-            self.skip_whitespace_and_comments();
+            self.skip_whitespace_and_comments()?;
+            let start = self.pos;
             let c = match self.advance() {
                 Some(c) => c,
                 None => break,
@@ -336,6 +655,29 @@ impl Lexer {
                 '}' => Token::CloseBrace,
                 ';' => Token::Semicolon,
                 ',' => Token::Comma,
+                '[' if self.peek() == Some('[') => {
+                    self.advance();
+                    let mut depth = 1usize;
+                    let attr_start = self.pos;
+                    while let Some(ch) = self.advance() {
+                        if ch == '[' && self.peek() == Some('[') {
+                            self.advance();
+                            depth += 1;
+                        } else if ch == ']' && self.peek() == Some(']') {
+                            self.advance();
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                    }
+                    let text: String = self.chars[attr_start..self.pos].iter().collect();
+                    if Self::contains_noreturn_attribute(&text) {
+                        Token::AttributeNoreturn
+                    } else {
+                        Token::Skip
+                    }
+                }
                 '[' => Token::OpenBracket,
                 ']' => Token::CloseBracket,
                 '~' => Token::Tilde,
@@ -421,13 +763,26 @@ impl Lexer {
                 '=' => self.two_char('=', Token::EqualEqual, Token::Assign),
                 '!' => self.two_char('=', Token::NotEqual, Token::Bang),
 
-                '\'' => self.read_char_constant(),
-                '"' => self.read_string_literal(),
+                '\'' => self.read_char_constant()?,
+                '"' => self.read_string_literal()?,
+                'L' | 'u' | 'U' if self.peek() == Some('\'') => {
+                    self.advance();
+                    self.read_char_constant()?
+                }
+                'L' | 'u' | 'U' if self.peek() == Some('"') => {
+                    self.advance();
+                    self.read_string_literal()?
+                }
+                'u' if self.peek() == Some('8') && self.peek_ahead(1) == Some('"') => {
+                    self.advance();
+                    self.advance();
+                    self.read_string_literal()?
+                }
 
                 // Float literal starting with '.' (e.g., .5)
-                '.' if self.peek().map_or(false, |c| c.is_ascii_digit()) => {
+                '.' if self.peek().is_some_and(|c| c.is_ascii_digit()) => {
                     self.pos -= 1; // unget the '.'
-                    self.read_number()
+                    self.read_number()?
                 }
                 '.' => {
                     if self.peek() == Some('.') {
@@ -436,7 +791,7 @@ impl Lexer {
                             self.advance(); // consume third .
                             Token::Ellipsis
                         } else {
-                            panic!("Expected '...' (three dots)");
+                            return Err("expected '...' (three dots)".to_string());
                         }
                     } else {
                         Token::Dot
@@ -444,27 +799,144 @@ impl Lexer {
                 }
                 _ if c.is_ascii_digit() => {
                     self.pos -= 1; // unget
-                    self.read_number()
+                    self.read_number()?
                 }
                 _ if c.is_ascii_alphabetic() || c == '_' => {
                     self.pos -= 1; // unget
-                    self.read_identifier_or_keyword()
+                    self.read_identifier_or_keyword()?
                 }
 
-                _ => panic!("Unexpected character '{}' at position {}", c, self.pos - 1),
+                _ => {
+                    return Err(format!(
+                        "unexpected character '{}' at position {}",
+                        c,
+                        self.pos - 1
+                    ));
+                }
             };
 
-            // Filter out KWNoreturn used as skip token for __extension__, __asm__, etc.
-            if tok != Token::KWNoreturn {
-                tokens.push(tok);
+            // Filter out ignored annotations and extensions.
+            if tok != Token::Skip {
+                tokens.push(SpannedToken {
+                    token: tok,
+                    span: self.span_for_offsets(start, self.pos),
+                });
             }
         }
 
-        tokens
+        Ok(tokens)
+    }
+
+    #[allow(dead_code)]
+    pub fn lex_all(&mut self) -> Result<Vec<Token>, String> {
+        Ok(self
+            .lex_all_spanned()?
+            .into_iter()
+            .map(|spanned| spanned.token)
+            .collect())
     }
 }
 
-pub fn lex(input: &str) -> Vec<Token> {
+#[allow(dead_code)]
+pub fn lex(input: &str) -> Result<Vec<Token>, String> {
     let mut lexer = Lexer::new(input);
     lexer.lex_all()
+}
+
+pub fn lex_spanned(input: &str) -> Result<Vec<SpannedToken>, String> {
+    let mut lexer = Lexer::new(input);
+    lexer.lex_all_spanned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn require_err<T>(result: Result<T, String>, context: &str) -> Result<String, String> {
+        match result {
+            Ok(_) => Err(format!("{context} unexpectedly succeeded")),
+            Err(err) => Ok(err),
+        }
+    }
+
+    #[test]
+    fn reports_unterminated_block_comment() -> Result<(), String> {
+        let err = require_err(lex("int main(void) { /* nope "), "lexing should fail")?;
+        assert!(err.contains("unterminated block comment"));
+        Ok(())
+    }
+
+    #[test]
+    fn reports_invalid_number_suffix() -> Result<(), String> {
+        let err = require_err(lex("int x = 123abc;"), "lexing should fail")?;
+        assert!(err.contains("invalid number literal"));
+        Ok(())
+    }
+
+    #[test]
+    fn lexes_hexadecimal_octal_and_binary_integer_literals() -> Result<(), String> {
+        let tokens = lex("int x = 0x2aU; int y = 052L; int z = 0b101010;")?;
+        assert!(tokens.contains(&Token::UIntLiteral(42)));
+        assert!(tokens.contains(&Token::LongLiteral(42)));
+        assert!(tokens.contains(&Token::IntLiteral(42)));
+        Ok(())
+    }
+
+    #[test]
+    fn lexes_long_long_integer_suffixes_as_long() -> Result<(), String> {
+        let tokens = lex("long x = 42LL; unsigned long y = 42ULL; long z = 42llu;")?;
+        assert!(tokens.contains(&Token::LongLiteral(42)));
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|tok| matches!(tok, Token::ULongLiteral(42)))
+                .count(),
+            2
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lexes_leading_zero_float_literals_as_decimal_floats() -> Result<(), String> {
+        let tokens = lex("double x = 0.0; double y = 09.5;")?;
+        assert!(tokens.contains(&Token::DoubleLiteral(0.0)));
+        assert!(tokens.contains(&Token::DoubleLiteral(9.5)));
+        Ok(())
+    }
+
+    #[test]
+    fn lexes_hex_and_octal_character_escapes() -> Result<(), String> {
+        let tokens = lex("int x = '\\x41'; int y = '\\101'; int z = '\\377';")?;
+        assert!(tokens.contains(&Token::CharLiteral(65)));
+        assert!(tokens.contains(&Token::CharLiteral(255)));
+        Ok(())
+    }
+
+    #[test]
+    fn reports_missing_hex_escape_digits() -> Result<(), String> {
+        let err = require_err(lex("char *s = \"\\x\";"), "lexing should fail")?;
+        assert!(err.contains("expected hexadecimal digits"));
+        Ok(())
+    }
+
+    #[test]
+    fn reports_invalid_octal_integer_literal() -> Result<(), String> {
+        let err = require_err(lex("int x = 09;"), "lexing should fail")?;
+        assert!(err.contains("invalid octal integer literal"));
+        Ok(())
+    }
+
+    #[test]
+    fn reports_invalid_binary_integer_literal() -> Result<(), String> {
+        let err = require_err(lex("int x = 0b102;"), "lexing should fail")?;
+        assert!(err.contains("invalid binary integer literal"));
+        Ok(())
+    }
+
+    #[test]
+    fn reports_unterminated_string_literal() -> Result<(), String> {
+        let err = require_err(lex("char *s = \"unterminated;"), "lexing should fail")?;
+        assert!(err.contains("unterminated string literal"));
+        Ok(())
+    }
 }

@@ -1,0 +1,16 @@
+double fabs(double);
+double floor(double);
+double ceil(double);
+double trunc(double);
+double round(double);
+double sqrt(double);
+double pow(double, double);
+double sin(double);
+double cos(double);
+double tan(double);
+double exp(double);
+double log(double);
+float fabsf(float);
+float sqrtf(float);
+long double fabsl(long double);
+long double sqrtl(long double);

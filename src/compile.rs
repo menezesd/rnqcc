@@ -1,50 +1,454 @@
-use crate::codegen;
-use crate::emit;
+use crate::backend;
+use crate::diagnostic::Diagnostic;
 use crate::lex;
 use crate::optimize;
 use crate::parse;
 use crate::resolve;
 use crate::tacky;
 use crate::types::*;
+use std::collections::HashSet;
 
-pub fn compile(stage: &Stage, src_file: &str, platform: &Platform, opt_flags: &optimize::OptimizationFlags, no_coalescing: bool) {
-    // Read source file
-    let source = std::fs::read_to_string(src_file)
-        .unwrap_or_else(|_| panic!("Could not read file: {}", src_file));
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DumpOptions {
+    pub ast: bool,
+    pub tacky_pre_opt: bool,
+    pub tacky: bool,
+    pub asm_ir: bool,
+    pub source_comments: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct WarningOptions {
+    pub enabled: bool,
+    pub unreachable: bool,
+    pub missing_return: bool,
+    pub error: bool,
+}
+
+impl Default for WarningOptions {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            unreachable: true,
+            missing_return: true,
+            error: false,
+        }
+    }
+}
+
+impl WarningOptions {
+    fn allows(self, warning: &crate::diagnostic::Warning) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        match warning.kind {
+            crate::diagnostic::WarningKind::UnreachableStatement { .. } => self.unreachable,
+            crate::diagnostic::WarningKind::MissingReturn { .. } => self.missing_return,
+        }
+    }
+}
+
+fn val_is_assignable(val: &TackyVal) -> bool {
+    matches!(val, TackyVal::Var(_))
+}
+
+pub fn validate_tacky_program(program: &TackyProgram) -> Result<(), String> {
+    for item in &program.top_level {
+        let TackyTopLevel::Function(function) = item else {
+            continue;
+        };
+        let labels: HashSet<&str> = function
+            .body
+            .iter()
+            .filter_map(|instr| match instr {
+                TackyInstr::Label(label) => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        for instr in &function.body {
+            match instr {
+                TackyInstr::Unary { dst, .. }
+                | TackyInstr::Binary { dst, .. }
+                | TackyInstr::Copy { dst, .. }
+                | TackyInstr::SignExtend { dst, .. }
+                | TackyInstr::ZeroExtend { dst, .. }
+                | TackyInstr::Truncate { dst, .. }
+                | TackyInstr::IntToDouble { dst, .. }
+                | TackyInstr::IntToFloat { dst, .. }
+                | TackyInstr::DoubleToInt { dst, .. }
+                | TackyInstr::FloatToInt { dst, .. }
+                | TackyInstr::UIntToDouble { dst, .. }
+                | TackyInstr::UIntToFloat { dst, .. }
+                | TackyInstr::DoubleToUInt { dst, .. }
+                | TackyInstr::FloatToUInt { dst, .. }
+                | TackyInstr::FloatToDouble { dst, .. }
+                | TackyInstr::DoubleToFloat { dst, .. }
+                | TackyInstr::GetAddress { dst, .. }
+                | TackyInstr::Load { dst, .. }
+                | TackyInstr::CopyFromOffset { dst, .. }
+                | TackyInstr::AddPtr { dst, .. } => {
+                    if !val_is_assignable(dst) {
+                        return Err(format!(
+                            "function '{}' has non-assignable TACKY destination in {:?}",
+                            function.name, instr
+                        ));
+                    }
+                    if let TackyInstr::CopyFromOffset { offset, .. } = instr {
+                        if *offset < 0 {
+                            return Err(format!(
+                                "function '{}' has negative aggregate offset in {:?}",
+                                function.name, instr
+                            ));
+                        }
+                    }
+                    if let TackyInstr::AddPtr { scale, .. } = instr {
+                        if *scale <= 0 {
+                            return Err(format!(
+                                "function '{}' has non-positive pointer scale {}",
+                                function.name, scale
+                            ));
+                        }
+                    }
+                }
+                TackyInstr::Jump(label)
+                | TackyInstr::JumpIfZero(_, label)
+                | TackyInstr::JumpIfNotZero(_, label)
+                    if !labels.contains(label.as_str()) =>
+                {
+                    return Err(format!(
+                        "function '{}' jumps to undefined TACKY label '{}'",
+                        function.name, label
+                    ));
+                }
+                TackyInstr::FunCall {
+                    args,
+                    dst,
+                    stack_arg_indices,
+                    struct_arg_groups,
+                    fixed_flat_arg_count,
+                    ..
+                } => {
+                    if !val_is_assignable(dst) {
+                        return Err(format!(
+                            "function '{}' has non-assignable call destination",
+                            function.name
+                        ));
+                    }
+                    if *fixed_flat_arg_count > args.len() {
+                        return Err(format!(
+                            "function '{}' call fixed arg count {} exceeds flattened arg count {}",
+                            function.name,
+                            fixed_flat_arg_count,
+                            args.len()
+                        ));
+                    }
+                    if let Some(index) =
+                        stack_arg_indices.iter().find(|index| **index >= args.len())
+                    {
+                        return Err(format!(
+                            "function '{}' call stack arg index {} exceeds flattened arg count {}",
+                            function.name,
+                            index,
+                            args.len()
+                        ));
+                    }
+                    for (start, count, classes) in struct_arg_groups {
+                        if *start + *count > args.len() || classes.len() != *count {
+                            return Err(format!(
+                                "function '{}' has invalid struct argument group {:?}",
+                                function.name,
+                                (start, count, classes)
+                            ));
+                        }
+                    }
+                }
+                TackyInstr::CopyToOffset { offset, .. } if *offset < 0 => {
+                    return Err(format!(
+                        "function '{}' has negative aggregate offset in {:?}",
+                        function.name, instr
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+fn asm_operand_has_pseudo(operand: &AsmOperand) -> bool {
+    matches!(operand, AsmOperand::Pseudo(_) | AsmOperand::PseudoMem(_, _))
+}
+
+pub fn validate_asm_program(program: &AsmProgram) -> Result<(), String> {
+    for item in &program.top_level {
+        let AsmTopLevel::Function(function) = item else {
+            continue;
+        };
+        let labels: HashSet<&str> = function
+            .instructions
+            .iter()
+            .filter_map(|instr| match instr {
+                AsmInstr::Label(label) => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        for instr in &function.instructions {
+            match instr {
+                AsmInstr::Jmp(label) | AsmInstr::JmpCC(_, label)
+                    if !labels.contains(label.as_str()) =>
+                {
+                    return Err(format!(
+                        "function '{}' jumps to undefined assembly label '{}'",
+                        function.name, label
+                    ));
+                }
+                AsmInstr::Mov(_, src, dst)
+                | AsmInstr::Movsx(_, _, src, dst)
+                | AsmInstr::MovZeroExtend(_, _, src, dst)
+                | AsmInstr::Binary(_, _, src, dst)
+                | AsmInstr::Cmp(_, src, dst)
+                | AsmInstr::Cvtsi2sd(_, src, dst)
+                | AsmInstr::Cvtsi2ss(_, src, dst)
+                | AsmInstr::Cvttsd2si(_, src, dst)
+                | AsmInstr::Cvttss2si(_, src, dst)
+                | AsmInstr::AArch64UIntToDouble(_, src, dst)
+                | AsmInstr::AArch64UIntToFloat(_, src, dst)
+                | AsmInstr::AArch64DoubleToUInt(_, src, dst)
+                | AsmInstr::AArch64FloatToUInt(_, src, dst)
+                | AsmInstr::Lea(src, dst)
+                    if asm_operand_has_pseudo(src) || asm_operand_has_pseudo(dst) =>
+                {
+                    return Err(format!(
+                        "function '{}' has unresolved pseudo operand in {:?}",
+                        function.name, instr
+                    ));
+                }
+                AsmInstr::Cvtss2sd(src, dst)
+                | AsmInstr::Cvtsd2ss(src, dst)
+                | AsmInstr::AArch64FloatToDouble(src, dst)
+                | AsmInstr::AArch64DoubleToFloat(src, dst)
+                    if asm_operand_has_pseudo(src) || asm_operand_has_pseudo(dst) =>
+                {
+                    return Err(format!(
+                        "function '{}' has unresolved pseudo operand in {:?}",
+                        function.name, instr
+                    ));
+                }
+                AsmInstr::AArch64AddPtr(ptr, index, _, dst)
+                    if asm_operand_has_pseudo(ptr)
+                        || asm_operand_has_pseudo(index)
+                        || asm_operand_has_pseudo(dst) =>
+                {
+                    return Err(format!(
+                        "function '{}' has unresolved pseudo operand in {:?}",
+                        function.name, instr
+                    ));
+                }
+                AsmInstr::AArch64Rem(_, _, left, right, dst)
+                    if asm_operand_has_pseudo(left)
+                        || asm_operand_has_pseudo(right)
+                        || asm_operand_has_pseudo(dst) =>
+                {
+                    return Err(format!(
+                        "function '{}' has unresolved pseudo operand in {:?}",
+                        function.name, instr
+                    ));
+                }
+                AsmInstr::LoadIndirect(_, _, dst)
+                | AsmInstr::StoreIndirect(_, dst, _)
+                | AsmInstr::AArch64LoadAdjusted(_, dst, _, _)
+                | AsmInstr::AArch64StoreOutgoingArg(_, dst, _, _)
+                    if asm_operand_has_pseudo(dst) =>
+                {
+                    return Err(format!(
+                        "function '{}' has unresolved pseudo operand in {:?}",
+                        function.name, instr
+                    ));
+                }
+                AsmInstr::Unary(_, _, operand)
+                | AsmInstr::Idiv(_, operand)
+                | AsmInstr::Div(_, operand)
+                | AsmInstr::SetCC(_, operand)
+                | AsmInstr::Push(operand)
+                    if asm_operand_has_pseudo(operand) =>
+                {
+                    return Err(format!(
+                        "function '{}' has unresolved pseudo operand in {:?}",
+                        function.name, instr
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn compile(
+    stage: &Stage,
+    src_file: &str,
+    target: &Target,
+    opt_flags: &optimize::OptimizationFlags,
+    no_coalescing: bool,
+    dumps: DumpOptions,
+    warnings: WarningOptions,
+) -> Result<(), String> {
+    // C source is byte-oriented. External preprocessors can materialize string
+    // escapes such as \377 as raw non-UTF-8 bytes in .i output, so preserve
+    // each input byte as a single scalar value for the lexer.
+    let source_bytes =
+        std::fs::read(src_file).map_err(|err| format!("could not read {}: {}", src_file, err))?;
+    let source: String = source_bytes.into_iter().map(char::from).collect();
 
     // Lex
-    let tokens = lex::lex(&source);
+    let spanned_tokens = lex::lex_spanned(&source).map_err(|err| format!("lex failed: {}", err))?;
+    let tokens: Vec<_> = spanned_tokens
+        .iter()
+        .map(|spanned| spanned.token.clone())
+        .collect();
     if *stage == Stage::Lex {
-        return;
+        println!("{:#?}", tokens);
+        return Ok(());
     }
 
     // Parse
-    let ast = parse::parse(tokens);
+    let ast = parse::parse_from_spanned(spanned_tokens.clone())?;
     if *stage == Stage::Parse {
-        return;
+        println!("{:#?}", ast);
+        return Ok(());
+    }
+    if dumps.ast {
+        eprintln!("{:#?}", ast);
     }
 
     // Validate (resolve variables, label loops)
-    let resolved_ast = resolve::resolve(ast);
+    let resolved = resolve::resolve(ast).map_err(|diagnostic| diagnostic.render())?;
+    let active_warnings: Vec<_> = resolved
+        .warnings
+        .iter()
+        .filter(|warning| warnings.allows(warning))
+        .collect();
+    for warning in &active_warnings {
+        eprintln!("rnqcc: {}", warning.render());
+    }
+    if warnings.error && !active_warnings.is_empty() {
+        return Err("warnings treated as errors".to_string());
+    }
+    let resolved_ast = resolved.program;
     if *stage == Stage::Validate {
-        return;
+        println!("{:#?}", resolved_ast);
+        return Ok(());
     }
 
     // Generate TACKY IR
-    let mut tacky_program = tacky::generate(resolved_ast);
+    let mut tacky_program =
+        tacky::generate(resolved_ast).map_err(|err| Diagnostic::tacky(err).render())?;
+    validate_tacky_program(&tacky_program).map_err(|err| Diagnostic::tacky(err).render())?;
+    if dumps.tacky_pre_opt {
+        eprintln!("{:#?}", tacky_program);
+    }
     if *stage == Stage::Tacky {
-        return;
+        println!("{:#?}", tacky_program);
+        return Ok(());
     }
 
     // Optimize TACKY IR
     optimize::optimize_program(&mut tacky_program, opt_flags);
-
-    // Generate assembly IR and emit
-    let asm_program = codegen::gen(&tacky_program, no_coalescing);
-    if *stage == Stage::Codegen {
-        return;
+    validate_tacky_program(&tacky_program).map_err(|err| Diagnostic::tacky(err).render())?;
+    if dumps.tacky {
+        eprintln!("{:#?}", tacky_program);
     }
 
-    let asm_filename = src_file.trim_end_matches(".i").to_owned() + ".s";
-    emit::emit(&asm_filename, &asm_program, platform).unwrap();
+    // Generate assembly IR and emit
+    let asm_program = backend::codegen(&tacky_program, target, no_coalescing)?;
+    validate_asm_program(&asm_program)?;
+    if *stage == Stage::Codegen {
+        println!("{:#?}", asm_program);
+        return Ok(());
+    }
+    if dumps.asm_ir {
+        eprintln!("{:#?}", asm_program);
+    }
+
+    let asm_filename = std::path::Path::new(src_file)
+        .with_extension("s")
+        .to_string_lossy()
+        .into_owned();
+    backend::emit(&asm_filename, &asm_program, target)?;
+    if dumps.source_comments {
+        prepend_source_comment(&asm_filename, src_file)?;
+    }
+    Ok(())
+}
+
+fn prepend_source_comment(asm_filename: &str, src_file: &str) -> Result<(), String> {
+    let body = std::fs::read_to_string(asm_filename)
+        .map_err(|err| format!("could not read {}: {}", asm_filename, err))?;
+    let comment = format!("# rnqcc source: {}\n", src_file);
+    std::fs::write(asm_filename, format!("{}{}", comment, body))
+        .map_err(|err| format!("could not write {}: {}", asm_filename, err))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn require_err<T>(result: Result<T, String>, context: &str) -> Result<String, String> {
+        match result {
+            Ok(_) => Err(format!("{context} unexpectedly succeeded")),
+            Err(err) => Ok(err),
+        }
+    }
+
+    #[test]
+    fn tacky_validator_rejects_missing_jump_label() -> Result<(), String> {
+        let program = TackyProgram {
+            top_level: vec![TackyTopLevel::Function(TackyFunction {
+                name: "main".to_string(),
+                params: Vec::new(),
+                global: true,
+                body: vec![TackyInstr::Jump("missing".to_string())],
+                stack_params: HashSet::new(),
+                struct_param_groups: Vec::new(),
+            })],
+            global_vars: HashSet::new(),
+            thread_local_vars: HashSet::new(),
+            symbol_types: Default::default(),
+            symbol_alignments: Default::default(),
+            array_sizes: Default::default(),
+            struct_defs: Default::default(),
+            var_struct_tags: Default::default(),
+        };
+
+        let err = require_err(
+            validate_tacky_program(&program),
+            "validator should reject bad label",
+        )?;
+        assert!(err.contains("undefined TACKY label"));
+        Ok(())
+    }
+
+    #[test]
+    fn asm_validator_rejects_unresolved_pseudos() -> Result<(), String> {
+        let program = AsmProgram {
+            top_level: vec![AsmTopLevel::Function(AsmFunction {
+                name: "main".to_string(),
+                global: true,
+                instructions: vec![AsmInstr::Mov(
+                    AsmType::Longword,
+                    AsmOperand::Pseudo("tmp".to_string()),
+                    AsmOperand::Reg(Reg::AX),
+                )],
+            })],
+        };
+
+        let err = require_err(
+            validate_asm_program(&program),
+            "validator should reject pseudos",
+        )?;
+        assert!(err.contains("unresolved pseudo operand"));
+        Ok(())
+    }
 }

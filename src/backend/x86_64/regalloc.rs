@@ -7,17 +7,37 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 // GP allocatable registers (k=12): caller-saved first (colors 0-6), callee-saved last (7-11)
 const GP_COLOR_ORDER: [Reg; 12] = [
-    Reg::AX, Reg::CX, Reg::DX, Reg::DI, Reg::SI, Reg::R8, Reg::R9,
-    Reg::BX, Reg::R12, Reg::R13, Reg::R14, Reg::R15,
+    Reg::AX,
+    Reg::CX,
+    Reg::DX,
+    Reg::DI,
+    Reg::SI,
+    Reg::R8,
+    Reg::R9,
+    Reg::BX,
+    Reg::R12,
+    Reg::R13,
+    Reg::R14,
+    Reg::R15,
 ];
 const GP_K: usize = 12;
 
 // XMM allocatable registers (k=14): all caller-saved
 const XMM_COLOR_ORDER: [XmmReg; 14] = [
-    XmmReg::XMM0, XmmReg::XMM1, XmmReg::XMM2, XmmReg::XMM3,
-    XmmReg::XMM4, XmmReg::XMM5, XmmReg::XMM6, XmmReg::XMM7,
-    XmmReg::XMM8, XmmReg::XMM9, XmmReg::XMM10, XmmReg::XMM11,
-    XmmReg::XMM12, XmmReg::XMM13,
+    XmmReg::XMM0,
+    XmmReg::XMM1,
+    XmmReg::XMM2,
+    XmmReg::XMM3,
+    XmmReg::XMM4,
+    XmmReg::XMM5,
+    XmmReg::XMM6,
+    XmmReg::XMM7,
+    XmmReg::XMM8,
+    XmmReg::XMM9,
+    XmmReg::XMM10,
+    XmmReg::XMM11,
+    XmmReg::XMM12,
+    XmmReg::XMM13,
 ];
 const XMM_K: usize = 14;
 
@@ -25,19 +45,45 @@ pub const GP_CALLEE_SAVED: [Reg; 5] = [Reg::BX, Reg::R12, Reg::R13, Reg::R14, Re
 
 const ARG_INT_REGS: [Reg; 6] = [Reg::DI, Reg::SI, Reg::DX, Reg::CX, Reg::R8, Reg::R9];
 const ARG_SSE_REGS: [XmmReg; 8] = [
-    XmmReg::XMM0, XmmReg::XMM1, XmmReg::XMM2, XmmReg::XMM3,
-    XmmReg::XMM4, XmmReg::XMM5, XmmReg::XMM6, XmmReg::XMM7,
+    XmmReg::XMM0,
+    XmmReg::XMM1,
+    XmmReg::XMM2,
+    XmmReg::XMM3,
+    XmmReg::XMM4,
+    XmmReg::XMM5,
+    XmmReg::XMM6,
+    XmmReg::XMM7,
 ];
 
 const CALLER_SAVED_GP: [Reg; 9] = [
-    Reg::AX, Reg::CX, Reg::DX, Reg::DI, Reg::SI, Reg::R8, Reg::R9, Reg::R10, Reg::R11,
+    Reg::AX,
+    Reg::CX,
+    Reg::DX,
+    Reg::DI,
+    Reg::SI,
+    Reg::R8,
+    Reg::R9,
+    Reg::R10,
+    Reg::R11,
 ];
 
 const ALL_XMM: [XmmReg; 16] = [
-    XmmReg::XMM0, XmmReg::XMM1, XmmReg::XMM2, XmmReg::XMM3,
-    XmmReg::XMM4, XmmReg::XMM5, XmmReg::XMM6, XmmReg::XMM7,
-    XmmReg::XMM8, XmmReg::XMM9, XmmReg::XMM10, XmmReg::XMM11,
-    XmmReg::XMM12, XmmReg::XMM13, XmmReg::XMM14, XmmReg::XMM15,
+    XmmReg::XMM0,
+    XmmReg::XMM1,
+    XmmReg::XMM2,
+    XmmReg::XMM3,
+    XmmReg::XMM4,
+    XmmReg::XMM5,
+    XmmReg::XMM6,
+    XmmReg::XMM7,
+    XmmReg::XMM8,
+    XmmReg::XMM9,
+    XmmReg::XMM10,
+    XmmReg::XMM11,
+    XmmReg::XMM12,
+    XmmReg::XMM13,
+    XmmReg::XMM14,
+    XmmReg::XMM15,
 ];
 
 // ============================================================
@@ -57,10 +103,10 @@ pub enum RegId {
 
 struct AsmBlock {
     start: usize,
-    end: usize, // exclusive
-    succs: Vec<usize>,   // block indices
+    end: usize,        // exclusive
+    succs: Vec<usize>, // block indices
     preds: Vec<usize>,
-    reaches_exit: bool,  // has Ret as last instruction
+    reaches_exit: bool, // has Ret as last instruction
 }
 
 fn build_asm_cfg(instrs: &[AsmInstr]) -> Vec<AsmBlock> {
@@ -72,15 +118,13 @@ fn build_asm_cfg(instrs: &[AsmInstr]) -> Vec<AsmBlock> {
     let mut leaders: Vec<usize> = vec![0]; // first instruction is always a leader
     for (i, instr) in instrs.iter().enumerate() {
         match instr {
-            AsmInstr::Label(_) => {
-                if !leaders.contains(&i) {
-                    leaders.push(i);
-                }
+            AsmInstr::Label(_) if !leaders.contains(&i) => {
+                leaders.push(i);
             }
-            AsmInstr::Jmp(_) | AsmInstr::JmpCC(_, _) | AsmInstr::Ret => {
-                if i + 1 < instrs.len() && !leaders.contains(&(i + 1)) {
-                    leaders.push(i + 1);
-                }
+            AsmInstr::Jmp(_) | AsmInstr::JmpCC(_, _) | AsmInstr::Ret | AsmInstr::Unreachable
+                if i + 1 < instrs.len() && !leaders.contains(&(i + 1)) =>
+            {
+                leaders.push(i + 1);
             }
             _ => {}
         }
@@ -91,12 +135,20 @@ fn build_asm_cfg(instrs: &[AsmInstr]) -> Vec<AsmBlock> {
     // Create blocks
     let mut blocks: Vec<AsmBlock> = Vec::new();
     for w in leaders.windows(2) {
-        blocks.push(AsmBlock { start: w[0], end: w[1], succs: vec![], preds: vec![], reaches_exit: false });
+        blocks.push(AsmBlock {
+            start: w[0],
+            end: w[1],
+            succs: vec![],
+            preds: vec![],
+            reaches_exit: false,
+        });
     }
     blocks.push(AsmBlock {
-        start: *leaders.last().unwrap(),
+        start: leaders.last().copied().unwrap_or(0),
         end: instrs.len(),
-        succs: vec![], preds: vec![], reaches_exit: false,
+        succs: vec![],
+        preds: vec![],
+        reaches_exit: false,
     });
 
     // Build label → block index map
@@ -113,7 +165,7 @@ fn build_asm_cfg(instrs: &[AsmInstr]) -> Vec<AsmBlock> {
         let last_idx = blocks[bi].end - 1;
         let last = &instrs[last_idx];
         match last {
-            AsmInstr::Ret => {
+            AsmInstr::Ret | AsmInstr::Unreachable => {
                 blocks[bi].reaches_exit = true;
             }
             AsmInstr::Jmp(label) => {
@@ -188,39 +240,29 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
             used.extend(operand_reads(dst));
             (used, operand_writes(dst))
         }
-        AsmInstr::Unary(_, _, dst) => {
-            (operand_reads(dst), operand_writes(dst))
-        }
+        AsmInstr::Unary(_, _, dst) => (operand_reads(dst), operand_writes(dst)),
         AsmInstr::Cmp(_, src, dst) => {
             let mut used = operand_reads(src);
             used.extend(operand_reads(dst));
             (used, vec![])
         }
-        AsmInstr::SetCC(_, dst) => {
-            (vec![], operand_writes(dst))
-        }
-        AsmInstr::Push(val) => {
-            (operand_reads(val), vec![])
-        }
-        AsmInstr::Pop(reg) => {
-            (vec![], vec![RegId::Gp(*reg)])
-        }
+        AsmInstr::SetCC(_, dst) => (vec![], operand_writes(dst)),
+        AsmInstr::Push(val) => (operand_reads(val), vec![]),
+        AsmInstr::Pop(reg) => (vec![], vec![RegId::Gp(*reg)]),
         AsmInstr::Idiv(_, divisor) | AsmInstr::Div(_, divisor) => {
             let mut used = operand_reads(divisor);
             used.push(RegId::Gp(Reg::AX));
             used.push(RegId::Gp(Reg::DX));
             (used, vec![RegId::Gp(Reg::AX), RegId::Gp(Reg::DX)])
         }
-        AsmInstr::Cdq(_) => {
-            (vec![RegId::Gp(Reg::AX)], vec![RegId::Gp(Reg::DX)])
-        }
+        AsmInstr::Cdq(_) => (vec![RegId::Gp(Reg::AX)], vec![RegId::Gp(Reg::DX)]),
         AsmInstr::Call(_, int_regs, sse_regs, _) => {
             let mut used = Vec::new();
-            for i in 0..*int_regs {
-                used.push(RegId::Gp(ARG_INT_REGS[i]));
+            for reg in ARG_INT_REGS.iter().take(*int_regs) {
+                used.push(RegId::Gp(*reg));
             }
-            for i in 0..*sse_regs {
-                used.push(RegId::Xmm(ARG_SSE_REGS[i]));
+            for reg in ARG_SSE_REGS.iter().take(*sse_regs) {
+                used.push(RegId::Xmm(*reg));
             }
             let mut updated = Vec::new();
             for r in &CALLER_SAVED_GP {
@@ -231,9 +273,19 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
             }
             (used, updated)
         }
-        AsmInstr::Cvtsi2sd(_, src, dst) | AsmInstr::Cvttsd2si(_, src, dst) => {
-            (operand_reads(src), operand_writes(dst))
-        }
+        AsmInstr::X86SetVarargsXmmCount(_) => (vec![], vec![RegId::Gp(Reg::AX)]),
+        AsmInstr::Cvtsi2sd(_, src, dst)
+        | AsmInstr::Cvtsi2ss(_, src, dst)
+        | AsmInstr::Cvttsd2si(_, src, dst)
+        | AsmInstr::Cvttss2si(_, src, dst)
+        | AsmInstr::AArch64UIntToDouble(_, src, dst)
+        | AsmInstr::AArch64UIntToFloat(_, src, dst)
+        | AsmInstr::AArch64DoubleToUInt(_, src, dst)
+        | AsmInstr::AArch64FloatToUInt(_, src, dst) => (operand_reads(src), operand_writes(dst)),
+        AsmInstr::Cvtss2sd(src, dst)
+        | AsmInstr::Cvtsd2ss(src, dst)
+        | AsmInstr::AArch64FloatToDouble(src, dst)
+        | AsmInstr::AArch64DoubleToFloat(src, dst) => (operand_reads(src), operand_writes(dst)),
         AsmInstr::Lea(src, dst) => {
             // Lea reads address components from src, writes result to dst
             let used = match src {
@@ -244,19 +296,64 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
             };
             (used, operand_writes(dst))
         }
-        AsmInstr::LoadIndirect(_, reg, dst) => {
-            (vec![RegId::Gp(*reg)], operand_writes(dst))
-        }
+        AsmInstr::LoadIndirect(_, reg, dst) => (vec![RegId::Gp(*reg)], operand_writes(dst)),
         AsmInstr::StoreIndirect(_, src, reg) => {
             let mut used = operand_reads(src);
             used.push(RegId::Gp(*reg));
             (used, vec![])
         }
-        // Terminators and others: no register effects for liveness
-        AsmInstr::Ret | AsmInstr::Jmp(_) | AsmInstr::JmpCC(_, _) |
-        AsmInstr::Label(_) | AsmInstr::AllocateStack(_) | AsmInstr::DeallocateStack(_) => {
-            (vec![], vec![])
+        AsmInstr::AtomicRmw(_, _, return_old, dst) => {
+            let used = vec![RegId::Gp(Reg::R10), RegId::Gp(Reg::R11)];
+            let mut updated = operand_writes(dst);
+            if *return_old {
+                updated.push(RegId::Gp(Reg::AX));
+                updated.push(RegId::Gp(Reg::R12));
+            }
+            (used, updated)
         }
+        AsmInstr::AtomicExchange(_, dst) => {
+            let used = vec![RegId::Gp(Reg::R10), RegId::Gp(Reg::R11)];
+            (used, operand_writes(dst))
+        }
+        AsmInstr::AtomicCompareExchange(_, dst) => {
+            let used = vec![
+                RegId::Gp(Reg::R10),
+                RegId::Gp(Reg::R11),
+                RegId::Gp(Reg::R12),
+            ];
+            let mut updated = operand_writes(dst);
+            updated.push(RegId::Gp(Reg::AX));
+            updated.push(RegId::Gp(Reg::R10));
+            (used, updated)
+        }
+        AsmInstr::AtomicCompareSwap(_, return_old, dst) => {
+            let used = vec![
+                RegId::Gp(Reg::R10),
+                RegId::Gp(Reg::R11),
+                RegId::Gp(Reg::R12),
+            ];
+            let mut updated = operand_writes(dst);
+            updated.push(RegId::Gp(Reg::AX));
+            if !return_old {
+                updated.push(RegId::Gp(Reg::R10));
+            }
+            (used, updated)
+        }
+        // Terminators and others: no register effects for liveness
+        AsmInstr::Ret
+        | AsmInstr::Unreachable
+        | AsmInstr::Jmp(_)
+        | AsmInstr::JmpCC(_, _)
+        | AsmInstr::Label(_)
+        | AsmInstr::AllocateStack(_)
+        | AsmInstr::DeallocateStack(_)
+        | AsmInstr::AArch64AddPtr(..)
+        | AsmInstr::AArch64LoadAdjusted(..)
+        | AsmInstr::AArch64StoreOutgoingArg(..)
+        | AsmInstr::AArch64Rem(..)
+        | AsmInstr::AArch64SaveLink(..)
+        | AsmInstr::AArch64RestoreLink(..)
+        | AsmInstr::AtomicFence => (vec![], vec![]),
     }
 }
 
@@ -289,10 +386,7 @@ fn mov_operands(instr: &AsmInstr) -> Option<(RegId, RegId)> {
 // Liveness Analysis (backward dataflow)
 // ============================================================
 
-fn liveness_analysis(
-    instrs: &[AsmInstr],
-    exit_live: &HashSet<RegId>,
-) -> Vec<HashSet<RegId>> {
+fn liveness_analysis(instrs: &[AsmInstr], exit_live: &HashSet<RegId>) -> Vec<HashSet<RegId>> {
     let blocks = build_asm_cfg(instrs);
     if blocks.is_empty() {
         return vec![HashSet::new(); instrs.len()];
@@ -336,13 +430,13 @@ fn liveness_analysis(
 
     // Compute per-instruction live_after
     let mut live_after: Vec<HashSet<RegId>> = vec![HashSet::new(); instrs.len()];
-    for bi in 0..num_blocks {
+    for (bi, block) in blocks.iter().enumerate().take(num_blocks) {
         // Recompute live_out for this block
         let mut live: HashSet<RegId> = HashSet::new();
-        for &si in &blocks[bi].succs {
+        for &si in &block.succs {
             live.extend(block_live_in[si].iter().cloned());
         }
-        if blocks[bi].reaches_exit {
+        if block.reaches_exit {
             live.extend(exit_live.iter().cloned());
         }
 
@@ -374,7 +468,11 @@ struct Graph {
 
 impl Graph {
     fn new() -> Self {
-        Graph { adj: HashMap::new(), spill_cost: HashMap::new(), color: HashMap::new() }
+        Graph {
+            adj: HashMap::new(),
+            spill_cost: HashMap::new(),
+            color: HashMap::new(),
+        }
     }
 
     fn add_node(&mut self, id: RegId, cost: f64) {
@@ -384,14 +482,18 @@ impl Graph {
     }
 
     fn add_edge(&mut self, a: &RegId, b: &RegId) {
-        if a == b { return; }
-        if !self.adj.contains_key(a) || !self.adj.contains_key(b) { return; }
-        self.adj.get_mut(a).unwrap().insert(b.clone());
-        self.adj.get_mut(b).unwrap().insert(a.clone());
-    }
-
-    fn degree(&self, id: &RegId) -> usize {
-        self.adj.get(id).map(|s| s.len()).unwrap_or(0)
+        if a == b {
+            return;
+        }
+        if !self.adj.contains_key(a) || !self.adj.contains_key(b) {
+            return;
+        }
+        if let Some(edges) = self.adj.get_mut(a) {
+            edges.insert(b.clone());
+        }
+        if let Some(edges) = self.adj.get_mut(b) {
+            edges.insert(a.clone());
+        }
     }
 
     fn has_node(&self, id: &RegId) -> bool {
@@ -408,7 +510,7 @@ fn build_interference_graph(
     live_after: &[HashSet<RegId>],
     candidates: &HashSet<String>,
     hard_reg_ids: &[RegId],
-    k: usize,
+    _k: usize,
 ) -> Graph {
     let mut graph = Graph::new();
 
@@ -444,18 +546,26 @@ fn build_interference_graph(
 
     // Add interference edges from liveness
     for (i, instr) in instrs.iter().enumerate() {
-        let (used, updated) = find_used_and_updated(instr);
+        let (_, updated) = find_used_and_updated(instr);
         let is_mov = mov_operands(instr);
         let mov_src = is_mov.as_ref().map(|(s, _)| s);
 
         for u in &updated {
-            if !graph.has_node(u) { continue; }
+            if !graph.has_node(u) {
+                continue;
+            }
             for l in &live_after[i] {
-                if u == l { continue; }
-                if !graph.has_node(l) { continue; }
+                if u == l {
+                    continue;
+                }
+                if !graph.has_node(l) {
+                    continue;
+                }
                 // Mov exception: don't add edge between dst and src
                 if let Some(src) = mov_src {
-                    if l == src { continue; }
+                    if l == src {
+                        continue;
+                    }
                 }
                 graph.add_edge(u, l);
             }
@@ -473,28 +583,42 @@ fn color_graph(graph: &mut Graph, hard_reg_ids: &[RegId], k: usize) {
     let hard_set: HashSet<RegId> = hard_reg_ids.iter().cloned().collect();
 
     // Collect pseudo nodes
-    let pseudo_nodes: Vec<RegId> = graph.adj.keys()
+    let pseudo_nodes: Vec<RegId> = graph
+        .adj
+        .keys()
         .filter(|id| !hard_set.contains(id))
         .cloned()
         .collect();
 
-    if pseudo_nodes.is_empty() { return; }
+    if pseudo_nodes.is_empty() {
+        return;
+    }
 
     // Simplify: push nodes to stack
     let mut stack: Vec<(RegId, bool)> = Vec::new(); // (node, is_potential_spill)
     let mut pruned: HashSet<RegId> = HashSet::new();
 
     let remaining = |pruned: &HashSet<RegId>| -> Vec<RegId> {
-        pseudo_nodes.iter().filter(|n| !pruned.contains(n)).cloned().collect()
+        pseudo_nodes
+            .iter()
+            .filter(|n| !pruned.contains(n))
+            .cloned()
+            .collect()
     };
 
     let current_degree = |id: &RegId, graph: &Graph, pruned: &HashSet<RegId>| -> usize {
-        graph.adj.get(id).map(|nbrs| nbrs.iter().filter(|n| !pruned.contains(n)).count()).unwrap_or(0)
+        graph
+            .adj
+            .get(id)
+            .map(|nbrs| nbrs.iter().filter(|n| !pruned.contains(n)).count())
+            .unwrap_or(0)
     };
 
     loop {
         let rem = remaining(&pruned);
-        if rem.is_empty() { break; }
+        if rem.is_empty() {
+            break;
+        }
 
         // Try to find a node with degree < k
         let low_degree = rem.iter().find(|n| current_degree(n, graph, &pruned) < k);
@@ -504,13 +628,16 @@ fn color_graph(graph: &mut Graph, hard_reg_ids: &[RegId], k: usize) {
             pruned.insert(node.clone());
         } else {
             // Pick spill candidate: min(spill_cost / degree)
-            let candidate = rem.iter()
+            let candidate = rem
+                .iter()
                 .min_by(|a, b| {
                     let cost_a = graph.spill_cost.get(*a).copied().unwrap_or(0.0);
                     let cost_b = graph.spill_cost.get(*b).copied().unwrap_or(0.0);
                     let deg_a = current_degree(a, graph, &pruned).max(1) as f64;
                     let deg_b = current_degree(b, graph, &pruned).max(1) as f64;
-                    (cost_a / deg_a).partial_cmp(&(cost_b / deg_b)).unwrap_or(std::cmp::Ordering::Equal)
+                    (cost_a / deg_a)
+                        .partial_cmp(&(cost_b / deg_b))
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .cloned();
             if let Some(node) = candidate {
@@ -522,7 +649,9 @@ fn color_graph(graph: &mut Graph, hard_reg_ids: &[RegId], k: usize) {
 
     // Select: pop from stack and assign colors
     while let Some((node, _is_spill)) = stack.pop() {
-        let used_colors: HashSet<usize> = graph.adj.get(&node)
+        let used_colors: HashSet<usize> = graph
+            .adj
+            .get(&node)
             .map(|nbrs| {
                 nbrs.iter()
                     .filter_map(|n| graph.color.get(n).and_then(|c| *c))
@@ -545,12 +674,18 @@ struct UnionFind {
 }
 
 impl UnionFind {
-    fn new() -> Self { UnionFind { parent: HashMap::new() } }
+    fn new() -> Self {
+        UnionFind {
+            parent: HashMap::new(),
+        }
+    }
 
     fn find(&self, x: &RegId) -> RegId {
         let mut current = x.clone();
         while let Some(p) = self.parent.get(&current) {
-            if p == &current { break; }
+            if p == &current {
+                break;
+            }
             current = p.clone();
         }
         current
@@ -575,22 +710,39 @@ fn briggs_test(graph: &Graph, x: &RegId, y: &RegId, k: usize, pruned: &HashSet<R
             merged_nbrs.insert(n.clone());
         }
     }
-    let significant = merged_nbrs.iter()
+    let significant = merged_nbrs
+        .iter()
         .filter(|n| {
-            let deg = graph.adj.get(*n).map(|s| s.iter().filter(|nn| !pruned.contains(nn)).count()).unwrap_or(0);
+            let deg = graph
+                .adj
+                .get(*n)
+                .map(|s| s.iter().filter(|nn| !pruned.contains(nn)).count())
+                .unwrap_or(0);
             deg >= k
         })
         .count();
     significant < k
 }
 
-fn george_test(graph: &Graph, pseudo: &RegId, hard: &RegId, k: usize, pruned: &HashSet<RegId>) -> bool {
+fn george_test(
+    graph: &Graph,
+    pseudo: &RegId,
+    hard: &RegId,
+    k: usize,
+    pruned: &HashSet<RegId>,
+) -> bool {
     // For each neighbor of pseudo: either it already interferes with hard, or it has degree < k
     let nbrs = graph.adj.get(pseudo).cloned().unwrap_or_default();
     for n in &nbrs {
-        if n == hard || pruned.contains(n) { continue; }
+        if n == hard || pruned.contains(n) {
+            continue;
+        }
         let interferes_with_hard = graph.are_neighbors(n, hard);
-        let deg = graph.adj.get(n).map(|s| s.iter().filter(|nn| !pruned.contains(nn)).count()).unwrap_or(0);
+        let deg = graph
+            .adj
+            .get(n)
+            .map(|s| s.iter().filter(|nn| !pruned.contains(nn)).count())
+            .unwrap_or(0);
         if !interferes_with_hard && deg >= k {
             return false;
         }
@@ -605,10 +757,9 @@ fn is_hard_reg(id: &RegId) -> bool {
 fn coalesce_pass(
     instrs: &[AsmInstr],
     graph: &mut Graph,
-    hard_reg_ids: &[RegId],
+    _hard_reg_ids: &[RegId],
     k: usize,
 ) -> Option<UnionFind> {
-    let hard_set: HashSet<RegId> = hard_reg_ids.iter().cloned().collect();
     let pruned: HashSet<RegId> = HashSet::new(); // no nodes pruned during coalescing
 
     let mut uf = UnionFind::new();
@@ -619,9 +770,15 @@ fn coalesce_pass(
         if let Some((src, dst)) = mov_operands(instr) {
             let src_r = uf.find(&src);
             let dst_r = uf.find(&dst);
-            if src_r == dst_r { continue; }
-            if !graph.has_node(&src_r) || !graph.has_node(&dst_r) { continue; }
-            if graph.are_neighbors(&src_r, &dst_r) { continue; }
+            if src_r == dst_r {
+                continue;
+            }
+            if !graph.has_node(&src_r) || !graph.has_node(&dst_r) {
+                continue;
+            }
+            if graph.are_neighbors(&src_r, &dst_r) {
+                continue;
+            }
 
             // Determine which is pseudo and which is hard (or both pseudo)
             let can_coalesce = if is_hard_reg(&src_r) && is_hard_reg(&dst_r) {
@@ -648,7 +805,13 @@ fn coalesce_pass(
                 };
 
                 // Transfer edges from `from` to `into`
-                let from_nbrs: Vec<RegId> = graph.adj.get(&from).cloned().unwrap_or_default().into_iter().collect();
+                let from_nbrs: Vec<RegId> = graph
+                    .adj
+                    .get(&from)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
                 for n in &from_nbrs {
                     if n != &into {
                         graph.add_edge(&into, n);
@@ -673,7 +836,11 @@ fn coalesce_pass(
         }
     }
 
-    if coalesced_any { Some(uf) } else { None }
+    if coalesced_any {
+        Some(uf)
+    } else {
+        None
+    }
 }
 
 fn rewrite_coalesced(instrs: &mut Vec<AsmInstr>, uf: &UnionFind) {
@@ -706,26 +873,43 @@ fn rewrite_coalesced(instrs: &mut Vec<AsmInstr>, uf: &UnionFind) {
     for instr in instrs.iter_mut() {
         match instr {
             AsmInstr::Mov(_, src, dst) | AsmInstr::Cmp(_, src, dst) => {
-                rewrite_op(src, uf); rewrite_op(dst, uf);
+                rewrite_op(src, uf);
+                rewrite_op(dst, uf);
             }
             AsmInstr::Movsx(_, _, src, dst) | AsmInstr::MovZeroExtend(_, _, src, dst) => {
-                rewrite_op(src, uf); rewrite_op(dst, uf);
+                rewrite_op(src, uf);
+                rewrite_op(dst, uf);
             }
             AsmInstr::Binary(_, _, src, dst) => {
-                rewrite_op(src, uf); rewrite_op(dst, uf);
+                rewrite_op(src, uf);
+                rewrite_op(dst, uf);
             }
-            AsmInstr::Unary(_, _, op) => { rewrite_op(op, uf); }
-            AsmInstr::Idiv(_, op) | AsmInstr::Div(_, op) => { rewrite_op(op, uf); }
-            AsmInstr::SetCC(_, op) => { rewrite_op(op, uf); }
-            AsmInstr::Push(op) => { rewrite_op(op, uf); }
+            AsmInstr::Unary(_, _, op) => {
+                rewrite_op(op, uf);
+            }
+            AsmInstr::Idiv(_, op) | AsmInstr::Div(_, op) => {
+                rewrite_op(op, uf);
+            }
+            AsmInstr::SetCC(_, op) => {
+                rewrite_op(op, uf);
+            }
+            AsmInstr::Push(op) => {
+                rewrite_op(op, uf);
+            }
             AsmInstr::Cvtsi2sd(_, src, dst) | AsmInstr::Cvttsd2si(_, src, dst) => {
-                rewrite_op(src, uf); rewrite_op(dst, uf);
+                rewrite_op(src, uf);
+                rewrite_op(dst, uf);
             }
             AsmInstr::Lea(src, dst) => {
-                rewrite_op(src, uf); rewrite_op(dst, uf);
+                rewrite_op(src, uf);
+                rewrite_op(dst, uf);
             }
-            AsmInstr::LoadIndirect(_, _, dst) => { rewrite_op(dst, uf); }
-            AsmInstr::StoreIndirect(_, src, _) => { rewrite_op(src, uf); }
+            AsmInstr::LoadIndirect(_, _, dst) => {
+                rewrite_op(dst, uf);
+            }
+            AsmInstr::StoreIndirect(_, src, _) => {
+                rewrite_op(src, uf);
+            }
             _ => {}
         }
     }
@@ -753,10 +937,7 @@ fn operands_equal(a: &AsmOperand, b: &AsmOperand) -> bool {
 // Apply Coloring: replace pseudos with hard registers
 // ============================================================
 
-fn build_color_map(
-    graph: &Graph,
-    hard_reg_ids: &[RegId],
-) -> HashMap<String, RegId> {
+fn build_color_map(graph: &Graph, hard_reg_ids: &[RegId]) -> HashMap<String, RegId> {
     // Map color index → hard register
     let mut color_to_reg: HashMap<usize, RegId> = HashMap::new();
     for (i, hr) in hard_reg_ids.iter().enumerate() {
@@ -792,26 +973,43 @@ fn apply_register_map(instrs: &mut Vec<AsmInstr>, map: &HashMap<String, RegId>) 
     for instr in instrs.iter_mut() {
         match instr {
             AsmInstr::Mov(_, src, dst) | AsmInstr::Cmp(_, src, dst) => {
-                replace_op(src, map); replace_op(dst, map);
+                replace_op(src, map);
+                replace_op(dst, map);
             }
             AsmInstr::Movsx(_, _, src, dst) | AsmInstr::MovZeroExtend(_, _, src, dst) => {
-                replace_op(src, map); replace_op(dst, map);
+                replace_op(src, map);
+                replace_op(dst, map);
             }
             AsmInstr::Binary(_, _, src, dst) => {
-                replace_op(src, map); replace_op(dst, map);
+                replace_op(src, map);
+                replace_op(dst, map);
             }
-            AsmInstr::Unary(_, _, op) => { replace_op(op, map); }
-            AsmInstr::Idiv(_, op) | AsmInstr::Div(_, op) => { replace_op(op, map); }
-            AsmInstr::SetCC(_, op) => { replace_op(op, map); }
-            AsmInstr::Push(op) => { replace_op(op, map); }
+            AsmInstr::Unary(_, _, op) => {
+                replace_op(op, map);
+            }
+            AsmInstr::Idiv(_, op) | AsmInstr::Div(_, op) => {
+                replace_op(op, map);
+            }
+            AsmInstr::SetCC(_, op) => {
+                replace_op(op, map);
+            }
+            AsmInstr::Push(op) => {
+                replace_op(op, map);
+            }
             AsmInstr::Cvtsi2sd(_, src, dst) | AsmInstr::Cvttsd2si(_, src, dst) => {
-                replace_op(src, map); replace_op(dst, map);
+                replace_op(src, map);
+                replace_op(dst, map);
             }
             AsmInstr::Lea(src, dst) => {
-                replace_op(src, map); replace_op(dst, map);
+                replace_op(src, map);
+                replace_op(dst, map);
             }
-            AsmInstr::LoadIndirect(_, _, dst) => { replace_op(dst, map); }
-            AsmInstr::StoreIndirect(_, src, _) => { replace_op(src, map); }
+            AsmInstr::LoadIndirect(_, _, dst) => {
+                replace_op(dst, map);
+            }
+            AsmInstr::StoreIndirect(_, src, _) => {
+                replace_op(src, map);
+            }
             _ => {}
         }
     }
@@ -857,7 +1055,7 @@ pub fn allocate_registers(
                     continue;
                 }
                 let ct = types.get(name).copied().unwrap_or(CType::Int);
-                if ct == CType::Double {
+                if ct.is_floating() {
                     xmm_candidates.insert(name.clone());
                 } else if ct != CType::Struct {
                     gp_candidates.insert(name.clone());
@@ -869,13 +1067,23 @@ pub fn allocate_registers(
     // --- GP Register Allocation ---
     let gp_hard_ids: Vec<RegId> = GP_COLOR_ORDER.iter().map(|r| RegId::Gp(*r)).collect();
     allocate_one_pass(
-        &mut func.instructions, &exit_live, &gp_candidates, &gp_hard_ids, GP_K, no_coalescing,
+        &mut func.instructions,
+        &exit_live,
+        &gp_candidates,
+        &gp_hard_ids,
+        GP_K,
+        no_coalescing,
     );
 
     // --- XMM Register Allocation ---
     let xmm_hard_ids: Vec<RegId> = XMM_COLOR_ORDER.iter().map(|r| RegId::Xmm(*r)).collect();
     allocate_one_pass(
-        &mut func.instructions, &exit_live, &xmm_candidates, &xmm_hard_ids, XMM_K, no_coalescing,
+        &mut func.instructions,
+        &exit_live,
+        &xmm_candidates,
+        &xmm_hard_ids,
+        XMM_K,
+        no_coalescing,
     );
 
     // Determine which callee-saved GP registers were used
@@ -891,7 +1099,9 @@ pub fn allocate_registers(
         });
     }
 
-    RegAllocResult { callee_saved: callee_saved_used }
+    RegAllocResult {
+        callee_saved: callee_saved_used,
+    }
 }
 
 fn allocate_one_pass(
@@ -902,7 +1112,9 @@ fn allocate_one_pass(
     k: usize,
     no_coalescing: bool,
 ) {
-    if candidates.is_empty() { return; }
+    if candidates.is_empty() {
+        return;
+    }
 
     // Build-coalesce loop
     let mut graph;
@@ -931,17 +1143,44 @@ fn allocate_one_pass(
 
 fn visit_operands<F: FnMut(&AsmOperand)>(instr: &AsmInstr, mut f: F) {
     match instr {
-        AsmInstr::Mov(_, src, dst) | AsmInstr::Cmp(_, src, dst) => { f(src); f(dst); }
-        AsmInstr::Movsx(_, _, src, dst) | AsmInstr::MovZeroExtend(_, _, src, dst) => { f(src); f(dst); }
-        AsmInstr::Binary(_, _, src, dst) => { f(src); f(dst); }
-        AsmInstr::Unary(_, _, op) => { f(op); }
-        AsmInstr::Idiv(_, op) | AsmInstr::Div(_, op) => { f(op); }
-        AsmInstr::SetCC(_, op) => { f(op); }
-        AsmInstr::Push(op) => { f(op); }
-        AsmInstr::Cvtsi2sd(_, src, dst) | AsmInstr::Cvttsd2si(_, src, dst) => { f(src); f(dst); }
-        AsmInstr::Lea(src, dst) => { f(src); f(dst); }
-        AsmInstr::LoadIndirect(_, _, dst) => { f(dst); }
-        AsmInstr::StoreIndirect(_, src, _) => { f(src); }
+        AsmInstr::Mov(_, src, dst) | AsmInstr::Cmp(_, src, dst) => {
+            f(src);
+            f(dst);
+        }
+        AsmInstr::Movsx(_, _, src, dst) | AsmInstr::MovZeroExtend(_, _, src, dst) => {
+            f(src);
+            f(dst);
+        }
+        AsmInstr::Binary(_, _, src, dst) => {
+            f(src);
+            f(dst);
+        }
+        AsmInstr::Unary(_, _, op) => {
+            f(op);
+        }
+        AsmInstr::Idiv(_, op) | AsmInstr::Div(_, op) => {
+            f(op);
+        }
+        AsmInstr::SetCC(_, op) => {
+            f(op);
+        }
+        AsmInstr::Push(op) => {
+            f(op);
+        }
+        AsmInstr::Cvtsi2sd(_, src, dst) | AsmInstr::Cvttsd2si(_, src, dst) => {
+            f(src);
+            f(dst);
+        }
+        AsmInstr::Lea(src, dst) => {
+            f(src);
+            f(dst);
+        }
+        AsmInstr::LoadIndirect(_, _, dst) => {
+            f(dst);
+        }
+        AsmInstr::StoreIndirect(_, src, _) => {
+            f(src);
+        }
         _ => {}
     }
 }

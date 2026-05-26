@@ -1,0 +1,55 @@
+TackyProgram {
+    top_level: [
+        Function(
+            TackyFunction {
+                name: "main",
+                params: [],
+                global: true,
+                body: [
+                    Copy {
+                        src: Constant(
+                            40,
+                        ),
+                        dst: Var(
+                            "x.0",
+                        ),
+                    },
+                    Binary {
+                        op: Add,
+                        left: Var(
+                            "x.0",
+                        ),
+                        right: Constant(
+                            2,
+                        ),
+                        dst: Var(
+                            "tmp.0",
+                        ),
+                    },
+                    Return(
+                        Var(
+                            "tmp.0",
+                        ),
+                    ),
+                    Return(
+                        Constant(
+                            0,
+                        ),
+                    ),
+                ],
+                stack_params: {},
+                struct_param_groups: [],
+            },
+        ),
+    ],
+    global_vars: {},
+    thread_local_vars: {},
+    symbol_types: {
+        "x.0": Int,
+        "tmp.0": Int,
+    },
+    symbol_alignments: {},
+    array_sizes: {},
+    struct_defs: {},
+    var_struct_tags: {},
+}

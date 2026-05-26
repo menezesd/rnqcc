@@ -1509,6 +1509,10 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
         guard: Some("__rnqcc_poll_h"),
     },
     VirtualHeaderInfo {
+        name: "sys/poll.h",
+        guard: Some("__rnqcc_sys_poll_h"),
+    },
+    VirtualHeaderInfo {
         name: "setjmp.h",
         guard: Some("__rnqcc_setjmp_h"),
     },
@@ -1617,6 +1621,14 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
         guard: Some("__rnqcc_netinet_tcp_h"),
     },
     VirtualHeaderInfo {
+        name: "netinet/ip.h",
+        guard: Some("__rnqcc_netinet_ip_h"),
+    },
+    VirtualHeaderInfo {
+        name: "netinet/udp.h",
+        guard: Some("__rnqcc_netinet_udp_h"),
+    },
+    VirtualHeaderInfo {
         name: "net/if.h",
         guard: Some("__rnqcc_net_if_h"),
     },
@@ -1627,6 +1639,10 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
     VirtualHeaderInfo {
         name: "netdb.h",
         guard: Some("__rnqcc_netdb_h"),
+    },
+    VirtualHeaderInfo {
+        name: "resolv.h",
+        guard: Some("__rnqcc_resolv_h"),
     },
     VirtualHeaderInfo {
         name: "linux/limits.h",
@@ -2133,10 +2149,14 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 &[
                     ("_PATH_BSHELL", "\"/bin/sh\""),
                     ("_PATH_CSHELL", "\"/bin/csh\""),
+                    ("_PATH_DEFPATH", "\"/usr/bin:/bin\""),
                     ("_PATH_DEV", "\"/dev/\""),
                     ("_PATH_DEVNULL", "\"/dev/null\""),
+                    ("_PATH_STDPATH", "\"/usr/bin:/bin:/usr/sbin:/sbin\""),
+                    ("_PATH_TTY", "\"/dev/tty\""),
                     ("_PATH_TMP", "\"/tmp/\""),
                     ("_PATH_VARDB", "\"/var/db/\""),
+                    ("_PATH_VI", "\"/usr/bin/vi\""),
                 ],
             );
             String::new()
@@ -2146,6 +2166,7 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 macros,
                 &[
                     ("EX_OK", "0"),
+                    ("EX__BASE", "64"),
                     ("EX_USAGE", "64"),
                     ("EX_DATAERR", "65"),
                     ("EX_NOINPUT", "66"),
@@ -2161,6 +2182,7 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                     ("EX_PROTOCOL", "76"),
                     ("EX_NOPERM", "77"),
                     ("EX_CONFIG", "78"),
+                    ("EX__MAX", "78"),
                 ],
             );
             String::new()
@@ -2373,6 +2395,7 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 include_str!("virtual_headers/poll.h")
             )
         }
+        "sys/poll.h" => include_virtual_compat_header("poll.h", macros),
         "unistd.h" => {
             virtual_null_macro(macros);
             define_virtual_object_macros(
@@ -2534,6 +2557,7 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 &[
                     ("MAXPATHLEN", "1024"),
                     ("MAXHOSTNAMELEN", "256"),
+                    ("MAXSYMLINKS", "32"),
                     ("NBBY", "8"),
                     ("NGROUPS", "16"),
                 ],
@@ -2547,6 +2571,7 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                     vec!["x", "y"],
                     "((((x) + ((y) - 1)) / (y)) * (y))",
                 ),
+                ("powerof2", vec!["x"], "(((x) & ((x) - 1)) == 0)"),
             ] {
                 macros.insert(
                     name.to_string(),
@@ -2644,7 +2669,7 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                     },
                 );
             }
-            String::new()
+            include_virtual_compat_header("sys/types.h", macros)
         }
         "netinet/in.h" => {
             define_virtual_object_macros(
@@ -2687,6 +2712,36 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 "{}{}",
                 include_virtual_compat_header("netinet/in.h", macros),
                 include_str!("virtual_headers/netinet/tcp.h")
+            )
+        }
+        "netinet/ip.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("IPVERSION", "4"),
+                    ("IP_MAXPACKET", "65535"),
+                    ("IPTOS_LOWDELAY", "0x10"),
+                    ("IPTOS_THROUGHPUT", "0x08"),
+                    ("IPTOS_RELIABILITY", "0x04"),
+                ],
+            );
+            if virtual_header_include_once(macros, "netinet/ip.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}",
+                include_virtual_compat_header("netinet/in.h", macros),
+                include_str!("virtual_headers/netinet/ip.h")
+            )
+        }
+        "netinet/udp.h" => {
+            if virtual_header_include_once(macros, "netinet/udp.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}",
+                include_virtual_compat_header("netinet/in.h", macros),
+                include_str!("virtual_headers/netinet/udp.h")
             )
         }
         "net/if.h" => {
@@ -2757,6 +2812,23 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 include_virtual_compat_header("netinet/in.h", macros),
                 include_str!("virtual_headers/netdb.h")
             )
+        }
+        "resolv.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("NS_PACKETSZ", "512"),
+                    ("NS_MAXDNAME", "1025"),
+                    ("RES_INIT", "0x00000001"),
+                    ("RES_RECURSE", "0x00000040"),
+                    ("RES_DEFNAMES", "0x00000080"),
+                    ("RES_DNSRCH", "0x00000200"),
+                ],
+            );
+            if virtual_header_include_once(macros, "resolv.h") {
+                return String::new();
+            }
+            include_str!("virtual_headers/resolv.h").to_string()
         }
         "linux/limits.h" => {
             define_virtual_object_macros(

@@ -6698,12 +6698,15 @@ fn internal_cpp_provides_autoconf_probe_virtual_headers() {
              char path[] = \"/tmp/file\";\n\
              char *base = basename(path);\n\
              char *dir = dirname(path);\n\
-             int path_ok = _PATH_DEVNULL[0] == '/' && _PATH_TMP[0] == '/';\n\
-             int exit_ok = EX_OK == 0 && EX_USAGE < EX_CONFIG;\n\
+             int path_ok = _PATH_DEVNULL[0] == '/' && _PATH_TMP[0] == '/' &&\n\
+                           _PATH_DEFPATH[0] == '/' && _PATH_STDPATH[0] == '/' &&\n\
+                           _PATH_TTY[0] == '/' && _PATH_VI[0] == '/';\n\
+             int exit_ok = EX_OK == 0 && EX__BASE == EX_USAGE && EX_CONFIG == EX__MAX;\n\
              int lock_ok = LOCK_SH != LOCK_EX && LOCK_UN != LOCK_NB;\n\
              int param_ok = MAXPATHLEN >= 1024 && MIN(3, 5) == 3 && MAX(3, 5) == 5 &&\n\
-                            howmany(17, 8) == 3 && roundup(17, 8) == 24;\n\
-             int dev = makedev(3, 7);\n\
+                            howmany(17, 8) == 3 && roundup(17, 8) == 24 &&\n\
+                            MAXSYMLINKS > 0 && powerof2(8);\n\
+             dev_t dev = makedev(3, 7);\n\
              int sysmacros_ok = major(dev) == 3 && minor(dev) == 7;\n\
              return base && dir && path_ok && exit_ok && lock_ok && param_ok && sysmacros_ok ? 42 : 1;\n\
          }\n",
@@ -6746,6 +6749,59 @@ fn internal_cpp_provides_linux_alias_probe_virtual_headers() {
              int limits_ok = PATH_MAX >= 1024 && NAME_MAX >= 255 && PIPE_BUF >= 512;\n\
              int errno_ok = EINVAL != ENOENT && EACCES != 0;\n\
              return malloc_fn && memcpy_fn && limits_ok && errno_ok ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-nostdinc")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_provides_network_probe_alias_headers() {
+    let src = temp_file("internal-cpp-network-probe-alias-headers", "c");
+    let exe = temp_file("internal-cpp-network-probe-alias-headers", "bin");
+    std::fs::write(
+        &src,
+        "#include <sys/poll.h>\n\
+         #include <netinet/ip.h>\n\
+         #include <netinet/udp.h>\n\
+         #include <resolv.h>\n\
+         int main(void) {\n\
+             struct pollfd pfd;\n\
+             struct ip packet;\n\
+             struct udphdr udp;\n\
+             res_state resolver = 0;\n\
+             pfd.fd = 3;\n\
+             pfd.events = POLLIN | POLLOUT;\n\
+             pfd.revents = 0;\n\
+             packet.ip_v = IPVERSION;\n\
+             packet.ip_ttl = 64;\n\
+             packet.ip_src.s_addr = INADDR_LOOPBACK;\n\
+             packet.ip_dst.s_addr = INADDR_ANY;\n\
+             udp.uh_sport = 53;\n\
+             udp.uh_dport = 5353;\n\
+             udp.uh_ulen = 8;\n\
+             int poll_ok = sizeof(nfds_t) == sizeof(unsigned long) && (pfd.events & POLLIN) != 0;\n\
+             int ip_ok = packet.ip_v == 4 && packet.ip_ttl == 64 && IP_MAXPACKET > 1024;\n\
+             int udp_ok = udp.uh_dport > udp.uh_sport && udp.uh_ulen == 8;\n\
+             int resolv_ok = resolver == 0 && NS_PACKETSZ == 512 && (RES_RECURSE | RES_DEFNAMES) != 0;\n\
+             return poll_ok && ip_ok && udp_ok && resolv_ok ? 42 : 1;\n\
          }\n",
     )
     .expect("failed to write source");
@@ -6961,6 +7017,7 @@ fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
         "pthread.h",
         "pwd.h",
         "regex.h",
+        "resolv.h",
         "setjmp.h",
         "signal.h",
         "stdalign.h",
@@ -6981,9 +7038,12 @@ fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
         "ifaddrs.h",
         "net/if.h",
         "netinet/in.h",
+        "netinet/ip.h",
         "netinet/tcp.h",
+        "netinet/udp.h",
         "sys/file.h",
         "sys/errno.h",
+        "sys/poll.h",
         "sys/select.h",
         "sys/socket.h",
         "sys/ioctl.h",

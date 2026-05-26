@@ -70,9 +70,11 @@ assembly/linking.
   annotations are honored for object declarations and struct/union members when
   `n` is an integer constant expression.
 - GNU `__attribute__((packed))` / `__attribute__((__packed__))` is honored on
-  whole struct/union definitions for layout, including dense member placement,
-  aggregate alignment 1, non-recursive nested struct layout, and zero-width
-  bit-field alignment barriers.
+  whole struct/union definitions and individual members for layout, including
+  dense member placement, aggregate alignment 1, non-recursive nested struct
+  layout, and zero-width bit-field alignment barriers. GNU
+  `__attribute__((aligned(n)))` on whole struct/union definitions raises the
+  aggregate alignment and size padding, including in combination with `packed`.
 - Additional GNU builtin compatibility includes `__builtin_constant_p`,
   `__builtin_expect_with_probability`, `__builtin_assume_aligned`,
   `__builtin_prefetch`, `__builtin_bswap32`, `__builtin_bswap64`,
@@ -141,3 +143,6 @@ dependency files, existing object/static-library inputs, nested response files,
 and paths containing spaces. New failures from real C projects should be reduced
 into fixtures under `tests/fixtures/smoke` or configure-style probes under
 `tests/fixtures/real_project` before broadening the compiler.
+`scripts/layout_oracle.py` additionally compares selected aggregate layout
+checks against the host C compiler so packing/alignment changes are
+regression-tested against the platform ABI.

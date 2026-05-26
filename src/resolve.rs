@@ -630,6 +630,7 @@ impl Resolver {
                                 member_full_type: resolved_ft,
                                 bit_width: m.bit_width,
                                 alignment: m.alignment,
+                                packed: m.packed,
                             }
                         })
                         .collect();
@@ -638,6 +639,7 @@ impl Resolver {
                         members: resolved_members,
                         is_union: sd.is_union,
                         packed: sd.packed,
+                        alignment: sd.alignment,
                     }))
                 }
                 BlockItem::Declaration(Declaration::TypedefDecl) => {
@@ -950,6 +952,7 @@ pub fn resolve(program: Program) -> ResolveResult<ResolveOutput> {
                                 member_full_type: resolved_ft,
                                 bit_width: m.bit_width,
                                 alignment: m.alignment,
+                                packed: m.packed,
                             }
                         })
                         .collect();
@@ -958,6 +961,7 @@ pub fn resolve(program: Program) -> ResolveResult<ResolveOutput> {
                         members: resolved_members,
                         is_union: sd.is_union,
                         packed: sd.packed,
+                        alignment: sd.alignment,
                     })
                 }
                 Declaration::TypedefDecl => Declaration::TypedefDecl,

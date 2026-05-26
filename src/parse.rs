@@ -5,6 +5,19 @@ use crate::lex;
 use crate::types::*;
 
 type ParseResult<T> = Result<T, String>;
+const MAX_SUPPORTED_ALIGNMENT: usize = 1 << 30;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct AggregateAttributes {
+    packed: bool,
+    alignment: Option<std::num::NonZeroUsize>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct MemberAttributes {
+    alignment: Option<std::num::NonZeroUsize>,
+    packed: bool,
+}
 
 #[derive(Debug)]
 enum AbstractDecl {
@@ -87,6 +100,21 @@ pub struct Parser {
 }
 
 impl Parser {
+    fn merge_aggregate_attributes(
+        prefix: AggregateAttributes,
+        suffix: AggregateAttributes,
+    ) -> AggregateAttributes {
+        AggregateAttributes {
+            packed: prefix.packed || suffix.packed,
+            alignment: match (prefix.alignment, suffix.alignment) {
+                (Some(prefix), Some(suffix)) => Some(prefix.max(suffix)),
+                (Some(prefix), None) => Some(prefix),
+                (None, Some(suffix)) => Some(suffix),
+                (None, None) => None,
+            },
+        }
+    }
+
     pub fn new(tokens: Vec<Token>) -> Self {
         let mut builtin_typedefs = std::collections::HashMap::new();
         builtin_typedefs.insert(
@@ -366,16 +394,8 @@ impl Parser {
         if sd.members.is_empty() {
             return Ok(());
         }
-        let def = if sd.is_union && sd.packed {
-            StructDef::from_members_union_packed(&sd.tag, &sd.members, &self.struct_defs)
-        } else if sd.is_union {
-            StructDef::from_members_union(&sd.tag, &sd.members, &self.struct_defs)
-        } else if sd.packed {
-            StructDef::from_members_packed(&sd.tag, &sd.members, &self.struct_defs)
-        } else {
-            StructDef::from_members(&sd.tag, &sd.members, &self.struct_defs)
-        }
-        .map_err(|err| self.format_error(&err))?;
+        let def = StructDef::from_declaration(sd, &self.struct_defs)
+            .map_err(|err| self.format_error(&err))?;
         self.struct_defs.insert(sd.tag.clone(), def);
         Ok(())
     }
@@ -713,20 +733,31 @@ impl Parser {
         self.expect_token(Token::OpenParen)?;
         let alignment = if self.peek().is_some_and(|tok| self.is_type_keyword(tok)) {
             let ft = self.parse_type_name_full()?;
-            ft.alignment_with(&self.struct_defs)
+            Self::validate_alignment_value(ft.alignment_with(&self.struct_defs) as i64)?
         } else {
             let exp = self.parse_assignment()?;
             let value = self
                 .eval_integer_constant_exp_with_layout(&exp)
                 .ok_or_else(|| self.format_error("expected constant alignment"))?;
-            if value <= 0 {
-                return Err(self.format_error("alignment must be positive"));
-            }
-            value as usize
+            Self::validate_alignment_value(value)?
         };
         self.expect_token(Token::CloseParen)?;
+        Ok(alignment)
+    }
+
+    fn validate_alignment_value(value: i64) -> ParseResult<std::num::NonZeroUsize> {
+        if value <= 0 {
+            return Err("alignment must be positive".to_string());
+        }
+        let alignment = usize::try_from(value).map_err(|_| "alignment is too large".to_string())?;
+        if alignment > MAX_SUPPORTED_ALIGNMENT {
+            return Err("alignment is too large".to_string());
+        }
+        if !alignment.is_power_of_two() {
+            return Err("alignment must be a power of two".to_string());
+        }
         std::num::NonZeroUsize::new(alignment)
-            .ok_or_else(|| self.format_error("alignment must be positive"))
+            .ok_or_else(|| "alignment must be positive".to_string())
     }
 
     fn merge_alignment(
@@ -750,50 +781,53 @@ impl Parser {
         let value = parser
             .eval_integer_constant_exp_with_layout(&exp)
             .ok_or_else(|| self.format_error("expected constant alignment"))?;
-        if value <= 0 {
-            return Err(self.format_error("alignment must be positive"));
-        }
-        std::num::NonZeroUsize::new(value as usize)
-            .ok_or_else(|| self.format_error("alignment must be positive"))
+        Self::validate_alignment_value(value).map_err(|err| self.format_error(&err))
     }
 
-    fn consume_alignment_specifiers(&mut self) -> ParseResult<Option<std::num::NonZeroUsize>> {
-        let mut alignment = None;
+    fn consume_member_attributes(&mut self) -> ParseResult<MemberAttributes> {
+        let mut attrs = MemberAttributes::default();
         loop {
             match self.peek().cloned() {
                 Some(Token::KWAlignAs) => {
                     let value = self.parse_alignment_specifier()?;
-                    alignment = Self::merge_alignment(alignment, value);
+                    attrs.alignment = Self::merge_alignment(attrs.alignment, value);
                 }
                 Some(Token::AttributeAligned(expression)) => {
                     let value = self.parse_attribute_alignment(&expression)?;
                     self.advance()?;
-                    alignment = Self::merge_alignment(alignment, value);
+                    attrs.alignment = Self::merge_alignment(attrs.alignment, value);
                 }
                 Some(Token::AttributeAlignedNoreturn(expression)) => {
                     let value = self.parse_attribute_alignment(&expression)?;
                     self.pending_noreturn = true;
                     self.advance()?;
-                    alignment = Self::merge_alignment(alignment, value);
+                    attrs.alignment = Self::merge_alignment(attrs.alignment, value);
                 }
                 Some(Token::AttributePacked) => {
                     self.advance()?;
+                    attrs.packed = true;
                 }
                 Some(Token::AttributePackedAligned(expression)) => {
                     let value = self.parse_attribute_alignment(&expression)?;
                     self.advance()?;
-                    alignment = Self::merge_alignment(alignment, value);
+                    attrs.alignment = Self::merge_alignment(attrs.alignment, value);
+                    attrs.packed = true;
                 }
                 Some(Token::AttributePackedAlignedNoreturn(expression)) => {
                     let value = self.parse_attribute_alignment(&expression)?;
                     self.pending_noreturn = true;
                     self.advance()?;
-                    alignment = Self::merge_alignment(alignment, value);
+                    attrs.alignment = Self::merge_alignment(attrs.alignment, value);
+                    attrs.packed = true;
                 }
                 _ => break,
             }
         }
-        Ok(alignment)
+        Ok(attrs)
+    }
+
+    fn consume_alignment_specifiers(&mut self) -> ParseResult<Option<std::num::NonZeroUsize>> {
+        Ok(self.consume_member_attributes()?.alignment)
     }
 
     fn consume_declaration_attributes(
@@ -842,28 +876,40 @@ impl Parser {
         Ok((alignment, noreturn))
     }
 
-    fn consume_packed_attributes(&mut self) -> ParseResult<bool> {
-        let mut packed = false;
+    fn consume_aggregate_attributes(&mut self) -> ParseResult<AggregateAttributes> {
+        let mut attrs = AggregateAttributes::default();
         loop {
             match self.peek().cloned() {
                 Some(Token::AttributePacked) => {
                     self.advance()?;
-                    packed = true;
+                    attrs.packed = true;
+                }
+                Some(Token::AttributeAligned(expression)) => {
+                    let value = self.parse_attribute_alignment(&expression)?;
+                    self.advance()?;
+                    attrs.alignment = Self::merge_alignment(attrs.alignment, value);
+                }
+                Some(Token::AttributeAlignedNoreturn(expression)) => {
+                    let value = self.parse_attribute_alignment(&expression)?;
+                    self.advance()?;
+                    attrs.alignment = Self::merge_alignment(attrs.alignment, value);
                 }
                 Some(Token::AttributePackedAligned(expression)) => {
-                    let _ = self.parse_attribute_alignment(&expression)?;
+                    let value = self.parse_attribute_alignment(&expression)?;
                     self.advance()?;
-                    packed = true;
+                    attrs.alignment = Self::merge_alignment(attrs.alignment, value);
+                    attrs.packed = true;
                 }
                 Some(Token::AttributePackedAlignedNoreturn(expression)) => {
-                    let _ = self.parse_attribute_alignment(&expression)?;
+                    let value = self.parse_attribute_alignment(&expression)?;
                     self.advance()?;
-                    packed = true;
+                    attrs.alignment = Self::merge_alignment(attrs.alignment, value);
+                    attrs.packed = true;
                 }
                 _ => break,
             }
         }
-        Ok(packed)
+        Ok(attrs)
     }
 
     fn parse_typeof_full_type(&mut self) -> ParseResult<FullType> {
@@ -2001,7 +2047,7 @@ impl Parser {
             if self.peek().is_none() {
                 return Err(self.format_error("expected CloseBrace but found end of input"));
             }
-            let member_alignment = self.consume_alignment_specifiers()?;
+            let member_attrs = self.consume_member_attributes()?;
             let base_type = self.parse_type()?;
             let (name, full_type, _) = if base_type == CType::Struct && self.at(&Token::Semicolon) {
                 let Some(tag) = self.last_struct_tag.clone() else {
@@ -2040,8 +2086,8 @@ impl Parser {
             } else {
                 None
             };
-            let post_alignment = self.consume_alignment_specifiers()?;
-            let member_alignment = match (member_alignment, post_alignment) {
+            let post_attrs = self.consume_member_attributes()?;
+            let member_alignment = match (member_attrs.alignment, post_attrs.alignment) {
                 (Some(current), Some(post)) => Some(current.max(post)),
                 (Some(current), None) => Some(current),
                 (None, Some(post)) => Some(post),
@@ -2053,6 +2099,7 @@ impl Parser {
                 member_full_type,
                 bit_width,
                 alignment: member_alignment,
+                packed: member_attrs.packed || post_attrs.packed,
             });
             self.expect_token(Token::Semicolon)?;
         }
@@ -2067,7 +2114,7 @@ impl Parser {
         } else {
             self.expect_token(Token::KWStruct)?;
         }
-        let prefix_packed = self.consume_packed_attributes()?;
+        let prefix_attrs = self.consume_aggregate_attributes()?;
         // Tag is optional for anonymous structs/unions
         let tag = if let Some(Token::Identifier(_)) = self.peek() {
             self.parse_identifier()?
@@ -2079,13 +2126,15 @@ impl Parser {
         // If followed by { members }, parse the struct body and record a pending definition
         if self.at(&Token::OpenBrace) {
             let members = self.parse_struct_members()?;
-            let suffix_packed = self.consume_packed_attributes()?;
+            let suffix_attrs = self.consume_aggregate_attributes()?;
             self.validate_flexible_array_members(&members, is_union)?;
+            let attrs = Self::merge_aggregate_attributes(prefix_attrs, suffix_attrs);
             let declaration = StructDeclaration {
                 tag: tag.clone(),
                 members,
                 is_union,
-                packed: prefix_packed || suffix_packed,
+                packed: attrs.packed,
+                alignment: attrs.alignment,
             };
             self.record_struct_definition(&declaration)?;
             self.pending_struct_decls.push(declaration);
@@ -2150,19 +2199,21 @@ impl Parser {
             let is_union = self.at(&Token::KWUnion);
             let save_pos = self.pos;
             self.advance()?; // consume 'struct' or 'union'
-            let prefix_packed = self.consume_packed_attributes()?;
+            let prefix_attrs = self.consume_aggregate_attributes()?;
             if let Some(Token::Identifier(_)) = self.peek() {
                 let tag = self.parse_identifier()?;
                 if self.at(&Token::OpenBrace) {
                     let members = self.parse_struct_members()?;
-                    let suffix_packed = self.consume_packed_attributes()?;
+                    let suffix_attrs = self.consume_aggregate_attributes()?;
                     self.validate_flexible_array_members(&members, is_union)?;
                     self.expect_token(Token::Semicolon)?;
+                    let attrs = Self::merge_aggregate_attributes(prefix_attrs, suffix_attrs);
                     let declaration = StructDeclaration {
                         tag,
                         members,
                         is_union,
-                        packed: prefix_packed || suffix_packed,
+                        packed: attrs.packed,
+                        alignment: attrs.alignment,
                     };
                     self.record_struct_definition(&declaration)?;
                     return Ok(Declaration::StructDecl(declaration));
@@ -2172,7 +2223,8 @@ impl Parser {
                         tag,
                         members: vec![],
                         is_union,
-                        packed: prefix_packed,
+                        packed: prefix_attrs.packed,
+                        alignment: prefix_attrs.alignment,
                     }));
                 }
             }
@@ -2656,20 +2708,22 @@ impl Parser {
                 let save_pos = self.pos;
                 self.advance()?; // consume 'struct' or 'union'
                                  // Only check for standalone decl if next token is an identifier (not anonymous)
-                let prefix_packed = self.consume_packed_attributes()?;
+                let prefix_attrs = self.consume_aggregate_attributes()?;
                 if let Some(Token::Identifier(_)) = self.peek() {
                     let tag = self.parse_identifier()?;
                     if self.at(&Token::OpenBrace) {
                         let members = self.parse_struct_members()?;
-                        let suffix_packed = self.consume_packed_attributes()?;
+                        let suffix_attrs = self.consume_aggregate_attributes()?;
                         self.validate_flexible_array_members(&members, is_union)?;
                         self.expect_token(Token::Semicolon)?;
+                        let attrs = Self::merge_aggregate_attributes(prefix_attrs, suffix_attrs);
                         return Ok(BlockItem::Declaration(Declaration::StructDecl(
                             StructDeclaration {
                                 tag,
                                 members,
                                 is_union,
-                                packed: prefix_packed || suffix_packed,
+                                packed: attrs.packed,
+                                alignment: attrs.alignment,
                             },
                         )));
                     } else if self.at(&Token::Semicolon) {
@@ -2679,7 +2733,8 @@ impl Parser {
                                 tag,
                                 members: vec![],
                                 is_union,
-                                packed: prefix_packed,
+                                packed: prefix_attrs.packed,
+                                alignment: prefix_attrs.alignment,
                             },
                         )));
                     }

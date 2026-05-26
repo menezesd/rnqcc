@@ -5,6 +5,7 @@ cargo fmt -- --check
 cargo check --all-targets
 cargo clippy --all-targets -- -D warnings
 cargo test
+python3 scripts/layout_oracle.py
 bash -n run_tests.sh
 
 cargo build

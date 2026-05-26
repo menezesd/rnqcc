@@ -3329,6 +3329,16 @@ union __attribute__((packed)) PackedUnion {
     long value;
 };
 
+struct __attribute__((packed)) PackedLongBits {
+    long flag : 1;
+    char tail;
+};
+
+union __attribute__((packed)) PackedLongBitUnion {
+    long flag : 1;
+    char tag;
+};
+
 struct Natural {
     char tag;
     long value;
@@ -3342,7 +3352,72 @@ int main(void) {
     if (sizeof(struct SuffixPacked) != 13) return 4;
     if (__builtin_offsetof(struct SuffixPacked, value) != 1) return 5;
     if (sizeof(union PackedUnion) != 8) return 6;
-    if (sizeof(struct Natural) <= sizeof(struct PrefixPacked)) return 7;
+    if (sizeof(struct PackedLongBits) != 2) return 7;
+    if (_Alignof(struct PackedLongBits) != 1) return 8;
+    if (__builtin_offsetof(struct PackedLongBits, tail) != 1) return 9;
+    if (sizeof(union PackedLongBitUnion) != 1) return 10;
+    if (_Alignof(union PackedLongBitUnion) != 1) return 11;
+    if (sizeof(struct Natural) <= sizeof(struct PrefixPacked)) return 12;
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write test input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn honors_field_packed_and_aggregate_aligned_layout() {
+    let src = temp_file("frontend-packed-aligned-attributes", "i");
+    let exe = temp_file("frontend-packed-aligned-attributes", "bin");
+    std::fs::write(
+        &src,
+        r#"
+struct FieldPacked {
+    char tag;
+    int value __attribute__((packed));
+    char tail;
+};
+
+struct __attribute__((aligned(16))) AlignedStruct {
+    char tag;
+    int value;
+};
+
+struct __attribute__((packed, aligned(4))) PackedAligned {
+    char tag;
+    int value;
+};
+
+struct SuffixAligned {
+    char tag;
+    int value;
+} __attribute__((aligned(16)));
+
+int main(void) {
+    if (sizeof(struct FieldPacked) != 6) return 1;
+    if (__builtin_offsetof(struct FieldPacked, value) != 1) return 2;
+    if (__builtin_offsetof(struct FieldPacked, tail) != 5) return 3;
+    if (_Alignof(struct AlignedStruct) != 16) return 4;
+    if (sizeof(struct AlignedStruct) != 16) return 5;
+    if (_Alignof(struct PackedAligned) != 4) return 6;
+    if (sizeof(struct PackedAligned) != 8) return 7;
+    if (__builtin_offsetof(struct PackedAligned, value) != 1) return 8;
+    if (_Alignof(struct SuffixAligned) != 16) return 9;
+    if (sizeof(struct SuffixAligned) != 16) return 10;
     return 42;
 }
 "#,

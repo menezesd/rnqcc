@@ -678,13 +678,61 @@ pub struct StructMember {
 }
 
 impl StructDef {
+    pub fn from_declaration(
+        declaration: &StructDeclaration,
+        struct_defs: &std::collections::HashMap<String, StructDef>,
+    ) -> Result<Self, String> {
+        match (
+            declaration.is_union,
+            declaration.packed,
+            declaration.alignment,
+        ) {
+            (true, true, Some(alignment)) => Self::from_members_union_packed_aligned(
+                &declaration.tag,
+                &declaration.members,
+                struct_defs,
+                alignment,
+            ),
+            (true, true, None) => {
+                Self::from_members_union_packed(&declaration.tag, &declaration.members, struct_defs)
+            }
+            (true, false, Some(alignment)) => Self::from_members_union_aligned(
+                &declaration.tag,
+                &declaration.members,
+                struct_defs,
+                alignment,
+            ),
+            (true, false, None) => {
+                Self::from_members_union(&declaration.tag, &declaration.members, struct_defs)
+            }
+            (false, true, Some(alignment)) => Self::from_members_packed_aligned(
+                &declaration.tag,
+                &declaration.members,
+                struct_defs,
+                alignment,
+            ),
+            (false, true, None) => {
+                Self::from_members_packed(&declaration.tag, &declaration.members, struct_defs)
+            }
+            (false, false, Some(alignment)) => Self::from_members_aligned(
+                &declaration.tag,
+                &declaration.members,
+                struct_defs,
+                alignment,
+            ),
+            (false, false, None) => {
+                Self::from_members(&declaration.tag, &declaration.members, struct_defs)
+            }
+        }
+    }
+
     /// Compute layout from member declarations
     pub fn from_members(
         tag: &str,
         members: &[MemberDeclaration],
         struct_defs: &std::collections::HashMap<String, StructDef>,
     ) -> Result<Self, String> {
-        Self::from_members_ex(tag, members, struct_defs, false, false)
+        Self::from_members_ex(tag, members, struct_defs, false, false, None)
     }
 
     pub fn from_members_packed(
@@ -692,7 +740,25 @@ impl StructDef {
         members: &[MemberDeclaration],
         struct_defs: &std::collections::HashMap<String, StructDef>,
     ) -> Result<Self, String> {
-        Self::from_members_ex(tag, members, struct_defs, false, true)
+        Self::from_members_ex(tag, members, struct_defs, false, true, None)
+    }
+
+    pub fn from_members_aligned(
+        tag: &str,
+        members: &[MemberDeclaration],
+        struct_defs: &std::collections::HashMap<String, StructDef>,
+        alignment: std::num::NonZeroUsize,
+    ) -> Result<Self, String> {
+        Self::from_members_ex(tag, members, struct_defs, false, false, Some(alignment))
+    }
+
+    pub fn from_members_packed_aligned(
+        tag: &str,
+        members: &[MemberDeclaration],
+        struct_defs: &std::collections::HashMap<String, StructDef>,
+        alignment: std::num::NonZeroUsize,
+    ) -> Result<Self, String> {
+        Self::from_members_ex(tag, members, struct_defs, false, true, Some(alignment))
     }
 
     pub fn from_members_union(
@@ -700,7 +766,7 @@ impl StructDef {
         members: &[MemberDeclaration],
         struct_defs: &std::collections::HashMap<String, StructDef>,
     ) -> Result<Self, String> {
-        Self::from_members_ex(tag, members, struct_defs, true, false)
+        Self::from_members_ex(tag, members, struct_defs, true, false, None)
     }
 
     pub fn from_members_union_packed(
@@ -708,7 +774,25 @@ impl StructDef {
         members: &[MemberDeclaration],
         struct_defs: &std::collections::HashMap<String, StructDef>,
     ) -> Result<Self, String> {
-        Self::from_members_ex(tag, members, struct_defs, true, true)
+        Self::from_members_ex(tag, members, struct_defs, true, true, None)
+    }
+
+    pub fn from_members_union_aligned(
+        tag: &str,
+        members: &[MemberDeclaration],
+        struct_defs: &std::collections::HashMap<String, StructDef>,
+        alignment: std::num::NonZeroUsize,
+    ) -> Result<Self, String> {
+        Self::from_members_ex(tag, members, struct_defs, true, false, Some(alignment))
+    }
+
+    pub fn from_members_union_packed_aligned(
+        tag: &str,
+        members: &[MemberDeclaration],
+        struct_defs: &std::collections::HashMap<String, StructDef>,
+        alignment: std::num::NonZeroUsize,
+    ) -> Result<Self, String> {
+        Self::from_members_ex(tag, members, struct_defs, true, true, Some(alignment))
     }
 
     fn from_members_ex(
@@ -717,6 +801,7 @@ impl StructDef {
         struct_defs: &std::collections::HashMap<String, StructDef>,
         is_union: bool,
         packed: bool,
+        aggregate_alignment: Option<std::num::NonZeroUsize>,
     ) -> Result<Self, String> {
         let mut offset = 0usize;
         let mut max_align = 1usize;
@@ -730,7 +815,8 @@ impl StructDef {
 
         for m in members {
             let (m_size, natural_align) = member_size_align(&m.member_full_type, struct_defs)?;
-            let layout_align = if packed { 1 } else { natural_align };
+            let member_packed = packed || m.packed;
+            let layout_align = if member_packed { 1 } else { natural_align };
             let m_align = m
                 .alignment
                 .map_or(layout_align, |a| a.get().max(layout_align));
@@ -758,7 +844,13 @@ impl StructDef {
                         m.name, width, storage_bits
                     ));
                 }
-                let (storage_size, storage_align, storage_type) = if m_size > 4 && width <= 32 {
+                let (storage_size, storage_align, storage_type) = if member_packed {
+                    (
+                        usize::from(width).div_ceil(8).max(1),
+                        1,
+                        m.member_type,
+                    )
+                } else if m_size > 4 && width <= 32 {
                     (
                         4,
                         4,
@@ -771,7 +863,7 @@ impl StructDef {
                 } else {
                     (m_size, m_align, m.member_type)
                 };
-                let zero_width_align = if packed && width == 0 {
+                let zero_width_align = if member_packed && width == 0 {
                     natural_align
                 } else {
                     storage_align
@@ -779,10 +871,10 @@ impl StructDef {
                 let storage_bits = storage_size * 8;
                 if width == 0 {
                     if !m.name.is_empty() {
-                        return Err("zero-width bit-field may not have a name".to_string());
+                    return Err("zero-width bit-field may not have a name".to_string());
                     }
                     if !is_union {
-                        offset = (offset + zero_width_align - 1) & !(zero_width_align - 1);
+                        offset = round_up_to(offset, zero_width_align)?;
                     }
                     next_bit_offset = 0;
                     bit_unit_size = 0;
@@ -815,13 +907,15 @@ impl StructDef {
                     || bit_unit_type != storage_type
                     || next_bit_offset + width as usize > storage_bits;
                 if needs_new_unit {
-                    offset = (offset + storage_align - 1) & !(storage_align - 1);
+                    offset = round_up_to(offset, storage_align)?;
                     bit_unit_offset = offset;
                     bit_unit_size = storage_size;
                     bit_unit_align = storage_align;
                     bit_unit_type = storage_type;
                     next_bit_offset = 0;
-                    offset += storage_size;
+                    offset = offset
+                        .checked_add(storage_size)
+                        .ok_or_else(|| format!("struct '{}' layout is too large", tag))?;
                 }
                 if !m.name.is_empty() {
                     laid_out.push(StructMember {
@@ -870,13 +964,16 @@ impl StructDef {
                 }
             } else {
                 // Struct: sequential layout with alignment
-                offset = (offset + m_align - 1) & !(m_align - 1);
+                offset = round_up_to(offset, m_align)?;
                 if m.name.is_empty() {
                     if let FullType::Struct(nested_tag) = &m.member_full_type {
                         if let Some(nested) = struct_defs.get(nested_tag) {
                             for nested_member in &nested.members {
                                 let mut flattened = nested_member.clone();
-                                flattened.offset += offset;
+                                flattened.offset = flattened
+                                    .offset
+                                    .checked_add(offset)
+                                    .ok_or_else(|| format!("struct '{}' layout is too large", tag))?;
                                 laid_out.push(flattened);
                             }
                         }
@@ -892,18 +989,24 @@ impl StructDef {
                         bit_offset: 0,
                     });
                 }
-                offset += m_size;
+                offset = offset
+                    .checked_add(m_size)
+                    .ok_or_else(|| format!("struct '{}' layout is too large", tag))?;
             }
             if m_align > max_align {
                 max_align = m_align;
             }
         }
 
+        if let Some(alignment) = aggregate_alignment {
+            max_align = max_align.max(alignment.get());
+        }
+
         let total_size = if is_union {
             // Union size = max member size, padded to alignment
-            (max_size + max_align - 1) & !(max_align - 1)
+            round_up_to(max_size, max_align)?
         } else {
-            (offset + max_align - 1) & !(max_align - 1)
+            round_up_to(offset, max_align)?
         };
 
         Ok(StructDef {
@@ -918,6 +1021,17 @@ impl StructDef {
     pub fn find_member(&self, name: &str) -> Option<&StructMember> {
         self.members.iter().find(|m| m.name == name)
     }
+}
+
+fn round_up_to(value: usize, alignment: usize) -> Result<usize, String> {
+    if alignment == 0 || !alignment.is_power_of_two() {
+        return Err(format!("invalid alignment {}", alignment));
+    }
+    let mask = alignment - 1;
+    value
+        .checked_add(mask)
+        .map(|rounded| rounded & !mask)
+        .ok_or_else(|| "struct layout is too large".to_string())
 }
 
 fn member_size_align(
@@ -1346,6 +1460,7 @@ pub struct MemberDeclaration {
     pub member_full_type: FullType,
     pub bit_width: Option<u8>,
     pub alignment: Option<std::num::NonZeroUsize>,
+    pub packed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1354,6 +1469,7 @@ pub struct StructDeclaration {
     pub members: Vec<MemberDeclaration>, // empty = incomplete type
     pub is_union: bool,
     pub packed: bool,
+    pub alignment: Option<std::num::NonZeroUsize>,
 }
 
 #[allow(clippy::enum_variant_names)]
@@ -1885,6 +2001,7 @@ mod tests {
                 member_full_type: FullType::Scalar(CType::Double),
                 bit_width: None,
                 alignment: None,
+                packed: false,
             },
             MemberDeclaration {
                 name: "l".to_string(),
@@ -1892,6 +2009,7 @@ mod tests {
                 member_full_type: FullType::Scalar(CType::Long),
                 bit_width: None,
                 alignment: None,
+                packed: false,
             },
         ];
         let union = StructDef::from_members_union("U", &members, &HashMap::new())?;

@@ -5743,19 +5743,7 @@ impl TackyGen {
                 }
                 BlockItem::Declaration(Declaration::StructDecl(sd)) => {
                     if !sd.members.is_empty() {
-                        let def = if sd.is_union && sd.packed {
-                            StructDef::from_members_union_packed(
-                                &sd.tag,
-                                &sd.members,
-                                &self.struct_defs,
-                            )
-                        } else if sd.is_union {
-                            StructDef::from_members_union(&sd.tag, &sd.members, &self.struct_defs)
-                        } else if sd.packed {
-                            StructDef::from_members_packed(&sd.tag, &sd.members, &self.struct_defs)
-                        } else {
-                            StructDef::from_members(&sd.tag, &sd.members, &self.struct_defs)
-                        }?;
+                        let def = StructDef::from_declaration(&sd, &self.struct_defs)?;
                         self.struct_defs.insert(sd.tag.clone(), def);
                     }
                 }
@@ -6139,15 +6127,7 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
             }
             Declaration::StructDecl(sd) => {
                 if !sd.members.is_empty() {
-                    let def = if sd.is_union && sd.packed {
-                        StructDef::from_members_union_packed(&sd.tag, &sd.members, &gen.struct_defs)
-                    } else if sd.is_union {
-                        StructDef::from_members_union(&sd.tag, &sd.members, &gen.struct_defs)
-                    } else if sd.packed {
-                        StructDef::from_members_packed(&sd.tag, &sd.members, &gen.struct_defs)
-                    } else {
-                        StructDef::from_members(&sd.tag, &sd.members, &gen.struct_defs)
-                    }?;
+                    let def = StructDef::from_declaration(sd, &gen.struct_defs)?;
                     gen.struct_defs.insert(sd.tag.clone(), def);
                 }
             }

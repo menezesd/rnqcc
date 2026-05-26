@@ -31,5 +31,8 @@ jobs:
       - name: Test
         run: cargo test
 
+      - name: Layout oracle
+        run: python3 scripts/layout_oracle.py
+
       - name: Real project smoke
         run: sh scripts/real_project_smoke.sh

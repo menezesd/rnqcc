@@ -691,7 +691,8 @@ impl Lexer {
             }
             "char" => Token::KWChar,
             "sizeof" => Token::KWSizeOf,
-            "typeof" | "__typeof" | "__typeof__" => Token::KWTypeOf,
+            "typeof" | "__typeof" | "__typeof__" | "typeof_unqual" | "__typeof_unqual"
+            | "__typeof_unqual__" => Token::KWTypeOf,
             "_Alignof" | "alignof" | "__alignof" | "__alignof__" => Token::KWAlignOf,
             "_Alignas" | "alignas" => Token::KWAlignAs,
             "struct" => Token::KWStruct,

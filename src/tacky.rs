@@ -137,6 +137,18 @@ impl TackyGen {
         }
     }
 
+    fn static_address_initializer_label(init: &Exp) -> Option<&str> {
+        match init {
+            Exp::Var(name) => Some(name.as_str()),
+            Exp::Unary(UnaryOp::AddrOf, inner) => match inner.as_ref() {
+                Exp::Var(name) => Some(name.as_str()),
+                _ => None,
+            },
+            Exp::Cast(_, _, inner) => Self::static_address_initializer_label(inner),
+            _ => None,
+        }
+    }
+
     fn is_one_dimensional_char_array(ft: &FullType) -> bool {
         matches!(
             ft,
@@ -5106,15 +5118,19 @@ impl TackyGen {
                 let label = self.make_string_constant(s);
                 builder.put(base_offset, StaticInit::PointerInit(label))?;
             }
+            (FullType::Pointer(_), _) => {
+                if let Some(label) = Self::static_address_initializer_label(init) {
+                    builder.put(base_offset, StaticInit::PointerInit(label.to_string()))?;
+                } else {
+                    let (v, is_dbl, is_uns) = eval_constant_init(&Some(init.clone()))?;
+                    let cv = convert_init_value(v, CType::Pointer, is_dbl, is_uns);
+                    builder.put(base_offset, make_static_init(cv, CType::Pointer))?;
+                }
+            }
             (FullType::Scalar(ctype), _) => {
                 let (v, is_dbl, is_uns) = eval_constant_init(&Some(init.clone()))?;
                 let cv = convert_init_value(v, *ctype, is_dbl, is_uns);
                 builder.put(base_offset, make_static_init(cv, *ctype))?;
-            }
-            (FullType::Pointer(_), _) => {
-                let (v, is_dbl, is_uns) = eval_constant_init(&Some(init.clone()))?;
-                let cv = convert_init_value(v, CType::Pointer, is_dbl, is_uns);
-                builder.put(base_offset, make_static_init(cv, CType::Pointer))?;
             }
             _ => {
                 return Err(format!(
@@ -5712,6 +5728,25 @@ impl TackyGen {
                 });
                 return Ok(());
             }
+            if let Some(label) = (vd.var_type == CType::Pointer)
+                .then(|| {
+                    vd.init
+                        .as_ref()
+                        .and_then(Self::static_address_initializer_label)
+                })
+                .flatten()
+            {
+                let align = std::cmp::max(vd.var_type.size() as usize, 1);
+                let align = vd.alignment.map_or(align, |a| a.get().max(align));
+                self.static_vars.push(TackyStaticVar {
+                    name: vd.name,
+                    global: false,
+                    thread_local: is_thread_local,
+                    alignment: align,
+                    init_values: vec![StaticInit::PointerInit(label.to_string())],
+                });
+                return Ok(());
+            }
             let (raw_val, is_dbl, is_uns) = eval_constant_init(&vd.init)?;
             let init_val = convert_init_value(raw_val, vd.var_type, is_dbl, is_uns);
             let align = if vd.var_type == CType::Double {
@@ -6198,6 +6233,12 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
             let init_val: Option<(i64, bool, bool)> = match &vd.init {
                 Some(Exp::ArrayInit(_)) => None,     // Array init handled separately
                 Some(Exp::StringLiteral(_)) => None, // String init handled separately
+                Some(exp)
+                    if vd.var_type == CType::Pointer
+                        && TackyGen::static_address_initializer_label(exp).is_some() =>
+                {
+                    None
+                }
                 Some(exp) => Some(
                     eval_static_integer_constant_exp(exp)
                         .ok_or_else(|| "Global initializer must be constant".to_string())?,
@@ -6385,6 +6426,30 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
                     global_vars.insert(sc.name.clone());
                     top_level.push(TackyTopLevel::StaticConstant(sc));
                 }
+                continue;
+            }
+            if let (None, true, Some(label)) = (
+                &vd.array_dims,
+                vd.var_type == CType::Pointer,
+                vd.init
+                    .as_ref()
+                    .and_then(TackyGen::static_address_initializer_label),
+            ) {
+                let is_global = *linkage.get(&vd.name).unwrap_or(&true);
+                let align = std::cmp::max(vd.var_type.size() as usize, 1);
+                let align = vd.alignment.map_or(align, |a| a.get().max(align));
+                top_level.push(TackyTopLevel::StaticVar(TackyStaticVar {
+                    name: vd.name.clone(),
+                    global: is_global,
+                    thread_local: vd
+                        .storage_class
+                        .as_ref()
+                        .is_some_and(StorageClass::is_thread_local),
+                    alignment: align,
+                    init_values: vec![StaticInit::PointerInit(label.to_string())],
+                }));
+                file_scope_vars.remove(&vd.name);
+                global_array_names.insert(vd.name.clone());
                 continue;
             }
             if let (Some(_), Some(init_exp @ Exp::ArrayInit(_))) = (&vd.array_dims, &vd.init) {

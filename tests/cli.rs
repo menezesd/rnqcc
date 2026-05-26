@@ -2186,6 +2186,109 @@ int main(void) {
 }
 
 #[test]
+fn compiles_aggregate_definition_with_declarators() {
+    let src = temp_file("aggregate-definition-declarators", "c");
+    let exe = temp_file("aggregate-definition-declarators", "bin");
+    std::fs::write(
+        &src,
+        r#"
+struct Point { int x; int y; } origin = { 20, 22 }, *origin_ptr = &origin;
+union Number { int i; long l; } number;
+
+int main(void) {
+    struct Local { int value; } local = { 11 }, *local_ptr = &local;
+    number.i = origin_ptr->x + origin.y;
+    return number.i + local_ptr->value == 53 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn compiles_static_pointer_address_initializers() {
+    let src = temp_file("static-pointer-address-initializers", "c");
+    let exe = temp_file("static-pointer-address-initializers", "bin");
+    std::fs::write(
+        &src,
+        "int global_value = 40;\n\
+         int *global_ptr = &global_value;\n\
+         static int *static_global_ptr = (int *)&global_value;\n\
+         int main(void) {\n\
+             static int *local_static_ptr = &global_value;\n\
+             return *global_ptr + *static_global_ptr + *local_static_ptr == 120 ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn compiles_static_pointer_designator_initializers() {
+    let src = temp_file("static-pointer-designator-initializers", "c");
+    let exe = temp_file("static-pointer-designator-initializers", "bin");
+    std::fs::write(
+        &src,
+        "int values[2] = { 41, 1 };\n\
+         int *values_ptr = values;\n\
+         int callee(void) { return 40; }\n\
+         int (*callee_ptr)(void) = callee;\n\
+         struct Holder { int *ptr; int (*fn)(void); } holder = { values, callee };\n\
+         int main(void) {\n\
+             static int *local_values_ptr = values;\n\
+             return values_ptr[0] + values_ptr[1] == 42 &&\n\
+                    local_values_ptr[0] + local_values_ptr[1] == 42 &&\n\
+                    holder.ptr[0] + holder.ptr[1] == 42 &&\n\
+                    callee_ptr() + holder.fn() == 80\n\
+                        ? 42\n\
+                        : 1;\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn indirect_function_pointer_uses_declared_return_type() {
     let src = temp_file("indirect-return-type", "i");
     let exe = temp_file("indirect-return-type", "bin");
@@ -3634,7 +3737,9 @@ int main(void) {
     typeof(next - ptr) diff = next - ptr;
     typeof(long_value()) function_result = long_value();
     typeof(*ptr) from_pointer = add_with_typeof_param(copy);
-    return base + from_pointer + diff + function_result - 6;
+    __typeof_unqual__(const int) unqualified_type_name = 3;
+    typeof_unqual(base) unqualified_expression = 4;
+    return base + from_pointer + diff + function_result + unqualified_type_name + unqualified_expression - 13;
 }
 "#,
     )

@@ -14,13 +14,16 @@ single target.
   string literals with common C byte escapes, and pointer arithmetic
 - `_Alignas` / `alignas` on objects and struct members; `_Alignof` / `alignof`
   and GNU `__alignof__` for type names and expressions
-- local variables, globals, static storage, and static local variables
+- local variables, globals, static storage, and static local variables; static
+  pointer initializers may reference named objects, arrays, functions, and
+  string literals
 - `if`, `while`, `do`, `for`, `break`, `continue`, `goto`, labels, and `switch`
 - C11 `_Generic` selections resolved by the frontend for ordinary scalar,
   pointer, array-decayed, function-decayed, and aggregate expression types
 - structs and unions, including copies, member access, nested aggregates,
-  anonymous aggregate members, and aggregate arguments/returns; trailing
-  flexible array members are supported in struct layout
+  anonymous aggregate members, aggregate definitions with declarators, and
+  aggregate arguments/returns; trailing flexible array members are supported in
+  struct layout
 - integer bit-fields that fit within their declared storage unit, including
   signed reads/writes, zero-width alignment fields, and host-checked mixed
   storage-unit layout cases
@@ -87,6 +90,10 @@ assembly/linking.
   Common fortified libc builtins such as
   `__builtin___memcpy_chk`, `__builtin___memset_chk`, and string `_chk`
   variants lower to the corresponding libc operation.
+- GNU `typeof` / `__typeof__` and C23-style `typeof_unqual` /
+  `__typeof_unqual__` are accepted for type-name and expression operands; rnqcc
+  does not model C qualifiers, so the unqualified form shares the same internal
+  representation as `typeof`.
 - Common `__atomic_*_fetch`, `__atomic_fetch_*`, `__sync_*_and_fetch`,
   `__sync_fetch_and_*`, `__atomic_load_n`, `__atomic_store_n`,
   `__atomic_exchange_n`,

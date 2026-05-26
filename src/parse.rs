@@ -2318,17 +2318,19 @@ impl Parser {
                     let members = self.parse_struct_members()?;
                     let suffix_attrs = self.consume_aggregate_attributes()?;
                     self.validate_flexible_array_members(&members, is_union)?;
-                    self.expect_token(Token::Semicolon)?;
-                    let attrs = Self::merge_aggregate_attributes(prefix_attrs, suffix_attrs);
-                    let declaration = StructDeclaration {
-                        tag,
-                        members,
-                        is_union,
-                        packed: attrs.packed,
-                        alignment: attrs.alignment,
-                    };
-                    self.record_struct_definition(&declaration)?;
-                    return Ok(Declaration::StructDecl(declaration));
+                    if self.at(&Token::Semicolon) {
+                        self.advance()?;
+                        let attrs = Self::merge_aggregate_attributes(prefix_attrs, suffix_attrs);
+                        let declaration = StructDeclaration {
+                            tag,
+                            members,
+                            is_union,
+                            packed: attrs.packed,
+                            alignment: attrs.alignment,
+                        };
+                        self.record_struct_definition(&declaration)?;
+                        return Ok(Declaration::StructDecl(declaration));
+                    }
                 } else if self.at(&Token::Semicolon) {
                     self.advance()?;
                     return Ok(Declaration::StructDecl(StructDeclaration {
@@ -2850,17 +2852,20 @@ impl Parser {
                         let members = self.parse_struct_members()?;
                         let suffix_attrs = self.consume_aggregate_attributes()?;
                         self.validate_flexible_array_members(&members, is_union)?;
-                        self.expect_token(Token::Semicolon)?;
-                        let attrs = Self::merge_aggregate_attributes(prefix_attrs, suffix_attrs);
-                        return Ok(BlockItem::Declaration(Declaration::StructDecl(
-                            StructDeclaration {
-                                tag,
-                                members,
-                                is_union,
-                                packed: attrs.packed,
-                                alignment: attrs.alignment,
-                            },
-                        )));
+                        if self.at(&Token::Semicolon) {
+                            self.advance()?;
+                            let attrs =
+                                Self::merge_aggregate_attributes(prefix_attrs, suffix_attrs);
+                            return Ok(BlockItem::Declaration(Declaration::StructDecl(
+                                StructDeclaration {
+                                    tag,
+                                    members,
+                                    is_union,
+                                    packed: attrs.packed,
+                                    alignment: attrs.alignment,
+                                },
+                            )));
+                        }
                     } else if self.at(&Token::Semicolon) {
                         self.advance()?;
                         return Ok(BlockItem::Declaration(Declaration::StructDecl(

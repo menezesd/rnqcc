@@ -1,5 +1,6 @@
 # source | extra compiler flags | optional expected failure
 tests/fixtures/real_project/configure_probes.c
+tests/fixtures/real_project/host_header_probes.c
 tests/fixtures/real_project/unix_probe_headers.c | -nostdinc
 tests/fixtures/smoke/project/main.c | -I tests/fixtures/smoke/include
 tests/fixtures/smoke/project/util.c | -I tests/fixtures/smoke/include

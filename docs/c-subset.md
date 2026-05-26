@@ -118,9 +118,10 @@ assembly/linking.
   pragmas, and `#pragma once`. Angle includes search user include paths,
   include-related environment variables, and common system include directories;
   macro-expanded includes, `#include_next`, virtual compatibility headers
-  including `assert.h`, `ctype.h`, `dirent.h`, `errno.h`, `fcntl.h`,
-  `grp.h`, `iso646.h`, `locale.h`, `math.h`, `poll.h`, `pthread.h`,
-  `pwd.h`, `setjmp.h`, `signal.h`, `stdalign.h`, `stdatomic.h`,
+  including `assert.h`, `arpa/inet.h`, `ctype.h`, `dirent.h`, `errno.h`,
+  `fcntl.h`, `grp.h`, `iso646.h`, `locale.h`, `math.h`, `netdb.h`,
+  `netinet/in.h`, `poll.h`, `pthread.h`, `pwd.h`, `setjmp.h`, `signal.h`,
+  `stdalign.h`, `stdatomic.h`,
   `stdnoreturn.h`, `stdio.h`, `stdlib.h`, `string.h`, `strings.h`,
   `sys/ioctl.h`, `sys/mman.h`, `sys/resource.h`, `sys/select.h`,
   `sys/socket.h`, `sys/stat.h`, `sys/time.h`, `sys/types.h`, `sys/uio.h`,

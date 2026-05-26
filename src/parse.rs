@@ -1069,7 +1069,30 @@ impl Parser {
     }
 
     fn parse_array_size(&mut self, allow_empty: bool) -> ParseResult<usize> {
+        while matches!(
+            self.peek(),
+            Some(Token::KWConst)
+                | Some(Token::KWVolatile)
+                | Some(Token::KWRestrict)
+                | Some(Token::KWAtomic)
+        ) {
+            self.advance()?;
+        }
+        if self.eat(&Token::KWStatic) {
+            while matches!(
+                self.peek(),
+                Some(Token::KWConst)
+                    | Some(Token::KWVolatile)
+                    | Some(Token::KWRestrict)
+                    | Some(Token::KWAtomic)
+            ) {
+                self.advance()?;
+            }
+        }
         if allow_empty && self.at(&Token::CloseBracket) {
+            return Ok(0);
+        }
+        if self.eat(&Token::Star) {
             return Ok(0);
         }
         let exp = self.parse_assignment()?;
@@ -2194,6 +2217,9 @@ impl Parser {
     }
 
     fn parse_declaration(&mut self) -> ParseResult<Declaration> {
+        if self.eat(&Token::Semicolon) {
+            return Ok(Declaration::TypedefDecl);
+        }
         if self.at(&Token::KWStaticAssert) {
             self.parse_static_assert_declaration()?;
             return Ok(Declaration::TypedefDecl);
@@ -2308,15 +2334,38 @@ impl Parser {
 
         // Handle typedef declarations
         if sc.as_ref().is_some_and(StorageClass::is_typedef) {
-            self.expect_token(Token::Semicolon)?;
             self.add_typedef(
                 name,
                 TypedefInfo {
                     base_type,
                     full_type: full_type.clone(),
-                    struct_tag: saved_struct_tag,
+                    struct_tag: saved_struct_tag.clone(),
                 },
             )?;
+            while self.eat(&Token::Comma) {
+                self.last_typedef_full_type = td_ft.clone();
+                let decl_tree = self.parse_declarator_tree()?;
+                let (name2, full_type2, _) =
+                    Self::process_declarator(&decl_tree, base_type, td_ft.as_ref());
+                let full_type2 = if base_type == CType::Struct {
+                    if let Some(ref tag) = saved_struct_tag {
+                        Self::replace_scalar_struct(&full_type2, tag)
+                    } else {
+                        full_type2
+                    }
+                } else {
+                    full_type2
+                };
+                self.add_typedef(
+                    name2,
+                    TypedefInfo {
+                        base_type,
+                        full_type: full_type2,
+                        struct_tag: saved_struct_tag.clone(),
+                    },
+                )?;
+            }
+            self.expect_token(Token::Semicolon)?;
             return Ok(Declaration::TypedefDecl);
         }
 
@@ -3937,6 +3986,65 @@ mod tests {
             "abstract declarator should fail",
         )?;
         assert!(err.contains("expected constant array size"), "{err}");
+        Ok(())
+    }
+
+    #[test]
+    fn parses_array_parameter_qualifiers() -> Result<(), String> {
+        let program = parse_source(
+            "extern int f(char *argv[restrict], int counts[static restrict 4], long values[*]);\n",
+        )?;
+        let Declaration::FunDecl(func) = &program.declarations[0] else {
+            return Err("expected function declaration".to_string());
+        };
+
+        assert_eq!(func.params.len(), 3);
+        assert!(matches!(
+            &func.param_full_types[0],
+            FullType::Pointer(inner) if matches!(inner.as_ref(), FullType::Pointer(_))
+        ));
+        assert_eq!(
+            func.param_full_types[1],
+            FullType::Pointer(Box::new(FullType::Scalar(CType::Int)))
+        );
+        assert_eq!(
+            func.param_full_types[2],
+            FullType::Pointer(Box::new(FullType::Scalar(CType::Long)))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parses_empty_top_level_declarations() -> Result<(), String> {
+        let program = parse_source("; struct s { int x; }; ; int y;\n")?;
+        assert!(matches!(
+            program.declarations.as_slice(),
+            [
+                Declaration::TypedefDecl,
+                Declaration::StructDecl(_),
+                Declaration::TypedefDecl,
+                Declaration::VarDecl(_)
+            ]
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_comma_separated_typedef_declarators() -> Result<(), String> {
+        let program =
+            parse_source("typedef unsigned long word_t, *word_ptr_t;\nword_t x;\nword_ptr_t p;\n")?;
+        let Declaration::VarDecl(x) = &program.declarations[1] else {
+            return Err("expected word_t variable".to_string());
+        };
+        let Declaration::VarDecl(p) = &program.declarations[2] else {
+            return Err("expected word_ptr_t variable".to_string());
+        };
+
+        assert_eq!(x.var_type, CType::ULong);
+        assert_eq!(
+            p.decl_full_type,
+            Some(FullType::Pointer(Box::new(FullType::Scalar(CType::ULong))))
+        );
         Ok(())
     }
 

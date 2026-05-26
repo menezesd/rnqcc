@@ -6141,6 +6141,35 @@ fn internal_cpp_preprocesses_linux_limits_header_with_default_search_paths() {
 }
 
 #[test]
+fn internal_cpp_predefines_gcc_integer_constant_macros() {
+    let src = temp_file("internal-cpp-gcc-integer-constant-macros", "c");
+    std::fs::write(
+        &src,
+        "long a = __INT16_C(-2);\n\
+         unsigned int b = __UINT32_C(4);\n\
+         long c = __INT64_C(5);\n\
+         unsigned long d = __UINTMAX_C(8);\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("long a = -2;"), "{stdout}");
+    assert!(stdout.contains("unsigned int b = 4U;"), "{stdout}");
+    assert!(stdout.contains("long c = 5L;"), "{stdout}");
+    assert!(stdout.contains("unsigned long d = 8UL;"), "{stdout}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn internal_cpp_provides_basic_virtual_compatibility_headers() {
     let src = temp_file("internal-cpp-virtual-headers", "c");
     let exe = temp_file("internal-cpp-virtual-headers", "bin");

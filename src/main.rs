@@ -4668,6 +4668,22 @@ fn define_builtin_macro(macros: &mut HashMap<String, MacroDef>, name: &str, valu
     macros.insert(name.to_string(), MacroDef::Object(value.to_string()));
 }
 
+fn define_builtin_function_macro(
+    macros: &mut HashMap<String, MacroDef>,
+    name: &str,
+    params: &[&str],
+    body: &str,
+) {
+    macros.insert(
+        name.to_string(),
+        MacroDef::Function {
+            params: params.iter().map(|param| (*param).to_string()).collect(),
+            variadic: false,
+            body: body.to_string(),
+        },
+    );
+}
+
 fn define_empty_function_macro(macros: &mut HashMap<String, MacroDef>, name: &str, variadic: bool) {
     macros.insert(
         name.to_string(),
@@ -4780,6 +4796,16 @@ fn seed_internal_predefined_macros(macros: &mut HashMap<String, MacroDef>, targe
     define_builtin_macro(macros, "__INT64_MAX__", "9223372036854775807L");
     define_builtin_macro(macros, "__WCHAR_MAX__", "2147483647");
     define_builtin_macro(macros, "__WINT_MAX__", "4294967295U");
+    define_builtin_function_macro(macros, "__INT8_C", &["c"], "c");
+    define_builtin_function_macro(macros, "__UINT8_C", &["c"], "c");
+    define_builtin_function_macro(macros, "__INT16_C", &["c"], "c");
+    define_builtin_function_macro(macros, "__UINT16_C", &["c"], "c");
+    define_builtin_function_macro(macros, "__INT32_C", &["c"], "c");
+    define_builtin_function_macro(macros, "__UINT32_C", &["c"], "c ## U");
+    define_builtin_function_macro(macros, "__INT64_C", &["c"], "c ## L");
+    define_builtin_function_macro(macros, "__UINT64_C", &["c"], "c ## UL");
+    define_builtin_function_macro(macros, "__INTMAX_C", &["c"], "c ## L");
+    define_builtin_function_macro(macros, "__UINTMAX_C", &["c"], "c ## UL");
     define_builtin_macro(macros, "__ORDER_LITTLE_ENDIAN__", "1234");
     define_builtin_macro(macros, "__ORDER_BIG_ENDIAN__", "4321");
     define_builtin_macro(macros, "__BYTE_ORDER__", "__ORDER_LITTLE_ENDIAN__");

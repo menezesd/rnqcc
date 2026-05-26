@@ -7582,6 +7582,42 @@ fn compiles_integer_bit_fields() {
 }
 
 #[test]
+fn compiles_comma_separated_struct_bit_fields() {
+    let src = temp_file("comma-separated-bit-fields", "c");
+    let exe = temp_file("comma-separated-bit-fields", "bin");
+    std::fs::write(
+        &src,
+        "struct flags { unsigned a:3, b:5, c:6; int x, y:4; };\n\
+         int main(void) {\n\
+           struct flags f = {0, 0, 0, 0, 0};\n\
+           f.a = 13;\n\
+           f.b = 17;\n\
+           f.c = 63;\n\
+           f.x = 5;\n\
+           f.y = -1;\n\
+           return f.a + f.b + f.c + f.x + (f.y == -1);\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(91));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn compiles_signed_integer_bit_fields() {
     let src = temp_file("signed-bit-fields", "c");
     let exe = temp_file("signed-bit-fields", "bin");

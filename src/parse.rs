@@ -133,6 +133,19 @@ impl Parser {
                 struct_tag: None,
             },
         );
+        for name in ["__int128_t", "__uint128_t"] {
+            builtin_typedefs.insert(
+                name.to_string(),
+                TypedefInfo {
+                    base_type: CType::ULong,
+                    full_type: FullType::Array {
+                        elem: Box::new(FullType::Scalar(CType::ULong)),
+                        size: 2,
+                    },
+                    struct_tag: None,
+                },
+            );
+        }
 
         Parser {
             tokens,
@@ -2053,59 +2066,69 @@ impl Parser {
             }
             let member_attrs = self.consume_member_attributes()?;
             let base_type = self.parse_type()?;
-            let (name, full_type, _) = if base_type == CType::Struct && self.at(&Token::Semicolon) {
-                let Some(tag) = self.last_struct_tag.clone() else {
-                    return Err(self.format_error("anonymous aggregate member has no type"));
-                };
-                (String::new(), FullType::Struct(tag), None)
-            } else if self.at(&Token::Colon) {
-                (String::new(), FullType::Scalar(base_type), None)
-            } else {
-                self.parse_declarator_full(base_type)?
-            };
-            let member_type = full_type.to_ctype();
-            // Replace Scalar(Struct) with FullType::Struct(tag)
-            let member_full_type = if base_type == CType::Struct {
-                if let Some(ref tag) = self.last_struct_tag {
-                    Self::replace_scalar_struct(&full_type, tag)
+            let base_typedef_full_type = self.last_typedef_full_type.clone();
+            loop {
+                self.last_typedef_full_type = base_typedef_full_type.clone();
+                let (name, full_type, _) =
+                    if base_type == CType::Struct && self.at(&Token::Semicolon) {
+                        let Some(tag) = self.last_struct_tag.clone() else {
+                            return Err(self.format_error("anonymous aggregate member has no type"));
+                        };
+                        (String::new(), FullType::Struct(tag), None)
+                    } else if self.at(&Token::Colon) {
+                        (String::new(), FullType::Scalar(base_type), None)
+                    } else {
+                        self.parse_declarator_full(base_type)?
+                    };
+                let member_type = full_type.to_ctype();
+                // Replace Scalar(Struct) with FullType::Struct(tag)
+                let member_full_type = if base_type == CType::Struct {
+                    if let Some(ref tag) = self.last_struct_tag {
+                        Self::replace_scalar_struct(&full_type, tag)
+                    } else {
+                        full_type
+                    }
                 } else {
                     full_type
+                };
+                let bit_width = if self.eat(&Token::Colon) {
+                    let width_exp = self.parse_assignment()?;
+                    let width = self
+                        .eval_integer_constant_exp_with_layout(&width_exp)
+                        .ok_or_else(|| {
+                            self.format_error("expected integer constant bit-field width")
+                        })?;
+                    if width < 0 {
+                        return Err(self.format_error("bit-field width must be non-negative"));
+                    }
+                    let width = u8::try_from(width)
+                        .map_err(|_| self.format_error("bit-field width is too large"))?;
+                    Some(width)
+                } else {
+                    None
+                };
+                let post_attrs = self.consume_member_attributes()?;
+                let member_alignment = match (member_attrs.alignment, post_attrs.alignment) {
+                    (Some(current), Some(post)) => Some(current.max(post)),
+                    (Some(current), None) => Some(current),
+                    (None, Some(post)) => Some(post),
+                    (None, None) => None,
+                };
+                members.push(MemberDeclaration {
+                    name,
+                    member_type,
+                    member_full_type,
+                    bit_width,
+                    alignment: member_alignment,
+                    packed: member_attrs.packed || post_attrs.packed,
+                });
+                if self.eat(&Token::Comma) {
+                    continue;
                 }
-            } else {
-                full_type
-            };
-            let bit_width = if self.eat(&Token::Colon) {
-                let width_exp = self.parse_assignment()?;
-                let width = self
-                    .eval_integer_constant_exp_with_layout(&width_exp)
-                    .ok_or_else(|| {
-                        self.format_error("expected integer constant bit-field width")
-                    })?;
-                if width < 0 {
-                    return Err(self.format_error("bit-field width must be non-negative"));
-                }
-                let width = u8::try_from(width)
-                    .map_err(|_| self.format_error("bit-field width is too large"))?;
-                Some(width)
-            } else {
-                None
-            };
-            let post_attrs = self.consume_member_attributes()?;
-            let member_alignment = match (member_attrs.alignment, post_attrs.alignment) {
-                (Some(current), Some(post)) => Some(current.max(post)),
-                (Some(current), None) => Some(current),
-                (None, Some(post)) => Some(post),
-                (None, None) => None,
-            };
-            members.push(MemberDeclaration {
-                name,
-                member_type,
-                member_full_type,
-                bit_width,
-                alignment: member_alignment,
-                packed: member_attrs.packed || post_attrs.packed,
-            });
-            self.expect_token(Token::Semicolon)?;
+                self.expect_token(Token::Semicolon)?;
+                break;
+            }
+            self.last_typedef_full_type = None;
         }
         self.expect_token(Token::CloseBrace)?;
         Ok(members)
@@ -4210,6 +4233,36 @@ mod tests {
         };
         assert_eq!(func.return_type, CType::Double);
         assert_eq!(func.params[0].1, CType::Double);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_builtin_int128_typedef_names_as_opaque_two_word_arrays() -> Result<(), String> {
+        let program = parse_source("__uint128_t vector[4];\n__int128_t scalar;\n")?;
+        let Declaration::VarDecl(vector) = &program.declarations[0] else {
+            return Err("expected vector declaration".to_string());
+        };
+        let Declaration::VarDecl(scalar) = &program.declarations[1] else {
+            return Err("expected scalar declaration".to_string());
+        };
+
+        assert_eq!(
+            vector.decl_full_type,
+            Some(FullType::Array {
+                elem: Box::new(FullType::Array {
+                    elem: Box::new(FullType::Scalar(CType::ULong)),
+                    size: 2,
+                }),
+                size: 4,
+            })
+        );
+        assert_eq!(
+            scalar.decl_full_type,
+            Some(FullType::Array {
+                elem: Box::new(FullType::Scalar(CType::ULong)),
+                size: 2,
+            })
+        );
         Ok(())
     }
 

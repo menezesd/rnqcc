@@ -6113,6 +6113,34 @@ fn internal_cpp_if_handles_prefixed_character_constants() {
 }
 
 #[test]
+fn internal_cpp_preprocesses_linux_limits_header_with_default_search_paths() {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+
+    let src = temp_file("internal-cpp-linux-limits-default-search", "c");
+    std::fs::write(
+        &src,
+        "#include <limits.h>\n\
+         int rnqcc_limits_probe = CHAR_BIT + (INT_MAX > 0);\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("int rnqcc_limits_probe ="), "{stdout}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn internal_cpp_provides_basic_virtual_compatibility_headers() {
     let src = temp_file("internal-cpp-virtual-headers", "c");
     let exe = temp_file("internal-cpp-virtual-headers", "bin");

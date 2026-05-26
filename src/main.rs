@@ -4870,6 +4870,32 @@ fn push_existing_include_dir(dirs: &mut Vec<PathBuf>, path: PathBuf) {
     }
 }
 
+fn linux_gcc_include_triples(target: &Target) -> &'static [&'static str] {
+    match target.arch {
+        Arch::X86_64 => &["x86_64-linux-gnu", "x86_64-pc-linux-gnu"],
+        Arch::AArch64 => &["aarch64-linux-gnu", "aarch64-unknown-linux-gnu"],
+    }
+}
+
+fn push_linux_gcc_include_dirs(dirs: &mut Vec<PathBuf>, target: &Target) {
+    for triple in linux_gcc_include_triples(target) {
+        let root = PathBuf::from("/usr/lib/gcc").join(triple);
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        let mut versions: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect();
+        versions.sort();
+        versions.reverse();
+        for version in versions {
+            push_existing_include_dir(dirs, version.join("include"));
+        }
+    }
+}
+
 fn default_system_include_dirs(target: &Target) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     for var in ["CPATH", "C_INCLUDE_PATH"] {
@@ -4882,6 +4908,7 @@ fn default_system_include_dirs(target: &Target) -> Vec<PathBuf> {
 
     match target.os {
         TargetOs::Linux => {
+            push_linux_gcc_include_dirs(&mut dirs, target);
             push_existing_include_dir(&mut dirs, PathBuf::from("/usr/local/include"));
             match target.arch {
                 Arch::X86_64 => push_existing_include_dir(

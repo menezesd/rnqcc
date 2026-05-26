@@ -300,10 +300,12 @@ pub fn compile(
     let source_bytes =
         std::fs::read(src_file).map_err(|err| format!("could not read {}: {}", src_file, err))?;
     let source: String = source_bytes.into_iter().map(char::from).collect();
-    let source = strip_preprocessor_line_markers(&source);
+    let mapped_source = strip_preprocessor_line_markers_with_map(&source);
 
     // Lex
-    let spanned_tokens = lex::lex_spanned(&source).map_err(|err| format!("lex failed: {}", err))?;
+    let spanned_tokens =
+        lex::lex_spanned_with_line_map(&mapped_source.source, mapped_source.line_map)
+            .map_err(|err| format!("lex failed: {}", err))?;
     let tokens: Vec<_> = spanned_tokens
         .iter()
         .map(|spanned| spanned.token.clone())
@@ -383,19 +385,51 @@ pub fn compile(
     Ok(())
 }
 
+struct MappedSource {
+    source: String,
+    line_map: Vec<lex::SourceLineMapping>,
+}
+
+#[allow(dead_code)]
 fn strip_preprocessor_line_markers(source: &str) -> String {
+    strip_preprocessor_line_markers_with_map(source).source
+}
+
+fn strip_preprocessor_line_markers_with_map(source: &str) -> MappedSource {
     let mut out = String::with_capacity(source.len());
+    let mut line_map = Vec::new();
+    let mut logical_file: Option<String> = None;
+    let mut next_logical_line = 1usize;
+
     for line in source.split_inclusive('\n') {
         let trimmed = line.trim_start();
         if is_preprocessor_line_marker(trimmed) {
+            if let Some((line, file)) = parse_preprocessor_line_marker(trimmed) {
+                next_logical_line = line;
+                if let Some(file) = file {
+                    logical_file = Some(file);
+                }
+            }
             if line.ends_with('\n') {
                 out.push('\n');
+                line_map.push(lex::SourceLineMapping {
+                    file: logical_file.clone(),
+                    line: next_logical_line,
+                });
             }
         } else {
             out.push_str(line);
+            line_map.push(lex::SourceLineMapping {
+                file: logical_file.clone(),
+                line: next_logical_line,
+            });
+            next_logical_line = next_logical_line.saturating_add(1);
         }
     }
-    out
+    MappedSource {
+        source: out,
+        line_map,
+    }
 }
 
 fn is_preprocessor_line_marker(trimmed_line: &str) -> bool {
@@ -412,6 +446,47 @@ fn is_preprocessor_line_marker(trimmed_line: &str) -> bool {
         .chars()
         .next()
         .is_some_and(|ch| ch.is_ascii_digit())
+}
+
+fn parse_preprocessor_line_marker(trimmed_line: &str) -> Option<(usize, Option<String>)> {
+    let rest = if let Some(rest) = trimmed_line.strip_prefix("#line") {
+        rest
+    } else {
+        trimmed_line.strip_prefix('#')?
+    };
+    let rest = rest.trim_start();
+    let digits_len = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .map(char::len_utf8)
+        .sum::<usize>();
+    if digits_len == 0 {
+        return None;
+    }
+    let line = rest[..digits_len].parse::<usize>().ok()?;
+    let rest = rest[digits_len..].trim_start();
+    let file = rest
+        .strip_prefix('"')
+        .and_then(|rest| parse_line_marker_filename(rest).map(|(file, _)| file));
+    Some((line, file))
+}
+
+fn parse_line_marker_filename(rest: &str) -> Option<(String, &str)> {
+    let mut file = String::new();
+    let mut escaped = false;
+    for (idx, ch) in rest.char_indices() {
+        if escaped {
+            file.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' => return Some((file, &rest[idx + ch.len_utf8()..])),
+            _ => file.push(ch),
+        }
+    }
+    None
 }
 
 fn prepend_source_comment(asm_filename: &str, src_file: &str) -> Result<(), String> {
@@ -489,5 +564,20 @@ mod tests {
         let source = "# 1 \"input.c\"\n#line 20 \"generated.c\"\nint main(void) { return 0; }\n";
         let stripped = strip_preprocessor_line_markers(source);
         assert_eq!(stripped, "\n\nint main(void) { return 0; }\n");
+    }
+
+    #[test]
+    fn maps_preprocessor_line_markers_to_logical_source_locations() -> Result<(), String> {
+        let source = "# 1 \"input.c\"\n#line 20 \"generated.c\"\nint main(void) { return 0; }\n";
+        let mapped = strip_preprocessor_line_markers_with_map(source);
+        let tokens = lex::lex_spanned_with_line_map(&mapped.source, mapped.line_map)?;
+        let first = tokens
+            .first()
+            .ok_or_else(|| "expected token after line markers".to_string())?;
+
+        assert_eq!(first.span.start.file.as_deref(), Some("generated.c"));
+        assert_eq!(first.span.start.line, 20);
+        assert_eq!(first.span.start.column, 1);
+        Ok(())
     }
 }

@@ -342,6 +342,30 @@ fn reports_parse_errors_without_rust_panic_output() {
 }
 
 #[test]
+fn preprocessed_line_markers_remap_parse_diagnostics() {
+    let src = temp_file("bad-parse-line-marker", "i");
+    std::fs::write(&src, "# 50 \"generated-probe.c\"\nint main(\n")
+        .expect("failed to write bad input");
+
+    let output = Command::new(rnqcc())
+        .arg("--stage")
+        .arg("parse")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("parse failed at generated-probe.c:50:10"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("thread 'main' panicked"), "{stderr}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn rejects_extreme_alignment_without_panic() {
     for (name, source) in [
         (

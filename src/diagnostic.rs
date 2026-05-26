@@ -33,7 +33,7 @@ pub struct Warning {
     pub phase: Phase,
     pub kind: WarningKind,
     pub message: String,
-    pub span: Option<crate::lex::SourceSpan>,
+    pub span: Option<Box<crate::lex::SourceSpan>>,
 }
 
 impl Warning {
@@ -65,8 +65,10 @@ impl Warning {
         };
         if let Some(span) = &self.span {
             format!(
-                "{} warning at {}:{}: {}",
-                phase, span.start.line, span.start.column, self.message
+                "{} warning at {}: {}",
+                phase,
+                render_location(&span.start),
+                self.message
             )
         } else {
             format!("{} warning: {}", phase, self.message)
@@ -79,7 +81,7 @@ pub struct Diagnostic {
     pub phase: Phase,
     pub kind: DiagnosticKind,
     pub message: String,
-    pub span: Option<crate::lex::SourceSpan>,
+    pub span: Option<Box<crate::lex::SourceSpan>>,
 }
 
 impl Diagnostic {
@@ -123,8 +125,10 @@ impl Diagnostic {
         };
         if let Some(span) = &self.span {
             format!(
-                "{} failed at {}:{}: {}",
-                phase, span.start.line, span.start.column, self.message
+                "{} failed at {}: {}",
+                phase,
+                render_location(&span.start),
+                self.message
             )
         } else {
             format!("{} failed: {}", phase, self.message)
@@ -139,7 +143,7 @@ impl Diagnostic {
                 message: message.clone(),
             },
             message,
-            span,
+            span: span.map(Box::new),
         }
     }
 
@@ -153,5 +157,12 @@ impl Diagnostic {
             message,
             span: None,
         }
+    }
+}
+
+fn render_location(location: &crate::lex::SourceLocation) -> String {
+    match &location.file {
+        Some(file) => format!("{}:{}:{}", file, location.line, location.column),
+        None => format!("{}:{}", location.line, location.column),
     }
 }

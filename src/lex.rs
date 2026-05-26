@@ -1,12 +1,13 @@
 use crate::types::Token;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceLocation {
+    pub file: Option<String>,
     pub line: usize,
     pub column: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceSpan {
     pub start: SourceLocation,
     pub end: SourceLocation,
@@ -20,9 +21,16 @@ pub struct SpannedToken {
     pub span: SourceSpan,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLineMapping {
+    pub file: Option<String>,
+    pub line: usize,
+}
+
 pub struct Lexer {
     chars: Vec<char>,
     pos: usize,
+    line_map: Option<Vec<SourceLineMapping>>,
 }
 
 impl Lexer {
@@ -30,6 +38,15 @@ impl Lexer {
         Lexer {
             chars: input.chars().collect(),
             pos: 0,
+            line_map: None,
+        }
+    }
+
+    pub fn with_line_map(input: &str, line_map: Vec<SourceLineMapping>) -> Self {
+        Lexer {
+            chars: input.chars().collect(),
+            pos: 0,
+            line_map: Some(line_map),
         }
     }
 
@@ -631,8 +648,8 @@ impl Lexer {
     }
 
     fn location_for_offset(&self, offset: usize) -> SourceLocation {
-        let mut line = 1;
-        let mut column = 1;
+        let mut line = 1usize;
+        let mut column = 1usize;
         for ch in self.chars.iter().take(offset) {
             if *ch == '\n' {
                 line += 1;
@@ -641,7 +658,22 @@ impl Lexer {
                 column += 1;
             }
         }
-        SourceLocation { line, column }
+        if let Some(mapped) = self
+            .line_map
+            .as_ref()
+            .and_then(|line_map| line_map.get(line.saturating_sub(1)))
+        {
+            return SourceLocation {
+                file: mapped.file.clone(),
+                line: mapped.line,
+                column,
+            };
+        }
+        SourceLocation {
+            file: None,
+            line,
+            column,
+        }
     }
 
     fn span_for_offsets(&self, start_offset: usize, end_offset: usize) -> SourceSpan {
@@ -876,8 +908,17 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
     lexer.lex_all()
 }
 
+#[allow(dead_code)]
 pub fn lex_spanned(input: &str) -> Result<Vec<SpannedToken>, String> {
     let mut lexer = Lexer::new(input);
+    lexer.lex_all_spanned()
+}
+
+pub fn lex_spanned_with_line_map(
+    input: &str,
+    line_map: Vec<SourceLineMapping>,
+) -> Result<Vec<SpannedToken>, String> {
+    let mut lexer = Lexer::with_line_map(input, line_map);
     lexer.lex_all_spanned()
 }
 

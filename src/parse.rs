@@ -3791,11 +3791,11 @@ pub fn parse_from_spanned(tokens: Vec<lex::SpannedToken>) -> Result<Program, Str
     parse(plain_tokens).map_err(|message| {
         let message = message.trim_start_matches("parse failed: ").to_string();
         let span = parse_token_index(&message)
-            .and_then(|index| tokens.get(index).map(|spanned| spanned.span))
+            .and_then(|index| tokens.get(index).map(|spanned| spanned.span.clone()))
             .or_else(|| {
                 tokens.last().map(|spanned| lex::SourceSpan {
-                    start: spanned.span.end,
-                    end: spanned.span.end,
+                    start: spanned.span.end.clone(),
+                    end: spanned.span.end.clone(),
                     start_offset: spanned.span.end_offset,
                     end_offset: spanned.span.end_offset,
                 })

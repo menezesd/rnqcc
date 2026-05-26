@@ -676,7 +676,7 @@ impl Lexer {
         }
     }
 
-    fn span_for_offsets(&self, start_offset: usize, end_offset: usize) -> SourceSpan {
+    pub(crate) fn span_for_offsets(&self, start_offset: usize, end_offset: usize) -> SourceSpan {
         SourceSpan {
             start: self.location_for_offset(start_offset),
             end: self.location_for_offset(end_offset),

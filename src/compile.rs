@@ -304,8 +304,10 @@ pub fn compile(
 
     // Lex
     let spanned_tokens =
-        lex::lex_spanned_with_line_map(&mapped_source.source, mapped_source.line_map)
-            .map_err(|err| format!("lex failed: {}", err))?;
+        lex::lex_spanned_with_line_map(&mapped_source.source, mapped_source.line_map.clone())
+            .map_err(|err| {
+                render_lex_error(&mapped_source.source, &mapped_source.line_map, &err)
+            })?;
     let tokens: Vec<_> = spanned_tokens
         .iter()
         .map(|spanned| spanned.token.clone())
@@ -489,6 +491,29 @@ fn parse_line_marker_filename(rest: &str) -> Option<(String, &str)> {
     None
 }
 
+fn render_lex_error(source: &str, line_map: &[lex::SourceLineMapping], error: &str) -> String {
+    let Some(offset) = lex_error_offset(error) else {
+        return format!("lex failed: {}", error);
+    };
+    let lexer = lex::Lexer::with_line_map(source, line_map.to_vec());
+    let span = lexer.span_for_offsets(offset, offset);
+    let location = match &span.start.file {
+        Some(file) => format!("{}:{}:{}", file, span.start.line, span.start.column),
+        None => format!("{}:{}", span.start.line, span.start.column),
+    };
+    format!("lex failed at {}: {}", location, error)
+}
+
+fn lex_error_offset(error: &str) -> Option<usize> {
+    let marker = "position ";
+    let start = error.find(marker)? + marker.len();
+    let digits: String = error[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
 fn prepend_source_comment(asm_filename: &str, src_file: &str) -> Result<(), String> {
     let body = std::fs::read_to_string(asm_filename)
         .map_err(|err| format!("could not read {}: {}", asm_filename, err))?;
@@ -579,5 +604,18 @@ mod tests {
         assert_eq!(first.span.start.line, 20);
         assert_eq!(first.span.start.column, 1);
         Ok(())
+    }
+
+    #[test]
+    fn renders_lex_errors_with_logical_line_marker_locations() {
+        let source = "# 40 \"generated.c\"\n@\n";
+        let mapped = strip_preprocessor_line_markers_with_map(source);
+        let err = lex::lex_spanned_with_line_map(&mapped.source, mapped.line_map.clone())
+            .expect_err("lexing should fail");
+
+        assert_eq!(
+            render_lex_error(&mapped.source, &mapped.line_map, &err),
+            "lex failed at generated.c:40:1: unexpected character '@' at position 1"
+        );
     }
 }

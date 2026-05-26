@@ -366,6 +366,29 @@ fn preprocessed_line_markers_remap_parse_diagnostics() {
 }
 
 #[test]
+fn preprocessed_line_markers_remap_lex_diagnostics() {
+    let src = temp_file("bad-lex-line-marker", "i");
+    std::fs::write(&src, "# 70 \"generated-lex.c\"\n@\n").expect("failed to write bad input");
+
+    let output = Command::new(rnqcc())
+        .arg("--stage")
+        .arg("lex")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("lex failed at generated-lex.c:70:1"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("thread 'main' panicked"), "{stderr}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn rejects_extreme_alignment_without_panic() {
     for (name, source) in [
         (

@@ -465,6 +465,38 @@ mod tests {
     }
 
     #[test]
+    fn leaves_indirect_object_recursion_disabled() -> Result<(), String> {
+        let mut macros = MacroTable::new();
+        macros.insert("A".to_string(), MacroDef::Object(lex("B")?));
+        macros.insert("B".to_string(), MacroDef::Object(lex("A")?));
+        assert_eq!(text(&expand_macros(&lex("A")?, &macros)?), "A");
+        Ok(())
+    }
+
+    #[test]
+    fn leaves_indirect_function_recursion_disabled() -> Result<(), String> {
+        let mut macros = MacroTable::new();
+        macros.insert(
+            "A".to_string(),
+            MacroDef::Function {
+                params: Vec::new(),
+                variadic: false,
+                body: lex("B()")?,
+            },
+        );
+        macros.insert(
+            "B".to_string(),
+            MacroDef::Function {
+                params: Vec::new(),
+                variadic: false,
+                body: lex("A()")?,
+            },
+        );
+        assert_eq!(text(&expand_macros(&lex("A()")?, &macros)?), "A()");
+        Ok(())
+    }
+
+    #[test]
     fn expands_function_macros_with_argument_prescan() -> Result<(), String> {
         let mut macros = MacroTable::new();
         macros.insert("A".to_string(), MacroDef::Object(lex("40")?));

@@ -637,6 +637,7 @@ impl Resolver {
                         tag: unique_tag,
                         members: resolved_members,
                         is_union: sd.is_union,
+                        packed: sd.packed,
                     }))
                 }
                 BlockItem::Declaration(Declaration::TypedefDecl) => {
@@ -956,6 +957,7 @@ pub fn resolve(program: Program) -> ResolveResult<ResolveOutput> {
                         tag: unique_tag,
                         members: resolved_members,
                         is_union: sd.is_union,
+                        packed: sd.packed,
                     })
                 }
                 Declaration::TypedefDecl => Declaration::TypedefDecl,

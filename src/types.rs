@@ -684,7 +684,15 @@ impl StructDef {
         members: &[MemberDeclaration],
         struct_defs: &std::collections::HashMap<String, StructDef>,
     ) -> Result<Self, String> {
-        Self::from_members_ex(tag, members, struct_defs, false)
+        Self::from_members_ex(tag, members, struct_defs, false, false)
+    }
+
+    pub fn from_members_packed(
+        tag: &str,
+        members: &[MemberDeclaration],
+        struct_defs: &std::collections::HashMap<String, StructDef>,
+    ) -> Result<Self, String> {
+        Self::from_members_ex(tag, members, struct_defs, false, true)
     }
 
     pub fn from_members_union(
@@ -692,7 +700,15 @@ impl StructDef {
         members: &[MemberDeclaration],
         struct_defs: &std::collections::HashMap<String, StructDef>,
     ) -> Result<Self, String> {
-        Self::from_members_ex(tag, members, struct_defs, true)
+        Self::from_members_ex(tag, members, struct_defs, true, false)
+    }
+
+    pub fn from_members_union_packed(
+        tag: &str,
+        members: &[MemberDeclaration],
+        struct_defs: &std::collections::HashMap<String, StructDef>,
+    ) -> Result<Self, String> {
+        Self::from_members_ex(tag, members, struct_defs, true, true)
     }
 
     fn from_members_ex(
@@ -700,6 +716,7 @@ impl StructDef {
         members: &[MemberDeclaration],
         struct_defs: &std::collections::HashMap<String, StructDef>,
         is_union: bool,
+        packed: bool,
     ) -> Result<Self, String> {
         let mut offset = 0usize;
         let mut max_align = 1usize;
@@ -713,9 +730,10 @@ impl StructDef {
 
         for m in members {
             let (m_size, natural_align) = member_size_align(&m.member_full_type, struct_defs)?;
+            let layout_align = if packed { 1 } else { natural_align };
             let m_align = m
                 .alignment
-                .map_or(natural_align, |a| a.get().max(natural_align));
+                .map_or(layout_align, |a| a.get().max(layout_align));
             if let Some(width) = m.bit_width {
                 if !matches!(
                     m.member_full_type,
@@ -753,19 +771,24 @@ impl StructDef {
                 } else {
                     (m_size, m_align, m.member_type)
                 };
+                let zero_width_align = if packed && width == 0 {
+                    natural_align
+                } else {
+                    storage_align
+                };
                 let storage_bits = storage_size * 8;
                 if width == 0 {
                     if !m.name.is_empty() {
                         return Err("zero-width bit-field may not have a name".to_string());
                     }
                     if !is_union {
-                        offset = (offset + storage_align - 1) & !(storage_align - 1);
+                        offset = (offset + zero_width_align - 1) & !(zero_width_align - 1);
                     }
                     next_bit_offset = 0;
                     bit_unit_size = 0;
-                    bit_unit_align = storage_align;
+                    bit_unit_align = zero_width_align;
                     bit_unit_type = storage_type;
-                    max_align = max_align.max(storage_align);
+                    max_align = max_align.max(m_align);
                     continue;
                 }
 
@@ -1007,6 +1030,9 @@ pub enum Token {
     KWTypeOf,
     AttributeAligned(String),
     AttributeAlignedNoreturn(String),
+    AttributePacked,
+    AttributePackedAligned(String),
+    AttributePackedAlignedNoreturn(String),
     AttributeNoreturn,
     Skip,
     Ellipsis, // ...
@@ -1327,6 +1353,7 @@ pub struct StructDeclaration {
     pub tag: String,
     pub members: Vec<MemberDeclaration>, // empty = incomplete type
     pub is_union: bool,
+    pub packed: bool,
 }
 
 #[allow(clippy::enum_variant_names)]

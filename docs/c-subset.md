@@ -69,6 +69,10 @@ assembly/linking.
 - GNU `__attribute__((aligned(n)))` and MSVC `__declspec(align(n))` alignment
   annotations are honored for object declarations and struct/union members when
   `n` is an integer constant expression.
+- GNU `__attribute__((packed))` / `__attribute__((__packed__))` is honored on
+  whole struct/union definitions for layout, including dense member placement,
+  aggregate alignment 1, non-recursive nested struct layout, and zero-width
+  bit-field alignment barriers.
 - Additional GNU builtin compatibility includes `__builtin_constant_p`,
   `__builtin_expect_with_probability`, `__builtin_assume_aligned`,
   `__builtin_prefetch`, `__builtin_bswap32`, `__builtin_bswap64`,

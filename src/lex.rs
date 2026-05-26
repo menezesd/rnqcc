@@ -145,6 +145,14 @@ impl Lexer {
     }
 
     fn contains_noreturn_attribute(text: &str) -> bool {
+        Self::contains_named_attribute(text, &["noreturn", "__noreturn__"])
+    }
+
+    fn contains_packed_attribute(text: &str) -> bool {
+        Self::contains_named_attribute(text, &["packed", "__packed__"])
+    }
+
+    fn contains_named_attribute(text: &str, names: &[&str]) -> bool {
         let chars: Vec<char> = text.chars().collect();
         let mut pos = 0;
         while pos < chars.len() {
@@ -156,7 +164,7 @@ impl Lexer {
                     pos += 1;
                 }
                 let name: String = chars[start..pos].iter().collect();
-                if matches!(name.as_str(), "noreturn" | "__noreturn__") {
+                if names.contains(&name.as_str()) {
                     return true;
                 }
             } else {
@@ -578,12 +586,20 @@ impl Lexer {
                 let text: String = self.chars[attr_start..self.pos].iter().collect();
                 let alignment = Self::parse_aligned_attribute(&text);
                 let noreturn = Self::contains_noreturn_attribute(&text);
+                let packed = Self::contains_packed_attribute(&text);
                 if let Some(alignment) = alignment {
-                    return Ok(if noreturn {
+                    return Ok(if packed && noreturn {
+                        Token::AttributePackedAlignedNoreturn(alignment)
+                    } else if packed {
+                        Token::AttributePackedAligned(alignment)
+                    } else if noreturn {
                         Token::AttributeAlignedNoreturn(alignment)
                     } else {
                         Token::AttributeAligned(alignment)
                     });
+                }
+                if packed {
+                    return Ok(Token::AttributePacked);
                 }
                 if noreturn {
                     return Ok(Token::AttributeNoreturn);

@@ -3306,6 +3306,65 @@ int main(void) {
 }
 
 #[test]
+fn honors_packed_aggregate_attribute_layout() {
+    let src = temp_file("frontend-packed-aggregate-attributes", "i");
+    let exe = temp_file("frontend-packed-aggregate-attributes", "bin");
+    std::fs::write(
+        &src,
+        r#"
+struct __attribute__((packed)) PrefixPacked {
+    char tag;
+    long value;
+    int tail;
+};
+
+struct SuffixPacked {
+    char tag;
+    long value;
+    int tail;
+} __attribute__((packed));
+
+union __attribute__((packed)) PackedUnion {
+    char tag;
+    long value;
+};
+
+struct Natural {
+    char tag;
+    long value;
+    int tail;
+};
+
+int main(void) {
+    if (sizeof(struct PrefixPacked) != 13) return 1;
+    if (__builtin_offsetof(struct PrefixPacked, value) != 1) return 2;
+    if (__builtin_offsetof(struct PrefixPacked, tail) != 9) return 3;
+    if (sizeof(struct SuffixPacked) != 13) return 4;
+    if (__builtin_offsetof(struct SuffixPacked, value) != 1) return 5;
+    if (sizeof(union PackedUnion) != 8) return 6;
+    if (sizeof(struct Natural) <= sizeof(struct PrefixPacked)) return 7;
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write test input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn compiles_gnu_typeof_declarations() {
     let src = temp_file("frontend-typeof", "i");
     let exe = temp_file("frontend-typeof", "bin");
@@ -7145,6 +7204,55 @@ fn compiles_bit_field_zero_width_alignment() {
         .status()
         .expect("failed to run executable");
     assert_eq!(status.code(), Some(8));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn honors_gnu_packed_struct_and_union_layout() {
+    let src = temp_file("gnu-packed-layout", "c");
+    let exe = temp_file("gnu-packed-layout", "bin");
+    std::fs::write(
+        &src,
+        r#"struct __attribute__((packed)) PackedPair { char c; int i; char tail; };
+         union __attribute__((packed)) PackedUnion { char c; int i; };
+         struct Inner { char c; int i; };
+         struct __attribute__((packed)) Outer { char tag; struct Inner inner; char tail; };
+         struct PackedSuffix { char c; long l; } __attribute__((packed));
+         struct __attribute__((packed)) PackedBits { short x : 9; int : 0; };
+         _Static_assert(sizeof(struct PackedPair) == 6, "packed pair size");
+         _Static_assert(_Alignof(struct PackedPair) == 1, "packed pair align");
+         _Static_assert(__builtin_offsetof(struct PackedPair, i) == 1, "packed pair offset");
+         _Static_assert(sizeof(union PackedUnion) == 4, "packed union size");
+         _Static_assert(_Alignof(union PackedUnion) == 1, "packed union align");
+         _Static_assert(sizeof(struct Inner) == 8, "inner keeps natural layout");
+         _Static_assert(_Alignof(struct Inner) == 4, "inner keeps natural align");
+         _Static_assert(__builtin_offsetof(struct Outer, inner) == 1, "outer member placement");
+         _Static_assert(__builtin_offsetof(struct Outer, tail) == 9, "outer tail offset");
+         _Static_assert(sizeof(struct Outer) == 10, "outer size");
+         _Static_assert(_Alignof(struct Outer) == 1, "outer align");
+         _Static_assert(sizeof(struct PackedSuffix) == 9, "suffix packed size");
+         _Static_assert(__builtin_offsetof(struct PackedSuffix, l) == 1, "suffix packed offset");
+         _Static_assert(sizeof(struct PackedBits) == 4, "zero width bit-field boundary");
+         _Static_assert(_Alignof(struct PackedBits) == 1, "zero width packed align");
+         int main(void) { return 42; }
+        "#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(exe);

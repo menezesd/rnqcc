@@ -6169,6 +6169,57 @@ fn internal_cpp_provides_more_posix_virtual_headers() {
 }
 
 #[test]
+fn internal_cpp_provides_posix_at_and_fcntl_probe_surface() {
+    let src = temp_file("internal-cpp-posix-at-fcntl", "c");
+    let exe = temp_file("internal-cpp-posix-at-fcntl", "bin");
+    std::fs::write(
+        &src,
+        "#include <sys/types.h>\n\
+         #include <fcntl.h>\n\
+         #include <unistd.h>\n\
+         int main(void) {\n\
+             struct flock lock;\n\
+             lock.l_type = F_RDLCK;\n\
+             lock.l_whence = SEEK_SET;\n\
+             lock.l_start = 0;\n\
+             lock.l_len = 0;\n\
+             lock.l_pid = 0;\n\
+             int flags_ok = ((O_RDONLY | O_WRONLY | O_RDWR) & O_ACCMODE) == O_ACCMODE &&\n\
+                            O_CLOEXEC != 0 && O_DIRECTORY != 0 && O_NOFOLLOW != 0 &&\n\
+                            AT_FDCWD < 0 && AT_SYMLINK_NOFOLLOW != 0 && AT_REMOVEDIR != 0;\n\
+             int fcntl_ok = F_DUPFD == 0 && F_GETFD == 1 && F_SETLK != F_SETLKW &&\n\
+                            F_UNLCK != F_WRLCK;\n\
+             int proto_ok = sizeof(openat(AT_FDCWD, \".\", O_RDONLY | O_CLOEXEC)) == sizeof(int) &&\n\
+                            sizeof(faccessat(AT_FDCWD, \".\", F_OK, 0)) == sizeof(int) &&\n\
+                            sizeof(ftruncate(0, (off_t)0)) == sizeof(int) &&\n\
+                            sizeof(truncate(\"x\", (off_t)0)) == sizeof(int) &&\n\
+                            sizeof(posix_fadvise(0, (off_t)0, (off_t)0, POSIX_FADV_NORMAL)) == sizeof(int) &&\n\
+                            sizeof(posix_fallocate(0, (off_t)0, (off_t)0)) == sizeof(int);\n\
+             return flags_ok && fcntl_ok && proto_ok && sizeof(lock.l_start) == sizeof(off_t) ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-nostdinc")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn internal_cpp_provides_networking_virtual_headers() {
     let src = temp_file("internal-cpp-networking-headers", "c");
     let exe = temp_file("internal-cpp-networking-headers", "bin");

@@ -40,6 +40,9 @@ The internal preprocessor supports:
 - `#elifdef` and `#elifndef`
 - `defined NAME` and `defined(NAME)`
 - `__has_include(...)` and `__has_include_next(...)`
+- `__has_builtin(...)`, `__has_attribute(...)`, `__has_c_attribute(...)`,
+  `__has_declspec_attribute(...)`, `__has_feature(...)`,
+  `__has_extension(...)`, and `__has_warning(...)`
 - integer `#if` expressions using unary, arithmetic, shift, comparison,
   equality, bitwise, logical, conditional, and parenthesized operators, including
   decimal, octal, hexadecimal, binary, character constants, and common integer
@@ -49,15 +52,16 @@ The internal preprocessor supports:
 - line and block comment removal
 - `#error`
 - `#warning`
-- ignored `#pragma`
-- `#pragma once`
+- ignored unknown `#pragma` directives
+- `#pragma once`, `_Pragma("once")`, `#pragma GCC system_header`,
+  `#pragma clang system_header`, and `#pragma GCC poison`
 
 Known internal preprocessor gaps:
 
 - exact host compiler predefined macro parity
 - compiler-specific system header extensions beyond `#include_next`
 - macro expansion corner cases around disabled/re-enabled macro identifiers
-- a full token-stream preprocessor implementation
+- full source-map propagation from preprocessing tokens into later diagnostics
 
 ## Targets
 

@@ -1,8 +1,9 @@
 #!/usr/bin/env sh
 set -eu
 
-cargo fmt --check
-cargo clippy --all-targets
+cargo fmt -- --check
+cargo check --all-targets
+cargo clippy --all-targets -- -D warnings
 cargo test
 bash -n run_tests.sh
 

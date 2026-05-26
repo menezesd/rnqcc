@@ -412,6 +412,7 @@ fn normalize_driver_arg_text(text: &str) -> Vec<OsString> {
                 normalized.push(OsString::from(part));
             }
         }
+        _ if text.starts_with("-W") => {}
         _ if text.starts_with("-isysroot") && text.len() > 9 => {
             normalized.push(OsString::from("--isysroot"));
             normalized.push(OsString::from(&text[9..]));

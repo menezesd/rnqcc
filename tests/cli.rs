@@ -10457,6 +10457,10 @@ fn driver_normalizes_more_real_project_flags() {
         .arg(&cc)
         .arg("--internal-cpp")
         .arg("-pipe")
+        .arg("-Wno-unused-parameter")
+        .arg("-Wno-sign-compare")
+        .arg("-Wno-error=implicit-function-declaration")
+        .arg("-Werror=implicit-function-declaration")
         .arg("-fsanitize=address")
         .arg("-fuse-ld=lld")
         .arg("-static-libasan")
@@ -10485,6 +10489,10 @@ fn driver_normalizes_more_real_project_flags() {
     assert!(log.contains("-rpath"));
     assert!(log.contains("/tmp/rnqcc-rpath"));
     assert!(!log.contains("-pipe"));
+    assert!(!log.contains("-Wno-unused-parameter"));
+    assert!(!log.contains("-Wno-sign-compare"));
+    assert!(!log.contains("-Wno-error=implicit-function-declaration"));
+    assert!(!log.contains("-Werror=implicit-function-declaration"));
 
     let _ = std::fs::remove_file(cc);
     let _ = std::fs::remove_file(out);

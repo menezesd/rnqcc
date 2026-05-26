@@ -135,7 +135,7 @@ assembly/linking.
   include-related environment variables, and common system include directories;
   macro-expanded includes, `#include_next`, virtual compatibility headers
   including `alloca.h`, `assert.h`, `arpa/inet.h`, `ctype.h`, `dirent.h`, `dlfcn.h`,
-  `errno.h`, `fcntl.h`, `fnmatch.h`, `glob.h`, `grp.h`, `ifaddrs.h`,
+  `errno.h`, `fcntl.h`, `fnmatch.h`, `getopt.h`, `glob.h`, `grp.h`, `ifaddrs.h`,
   `iso646.h`, `libgen.h`, `limits.h`, `linux/limits.h`, `locale.h`, `malloc.h`, `math.h`, `memory.h`, `net/if.h`, `netdb.h`, `netinet/in.h`,
   `netinet/ip.h`, `netinet/tcp.h`, `netinet/udp.h`, `paths.h`, `poll.h`, `pthread.h`, `pwd.h`, `regex.h`, `resolv.h`, `setjmp.h`, `signal.h`,
   `stdalign.h`, `stdatomic.h`,

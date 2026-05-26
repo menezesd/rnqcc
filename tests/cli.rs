@@ -6733,6 +6733,62 @@ fn internal_cpp_provides_autoconf_probe_virtual_headers() {
 }
 
 #[test]
+fn internal_cpp_provides_getopt_virtual_header() {
+    let src = temp_file("internal-cpp-getopt-header", "c");
+    let exe = temp_file("internal-cpp-getopt-header", "bin");
+    std::fs::write(
+        &src,
+        "#include <getopt.h>\n\
+         int main(void) {\n\
+             struct option options[4];\n\
+             int flag = 0;\n\
+             int index = -1;\n\
+             int (*short_fn)(int, char *const [], const char *) = getopt;\n\
+             int (*long_fn)(int, char *const [], const char *, const struct option *, int *) = getopt_long;\n\
+             options[0].name = \"help\";\n\
+             options[0].has_arg = no_argument;\n\
+             options[0].flag = &flag;\n\
+             options[0].val = 'h';\n\
+             options[1].name = \"output\";\n\
+             options[1].has_arg = required_argument;\n\
+             options[1].flag = 0;\n\
+             options[1].val = 'o';\n\
+             options[2].name = \"color\";\n\
+             options[2].has_arg = optional_argument;\n\
+             options[2].flag = 0;\n\
+             options[2].val = 1;\n\
+             options[3].name = 0;\n\
+             options[3].has_arg = 0;\n\
+             options[3].flag = 0;\n\
+             options[3].val = 0;\n\
+             int layout_ok = sizeof(struct option) >= sizeof(void *) * 2;\n\
+             int macros_ok = no_argument == 0 && required_argument == 1 && optional_argument == 2;\n\
+             return short_fn && long_fn && options[0].flag == &flag && index == -1 &&\n\
+                    layout_ok && macros_ok ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-nostdinc")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn internal_cpp_provides_linux_alias_probe_virtual_headers() {
     let src = temp_file("internal-cpp-linux-alias-probe-headers", "c");
     let exe = temp_file("internal-cpp-linux-alias-probe-headers", "bin");
@@ -7001,6 +7057,7 @@ fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
         "errno.h",
         "fcntl.h",
         "float.h",
+        "getopt.h",
         "grp.h",
         "inttypes.h",
         "iso646.h",

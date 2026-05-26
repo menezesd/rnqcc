@@ -1493,6 +1493,10 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
         guard: Some("__rnqcc_libgen_h"),
     },
     VirtualHeaderInfo {
+        name: "getopt.h",
+        guard: Some("__rnqcc_getopt_h"),
+    },
+    VirtualHeaderInfo {
         name: "paths.h",
         guard: None,
     },
@@ -2142,6 +2146,20 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 return String::new();
             }
             include_str!("virtual_headers/libgen.h").to_string()
+        }
+        "getopt.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("no_argument", "0"),
+                    ("required_argument", "1"),
+                    ("optional_argument", "2"),
+                ],
+            );
+            if virtual_header_include_once(macros, "getopt.h") {
+                return String::new();
+            }
+            include_str!("virtual_headers/getopt.h").to_string()
         }
         "paths.h" => {
             define_virtual_object_macros(

@@ -698,6 +698,10 @@ impl Lexer {
                 ']' => Token::CloseBracket,
                 '~' => Token::Tilde,
                 '?' => Token::Question,
+                ':' if self.peek() == Some('>') => {
+                    self.advance();
+                    Token::CloseBracket
+                }
                 ':' => Token::Colon,
 
                 '+' => {
@@ -727,7 +731,14 @@ impl Lexer {
                 }
                 '*' => self.two_char('=', Token::StarAssign, Token::Star),
                 '/' => self.two_char('=', Token::SlashAssign, Token::Slash),
-                '%' => self.two_char('=', Token::PercentAssign, Token::Percent),
+                '%' => {
+                    if self.peek() == Some('>') {
+                        self.advance();
+                        Token::CloseBrace
+                    } else {
+                        self.two_char('=', Token::PercentAssign, Token::Percent)
+                    }
+                }
 
                 '&' => {
                     if self.peek() == Some('&') {
@@ -754,7 +765,13 @@ impl Lexer {
                 '^' => self.two_char('=', Token::CaretAssign, Token::Caret),
 
                 '<' => {
-                    if self.peek() == Some('<') {
+                    if self.peek() == Some('%') {
+                        self.advance();
+                        Token::OpenBrace
+                    } else if self.peek() == Some(':') {
+                        self.advance();
+                        Token::OpenBracket
+                    } else if self.peek() == Some('<') {
                         self.advance();
                         self.two_char('=', Token::ShiftLeftAssign, Token::ShiftLeft)
                     } else if self.peek() == Some('=') {

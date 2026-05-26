@@ -6817,6 +6817,32 @@ fn internal_cpp_converts_trigraph_punctuators_in_preprocess_output() {
 }
 
 #[test]
+fn compiles_c_digraph_punctuators_after_internal_cpp() {
+    let src = temp_file("internal-cpp-digraph-compile", "c");
+    let exe = temp_file("internal-cpp-digraph-compile", "bin");
+    std::fs::write(
+        &src,
+        "int main(void) <% int values<:2:> = <% 40, 2 %>; return values<:0:> + values<:1:>; %>\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn internal_cpp_handles_va_opt() {
     let src = temp_file("internal-cpp-va-opt", "c");
     std::fs::write(

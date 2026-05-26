@@ -6730,6 +6730,46 @@ fn internal_cpp_provides_autoconf_probe_virtual_headers() {
 }
 
 #[test]
+fn internal_cpp_provides_linux_alias_probe_virtual_headers() {
+    let src = temp_file("internal-cpp-linux-alias-probe-headers", "c");
+    let exe = temp_file("internal-cpp-linux-alias-probe-headers", "bin");
+    std::fs::write(
+        &src,
+        "#include <alloca.h>\n\
+         #include <malloc.h>\n\
+         #include <memory.h>\n\
+         #include <sys/errno.h>\n\
+         #include <linux/limits.h>\n\
+         int main(void) {\n\
+             void *(*malloc_fn)(size_t) = malloc;\n\
+             void *(*memcpy_fn)(void *, const void *, size_t) = memcpy;\n\
+             int limits_ok = PATH_MAX >= 1024 && NAME_MAX >= 255 && PIPE_BUF >= 512;\n\
+             int errno_ok = EINVAL != ENOENT && EACCES != 0;\n\
+             return malloc_fn && memcpy_fn && limits_ok && errno_ok ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-nostdinc")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn internal_cpp_virtual_headers_tolerate_repeated_includes() {
     let src = temp_file("internal-cpp-repeat-virtual-headers", "c");
     let exe = temp_file("internal-cpp-repeat-virtual-headers", "bin");
@@ -6899,6 +6939,7 @@ fn internal_cpp_provides_more_system_virtual_headers() {
 fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
     let headers = [
         "assert.h",
+        "alloca.h",
         "ctype.h",
         "dirent.h",
         "errno.h",
@@ -6908,9 +6949,12 @@ fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
         "inttypes.h",
         "iso646.h",
         "libgen.h",
+        "linux/limits.h",
         "limits.h",
         "locale.h",
+        "malloc.h",
         "math.h",
+        "memory.h",
         "paths.h",
         "netdb.h",
         "poll.h",
@@ -6939,6 +6983,7 @@ fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
         "netinet/in.h",
         "netinet/tcp.h",
         "sys/file.h",
+        "sys/errno.h",
         "sys/select.h",
         "sys/socket.h",
         "sys/ioctl.h",

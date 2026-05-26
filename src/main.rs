@@ -1445,6 +1445,18 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
         guard: None,
     },
     VirtualHeaderInfo {
+        name: "memory.h",
+        guard: Some("__rnqcc_memory_h"),
+    },
+    VirtualHeaderInfo {
+        name: "malloc.h",
+        guard: Some("__rnqcc_malloc_h"),
+    },
+    VirtualHeaderInfo {
+        name: "alloca.h",
+        guard: Some("__rnqcc_alloca_h"),
+    },
+    VirtualHeaderInfo {
         name: "locale.h",
         guard: Some("__rnqcc_locale_h"),
     },
@@ -1533,6 +1545,10 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
         guard: Some("__rnqcc_sys_stat_h"),
     },
     VirtualHeaderInfo {
+        name: "sys/errno.h",
+        guard: None,
+    },
+    VirtualHeaderInfo {
         name: "sys/select.h",
         guard: Some("__rnqcc_sys_select_h"),
     },
@@ -1611,6 +1627,10 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
     VirtualHeaderInfo {
         name: "netdb.h",
         guard: Some("__rnqcc_netdb_h"),
+    },
+    VirtualHeaderInfo {
+        name: "linux/limits.h",
+        guard: Some("__rnqcc_linux_limits_h"),
     },
     VirtualHeaderInfo {
         name: "time.h",
@@ -1928,6 +1948,23 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 );
                 "int *__errno_location(void);\n".to_string()
             }
+        }
+        "memory.h" => include_virtual_compat_header("string.h", macros),
+        "malloc.h" => {
+            if virtual_header_include_once(macros, "malloc.h") {
+                return String::new();
+            }
+            include_virtual_compat_header("stdlib.h", macros)
+        }
+        "alloca.h" => {
+            if virtual_header_include_once(macros, "alloca.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}",
+                virtual_size_t_typedef(macros),
+                include_str!("virtual_headers/alloca.h")
+            )
         }
         "math.h" => {
             define_virtual_object_macros(
@@ -2259,6 +2296,7 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
             }
             format!("{}{}", types, include_str!("virtual_headers/sys/stat.h"))
         }
+        "sys/errno.h" => include_virtual_compat_header("errno.h", macros),
         "fcntl.h" => {
             define_virtual_object_macros(
                 macros,
@@ -2719,6 +2757,24 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 include_virtual_compat_header("netinet/in.h", macros),
                 include_str!("virtual_headers/netdb.h")
             )
+        }
+        "linux/limits.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("ARG_MAX", "131072"),
+                    ("LINK_MAX", "127"),
+                    ("MAX_CANON", "255"),
+                    ("MAX_INPUT", "255"),
+                    ("NAME_MAX", "255"),
+                    ("PATH_MAX", "4096"),
+                    ("PIPE_BUF", "4096"),
+                ],
+            );
+            if virtual_header_include_once(macros, "linux/limits.h") {
+                return String::new();
+            }
+            include_str!("virtual_headers/linux/limits.h").to_string()
         }
         "pthread.h" => {
             define_virtual_object_macros(

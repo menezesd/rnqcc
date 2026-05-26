@@ -134,13 +134,13 @@ assembly/linking.
   for subsequent struct/union definitions. Angle includes search user include paths,
   include-related environment variables, and common system include directories;
   macro-expanded includes, `#include_next`, virtual compatibility headers
-  including `assert.h`, `arpa/inet.h`, `ctype.h`, `dirent.h`, `dlfcn.h`,
+  including `alloca.h`, `assert.h`, `arpa/inet.h`, `ctype.h`, `dirent.h`, `dlfcn.h`,
   `errno.h`, `fcntl.h`, `fnmatch.h`, `glob.h`, `grp.h`, `ifaddrs.h`,
-  `iso646.h`, `libgen.h`, `locale.h`, `math.h`, `net/if.h`, `netdb.h`, `netinet/in.h`,
+  `iso646.h`, `libgen.h`, `limits.h`, `linux/limits.h`, `locale.h`, `malloc.h`, `math.h`, `memory.h`, `net/if.h`, `netdb.h`, `netinet/in.h`,
   `netinet/tcp.h`, `paths.h`, `poll.h`, `pthread.h`, `pwd.h`, `regex.h`, `setjmp.h`, `signal.h`,
   `stdalign.h`, `stdatomic.h`,
   `stdnoreturn.h`, `stdio.h`, `stdlib.h`, `string.h`, `strings.h`,
-  `sysexits.h`, `sys/file.h`, `sys/ioctl.h`, `sys/mman.h`, `sys/param.h`, `sys/resource.h`, `sys/select.h`,
+  `sysexits.h`, `sys/errno.h`, `sys/file.h`, `sys/ioctl.h`, `sys/mman.h`, `sys/param.h`, `sys/resource.h`, `sys/select.h`,
   `sys/socket.h`, `sys/stat.h`, `sys/sysmacros.h`, `sys/time.h`, `sys/types.h`, `sys/uio.h`,
   `sys/un.h`, `sys/utsname.h`, `sys/wait.h`, `syslog.h`, `termios.h`, `time.h`, `unistd.h`, `utime.h`,
   `wchar.h`, `wctype.h`, and common C library typedef/macro headers, `-D`, `-U`,

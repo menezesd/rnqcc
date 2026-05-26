@@ -6033,6 +6033,67 @@ fn internal_cpp_provides_common_posix_virtual_headers() {
 }
 
 #[test]
+fn internal_cpp_provides_networking_virtual_headers() {
+    let src = temp_file("internal-cpp-networking-headers", "c");
+    let exe = temp_file("internal-cpp-networking-headers", "bin");
+    std::fs::write(
+        &src,
+        "#include <sys/types.h>\n\
+         #include <sys/time.h>\n\
+         #include <sys/select.h>\n\
+         #include <sys/uio.h>\n\
+         #include <sys/socket.h>\n\
+         #include <netinet/in.h>\n\
+         #include <arpa/inet.h>\n\
+         #include <poll.h>\n\
+         int main(void) {\n\
+             fd_set set;\n\
+             struct timeval tv;\n\
+             struct iovec iov;\n\
+             struct sockaddr_storage storage;\n\
+             struct sockaddr_in addr;\n\
+             struct pollfd pfd;\n\
+             char text[INET6_ADDRSTRLEN];\n\
+             tv.tv_sec = 0;\n\
+             tv.tv_usec = 0;\n\
+             iov.iov_base = text;\n\
+             iov.iov_len = sizeof(text);\n\
+             storage.ss_family = AF_INET;\n\
+             addr.sin_family = AF_INET;\n\
+             addr.sin_port = 0;\n\
+             addr.sin_addr.s_addr = INADDR_LOOPBACK;\n\
+             pfd.fd = -1;\n\
+             pfd.events = POLLIN | POLLOUT;\n\
+             socklen_t len = sizeof(addr);\n\
+             int family_ok = AF_INET == PF_INET && SOCK_STREAM != SOCK_DGRAM && IPPROTO_TCP == 6;\n\
+             int macro_ok = INET_ADDRSTRLEN == 16 && INET6_ADDRSTRLEN == 46 && MSG_PEEK > 0;\n\
+             int type_ok = sizeof(socklen_t) == sizeof(unsigned int) && sizeof(sa_family_t) == sizeof(unsigned short) &&\n\
+                           sizeof(fd_set) >= sizeof(unsigned long) && sizeof(struct iovec) >= sizeof(void *) + sizeof(size_t);\n\
+             return family_ok && macro_ok && type_ok && len > 0 && pfd.events == (POLLIN | POLLOUT) ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-nostdinc")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn internal_cpp_virtual_headers_tolerate_repeated_includes() {
     let src = temp_file("internal-cpp-repeat-virtual-headers", "c");
     let exe = temp_file("internal-cpp-repeat-virtual-headers", "bin");
@@ -6212,6 +6273,7 @@ fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
         "limits.h",
         "locale.h",
         "math.h",
+        "poll.h",
         "pthread.h",
         "setjmp.h",
         "signal.h",
@@ -6224,9 +6286,14 @@ fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
         "stdio.h",
         "stdlib.h",
         "string.h",
+        "arpa/inet.h",
+        "netinet/in.h",
+        "sys/select.h",
+        "sys/socket.h",
         "sys/stat.h",
         "sys/time.h",
         "sys/types.h",
+        "sys/uio.h",
         "time.h",
         "unistd.h",
         "wchar.h",

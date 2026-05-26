@@ -1449,6 +1449,10 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
         guard: Some("__rnqcc_fcntl_h"),
     },
     VirtualHeaderInfo {
+        name: "poll.h",
+        guard: Some("__rnqcc_poll_h"),
+    },
+    VirtualHeaderInfo {
         name: "setjmp.h",
         guard: Some("__rnqcc_setjmp_h"),
     },
@@ -1481,12 +1485,32 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
         guard: Some("__rnqcc_sys_stat_h"),
     },
     VirtualHeaderInfo {
+        name: "sys/select.h",
+        guard: Some("__rnqcc_sys_select_h"),
+    },
+    VirtualHeaderInfo {
+        name: "sys/socket.h",
+        guard: Some("__rnqcc_sys_socket_h"),
+    },
+    VirtualHeaderInfo {
         name: "sys/time.h",
         guard: Some("__rnqcc_sys_time_h"),
     },
     VirtualHeaderInfo {
         name: "sys/types.h",
         guard: Some("__rnqcc_sys_types_defined"),
+    },
+    VirtualHeaderInfo {
+        name: "sys/uio.h",
+        guard: Some("__rnqcc_sys_uio_h"),
+    },
+    VirtualHeaderInfo {
+        name: "arpa/inet.h",
+        guard: Some("__rnqcc_arpa_inet_h"),
+    },
+    VirtualHeaderInfo {
+        name: "netinet/in.h",
+        guard: Some("__rnqcc_netinet_in_h"),
     },
     VirtualHeaderInfo {
         name: "time.h",
@@ -1961,6 +1985,27 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 include_str!("virtual_headers/fcntl.h")
             )
         }
+        "poll.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("POLLIN", "0x0001"),
+                    ("POLLPRI", "0x0002"),
+                    ("POLLOUT", "0x0004"),
+                    ("POLLERR", "0x0008"),
+                    ("POLLHUP", "0x0010"),
+                    ("POLLNVAL", "0x0020"),
+                ],
+            );
+            if virtual_header_include_once(macros, "poll.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}",
+                include_virtual_compat_header("sys/types.h", macros),
+                include_str!("virtual_headers/poll.h")
+            )
+        }
         "unistd.h" => {
             virtual_null_macro(macros);
             define_virtual_object_macros(
@@ -1985,6 +2030,100 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 "{}{}",
                 include_virtual_compat_header("sys/types.h", macros),
                 include_str!("virtual_headers/unistd.h")
+            )
+        }
+        "sys/select.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("FD_SETSIZE", "1024"),
+                    ("NFDBITS", "(8 * sizeof(unsigned long))"),
+                ],
+            );
+            if virtual_header_include_once(macros, "sys/select.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}{}",
+                include_virtual_compat_header("sys/types.h", macros),
+                include_virtual_compat_header("sys/time.h", macros),
+                include_str!("virtual_headers/sys/select.h")
+            )
+        }
+        "sys/socket.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("AF_UNSPEC", "0"),
+                    ("AF_INET", "2"),
+                    ("AF_INET6", "10"),
+                    ("PF_UNSPEC", "0"),
+                    ("PF_INET", "2"),
+                    ("PF_INET6", "10"),
+                    ("SOCK_STREAM", "1"),
+                    ("SOCK_DGRAM", "2"),
+                    ("SOCK_RAW", "3"),
+                    ("SOL_SOCKET", "1"),
+                    ("SO_REUSEADDR", "2"),
+                    ("SHUT_RD", "0"),
+                    ("SHUT_WR", "1"),
+                    ("SHUT_RDWR", "2"),
+                    ("MSG_OOB", "0x1"),
+                    ("MSG_PEEK", "0x2"),
+                    ("MSG_DONTWAIT", "0x40"),
+                ],
+            );
+            if virtual_header_include_once(macros, "sys/socket.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}{}",
+                include_virtual_compat_header("sys/types.h", macros),
+                include_virtual_compat_header("sys/uio.h", macros),
+                include_str!("virtual_headers/sys/socket.h")
+            )
+        }
+        "sys/uio.h" => {
+            if virtual_header_include_once(macros, "sys/uio.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}",
+                include_virtual_compat_header("sys/types.h", macros),
+                include_str!("virtual_headers/sys/uio.h")
+            )
+        }
+        "netinet/in.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("IPPROTO_IP", "0"),
+                    ("IPPROTO_TCP", "6"),
+                    ("IPPROTO_UDP", "17"),
+                    ("INADDR_ANY", "0x00000000U"),
+                    ("INADDR_LOOPBACK", "0x7f000001U"),
+                    ("INADDR_NONE", "0xffffffffU"),
+                    ("INET_ADDRSTRLEN", "16"),
+                    ("INET6_ADDRSTRLEN", "46"),
+                ],
+            );
+            if virtual_header_include_once(macros, "netinet/in.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}",
+                include_virtual_compat_header("sys/socket.h", macros),
+                include_str!("virtual_headers/netinet/in.h")
+            )
+        }
+        "arpa/inet.h" => {
+            if virtual_header_include_once(macros, "arpa/inet.h") {
+                return String::new();
+            }
+            format!(
+                "{}{}",
+                include_virtual_compat_header("netinet/in.h", macros),
+                include_str!("virtual_headers/arpa/inet.h")
             )
         }
         "pthread.h" => {

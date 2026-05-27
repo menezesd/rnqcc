@@ -772,6 +772,9 @@ fn convert_instruction(
         TackyInstr::GetAddress { src, dst } => {
             out.push(AsmInstr::Lea(convert_val(src), convert_val(dst)));
         }
+        TackyInstr::VaStart { dst } => {
+            out.push(AsmInstr::Lea(AsmOperand::Stack(16), convert_val(dst)));
+        }
         TackyInstr::Load { src_ptr, dst } => {
             let dst_t = val_type(dst, types);
             // Load pointer value into R11, then load indirectly

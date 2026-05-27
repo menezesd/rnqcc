@@ -97,6 +97,10 @@ pub struct Parser {
     pending_auto_type: bool,
     /// True when declaration specifiers/attributes mark a function as noreturn.
     pending_noreturn: bool,
+    /// True when the most recently parsed type specifier was an enum.
+    last_type_was_enum: bool,
+    /// Last nonconstant array bound parsed for minimal automatic VLA lowering.
+    pending_vla_bound: Option<Exp>,
     /// Function currently being parsed, for predefined function-name identifiers.
     current_function_name: Option<String>,
 }
@@ -164,6 +168,8 @@ impl Parser {
             pending_alignment: None,
             pending_auto_type: false,
             pending_noreturn: false,
+            last_type_was_enum: false,
+            pending_vla_bound: None,
             current_function_name: None,
         }
     }
@@ -242,6 +248,32 @@ impl Parser {
         };
         let full_type = self.infer_unsized_array_type(full_type.clone(), init.as_ref())?;
         let array_dims = Self::extract_array_dims(&full_type);
+        if let (Some(bound), Some(_)) = (self.pending_vla_bound.take(), array_dims.as_ref()) {
+            let elem = match full_type {
+                FullType::Array { elem, .. } => *elem,
+                ref other => other.clone(),
+            };
+            let size_exp = Exp::Binary(
+                BinaryOp::Mul,
+                Box::new(bound),
+                Box::new(Exp::SizeOfType(elem.to_ctype(), elem.clone())),
+            );
+            let ptr_ft = FullType::Pointer(Box::new(elem));
+            let ptr_info = match &ptr_ft {
+                FullType::Pointer(inner) => Some(ptr_info_from_full(inner)),
+                _ => None,
+            };
+            return Ok(VarDeclaration {
+                name,
+                var_type: CType::Pointer,
+                ptr_info,
+                array_dims: None,
+                decl_full_type: Some(ptr_ft),
+                init: Some(Exp::FunctionCall("alloca".to_string(), vec![size_exp])),
+                storage_class: sc,
+                alignment,
+            });
+        }
         let var_type = if array_dims.is_some() {
             let mut t = &full_type;
             while let FullType::Array { elem, .. } = t {
@@ -1100,9 +1132,10 @@ impl Parser {
             return Ok(0);
         }
         let exp = self.parse_assignment()?;
-        let value = self
-            .eval_integer_constant_exp_with_layout(&exp)
-            .ok_or_else(|| self.format_error("expected constant array size"))?;
+        let Some(value) = self.eval_integer_constant_exp_with_layout(&exp) else {
+            self.pending_vla_bound = Some(exp);
+            return Ok(0);
+        };
         if value < 0 {
             return Err(self.format_error("array size must be non-negative"));
         }
@@ -1218,6 +1251,7 @@ impl Parser {
     }
 
     fn parse_specifiers(&mut self) -> ParseResult<(Option<StorageClass>, CType)> {
+        self.last_type_was_enum = false;
         let mut sc: Option<StorageClass> = None;
         let mut has_int = false;
         let mut has_long = false;
@@ -1445,6 +1479,7 @@ impl Parser {
                 if self.at(&Token::OpenBrace) {
                     self.parse_enum_body()?;
                 }
+                self.last_type_was_enum = true;
                 return Ok((sc, CType::Int));
             }
             // Check for typedef name
@@ -1508,6 +1543,7 @@ impl Parser {
     }
 
     fn parse_type(&mut self) -> ParseResult<CType> {
+        self.last_type_was_enum = false;
         self.last_typedef_full_type = None;
         self.last_struct_tag = None;
 
@@ -1584,6 +1620,7 @@ impl Parser {
             if self.at(&Token::OpenBrace) {
                 self.parse_enum_body()?;
             }
+            self.last_type_was_enum = true;
             return Ok(CType::Int);
         }
         // Check for typedef name before parsing int/long/etc.
@@ -2213,6 +2250,7 @@ impl Parser {
             }
             let member_attrs = self.consume_member_attributes()?;
             let base_type = self.parse_type()?;
+            let base_was_enum = self.last_type_was_enum;
             let base_typedef_full_type = self.last_typedef_full_type.clone();
             loop {
                 self.last_typedef_full_type = base_typedef_full_type.clone();
@@ -2227,9 +2265,8 @@ impl Parser {
                     } else {
                         self.parse_declarator_full(base_type)?
                     };
-                let member_type = full_type.to_ctype();
                 // Replace Scalar(Struct) with FullType::Struct(tag)
-                let member_full_type = if base_type == CType::Struct {
+                let mut member_full_type = if base_type == CType::Struct {
                     if let Some(ref tag) = self.last_struct_tag {
                         Self::replace_scalar_struct(&full_type, tag)
                     } else {
@@ -2254,6 +2291,10 @@ impl Parser {
                 } else {
                     None
                 };
+                if base_was_enum && bit_width.is_some() {
+                    member_full_type = FullType::Scalar(CType::UInt);
+                }
+                let member_type = member_full_type.to_ctype();
                 let post_attrs = self.consume_member_attributes()?;
                 let member_alignment = match (member_attrs.alignment, post_attrs.alignment) {
                     (Some(current), Some(post)) => Some(current.max(post)),
@@ -2509,7 +2550,7 @@ impl Parser {
             self.add_typedef(
                 name,
                 TypedefInfo {
-                    base_type,
+                    base_type: full_type.to_ctype(),
                     full_type: full_type.clone(),
                     struct_tag: saved_struct_tag.clone(),
                 },
@@ -2531,7 +2572,7 @@ impl Parser {
                 self.add_typedef(
                     name2,
                     TypedefInfo {
-                        base_type,
+                        base_type: full_type2.to_ctype(),
                         full_type: full_type2,
                         struct_tag: saved_struct_tag.clone(),
                     },
@@ -2781,6 +2822,7 @@ impl Parser {
             let tree = s.parse_declarator_tree_inner(true)?;
             let td_ft = s.last_typedef_full_type.take();
             let (name, full_type, _) = Self::process_declarator(&tree, base, td_ft.as_ref());
+            let _ = s.pending_vla_bound.take();
             // Generate a dummy name for unnamed params
             let name = if name.is_empty() {
                 format!("__unnamed_{}", s.pos)
@@ -3161,21 +3203,18 @@ impl Parser {
                     }
                 };
 
-                let body = if self.at(&Token::OpenBrace) {
-                    Some(self.parse_block()?)
-                } else {
-                    self.expect_token(Token::Semicolon)?;
-                    None
-                };
-
-                if body.is_some() {
-                    return Err(self.format_error("function definitions not allowed inside blocks"));
-                }
-
                 self.add_value_type(
                     name.clone(),
                     Self::function_full_type(full_type.clone(), &func_info),
                 )?;
+                let param_value_types =
+                    Self::param_value_types(&func_info.params, &func_info.param_full_types);
+                let body = if self.at(&Token::OpenBrace) {
+                    Some(self.parse_function_body_with_values(&name, &param_value_types)?)
+                } else {
+                    self.expect_token(Token::Semicolon)?;
+                    None
+                };
 
                 Ok(BlockItem::Declaration(Declaration::FunDecl(
                     FunctionDeclaration {
@@ -3917,6 +3956,28 @@ impl Parser {
                         self.expect_token(Token::CloseParen)?;
                         return Ok(Exp::ULongConstant(offset as i64));
                     }
+                    if name == "__builtin_va_arg" {
+                        let ap = self.parse_assignment()?;
+                        self.expect_token(Token::Comma)?;
+                        let ty = self.parse_type()?;
+                        let full_type = self.parse_abstract_declarator_type(ty)?;
+                        self.expect_token(Token::CloseParen)?;
+                        let suffix = match full_type.to_ctype() {
+                            CType::Long => "long",
+                            CType::ULong => "ulong",
+                            CType::Pointer => "ptr",
+                            CType::UInt => "uint",
+                            CType::Short => "short",
+                            CType::UShort => "ushort",
+                            CType::Char | CType::SChar => "char",
+                            CType::UChar => "uchar",
+                            _ => "int",
+                        };
+                        return Ok(Exp::FunctionCall(
+                            format!("__rnqcc_va_arg_{}", suffix),
+                            vec![ap],
+                        ));
+                    }
                     let args = self.parse_arg_list()?;
                     self.expect_token(Token::CloseParen)?;
                     if name == "__builtin_expect" || name == "__builtin_expect_with_probability" {
@@ -4145,10 +4206,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_reports_nonconstant_array_size() -> Result<(), String> {
-        let err = require_err(parse_source_err("int x; int a[x];\n"), "parse should fail")?;
-        assert!(err.contains("expected constant array size"), "{err}");
-        assert!(err.contains("Parse error at token"), "{err}");
+    fn parses_nonconstant_local_array_as_vla_pointer() -> Result<(), String> {
+        let program = parse_source("void f(void) { int x; int a[x]; }\n")?;
+        let Declaration::FunDecl(func) = &program.declarations[0] else {
+            return Err("expected function".to_string());
+        };
+        let Some(body) = func.body.as_ref() else {
+            return Err("expected function body".to_string());
+        };
+        let BlockItem::Declaration(Declaration::VarDecl(vd)) = &body[1] else {
+            return Err("expected VLA declaration".to_string());
+        };
+        assert_eq!(vd.var_type, CType::Pointer);
+        assert!(matches!(vd.init, Some(Exp::FunctionCall(ref name, _)) if name == "alloca"));
         Ok(())
     }
 
@@ -4219,13 +4289,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_abstract_declarator_reports_nonconstant_array_size() -> Result<(), String> {
+    fn parses_nonconstant_abstract_array_bound() -> Result<(), String> {
         let mut parser = parser_source("[x]")?;
-        let err = require_err(
-            parser.parse_abstract_declarator_type(CType::Int),
-            "abstract declarator should fail",
-        )?;
-        assert!(err.contains("expected constant array size"), "{err}");
+        let ft = parser.parse_abstract_declarator_type(CType::Int)?;
+        assert_eq!(
+            ft,
+            FullType::Array {
+                elem: Box::new(FullType::Scalar(CType::Int)),
+                size: 0
+            }
+        );
         Ok(())
     }
 
@@ -4399,13 +4472,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_block_item_reports_nested_function_definition() -> Result<(), String> {
+    fn parse_block_item_accepts_nested_function_definition() -> Result<(), String> {
         let mut parser = parser_source("int f() { return 1; }")?;
-        let err = require_err(parser.parse_block_item(), "block item should fail")?;
-        assert!(
-            err.contains("function definitions not allowed inside blocks"),
-            "{err}"
-        );
+        let item = parser.parse_block_item()?;
+        assert!(matches!(
+            item,
+            BlockItem::Declaration(Declaration::FunDecl(FunctionDeclaration {
+                body: Some(_),
+                ..
+            }))
+        ));
         Ok(())
     }
 

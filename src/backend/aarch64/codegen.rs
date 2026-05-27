@@ -475,6 +475,9 @@ fn collect_stack_slots(
                 }
                 collect_var(dst, &mut vars, global_vars);
             }
+            TackyInstr::VaStart { dst } => {
+                collect_var(dst, &mut vars, global_vars);
+            }
             TackyInstr::GetAddress { src, dst } => {
                 collect_var(src, &mut vars, global_vars);
                 collect_var(dst, &mut vars, global_vars);
@@ -1272,6 +1275,12 @@ fn convert_function(
                     &stack_slots,
                     global_vars,
                 )?;
+            }
+            TackyInstr::VaStart { dst } => {
+                instructions.push(AsmInstr::Lea(
+                    AsmOperand::Stack(frame_size),
+                    val_operand(dst, &stack_slots, global_vars)?,
+                ));
             }
             TackyInstr::AddPtr {
                 ptr,

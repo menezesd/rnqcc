@@ -99,6 +99,7 @@ struct TackyGen {
     array_sizes: HashMap<String, usize>,
     /// Struct definitions
     struct_defs: HashMap<String, StructDef>,
+    nested_functions: Vec<TackyFunction>,
 }
 
 impl TackyGen {
@@ -123,6 +124,7 @@ impl TackyGen {
             ptr_info: HashMap::new(),
             array_sizes: HashMap::new(),
             struct_defs: HashMap::new(),
+            nested_functions: Vec::new(),
         }
     }
 
@@ -428,10 +430,39 @@ impl TackyGen {
         FullType::Pointer(Box::new(FullType::Scalar(CType::Char)))
     }
 
+    fn va_arg_helper_type(suffix: &str) -> Option<CType> {
+        match suffix {
+            "char" => Some(CType::Char),
+            "uchar" => Some(CType::UChar),
+            "short" => Some(CType::Short),
+            "ushort" => Some(CType::UShort),
+            "int" => Some(CType::Int),
+            "uint" => Some(CType::UInt),
+            "long" => Some(CType::Long),
+            "ulong" => Some(CType::ULong),
+            "ptr" => Some(CType::Pointer),
+            _ => None,
+        }
+    }
+
     fn builtin_function_info(name: &str) -> Option<BuiltinFunctionInfo> {
         let void_ptr = Self::void_pointer_type();
         let char_ptr = Self::char_pointer_type();
         match name {
+            "__builtin_abort" => Some((
+                "abort",
+                CType::Void,
+                FullType::Scalar(CType::Void),
+                vec![],
+                None,
+            )),
+            "__builtin_exit" => Some((
+                "exit",
+                CType::Void,
+                FullType::Scalar(CType::Void),
+                vec![CType::Int],
+                None,
+            )),
             "__builtin_memcpy" => Some((
                 "memcpy",
                 CType::Pointer,
@@ -569,6 +600,22 @@ impl TackyGen {
         )
     }
 
+    fn compatible_pointer_pointees(&self, dst: &FullType, src: &FullType) -> bool {
+        if dst == src || Self::is_void_pointer(&FullType::Pointer(Box::new(dst.clone()))) {
+            return true;
+        }
+        match (dst, src) {
+            (FullType::Scalar(a), FullType::Scalar(b)) => {
+                *a != CType::Struct
+                    && *b != CType::Struct
+                    && *a != CType::Void
+                    && *b != CType::Void
+                    && a.size() == b.size()
+            }
+            _ => self.compatible_full_types(dst, src),
+        }
+    }
+
     fn compatible_full_types(&self, dst: &FullType, src: &FullType) -> bool {
         if dst == src {
             return true;
@@ -581,8 +628,10 @@ impl TackyGen {
             }
             (FullType::Pointer(_), FullType::Scalar(CType::Pointer))
             | (FullType::Scalar(CType::Pointer), FullType::Pointer(_)) => true,
-            (FullType::Pointer(_), FullType::Pointer(_)) => {
-                Self::is_void_pointer(dst) || Self::is_void_pointer(src) || dst == src
+            (FullType::Pointer(dst_inner), FullType::Pointer(src_inner)) => {
+                Self::is_void_pointer(dst)
+                    || Self::is_void_pointer(src)
+                    || self.compatible_pointer_pointees(dst_inner, src_inner)
             }
             (FullType::Pointer(pointee), FullType::Array { elem, .. }) => {
                 Self::is_void_pointer(dst) || self.compatible_full_types(pointee, elem)
@@ -2286,6 +2335,52 @@ impl TackyGen {
         name: String,
         args: Vec<Exp>,
     ) -> TackyResult<(TackyVal, CType)> {
+        if name == "__builtin_return_address" && args.len() == 1 {
+            let dst = self.fresh_tmp_full(&Self::void_pointer_type());
+            self.emit(TackyInstr::Copy {
+                src: TackyVal::Constant(0),
+                dst: dst.clone(),
+            });
+            return Ok((dst, CType::Pointer));
+        }
+        if name == "__builtin_va_start" && args.len() >= 2 {
+            let Exp::Var(ap_name) = &args[0] else {
+                return Err("__builtin_va_start requires a va_list object".to_string());
+            };
+            self.emit(TackyInstr::VaStart {
+                dst: TackyVal::Var(ap_name.clone()),
+            });
+            return Ok((TackyVal::Constant(0), CType::Int));
+        }
+        if let Some(arg_type) = name
+            .strip_prefix("__rnqcc_va_arg_")
+            .and_then(Self::va_arg_helper_type)
+        {
+            if args.len() != 1 {
+                return Err("__builtin_va_arg requires one va_list argument".to_string());
+            }
+            let Exp::Var(ap_name) = &args[0] else {
+                return Err("__builtin_va_arg requires a va_list object".to_string());
+            };
+            let (slot_ptr, _) = self.emit_exp(args[0].clone())?;
+            let dst = self.fresh_tmp(arg_type);
+            self.emit(TackyInstr::Load {
+                src_ptr: slot_ptr.clone(),
+                dst: dst.clone(),
+            });
+            let next = self.fresh_tmp(CType::Pointer);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::Add,
+                left: slot_ptr,
+                right: TackyVal::Constant(8),
+                dst: next.clone(),
+            });
+            self.emit(TackyInstr::Copy {
+                src: next,
+                dst: TackyVal::Var(ap_name.clone()),
+            });
+            return Ok((dst, arg_type));
+        }
         if name == "__builtin___sprintf_chk" && args.len() >= 4 {
             self.func_types.insert(
                 "sprintf".to_string(),
@@ -2309,30 +2404,28 @@ impl TackyGen {
             .map(|(call_name, _, _, _, _)| (*call_name).to_string())
             .unwrap_or_else(|| name.clone());
         if matches!(name.as_str(), "alloca" | "__builtin_alloca") && args.len() == 1 {
-            if let Some((size, _, _)) = eval_static_integer_constant_exp_with_context(
+            let size = eval_static_integer_constant_exp_with_context(
                 &args[0],
                 &self.struct_defs,
                 &self.full_types,
-            ) {
-                let size = usize::try_from(size)
-                    .ok()
-                    .filter(|size| *size > 0)
-                    .unwrap_or(1);
-                let name = self.fresh_var_name();
-                let ft = FullType::Array {
-                    elem: Box::new(FullType::Scalar(CType::Char)),
-                    size,
-                };
-                self.register_var(&name, ft);
-                self.array_sizes.insert(name.clone(), size);
-                let ptr_ft = Self::void_pointer_type();
-                let dst = self.fresh_tmp_full(&ptr_ft);
-                self.emit(TackyInstr::GetAddress {
-                    src: TackyVal::Var(name),
-                    dst: dst.clone(),
-                });
-                return Ok((dst, CType::Pointer));
-            }
+            )
+            .and_then(|(size, _, _)| usize::try_from(size).ok())
+            .filter(|size| *size > 0)
+            .unwrap_or(4096);
+            let name = self.fresh_var_name();
+            let ft = FullType::Array {
+                elem: Box::new(FullType::Scalar(CType::Char)),
+                size,
+            };
+            self.register_var(&name, ft);
+            self.array_sizes.insert(name.clone(), size);
+            let ptr_ft = Self::void_pointer_type();
+            let dst = self.fresh_tmp_full(&ptr_ft);
+            self.emit(TackyInstr::GetAddress {
+                src: TackyVal::Var(name),
+                dst: dst.clone(),
+            });
+            return Ok((dst, CType::Pointer));
         }
         let pointer_sig = self
             .full_types
@@ -6076,6 +6169,9 @@ impl TackyGen {
                     if let Some(ref rft) = fd.return_full_type {
                         self.func_full_types.insert(fd.name.clone(), rft.clone());
                     }
+                    if fd.body.is_some() {
+                        self.emit_nested_function(fd)?;
+                    }
                 }
                 BlockItem::Declaration(Declaration::StructDecl(sd)) => {
                     let def = StructDef::from_declaration(&sd, &self.struct_defs)?;
@@ -6086,6 +6182,463 @@ impl TackyGen {
             }
         }
         Ok(())
+    }
+
+    fn emit_nested_function(&mut self, mut fd: FunctionDeclaration) -> TackyResult<()> {
+        let captures = self.collect_captures_for_nested(&fd);
+        let mut capture_map = HashMap::new();
+        for capture in captures {
+            let Some(captured_ft) = self.full_types.get(&capture).cloned() else {
+                continue;
+            };
+            let slot = format!("__rnqcc_chain_{}_{}", fd.name, capture.replace('.', "_"));
+            let slot_ft = FullType::Pointer(Box::new(captured_ft));
+            self.register_var(&slot, slot_ft);
+            self.static_vars.push(TackyStaticVar {
+                name: slot.clone(),
+                global: false,
+                thread_local: false,
+                alignment: 8,
+                init_values: vec![StaticInit::ZeroInit(8)],
+            });
+            let addr = self.fresh_tmp(CType::Pointer);
+            self.emit(TackyInstr::GetAddress {
+                src: TackyVal::Var(capture.clone()),
+                dst: addr.clone(),
+            });
+            self.emit(TackyInstr::Copy {
+                src: addr,
+                dst: TackyVal::Var(slot.clone()),
+            });
+            capture_map.insert(capture, slot);
+        }
+        if let Some(body) = fd.body.take() {
+            fd.body = Some(Self::rewrite_capture_block(body, &capture_map));
+        }
+
+        let saved_instructions = std::mem::take(&mut self.instructions);
+        let saved_current = std::mem::take(&mut self.current_function);
+        let saved_hidden_ret = self.hidden_ret_ptr.take();
+        if let Some(mut nested) = self.emit_function(fd)? {
+            nested.global = false;
+            self.nested_functions.push(nested);
+        }
+        self.instructions = saved_instructions;
+        self.current_function = saved_current;
+        self.hidden_ret_ptr = saved_hidden_ret;
+        Ok(())
+    }
+
+    fn collect_captures_for_nested(&self, fd: &FunctionDeclaration) -> Vec<String> {
+        let mut local_names: std::collections::HashSet<String> =
+            fd.params.iter().map(|(name, _, _)| name.clone()).collect();
+        if let Some(body) = fd.body.as_ref() {
+            Self::collect_declared_names(body, &mut local_names);
+        }
+        let mut used = Vec::new();
+        if let Some(body) = fd.body.as_ref() {
+            Self::collect_used_vars_block(body, &mut used);
+        }
+        used.into_iter()
+            .filter(|name| {
+                !local_names.contains(name)
+                    && self.full_types.contains_key(name)
+                    && !self.func_types.contains_key(name)
+            })
+            .collect()
+    }
+
+    fn collect_declared_names(block: &Block, names: &mut std::collections::HashSet<String>) {
+        for item in block {
+            match item {
+                BlockItem::Declaration(Declaration::VarDecl(vd)) => {
+                    names.insert(vd.name.clone());
+                }
+                BlockItem::Declaration(Declaration::FunDecl(fd)) => {
+                    names.insert(fd.name.clone());
+                }
+                BlockItem::Statement(stmt) => Self::collect_declared_names_stmt(stmt, names),
+                _ => {}
+            }
+        }
+    }
+
+    fn collect_declared_names_stmt(
+        stmt: &Statement,
+        names: &mut std::collections::HashSet<String>,
+    ) {
+        match stmt {
+            Statement::Block(block) => Self::collect_declared_names(block, names),
+            Statement::If(_, then_stmt, else_stmt) => {
+                Self::collect_declared_names_stmt(then_stmt, names);
+                if let Some(else_stmt) = else_stmt {
+                    Self::collect_declared_names_stmt(else_stmt, names);
+                }
+            }
+            Statement::While { body, .. }
+            | Statement::DoWhile { body, .. }
+            | Statement::Label(_, body)
+            | Statement::Case { body, .. }
+            | Statement::Default { body, .. }
+            | Statement::Switch { body, .. } => Self::collect_declared_names_stmt(body, names),
+            Statement::For { init, body, .. } => {
+                if let ForInit::Declaration(vd) = init.as_ref() {
+                    names.insert(vd.name.clone());
+                }
+                Self::collect_declared_names_stmt(body, names);
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_used_vars_block(block: &Block, used: &mut Vec<String>) {
+        for item in block {
+            match item {
+                BlockItem::Declaration(Declaration::VarDecl(vd)) => {
+                    if let Some(init) = vd.init.as_ref() {
+                        Self::collect_used_vars_exp(init, used);
+                    }
+                }
+                BlockItem::Declaration(Declaration::FunDecl(_)) => {}
+                BlockItem::Statement(stmt) => Self::collect_used_vars_stmt(stmt, used),
+                _ => {}
+            }
+        }
+    }
+
+    fn push_used_var(name: &str, used: &mut Vec<String>) {
+        if !used.iter().any(|existing| existing == name) {
+            used.push(name.to_string());
+        }
+    }
+
+    fn collect_used_vars_exp(exp: &Exp, used: &mut Vec<String>) {
+        match exp {
+            Exp::Var(name) => Self::push_used_var(name, used),
+            Exp::Cast(_, _, inner)
+            | Exp::Unary(_, inner)
+            | Exp::SizeOf(inner)
+            | Exp::Dot(inner, _)
+            | Exp::Arrow(inner, _) => Self::collect_used_vars_exp(inner, used),
+            Exp::Binary(_, left, right)
+            | Exp::Assign(left, right)
+            | Exp::CompoundAssign(_, left, right)
+            | Exp::Subscript(left, right)
+            | Exp::Comma(left, right) => {
+                Self::collect_used_vars_exp(left, used);
+                Self::collect_used_vars_exp(right, used);
+            }
+            Exp::Conditional(a, b, c) => {
+                Self::collect_used_vars_exp(a, used);
+                Self::collect_used_vars_exp(b, used);
+                Self::collect_used_vars_exp(c, used);
+            }
+            Exp::FunctionCall(name, args) => {
+                Self::push_used_var(name, used);
+                for arg in args {
+                    Self::collect_used_vars_exp(arg, used);
+                }
+            }
+            Exp::IndirectCall(callee, args) => {
+                Self::collect_used_vars_exp(callee, used);
+                for arg in args {
+                    Self::collect_used_vars_exp(arg, used);
+                }
+            }
+            Exp::ArrayInit(elems) => {
+                for elem in elems {
+                    Self::collect_used_vars_exp(elem, used);
+                }
+            }
+            Exp::DesignatedInit(designators, value) => {
+                for designator in designators {
+                    if let Designator::Index(index) = designator {
+                        Self::collect_used_vars_exp(index, used);
+                    }
+                }
+                Self::collect_used_vars_exp(value, used);
+            }
+            Exp::AtomicFetch { ptr, arg, .. } => {
+                Self::collect_used_vars_exp(ptr, used);
+                Self::collect_used_vars_exp(arg, used);
+            }
+            Exp::AtomicExchange { ptr, value } => {
+                Self::collect_used_vars_exp(ptr, used);
+                Self::collect_used_vars_exp(value, used);
+            }
+            Exp::AtomicCompareExchange {
+                ptr,
+                expected,
+                desired,
+            }
+            | Exp::AtomicCompareSwap {
+                ptr,
+                expected,
+                desired,
+                ..
+            } => {
+                Self::collect_used_vars_exp(ptr, used);
+                Self::collect_used_vars_exp(expected, used);
+                Self::collect_used_vars_exp(desired, used);
+            }
+            Exp::StatementExpr(block, result, _) => {
+                Self::collect_used_vars_block(block, used);
+                if let Some(result) = result {
+                    Self::collect_used_vars_exp(result, used);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_used_vars_stmt(stmt: &Statement, used: &mut Vec<String>) {
+        match stmt {
+            Statement::Return(Some(exp)) | Statement::Expression(exp) => {
+                Self::collect_used_vars_exp(exp, used);
+            }
+            Statement::If(cond, then_stmt, else_stmt) => {
+                Self::collect_used_vars_exp(cond, used);
+                Self::collect_used_vars_stmt(then_stmt, used);
+                if let Some(else_stmt) = else_stmt {
+                    Self::collect_used_vars_stmt(else_stmt, used);
+                }
+            }
+            Statement::Block(block) => Self::collect_used_vars_block(block, used),
+            Statement::While {
+                condition, body, ..
+            } => {
+                Self::collect_used_vars_exp(condition, used);
+                Self::collect_used_vars_stmt(body, used);
+            }
+            Statement::DoWhile {
+                body, condition, ..
+            } => {
+                Self::collect_used_vars_stmt(body, used);
+                Self::collect_used_vars_exp(condition, used);
+            }
+            Statement::For {
+                init,
+                condition,
+                post,
+                body,
+                ..
+            } => {
+                match init.as_ref() {
+                    ForInit::Declaration(vd) => {
+                        if let Some(init) = vd.init.as_ref() {
+                            Self::collect_used_vars_exp(init, used);
+                        }
+                    }
+                    ForInit::Expression(Some(exp)) => Self::collect_used_vars_exp(exp, used),
+                    ForInit::Expression(None) => {}
+                }
+                if let Some(condition) = condition {
+                    Self::collect_used_vars_exp(condition, used);
+                }
+                if let Some(post) = post {
+                    Self::collect_used_vars_exp(post, used);
+                }
+                Self::collect_used_vars_stmt(body, used);
+            }
+            Statement::Label(_, body)
+            | Statement::Case { body, .. }
+            | Statement::Default { body, .. } => Self::collect_used_vars_stmt(body, used),
+            Statement::Switch { control, body, .. } => {
+                Self::collect_used_vars_exp(control, used);
+                Self::collect_used_vars_stmt(body, used);
+            }
+            _ => {}
+        }
+    }
+
+    fn rewrite_capture_block(block: Block, capture_map: &HashMap<String, String>) -> Block {
+        block
+            .into_iter()
+            .map(|item| match item {
+                BlockItem::Declaration(Declaration::VarDecl(mut vd)) => {
+                    vd.init = vd
+                        .init
+                        .map(|init| Self::rewrite_capture_exp(init, capture_map));
+                    BlockItem::Declaration(Declaration::VarDecl(vd))
+                }
+                BlockItem::Statement(stmt) => {
+                    BlockItem::Statement(Self::rewrite_capture_stmt(stmt, capture_map))
+                }
+                other => other,
+            })
+            .collect()
+    }
+
+    fn rewrite_capture_exp(exp: Exp, capture_map: &HashMap<String, String>) -> Exp {
+        match exp {
+            Exp::Var(name) => capture_map.get(&name).map_or(Exp::Var(name), |slot| {
+                Exp::Unary(UnaryOp::Deref, Box::new(Exp::Var(slot.clone())))
+            }),
+            Exp::Cast(ct, ft, inner) => Exp::Cast(
+                ct,
+                ft,
+                Box::new(Self::rewrite_capture_exp(*inner, capture_map)),
+            ),
+            Exp::Unary(op, inner) => {
+                Exp::Unary(op, Box::new(Self::rewrite_capture_exp(*inner, capture_map)))
+            }
+            Exp::Binary(op, left, right) => Exp::Binary(
+                op,
+                Box::new(Self::rewrite_capture_exp(*left, capture_map)),
+                Box::new(Self::rewrite_capture_exp(*right, capture_map)),
+            ),
+            Exp::Assign(left, right) => Exp::Assign(
+                Box::new(Self::rewrite_capture_exp(*left, capture_map)),
+                Box::new(Self::rewrite_capture_exp(*right, capture_map)),
+            ),
+            Exp::CompoundAssign(op, left, right) => Exp::CompoundAssign(
+                op,
+                Box::new(Self::rewrite_capture_exp(*left, capture_map)),
+                Box::new(Self::rewrite_capture_exp(*right, capture_map)),
+            ),
+            Exp::Conditional(a, b, c) => Exp::Conditional(
+                Box::new(Self::rewrite_capture_exp(*a, capture_map)),
+                Box::new(Self::rewrite_capture_exp(*b, capture_map)),
+                Box::new(Self::rewrite_capture_exp(*c, capture_map)),
+            ),
+            Exp::FunctionCall(name, args) => Exp::FunctionCall(
+                name,
+                args.into_iter()
+                    .map(|arg| Self::rewrite_capture_exp(arg, capture_map))
+                    .collect(),
+            ),
+            Exp::Subscript(a, b) => Exp::Subscript(
+                Box::new(Self::rewrite_capture_exp(*a, capture_map)),
+                Box::new(Self::rewrite_capture_exp(*b, capture_map)),
+            ),
+            Exp::ArrayInit(elems) => Exp::ArrayInit(
+                elems
+                    .into_iter()
+                    .map(|elem| Self::rewrite_capture_exp(elem, capture_map))
+                    .collect(),
+            ),
+            Exp::DesignatedInit(designators, value) => Exp::DesignatedInit(
+                designators
+                    .into_iter()
+                    .map(|designator| match designator {
+                        Designator::Index(index) => Designator::Index(Box::new(
+                            Self::rewrite_capture_exp(*index, capture_map),
+                        )),
+                        other => other,
+                    })
+                    .collect(),
+                Box::new(Self::rewrite_capture_exp(*value, capture_map)),
+            ),
+            Exp::Dot(inner, member) => Exp::Dot(
+                Box::new(Self::rewrite_capture_exp(*inner, capture_map)),
+                member,
+            ),
+            Exp::Arrow(inner, member) => Exp::Arrow(
+                Box::new(Self::rewrite_capture_exp(*inner, capture_map)),
+                member,
+            ),
+            Exp::Comma(left, right) => Exp::Comma(
+                Box::new(Self::rewrite_capture_exp(*left, capture_map)),
+                Box::new(Self::rewrite_capture_exp(*right, capture_map)),
+            ),
+            Exp::StatementExpr(block, result, ft) => Exp::StatementExpr(
+                Self::rewrite_capture_block(block, capture_map),
+                result.map(|result| Box::new(Self::rewrite_capture_exp(*result, capture_map))),
+                ft,
+            ),
+            Exp::IndirectCall(callee, args) => Exp::IndirectCall(
+                Box::new(Self::rewrite_capture_exp(*callee, capture_map)),
+                args.into_iter()
+                    .map(|arg| Self::rewrite_capture_exp(arg, capture_map))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
+    fn rewrite_capture_stmt(stmt: Statement, capture_map: &HashMap<String, String>) -> Statement {
+        match stmt {
+            Statement::Return(exp) => {
+                Statement::Return(exp.map(|exp| Self::rewrite_capture_exp(exp, capture_map)))
+            }
+            Statement::Expression(exp) => {
+                Statement::Expression(Self::rewrite_capture_exp(exp, capture_map))
+            }
+            Statement::If(cond, then_stmt, else_stmt) => Statement::If(
+                Self::rewrite_capture_exp(cond, capture_map),
+                Box::new(Self::rewrite_capture_stmt(*then_stmt, capture_map)),
+                else_stmt.map(|stmt| Box::new(Self::rewrite_capture_stmt(*stmt, capture_map))),
+            ),
+            Statement::Block(block) => {
+                Statement::Block(Self::rewrite_capture_block(block, capture_map))
+            }
+            Statement::While {
+                condition,
+                body,
+                label,
+            } => Statement::While {
+                condition: Self::rewrite_capture_exp(condition, capture_map),
+                body: Box::new(Self::rewrite_capture_stmt(*body, capture_map)),
+                label,
+            },
+            Statement::DoWhile {
+                body,
+                condition,
+                label,
+            } => Statement::DoWhile {
+                body: Box::new(Self::rewrite_capture_stmt(*body, capture_map)),
+                condition: Self::rewrite_capture_exp(condition, capture_map),
+                label,
+            },
+            Statement::For {
+                init,
+                condition,
+                post,
+                body,
+                label,
+            } => Statement::For {
+                init: Box::new(match *init {
+                    ForInit::Declaration(mut vd) => {
+                        vd.init = vd
+                            .init
+                            .map(|init| Self::rewrite_capture_exp(init, capture_map));
+                        ForInit::Declaration(vd)
+                    }
+                    ForInit::Expression(exp) => ForInit::Expression(
+                        exp.map(|exp| Self::rewrite_capture_exp(exp, capture_map)),
+                    ),
+                }),
+                condition: condition.map(|exp| Self::rewrite_capture_exp(exp, capture_map)),
+                post: post.map(|exp| Self::rewrite_capture_exp(exp, capture_map)),
+                body: Box::new(Self::rewrite_capture_stmt(*body, capture_map)),
+                label,
+            },
+            Statement::Label(name, body) => Statement::Label(
+                name,
+                Box::new(Self::rewrite_capture_stmt(*body, capture_map)),
+            ),
+            Statement::Switch {
+                control,
+                body,
+                label,
+                cases,
+            } => Statement::Switch {
+                control: Self::rewrite_capture_exp(control, capture_map),
+                body: Box::new(Self::rewrite_capture_stmt(*body, capture_map)),
+                label,
+                cases,
+            },
+            Statement::Case { value, body, label } => Statement::Case {
+                value: Self::rewrite_capture_exp(value, capture_map),
+                body: Box::new(Self::rewrite_capture_stmt(*body, capture_map)),
+                label,
+            },
+            Statement::Default { body, label } => Statement::Default {
+                body: Box::new(Self::rewrite_capture_stmt(*body, capture_map)),
+                label,
+            },
+            other => other,
+        }
     }
 
     fn emit_function(&mut self, func: FunctionDeclaration) -> TackyResult<Option<TackyFunction>> {
@@ -6824,6 +7377,9 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
                 if let Some(mut tf) = gen.emit_function(fd)? {
                     tf.global = *linkage.get(&fname).unwrap_or(&true);
                     top_level.push(TackyTopLevel::Function(tf));
+                }
+                for nested in gen.nested_functions.drain(..) {
+                    top_level.push(TackyTopLevel::Function(nested));
                 }
                 for sv in gen.static_vars.drain(..) {
                     global_vars.insert(sv.name.clone());

@@ -1557,6 +1557,9 @@ pub enum TackyInstr {
         /// True if calling through a function pointer variable
         indirect: bool,
     },
+    VaStart {
+        dst: TackyVal,
+    },
     SignExtend {
         src: TackyVal,
         dst: TackyVal,

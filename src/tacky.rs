@@ -7341,18 +7341,12 @@ impl TackyGen {
                         *index += 1;
                         continue;
                     }
-                    if (Self::static_aggregate_initializer(elem_init).is_some()
-                        || matches!(elem_init, Exp::StringLiteral(_)))
-                        && (mem.member_full_type.is_array() || mem.member_full_type.is_struct())
+                    if mem.member_full_type.is_struct()
+                        || ((Self::static_aggregate_initializer(elem_init).is_some()
+                            || matches!(elem_init, Exp::StringLiteral(_)))
+                            && (mem.member_full_type.is_array()
+                                || mem.member_full_type.is_struct()))
                     {
-                        self.emit_initializer_value_at(
-                            arr_name,
-                            &mem.member_full_type,
-                            elem_init,
-                            base_offset + mem.offset as i64,
-                        )?;
-                        *index += 1;
-                    } else if mem.member_full_type.is_struct() {
                         self.emit_initializer_value_at(
                             arr_name,
                             &mem.member_full_type,
@@ -10458,8 +10452,8 @@ fn eval_static_integer_constant_exp_with_context(
             let (right, right_double, right_unsigned) =
                 eval_static_integer_constant_exp_with_context(right, struct_defs, full_types)?;
             if left_double || right_double {
-                let use_float = (left_double && left_unsigned || right_double && right_unsigned)
-                    && !(left_double && !left_unsigned || right_double && !right_unsigned);
+                let use_float =
+                    (left_unsigned || !left_double) && (right_unsigned || !right_double);
                 let left = if left_double {
                     f64::from_bits(left as u64)
                 } else if use_float {

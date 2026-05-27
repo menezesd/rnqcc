@@ -1240,6 +1240,7 @@ struct FuncallContext<'a> {
     variadic: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn convert_funcall(
     name: &str,
     args: &[TackyVal],
@@ -1351,7 +1352,7 @@ fn convert_funcall(
                 StackArg::MemoryBlock { size, .. } => size.next_multiple_of(8),
             })
             .sum();
-        let padding = if stack_bytes % 16 != 0 { 8 } else { 0 };
+        let padding = if !stack_bytes.is_multiple_of(16) { 8 } else { 0 };
         let outgoing_bytes = stack_bytes + padding;
         if outgoing_bytes > 0 {
             out.push(AsmInstr::AllocateStack(outgoing_bytes as i32));
@@ -1893,7 +1894,7 @@ fn convert_function(
                 dst: AsmOperand::PseudoMem(dst_name.clone(), 0),
                 size,
             });
-            stack_arg_idx += size.next_multiple_of(8) / 8;
+            stack_arg_idx += size.div_ceil(8);
             continue;
         }
         if force_stack.contains(&i) || func.stack_params.contains(param) {

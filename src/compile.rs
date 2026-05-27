@@ -295,6 +295,7 @@ pub fn validate_asm_program(program: &AsmProgram) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn compile(
     stage: &Stage,
     src_file: &str,

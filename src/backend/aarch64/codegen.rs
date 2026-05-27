@@ -205,6 +205,7 @@ fn emit_i128_zero_cmp(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_i128_signed_cmp(
     instructions: &mut Vec<AsmInstr>,
     left: &TackyVal,
@@ -295,6 +296,7 @@ fn emit_i128_return(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_i128_variable_shift(
     instructions: &mut Vec<AsmInstr>,
     function_name: &str,
@@ -1149,7 +1151,7 @@ fn convert_function(
                 global_vars,
             )?;
             stack_param_count +=
-                size.next_multiple_of(STACK_SLOT_SIZE as usize) / STACK_SLOT_SIZE as usize;
+                size.div_ceil(STACK_SLOT_SIZE as usize);
             param_index += 1;
             continue;
         }
@@ -2115,8 +2117,7 @@ fn convert_function(
                         StackArg::Scalar(AsmType::Octword, _) => 2,
                         StackArg::Scalar(_, _) => 1,
                         StackArg::MemoryBlock { size, .. } => {
-                            size.next_multiple_of(STACK_SLOT_SIZE as usize)
-                                / STACK_SLOT_SIZE as usize
+                            size.div_ceil(STACK_SLOT_SIZE as usize)
                         }
                     })
                     .sum();
@@ -2159,8 +2160,7 @@ fn convert_function(
                                     stack_arg_offset(0, stack_index),
                                     outgoing_bytes,
                                 );
-                                stack_index += size.next_multiple_of(STACK_SLOT_SIZE as usize)
-                                    / STACK_SLOT_SIZE as usize;
+                    stack_index += size.div_ceil(STACK_SLOT_SIZE as usize);
                             }
                         }
                     }

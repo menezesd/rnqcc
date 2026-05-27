@@ -314,6 +314,13 @@ impl Parser {
         name == "_Complex" || name == "__complex" || name == "__complex__"
     }
 
+    fn complex_full_type(elem: CType) -> FullType {
+        FullType::Vector {
+            elem: Box::new(FullType::Scalar(elem)),
+            lanes: 2,
+        }
+    }
+
     fn is_builtin_int128_type_name(name: &str) -> bool {
         name == "__int128" || name == "__int128__"
     }
@@ -1504,11 +1511,11 @@ impl Parser {
                     ));
                 }
                 let inner = Self::vla_size_expr_from_bound(bound, elem)?;
-                return Some(Exp::Binary(
+                Some(Exp::Binary(
                     BinaryOp::Mul,
                     Box::new(Exp::ULongConstant(*size as i64)),
                     Box::new(inner),
-                ));
+                ))
             }
             FullType::Struct(_) => None,
             _ => None,
@@ -1533,7 +1540,7 @@ impl Parser {
                     ) || matches!(mem.member_full_type, FullType::Array { .. })
                 })?;
                 let size = Self::vla_size_expr_from_bound(bound, &mem.member_full_type)?;
-                return if mem.offset == 0 {
+                if mem.offset == 0 {
                     Some(size)
                 } else {
                     Some(Exp::Binary(
@@ -1541,7 +1548,7 @@ impl Parser {
                         Box::new(Exp::ULongConstant(mem.offset as i64)),
                         Box::new(size),
                     ))
-                };
+                }
             }
             _ => None,
         }
@@ -1672,6 +1679,7 @@ impl Parser {
         let mut has_float = false;
         let mut has_double = false;
         let mut has_int128 = false;
+        let mut saw_complex = false;
         let mut mode_attr: Option<String> = None;
         let mut vector_size_attr: Option<usize> = None;
         let mut saw_non_type_specifier = false;
@@ -1697,6 +1705,7 @@ impl Parser {
                 }
                 Some(Token::Identifier(name)) if Self::is_complex_type_name(&name) => {
                     saw_non_type_specifier = true;
+                    saw_complex = true;
                     self.advance()?;
                     continue;
                 }
@@ -2018,6 +2027,8 @@ impl Parser {
                 elem: Box::new(FullType::Scalar(ctype)),
                 lanes,
             });
+        } else if saw_complex {
+            self.last_typedef_full_type = Some(Self::complex_full_type(ctype));
         }
 
         self.last_type_was_enum = false;
@@ -2030,6 +2041,7 @@ impl Parser {
         self.last_struct_tag = None;
         let mut vector_size_attr = None;
         let mut mode_attr: Option<String> = None;
+        let mut saw_complex = false;
 
         // Skip type qualifiers
         loop {
@@ -2090,9 +2102,10 @@ impl Parser {
         }
         if self.at(&Token::KWDouble) {
             self.advance()?;
-            if self.peek().is_some_and(
+            let has_complex = self.peek().is_some_and(
                 |tok| matches!(tok, Token::Identifier(name) if Self::is_complex_type_name(name)),
-            ) {
+            );
+            if has_complex {
                 self.advance()?;
             }
             if let Some(vector_size) = vector_size_attr {
@@ -2100,14 +2113,17 @@ impl Parser {
                     elem: Box::new(FullType::Scalar(CType::Double)),
                     lanes: std::cmp::max(vector_size / CType::Double.size() as usize, 1),
                 });
+            } else if has_complex {
+                self.last_typedef_full_type = Some(Self::complex_full_type(CType::Double));
             }
             return Ok(CType::Double);
         }
         if self.at(&Token::KWFloat) {
             self.advance()?;
-            if self.peek().is_some_and(
+            let has_complex = self.peek().is_some_and(
                 |tok| matches!(tok, Token::Identifier(name) if Self::is_complex_type_name(name)),
-            ) {
+            );
+            if has_complex {
                 self.advance()?;
             }
             if let Some(vector_size) = vector_size_attr {
@@ -2115,19 +2131,24 @@ impl Parser {
                     elem: Box::new(FullType::Scalar(CType::Float)),
                     lanes: std::cmp::max(vector_size / CType::Float.size() as usize, 1),
                 });
+            } else if has_complex {
+                self.last_typedef_full_type = Some(Self::complex_full_type(CType::Float));
             }
             return Ok(CType::Float);
         }
         if self.peek().is_some_and(
             |tok| matches!(tok, Token::Identifier(name) if Self::is_complex_type_name(name)),
         ) {
+            saw_complex = true;
             self.advance()?;
             if self.at(&Token::KWFloat) {
                 self.advance()?;
+                self.last_typedef_full_type = Some(Self::complex_full_type(CType::Float));
                 return Ok(CType::Float);
             }
             if self.at(&Token::KWDouble) {
                 self.advance()?;
+                self.last_typedef_full_type = Some(Self::complex_full_type(CType::Double));
                 return Ok(CType::Double);
             }
             if !matches!(
@@ -2140,6 +2161,7 @@ impl Parser {
                     | Some(Token::KWChar)
                     | Some(Token::KWBool)
             ) {
+                self.last_typedef_full_type = Some(Self::complex_full_type(CType::Double));
                 return Ok(CType::Double);
             }
         }
@@ -2299,6 +2321,8 @@ impl Parser {
                 elem: Box::new(FullType::Scalar(ctype)),
                 lanes: std::cmp::max(vector_size / lane_size, 1),
             });
+        } else if saw_complex {
+            self.last_typedef_full_type = Some(Self::complex_full_type(ctype));
         }
         self.last_type_was_enum = false;
         Ok(ctype)
@@ -3603,6 +3627,7 @@ impl Parser {
         })
     }
 
+    #[allow(clippy::type_complexity)]
     fn parse_param_list(&mut self) -> ParseResult<(Vec<ParamDecl>, Vec<FullType>, bool, Vec<Exp>)> {
         // "void" or empty or "int x, long y, ..."
         if self.at(&Token::KWVoid)

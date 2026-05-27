@@ -997,11 +997,7 @@ impl Lexer {
         }
         let value_text = Self::first_parenthesized_text(inputs)?;
         let value = value_text.trim();
-        let value_token = if let Some(token) = Self::simple_asm_value_token(value) {
-            token
-        } else {
-            return None;
-        };
+        let value_token = Self::simple_asm_value_token(value)?;
         Some(vec![
             Token::Identifier(output_name),
             Token::Assign,

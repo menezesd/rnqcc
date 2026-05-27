@@ -2814,6 +2814,24 @@ impl TackyGen {
             return Ok((ptr, CType::Pointer));
         }
 
+        let is_struct_compound_literal = matches!(
+            &inner,
+            Exp::Cast(_, Some(FullType::Struct(_)), boxed) if matches!(boxed.as_ref(), Exp::ArrayInit(_))
+        );
+        if is_struct_compound_literal {
+            let Exp::Cast(target_type, Some(ft @ FullType::Struct(_)), boxed) = inner else {
+                unreachable!();
+            };
+            let pointee_ft = ft.clone();
+            let (var, _) = self.emit_compound_literal_cast(target_type, Some(ft), *boxed)?;
+            let dst = self.fresh_tmp_full(&FullType::Pointer(Box::new(pointee_ft)));
+            self.emit(TackyInstr::GetAddress {
+                src: var,
+                dst: dst.clone(),
+            });
+            return Ok((dst, CType::Pointer));
+        }
+
         if let Exp::Var(ref name) = inner {
             if self.func_types.contains_key(name) {
                 let dst = self.fresh_tmp(CType::Pointer);
@@ -5134,13 +5152,14 @@ impl TackyGen {
                 if let Some(label) = Self::static_address_initializer_label(init) {
                     builder.put(base_offset, StaticInit::PointerInit(label.to_string()))?;
                 } else {
-                    let (v, is_dbl, is_uns) = eval_constant_init(&Some(init.clone()))?;
+                    let (v, is_dbl, is_uns) =
+                        self.eval_static_constant_init(&Some(init.clone()))?;
                     let cv = convert_init_value(v, CType::Pointer, is_dbl, is_uns);
                     builder.put(base_offset, make_static_init(cv, CType::Pointer))?;
                 }
             }
             (FullType::Scalar(ctype), _) => {
-                let (v, is_dbl, is_uns) = eval_constant_init(&Some(init.clone()))?;
+                let (v, is_dbl, is_uns) = self.eval_static_constant_init(&Some(init.clone()))?;
                 let cv = convert_init_value(v, *ctype, is_dbl, is_uns);
                 builder.put(base_offset, make_static_init(cv, *ctype))?;
             }
@@ -5163,6 +5182,15 @@ impl TackyGen {
         let mut builder = StaticInitBuilder::new();
         self.put_static_initializer(&mut builder, ft, init, 0)?;
         builder.finish(total_bytes)
+    }
+
+    fn eval_static_constant_init(&self, init: &Option<Exp>) -> TackyResult<(i64, bool, bool)> {
+        if let Some(exp) = init {
+            eval_static_integer_constant_exp_with_context(exp, &self.struct_defs, &self.full_types)
+                .ok_or_else(|| "Static variable initializer must be a constant".to_string())
+        } else {
+            Ok((0, false, false))
+        }
     }
 
     /// Handle a variable declaration (arrays, scalars, static, etc.)
@@ -5759,7 +5787,7 @@ impl TackyGen {
                 });
                 return Ok(());
             }
-            let (raw_val, is_dbl, is_uns) = eval_constant_init(&vd.init)?;
+            let (raw_val, is_dbl, is_uns) = self.eval_static_constant_init(&vd.init)?;
             let init_val = convert_init_value(raw_val, vd.var_type, is_dbl, is_uns);
             let align = if vd.var_type == CType::Double {
                 16
@@ -6055,23 +6083,62 @@ fn make_static_init(val: i64, t: CType) -> StaticInit {
     }
 }
 
-fn eval_static_integer_constant_exp(exp: &Exp) -> Option<(i64, bool, bool)> {
+fn eval_static_expr_full_type(
+    exp: &Exp,
+    full_types: &HashMap<String, FullType>,
+) -> Option<FullType> {
+    match exp {
+        Exp::Var(name) => full_types.get(name).cloned(),
+        Exp::StringLiteral(s) => Some(FullType::Array {
+            elem: Box::new(FullType::Scalar(CType::Char)),
+            size: c_string_byte_len(s) + 1,
+        }),
+        Exp::Cast(_, Some(ft), _) => Some(ft.clone()),
+        Exp::Cast(_, None, inner) => eval_static_expr_full_type(inner, full_types),
+        Exp::Unary(UnaryOp::Deref, inner) => match eval_static_expr_full_type(inner, full_types)? {
+            FullType::Pointer(pointee) => Some(*pointee),
+            _ => None,
+        },
+        Exp::Unary(UnaryOp::AddrOf, inner) => Some(FullType::Pointer(Box::new(
+            eval_static_expr_full_type(inner, full_types)?,
+        ))),
+        Exp::Subscript(arr, _) => match eval_static_expr_full_type(arr, full_types)? {
+            FullType::Array { elem, .. } => Some(*elem),
+            FullType::Pointer(pointee) => Some(*pointee),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn eval_static_integer_constant_exp_with_context(
+    exp: &Exp,
+    struct_defs: &HashMap<String, StructDef>,
+    full_types: &HashMap<String, FullType>,
+) -> Option<(i64, bool, bool)> {
     match exp {
         Exp::Constant(c) | Exp::LongConstant(c) => Some((*c, false, false)),
         Exp::UIntConstant(c) | Exp::ULongConstant(c) => Some((*c, false, true)),
         Exp::DoubleConstant(d) => Some((d.to_bits() as i64, true, false)),
+        Exp::SizeOf(inner) => {
+            let ft = eval_static_expr_full_type(inner, full_types)?;
+            Some((ft.byte_size_with(struct_defs) as i64, false, true))
+        }
+        Exp::SizeOfType(_, ft) => Some((ft.byte_size_with(struct_defs) as i64, false, true)),
+        Exp::AlignOfType(ft) => Some((ft.alignment_with(struct_defs) as i64, false, true)),
         Exp::Cast(_, _, inner) => {
             if let Exp::ArrayInit(elems) = inner.as_ref() {
                 let [value] = elems.as_slice() else {
                     return None;
                 };
-                eval_static_integer_constant_exp(value)
+                eval_static_integer_constant_exp_with_context(value, struct_defs, full_types)
             } else {
-                eval_static_integer_constant_exp(inner)
+                eval_static_integer_constant_exp_with_context(inner, struct_defs, full_types)
             }
         }
         Exp::Unary(op, inner) => {
-            let (value, is_double, is_unsigned) = eval_static_integer_constant_exp(inner)?;
+            let (value, is_double, is_unsigned) =
+                eval_static_integer_constant_exp_with_context(inner, struct_defs, full_types)?;
             match op {
                 UnaryOp::Negate if is_double => {
                     let d = -f64::from_bits(value as u64);
@@ -6084,27 +6151,29 @@ fn eval_static_integer_constant_exp(exp: &Exp) -> Option<(i64, bool, bool)> {
             }
         }
         Exp::Binary(op, left, right) => {
-            let (left, left_double, left_unsigned) = eval_static_integer_constant_exp(left)?;
-            let (right, right_double, right_unsigned) = eval_static_integer_constant_exp(right)?;
+            let (left, left_double, left_unsigned) =
+                eval_static_integer_constant_exp_with_context(left, struct_defs, full_types)?;
+            let (right, right_double, right_unsigned) =
+                eval_static_integer_constant_exp_with_context(right, struct_defs, full_types)?;
             if left_double || right_double {
                 return None;
             }
             let is_unsigned = left_unsigned || right_unsigned;
             let value = match op {
-                BinaryOp::Add => left + right,
-                BinaryOp::Sub => left - right,
-                BinaryOp::Mul => left * right,
+                BinaryOp::Add => left.wrapping_add(right),
+                BinaryOp::Sub => left.wrapping_sub(right),
+                BinaryOp::Mul => left.wrapping_mul(right),
                 BinaryOp::Div => {
                     if right == 0 {
                         return None;
                     }
-                    left / right
+                    left.checked_div(right)?
                 }
                 BinaryOp::Mod => {
                     if right == 0 {
                         return None;
                     }
-                    left % right
+                    left.checked_rem(right)?
                 }
                 BinaryOp::BitwiseAnd => left & right,
                 BinaryOp::BitwiseNand => !(left & right),
@@ -6130,27 +6199,23 @@ fn eval_static_integer_constant_exp(exp: &Exp) -> Option<(i64, bool, bool)> {
             Some((value, false, is_unsigned))
         }
         Exp::Conditional(cond, then_exp, else_exp) => {
-            let (cond, is_double, _) = eval_static_integer_constant_exp(cond)?;
+            let (cond, is_double, _) =
+                eval_static_integer_constant_exp_with_context(cond, struct_defs, full_types)?;
             if is_double {
                 return None;
             }
             if cond != 0 {
-                eval_static_integer_constant_exp(then_exp)
+                eval_static_integer_constant_exp_with_context(then_exp, struct_defs, full_types)
             } else {
-                eval_static_integer_constant_exp(else_exp)
+                eval_static_integer_constant_exp_with_context(else_exp, struct_defs, full_types)
             }
         }
         _ => None,
     }
 }
 
-fn eval_constant_init(init: &Option<Exp>) -> TackyResult<(i64, bool, bool)> {
-    if let Some(exp) = init {
-        eval_static_integer_constant_exp(exp)
-            .ok_or_else(|| "Static variable initializer must be a constant".to_string())
-    } else {
-        Ok((0, false, false))
-    }
+fn eval_static_integer_constant_exp(exp: &Exp) -> Option<(i64, bool, bool)> {
+    eval_static_integer_constant_exp_with_context(exp, &HashMap::new(), &HashMap::new())
 }
 
 pub fn generate(program: Program) -> TackyResult<TackyProgram> {
@@ -6267,8 +6332,12 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
                     None
                 }
                 Some(exp) => Some(
-                    eval_static_integer_constant_exp(exp)
-                        .ok_or_else(|| "Global initializer must be constant".to_string())?,
+                    eval_static_integer_constant_exp_with_context(
+                        exp,
+                        &gen.struct_defs,
+                        &gen.full_types,
+                    )
+                    .ok_or_else(|| "Global initializer must be constant".to_string())?,
                 ),
                 None => None,
             };

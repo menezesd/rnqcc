@@ -6269,6 +6269,93 @@ fn aarch64_macos_links_external_libc_data_symbols() {
 }
 
 #[test]
+fn global_initializer_accepts_sizeof_array_expression() {
+    let src = temp_file("global-sizeof-array-initializer", "c");
+    let exe = temp_file("global-sizeof-array-initializer", "bin");
+    std::fs::write(
+        &src,
+        "static const char payload[] = \"abc\";\n\
+         static const unsigned long payload_len = sizeof(payload) - 1;\n\
+         int main(void) { return payload_len == 3 ? 42 : 1; }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn global_initializer_accepts_wrapping_unsigned_sizeof_expression() {
+    let src = temp_file("global-wrapping-unsigned-initializer", "c");
+    let exe = temp_file("global-wrapping-unsigned-initializer", "bin");
+    std::fs::write(
+        &src,
+        "static unsigned long aa[] = { (1UL << (sizeof(long) * 8 - 1)) - 0xfff };\n\
+         static unsigned long bb[] = { (1UL << (sizeof(long) * 8 - 1)) - 0xfff };\n\
+         int main(void) { return aa[0] == bb[0] ? 42 : 1; }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn address_of_struct_compound_literal() {
+    let src = temp_file("address-of-struct-compound-literal", "c");
+    let exe = temp_file("address-of-struct-compound-literal", "bin");
+    std::fs::write(
+        &src,
+        "struct s { char *p; int t; };\n\
+         static int check(struct s *p) { return p->t == 1 && p->p[0] == 'h'; }\n\
+         int main(void) { return check(&(struct s){ \"hi\", 1 }) ? 42 : 1; }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn internal_cpp_provides_basic_virtual_compatibility_headers() {
     let src = temp_file("internal-cpp-virtual-headers", "c");
     let exe = temp_file("internal-cpp-virtual-headers", "bin");

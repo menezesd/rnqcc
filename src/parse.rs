@@ -97,6 +97,8 @@ pub struct Parser {
     pending_auto_type: bool,
     /// True when declaration specifiers/attributes mark a function as noreturn.
     pending_noreturn: bool,
+    /// Function currently being parsed, for predefined function-name identifiers.
+    current_function_name: Option<String>,
 }
 
 impl Parser {
@@ -162,6 +164,7 @@ impl Parser {
             pending_alignment: None,
             pending_auto_type: false,
             pending_noreturn: false,
+            current_function_name: None,
         }
     }
 
@@ -412,9 +415,6 @@ impl Parser {
     }
 
     fn record_struct_definition(&mut self, sd: &StructDeclaration) -> ParseResult<()> {
-        if sd.members.is_empty() {
-            return Ok(());
-        }
         let def = StructDef::from_declaration(sd, &self.struct_defs)
             .map_err(|err| self.format_error(&err))?;
         self.struct_defs.insert(sd.tag.clone(), def);
@@ -1228,6 +1228,7 @@ impl Parser {
         let mut has_void = false;
         let mut has_float = false;
         let mut has_double = false;
+        let mut saw_non_type_specifier = false;
 
         loop {
             match self.peek().cloned() {
@@ -1236,19 +1237,23 @@ impl Parser {
                 | Some(Token::KWVolatile)
                 | Some(Token::KWRestrict)
                 | Some(Token::KWInline) => {
+                    saw_non_type_specifier = true;
                     self.advance()?;
                     continue;
                 }
                 Some(Token::Identifier(name)) if Self::is_complex_type_name(&name) => {
+                    saw_non_type_specifier = true;
                     self.advance()?;
                     continue;
                 }
                 Some(Token::KWNoreturn) | Some(Token::AttributeNoreturn) => {
+                    saw_non_type_specifier = true;
                     self.pending_noreturn = true;
                     self.advance()?;
                     continue;
                 }
                 Some(Token::KWThreadLocal) => {
+                    saw_non_type_specifier = true;
                     self.advance()?;
                     sc = Some(match sc {
                         Some(existing) => existing.with_thread_local(),
@@ -1256,6 +1261,7 @@ impl Parser {
                     });
                 }
                 Some(Token::KWAlignAs) => {
+                    saw_non_type_specifier = true;
                     let alignment = self.parse_alignment_specifier()?;
                     self.pending_alignment =
                         Self::merge_alignment(self.pending_alignment, alignment);
@@ -1263,6 +1269,7 @@ impl Parser {
                 }
                 Some(Token::AttributeAligned(value))
                 | Some(Token::AttributePackedAligned(value)) => {
+                    saw_non_type_specifier = true;
                     let alignment = self.parse_attribute_alignment(&value)?;
                     self.advance()?;
                     self.pending_alignment =
@@ -1271,6 +1278,7 @@ impl Parser {
                 }
                 Some(Token::AttributeAlignedNoreturn(value))
                 | Some(Token::AttributePackedAlignedNoreturn(value)) => {
+                    saw_non_type_specifier = true;
                     let alignment = self.parse_attribute_alignment(&value)?;
                     self.advance()?;
                     self.pending_alignment =
@@ -1279,10 +1287,12 @@ impl Parser {
                     continue;
                 }
                 Some(Token::AttributePacked) => {
+                    saw_non_type_specifier = true;
                     self.advance()?;
                     continue;
                 }
                 Some(Token::KWAtomic) => {
+                    saw_non_type_specifier = true;
                     self.advance()?;
                     if self.eat(&Token::OpenParen) {
                         let (_atomic_sc, atomic_type) = self.parse_specifiers()?;
@@ -1318,6 +1328,7 @@ impl Parser {
                     return Ok((sc, CType::Void));
                 }
                 Some(Token::KWStatic) if sc.as_ref().is_none_or(StorageClass::is_thread_local) => {
+                    saw_non_type_specifier = true;
                     self.advance()?;
                     sc = Some(match sc {
                         Some(existing) => existing.with_static(),
@@ -1325,6 +1336,7 @@ impl Parser {
                     });
                 }
                 Some(Token::KWExtern) if sc.as_ref().is_none_or(StorageClass::is_thread_local) => {
+                    saw_non_type_specifier = true;
                     self.advance()?;
                     sc = Some(match sc {
                         Some(existing) => existing.with_extern(),
@@ -1332,10 +1344,12 @@ impl Parser {
                     });
                 }
                 Some(Token::KWTypedef) if sc.is_none() => {
+                    saw_non_type_specifier = true;
                     self.advance()?;
                     sc = Some(StorageClass::Typedef);
                 }
                 Some(Token::KWRegister) if sc.is_none() => {
+                    saw_non_type_specifier = true;
                     self.advance()?; // ignore register storage class
                 }
                 Some(Token::KWInt) if !has_int && !has_void && !has_char => {
@@ -1451,6 +1465,14 @@ impl Parser {
                     self.last_typedef_full_type = Some(ft);
                     return Ok((sc, ct));
                 }
+            }
+            if saw_non_type_specifier
+                && matches!(
+                    self.peek(),
+                    Some(Token::Identifier(_)) | Some(Token::Star) | Some(Token::OpenParen)
+                )
+            {
+                return Ok((sc, CType::Int));
             }
             return Err(self.format_error("expected type specifier"));
         }
@@ -1835,6 +1857,31 @@ impl Parser {
 
         // Direct declarator: identifier, (declarator), or abstract (no name)
         let mut decl = if self.eat(&Token::OpenParen) {
+            if self.eat(&Token::Caret) {
+                while matches!(
+                    self.peek(),
+                    Some(Token::KWConst)
+                        | Some(Token::KWVolatile)
+                        | Some(Token::KWRestrict)
+                        | Some(Token::KWAtomic)
+                ) || matches!(
+                    self.peek(),
+                    Some(Token::Identifier(name))
+                        if matches!(
+                            name.as_str(),
+                            "_Nonnull" | "_Nullable" | "_Null_unspecified"
+                        )
+                ) {
+                    self.advance()?;
+                }
+                let inner = if self.at(&Token::CloseParen) {
+                    Declarator::Ident(String::new())
+                } else {
+                    self.parse_declarator_tree_inner(true)?
+                };
+                self.expect_token(Token::CloseParen)?;
+                Declarator::Pointer(Box::new(inner))
+            } else
             // Check if this is a grouped declarator like (*fp) or just (params)
             if self.at(&Token::Star) || matches!(self.peek(), Some(Token::Identifier(_))) {
                 // Could be grouped declarator: (*name) or (name)
@@ -2024,6 +2071,21 @@ impl Parser {
 
     /// Parse one element of an initializer list.
     fn parse_init_element(&mut self) -> ParseResult<Exp> {
+        if matches!(self.peek(), Some(Token::Identifier(_)))
+            && self.tokens.get(self.pos + 1) == Some(&Token::Colon)
+        {
+            let field = self.parse_identifier()?;
+            self.expect_token(Token::Colon)?;
+            let value = if self.at(&Token::OpenBrace) {
+                self.parse_array_init()?
+            } else {
+                self.parse_assignment()?
+            };
+            return Ok(Exp::DesignatedInit(
+                vec![Designator::Field(field)],
+                Box::new(value),
+            ));
+        }
         let designators = self.parse_designators()?;
         let value = if self.at(&Token::OpenBrace) {
             self.parse_array_init()?
@@ -2348,6 +2410,52 @@ impl Parser {
             // Not a standalone decl — put back and let parse_specifiers handle it
             self.pos = save_pos;
         }
+        if let Some(Token::Identifier(name)) = self.peek().cloned() {
+            if !self.is_type_keyword(&Token::Identifier(name.clone()))
+                && self.pos + 1 < self.tokens.len()
+                && self.tokens[self.pos + 1] == Token::OpenParen
+            {
+                let name = self.parse_identifier()?;
+                self.expect_token(Token::OpenParen)?;
+                let (params, param_full_types, variadic) = self.parse_param_list()?;
+                self.expect_token(Token::CloseParen)?;
+                let func_info = FunctionDeclaratorInfo {
+                    params,
+                    param_full_types,
+                    variadic,
+                };
+                let func_info = if self.at(&Token::Semicolon) || self.at(&Token::OpenBrace) {
+                    func_info
+                } else {
+                    self.parse_old_style_param_declarations(func_info)?
+                };
+                let return_ft = FullType::Scalar(CType::Int);
+                self.add_value_type(
+                    name.clone(),
+                    Self::function_full_type(return_ft.clone(), &func_info),
+                )?;
+                let param_value_types =
+                    Self::param_value_types(&func_info.params, &func_info.param_full_types);
+                let body = if self.at(&Token::OpenBrace) {
+                    Some(self.parse_function_body_with_values(&name, &param_value_types)?)
+                } else {
+                    self.expect_token(Token::Semicolon)?;
+                    None
+                };
+                return Ok(Declaration::FunDecl(FunctionDeclaration {
+                    name,
+                    return_type: CType::Int,
+                    return_ptr_info: None,
+                    return_full_type: Some(return_ft),
+                    params: func_info.params,
+                    body,
+                    storage_class: None,
+                    param_full_types: func_info.param_full_types,
+                    variadic: func_info.variadic,
+                    noreturn: false,
+                }));
+            }
+        }
         let (sc, base_type) = self.parse_specifiers()?;
         let is_auto_type = std::mem::take(&mut self.pending_auto_type);
         let spec_noreturn = std::mem::take(&mut self.pending_noreturn);
@@ -2444,6 +2552,11 @@ impl Parser {
         };
         // Is it a function?
         if let Some(func_info) = decl_params {
+            let func_info = if self.at(&Token::Semicolon) || self.at(&Token::OpenBrace) {
+                func_info
+            } else {
+                self.parse_old_style_param_declarations(func_info)?
+            };
             self.add_value_type(
                 name.clone(),
                 Self::function_full_type(full_type.clone(), &func_info),
@@ -2451,7 +2564,7 @@ impl Parser {
             let param_value_types =
                 Self::param_value_types(&func_info.params, &func_info.param_full_types);
             let body = if self.at(&Token::OpenBrace) {
-                Some(self.parse_block_with_values(&param_value_types)?)
+                Some(self.parse_function_body_with_values(&name, &param_value_types)?)
             } else {
                 self.expect_token(Token::Semicolon)?;
                 None
@@ -2480,6 +2593,11 @@ impl Parser {
                 param_full_types: param_fts,
                 variadic,
             };
+            let func_info = if self.at(&Token::Semicolon) || self.at(&Token::OpenBrace) {
+                func_info
+            } else {
+                self.parse_old_style_param_declarations(func_info)?
+            };
             self.add_value_type(
                 name.clone(),
                 Self::function_full_type(full_type.clone(), &func_info),
@@ -2487,7 +2605,7 @@ impl Parser {
             let param_value_types =
                 Self::param_value_types(&func_info.params, &func_info.param_full_types);
             let body = if self.at(&Token::OpenBrace) {
-                Some(self.parse_block_with_values(&param_value_types)?)
+                Some(self.parse_function_body_with_values(&name, &param_value_types)?)
             } else {
                 self.expect_token(Token::Semicolon)?;
                 None
@@ -2640,6 +2758,21 @@ impl Parser {
         if self.at(&Token::CloseParen) {
             return Ok((Vec::new(), Vec::new(), false));
         }
+        if let Some(Token::Identifier(name)) = self.peek().cloned() {
+            if !self.is_type_keyword(&Token::Identifier(name.clone())) {
+                let mut params = Vec::new();
+                let mut param_fts = Vec::new();
+                loop {
+                    let name = self.parse_identifier()?;
+                    params.push((name, CType::Int, None));
+                    param_fts.push(FullType::Scalar(CType::Int));
+                    if !self.eat(&Token::Comma) {
+                        break;
+                    }
+                }
+                return Ok((params, param_fts, false));
+            }
+        }
         let mut params = Vec::new();
         let mut param_fts = Vec::new();
         let parse_one_param = |s: &mut Self, fts: &mut Vec<FullType>| -> ParseResult<ParamDecl> {
@@ -2688,6 +2821,58 @@ impl Parser {
             params.push(parse_one_param(self, &mut param_fts)?);
         }
         Ok((params, param_fts, variadic))
+    }
+
+    fn parse_old_style_param_declarations(
+        &mut self,
+        mut info: FunctionDeclaratorInfo,
+    ) -> ParseResult<FunctionDeclaratorInfo> {
+        while !self.at(&Token::OpenBrace) {
+            let (_sc, base_type) = self.parse_specifiers()?;
+            let td_ft = self.last_typedef_full_type.take();
+            loop {
+                let decl_tree = self.parse_declarator_tree()?;
+                let (name, full_type, decl_params) =
+                    Self::process_declarator(&decl_tree, base_type, td_ft.as_ref());
+                if decl_params.is_some() {
+                    return Err(
+                        self.format_error("old-style function parameter cannot be a function")
+                    );
+                }
+                let full_type = if base_type == CType::Struct {
+                    if let Some(ref tag) = self.last_struct_tag {
+                        Self::replace_scalar_struct(&full_type, tag)
+                    } else {
+                        full_type
+                    }
+                } else {
+                    full_type
+                };
+                let Some(index) = info.params.iter().position(|(param, _, _)| param == &name)
+                else {
+                    return Err(self.format_error(&format!(
+                        "old-style parameter declaration for unknown parameter '{}'",
+                        name
+                    )));
+                };
+                let ft = match full_type {
+                    FullType::Array { elem, .. } => FullType::Pointer(elem),
+                    other => other,
+                };
+                let ty = ft.to_ctype();
+                let pi = match &ft {
+                    FullType::Pointer(inner) => Some(ptr_info_from_full(inner)),
+                    _ => None,
+                };
+                info.params[index] = (name, ty, pi);
+                info.param_full_types[index] = ft;
+                if !self.eat(&Token::Comma) {
+                    break;
+                }
+            }
+            self.expect_token(Token::Semicolon)?;
+        }
+        Ok(info)
     }
 
     fn parse_identifier(&mut self) -> ParseResult<String> {
@@ -2745,6 +2930,19 @@ impl Parser {
         self.expect_token(Token::CloseBrace)?;
         self.pop_typedef_scope();
         Ok(items)
+    }
+
+    fn parse_function_body_with_values(
+        &mut self,
+        function_name: &str,
+        initial_values: &[(String, FullType)],
+    ) -> ParseResult<Block> {
+        let previous = self
+            .current_function_name
+            .replace(function_name.to_string());
+        let result = self.parse_block_with_values(initial_values);
+        self.current_function_name = previous;
+        result
     }
 
     fn parse_statement_expression(&mut self) -> ParseResult<Exp> {
@@ -3686,6 +3884,11 @@ impl Parser {
             }
             Some(Token::Identifier(name)) => {
                 self.advance()?;
+                if matches!(name.as_str(), "__FUNCTION__" | "__func__") {
+                    return Ok(Exp::StringLiteral(
+                        self.current_function_name.clone().unwrap_or_default(),
+                    ));
+                }
                 // Check for function call
                 if self.eat(&Token::OpenParen) {
                     if name == "__builtin_types_compatible_p" {

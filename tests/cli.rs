@@ -6356,6 +6356,128 @@ fn address_of_struct_compound_literal() {
 }
 
 #[test]
+fn permits_old_c_implicit_function_calls() {
+    let src = temp_file("old-c-implicit-function-calls", "c");
+    let exe = temp_file("old-c-implicit-function-calls", "bin");
+    std::fs::write(
+        &src,
+        "int main(void) {\n\
+             if (ret42() != 42) abort();\n\
+             return 42;\n\
+         }\n\
+         int ret42(void) { return 42; }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--Wno-missing-return")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn implicit_function_call_passes_arguments_in_registers() {
+    let src = temp_file("implicit-function-call-args", "c");
+    let exe = temp_file("implicit-function-call-args", "bin");
+    std::fs::write(&src, "int main(void) { exit(42); return 1; }\n")
+        .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--Wno-missing-return")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn parses_and_runs_old_style_function_definitions() {
+    let src = temp_file("old-style-function-definitions", "c");
+    let exe = temp_file("old-style-function-definitions", "bin");
+    std::fs::write(
+        &src,
+        "sum(p, n)\n\
+             int *p;\n\
+             int n;\n\
+         {\n\
+             return p[0] + n;\n\
+         }\n\
+         int main(void) {\n\
+             int value = 40;\n\
+             return sum(&value, 2);\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--Wno-missing-return")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn function_name_identifier_expands_to_current_function() {
+    let src = temp_file("function-name-identifier", "c");
+    let exe = temp_file("function-name-identifier", "bin");
+    std::fs::write(
+        &src,
+        "int strcmp(const char *, const char *);\n\
+         int main(void) { return strcmp(__FUNCTION__, \"main\") == 0 ? 42 : 1; }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn internal_cpp_provides_basic_virtual_compatibility_headers() {
     let src = temp_file("internal-cpp-virtual-headers", "c");
     let exe = temp_file("internal-cpp-virtual-headers", "bin");
@@ -8605,6 +8727,40 @@ fn compiles_signed_integer_bit_fields() {
         .status()
         .expect("failed to run executable");
     assert_eq!(status.code(), Some(7));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn compound_assign_updates_only_bit_field_bits() {
+    let src = temp_file("bit-field-compound-assign", "c");
+    let exe = temp_file("bit-field-compound-assign", "bin");
+    std::fs::write(
+        &src,
+        "struct x { unsigned x1:1; unsigned x2:2; unsigned x3:3; };\n\
+         int main(void) {\n\
+           struct x a = {1, 2, 3};\n\
+           struct x b = {1, 2, 3};\n\
+           struct x *c = &b;\n\
+           c->x3 += (a.x2 - a.x1) * c->x2;\n\
+           return a.x1 == 1 && c->x1 == 1 && c->x2 == 2 && c->x3 == 5 ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(exe);
@@ -11841,6 +11997,281 @@ fn driver_accepts_gcc_nostdinc_spelling() {
         .expect("failed to run rnqcc");
 
     assert!(output.status.success(), "{}", stderr(output));
+}
+
+#[test]
+fn global_pointer_initializer_accepts_null_based_member_address() {
+    let src = temp_file("global-null-member-ptr-init", "c");
+    let exe = temp_file("global-null-member-ptr-init", "bin");
+    std::fs::write(
+        &src,
+        r#"
+struct auth_config_rec {
+    char *auth_pwfile;
+    int x;
+};
+
+void *ptr = &((struct auth_config_rec *)0)->x;
+
+int main(void) {
+    return (unsigned long)ptr == __builtin_offsetof(struct auth_config_rec, x) ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn global_pointer_initializer_accepts_label_plus_member_offset() {
+    let src = temp_file("global-label-member-ptr-init", "c");
+    let exe = temp_file("global-label-member-ptr-init", "bin");
+    std::fs::write(
+        &src,
+        r#"
+struct box {
+    char pad;
+    int value;
+};
+
+struct box global_box = { 3, 42 };
+int *global_value = &global_box.value;
+
+int main(void) {
+    return *global_value;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn global_pointer_initializer_accepts_array_index_and_nested_member_offsets() {
+    let src = temp_file("global-array-nested-ptr-init", "c");
+    let exe = temp_file("global-array-nested-ptr-init", "bin");
+    std::fs::write(
+        &src,
+        r#"
+struct node {
+    int a;
+    struct { unsigned x; unsigned y; } s;
+    int b;
+    struct node *next;
+};
+
+struct node nodes[10];
+struct node one = { 1, { 2, 42 }, 3, 0 };
+
+struct node *node_ptr = &nodes[3];
+unsigned *y_ptr = &one.s.y;
+struct node **next_ptr = &one.next;
+
+int main(void) {
+    unsigned long array_diff = (unsigned long)node_ptr - (unsigned long)nodes;
+    unsigned long y_diff = (unsigned long)y_ptr - (unsigned long)&one.a;
+    unsigned long next_diff = (unsigned long)next_ptr - (unsigned long)y_ptr;
+    if (array_diff != 3 * sizeof(struct node)) {
+        return 1;
+    }
+    if (y_diff != __builtin_offsetof(struct node, s.y)) {
+        return 2;
+    }
+    if (next_diff != __builtin_offsetof(struct node, next) - __builtin_offsetof(struct node, s.y)) {
+        return 3;
+    }
+    return *y_ptr;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn accepts_gnu_colon_field_designated_initializer() {
+    let src = temp_file("gnu-colon-designator", "c");
+    let exe = temp_file("gnu-colon-designator", "bin");
+    std::fs::write(
+        &src,
+        r#"
+union u {
+    double d;
+    int i[3];
+};
+
+int signbit(double x) {
+    union u v = { d: x };
+    return v.i[1] < 0;
+}
+
+int main(void) {
+    return signbit(-1.0) && !signbit(2.0) ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn accepts_implicit_int_after_register_storage_class() {
+    let src = temp_file("register-implicit-int", "c");
+    let exe = temp_file("register-implicit-int", "bin");
+    std::fs::write(
+        &src,
+        r#"
+sum(to, from, count)
+register short *to, *from;
+register count;
+{
+    register n = (count + 7) / 8;
+    do {
+        *to += *from++;
+    } while (--n > 0);
+}
+
+int main(void) {
+    short in[8];
+    short out = 0;
+    int i;
+    for (i = 0; i < 8; i = i + 1) {
+        in[i] = i + 1;
+    }
+    sum(&out, in, 64);
+    return out == 36 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn treats_alloca_as_pointer_returning_builtin_without_visible_prototype() {
+    let src = temp_file("alloca-builtin-return", "c");
+    let exe = temp_file("alloca-builtin-return", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    char *buf = alloca(16);
+    buf[0] = 42;
+    return buf[0];
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn lowers_sprintf_checked_builtin_to_host_sprintf() {
+    let src = temp_file("sprintf-chk-builtin", "c");
+    let exe = temp_file("sprintf-chk-builtin", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    char buf[16];
+    int n = __builtin___sprintf_chk(buf, 0, 16, "%d", 42);
+    return n == 2 && buf[0] == '4' && buf[1] == '2' ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
 }
 
 #[test]

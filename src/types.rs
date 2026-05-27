@@ -1070,9 +1070,10 @@ pub enum StaticInit {
     UCharInit(u8),
     DoubleInit(f64),
     FloatInit(f32),
-    ZeroInit(usize),          // zero-fill N bytes
-    StringInit(String, bool), // (string_content, null_terminated) → .asciz or .ascii
-    PointerInit(String),      // label name → .quad label_name
+    ZeroInit(usize),                // zero-fill N bytes
+    StringInit(String, bool),       // (string_content, null_terminated) → .asciz or .ascii
+    PointerInit(String),            // label name → .quad label_name
+    PointerInitOffset(String, i64), // label + addend → .quad label_name+addend
 }
 
 // ============================================================

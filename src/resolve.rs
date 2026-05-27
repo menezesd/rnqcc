@@ -51,6 +51,7 @@ struct Resolver {
     break_labels: Vec<String>,
     continue_labels: Vec<String>,
     functions: HashMap<String, FunctionSignature>,
+    implicit_functions: HashMap<String, FunctionSignature>,
     defined_labels: Vec<String>,
     goto_targets: Vec<String>,
     case_counter: usize,
@@ -95,6 +96,7 @@ impl Resolver {
             break_labels: Vec::new(),
             continue_labels: Vec::new(),
             functions: HashMap::new(),
+            implicit_functions: HashMap::new(),
             defined_labels: Vec::new(),
             goto_targets: Vec::new(),
             case_counter: 0,
@@ -210,6 +212,45 @@ impl Resolver {
         Err(Diagnostic::resolve(DiagnosticKind::UndeclaredVariable {
             name: name.to_string(),
         }))
+    }
+
+    fn declare_implicit_function(&mut self, name: &str) {
+        let signature = FunctionSignature {
+            return_type: CType::Int,
+            return_full_type: None,
+            param_full_types: Vec::new(),
+            variadic: true,
+            noreturn: matches!(name, "abort" | "exit" | "_exit"),
+        };
+        self.functions
+            .entry(name.to_string())
+            .or_insert_with(|| signature.clone());
+        self.implicit_functions
+            .entry(name.to_string())
+            .or_insert(signature);
+    }
+
+    fn implicit_function_declarations(&self) -> Vec<Declaration> {
+        let mut names: Vec<_> = self.implicit_functions.keys().cloned().collect();
+        names.sort();
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let signature = self.implicit_functions.get(&name)?;
+                Some(Declaration::FunDecl(FunctionDeclaration {
+                    name,
+                    return_type: signature.return_type,
+                    return_ptr_info: None,
+                    return_full_type: signature.return_full_type.clone(),
+                    params: Vec::new(),
+                    param_full_types: signature.param_full_types.clone(),
+                    variadic: signature.variadic,
+                    noreturn: signature.noreturn,
+                    body: None,
+                    storage_class: None,
+                }))
+            })
+            .collect()
     }
 
     fn make_loop_label(&mut self) -> String {
@@ -366,8 +407,16 @@ impl Resolver {
                     Exp::FunctionCall(name, resolved_args)
                 } else {
                     // Could be an indirect call through a function pointer variable
-                    let resolved_name = self.resolve_var(&name)?;
-                    Exp::FunctionCall(resolved_name, resolved_args)
+                    match self.resolve_var(&name) {
+                        Ok(resolved_name) => Exp::FunctionCall(resolved_name, resolved_args),
+                        Err(err)
+                            if matches!(err.kind, DiagnosticKind::UndeclaredVariable { .. }) =>
+                        {
+                            self.declare_implicit_function(&name);
+                            Exp::FunctionCall(name, resolved_args)
+                        }
+                        Err(err) => return Err(err),
+                    }
                 }
             }
             Exp::SizeOf(inner) => Exp::SizeOf(Box::new(self.resolve_exp(*inner)?)),
@@ -916,7 +965,7 @@ pub fn resolve(program: Program) -> ResolveResult<ResolveOutput> {
         }
     }
 
-    let declarations = program
+    let mut declarations = program
         .declarations
         .into_iter()
         .map(|decl| {
@@ -968,6 +1017,7 @@ pub fn resolve(program: Program) -> ResolveResult<ResolveOutput> {
             })
         })
         .collect::<ResolveResult<Vec<_>>>()?;
+    declarations.extend(resolver.implicit_function_declarations());
 
     Ok(ResolveOutput {
         program: Program { declarations },

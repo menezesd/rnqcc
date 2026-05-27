@@ -1016,7 +1016,8 @@ fn static_init_size(init: &StaticInit) -> usize {
         StaticInit::LongInit(_)
         | StaticInit::ULongInit(_)
         | StaticInit::DoubleInit(_)
-        | StaticInit::PointerInit(_) => 8,
+        | StaticInit::PointerInit(_)
+        | StaticInit::PointerInitOffset(_, _) => 8,
         StaticInit::ZeroInit(n) => *n,
         StaticInit::StringInit(s, null_terminated) => {
             c_string_byte_len(s) + usize::from(*null_terminated)
@@ -1148,6 +1149,16 @@ fn emit_static_init(
         }
         StaticInit::PointerInit(label) => {
             writeln!(w, "\t.quad {}", platform.show_label(label))
+        }
+        StaticInit::PointerInitOffset(label, offset) => {
+            let sign = if *offset >= 0 { "+" } else { "" };
+            writeln!(
+                w,
+                "\t.quad {}{}{}",
+                platform.show_label(label),
+                sign,
+                offset
+            )
         }
     }
 }

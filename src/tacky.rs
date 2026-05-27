@@ -137,14 +137,141 @@ impl TackyGen {
         }
     }
 
-    fn static_address_initializer_label(init: &Exp) -> Option<&str> {
-        match init {
-            Exp::Var(name) => Some(name.as_str()),
-            Exp::Unary(UnaryOp::AddrOf, inner) => match inner.as_ref() {
-                Exp::Var(name) => Some(name.as_str()),
+    fn static_pointer_initializer(&self, init: &Exp) -> Option<StaticInit> {
+        match self.static_address_constant(init)? {
+            (Some(label), 0) => Some(StaticInit::PointerInit(label)),
+            (Some(label), offset) => Some(StaticInit::PointerInitOffset(label, offset)),
+            (None, offset) => Some(StaticInit::LongInit(offset)),
+        }
+    }
+
+    fn static_address_constant(&self, exp: &Exp) -> Option<(Option<String>, i64)> {
+        match exp {
+            Exp::Var(name) => Some((Some(name.clone()), 0)),
+            Exp::Constant(0)
+            | Exp::LongConstant(0)
+            | Exp::UIntConstant(0)
+            | Exp::ULongConstant(0) => Some((None, 0)),
+            Exp::Cast(_, _, inner) => self.static_address_constant(inner),
+            Exp::Unary(UnaryOp::AddrOf, inner) => self.static_lvalue_address_constant(inner),
+            Exp::Unary(UnaryOp::Deref, inner) => self.static_address_constant(inner),
+            Exp::Binary(BinaryOp::Add, left, right) => self
+                .static_address_add_constant(left, right, 1)
+                .or_else(|| self.static_address_add_constant(right, left, 1)),
+            Exp::Binary(BinaryOp::Sub, left, right) => {
+                self.static_address_add_constant(left, right, -1)
+            }
+            _ => None,
+        }
+    }
+
+    fn static_address_add_constant(
+        &self,
+        address: &Exp,
+        constant: &Exp,
+        sign: i64,
+    ) -> Option<(Option<String>, i64)> {
+        let (base, offset) = self.static_address_constant(address)?;
+        let (value, _, _) = eval_static_integer_constant_exp_with_context(
+            constant,
+            &self.struct_defs,
+            &self.full_types,
+        )?;
+        Some((base, offset + sign * value))
+    }
+
+    fn static_exp_full_type(&self, exp: &Exp) -> Option<FullType> {
+        match exp {
+            Exp::Dot(inner, member) => self.static_struct_member_full_type(inner, member),
+            Exp::Arrow(inner, member) => {
+                let tag = match self.static_exp_full_type(inner)? {
+                    FullType::Pointer(pointee) => match *pointee {
+                        FullType::Struct(tag) => tag,
+                        _ => return None,
+                    },
+                    _ => return None,
+                };
+                self.struct_defs
+                    .get(&tag)?
+                    .members
+                    .iter()
+                    .find(|m| m.name == *member)
+                    .map(|m| m.member_full_type.clone())
+            }
+            Exp::Subscript(arr, _) => match self.static_exp_full_type(arr)? {
+                FullType::Array { elem, .. } => Some(*elem),
+                FullType::Pointer(pointee) => Some(*pointee),
                 _ => None,
             },
-            Exp::Cast(_, _, inner) => Self::static_address_initializer_label(inner),
+            _ => eval_static_expr_full_type(exp, &self.full_types),
+        }
+    }
+
+    fn static_struct_member_full_type(&self, inner: &Exp, member: &str) -> Option<FullType> {
+        let tag = match self.static_exp_full_type(inner)? {
+            FullType::Struct(tag) => tag,
+            _ => return None,
+        };
+        self.struct_defs
+            .get(&tag)?
+            .members
+            .iter()
+            .find(|m| m.name == member)
+            .map(|m| m.member_full_type.clone())
+    }
+
+    fn static_lvalue_address_constant(&self, exp: &Exp) -> Option<(Option<String>, i64)> {
+        match exp {
+            Exp::Var(name) => Some((Some(name.clone()), 0)),
+            Exp::Dot(inner, member) => {
+                let (base, offset) = self.static_lvalue_address_constant(inner)?;
+                let tag = match self.static_exp_full_type(inner)? {
+                    FullType::Struct(tag) => tag,
+                    _ => return None,
+                };
+                let member_offset = self
+                    .struct_defs
+                    .get(&tag)?
+                    .members
+                    .iter()
+                    .find(|m| m.name == *member)?
+                    .offset as i64;
+                Some((base, offset + member_offset))
+            }
+            Exp::Arrow(inner, member) => {
+                let (base, offset) = self.static_address_constant(inner)?;
+                let tag = match self.static_exp_full_type(inner)? {
+                    FullType::Pointer(pointee) => match *pointee {
+                        FullType::Struct(tag) => tag,
+                        _ => return None,
+                    },
+                    _ => return None,
+                };
+                let member_offset = self
+                    .struct_defs
+                    .get(&tag)?
+                    .members
+                    .iter()
+                    .find(|m| m.name == *member)?
+                    .offset as i64;
+                Some((base, offset + member_offset))
+            }
+            Exp::Subscript(arr, idx) => {
+                let (base, offset) = self.static_address_constant(arr)?;
+                let elem_size = match self.static_exp_full_type(arr)? {
+                    FullType::Array { elem, .. } => elem.byte_size_with(&self.struct_defs),
+                    FullType::Pointer(pointee) => pointee.byte_size_with(&self.struct_defs),
+                    _ => return None,
+                } as i64;
+                let (index, _, _) = eval_static_integer_constant_exp_with_context(
+                    idx,
+                    &self.struct_defs,
+                    &self.full_types,
+                )?;
+                Some((base, offset + index * elem_size))
+            }
+            Exp::Unary(UnaryOp::Deref, inner) => self.static_address_constant(inner),
+            Exp::Cast(_, _, inner) => self.static_lvalue_address_constant(inner),
             _ => None,
         }
     }
@@ -423,6 +550,13 @@ impl TackyGen {
                 char_ptr,
                 vec![CType::Pointer, CType::Pointer, CType::ULong],
                 Some((CType::Char, 1)),
+            )),
+            "alloca" | "__builtin_alloca" => Some((
+                "alloca",
+                CType::Pointer,
+                void_ptr,
+                vec![CType::ULong],
+                Some((CType::Void, 1)),
             )),
             _ => None,
         }
@@ -728,7 +862,8 @@ impl TackyGen {
             StaticInit::LongInit(_)
             | StaticInit::ULongInit(_)
             | StaticInit::DoubleInit(_)
-            | StaticInit::PointerInit(_) => 8,
+            | StaticInit::PointerInit(_)
+            | StaticInit::PointerInitOffset(_, _) => 8,
             StaticInit::FloatInit(_) => 4,
             StaticInit::ZeroInit(n) => *n,
             StaticInit::StringInit(s, null_terminated) => {
@@ -1697,6 +1832,37 @@ impl TackyGen {
                 if lhs_ft.is_struct() {
                     return Err("compound assignment to non-scalar lvalue".to_string());
                 }
+                let mem = match left.as_ref() {
+                    Exp::Dot(inner, member) | Exp::Arrow(inner, member) => {
+                        let tag = self.dot_inner_tag(inner)?;
+                        self.struct_member(&tag, member)?
+                    }
+                    _ => unreachable!(),
+                };
+                if mem.bit_width.is_some() {
+                    let ptr = self.emit_dot_address(&left)?;
+                    let unit = self.fresh_tmp(mem.member_type);
+                    self.emit(TackyInstr::Load {
+                        src_ptr: ptr.clone(),
+                        dst: unit.clone(),
+                    });
+                    let current = self.extract_bit_field(unit, &mem)?;
+                    let (rhs, rhs_type) = self.emit_exp(*right)?;
+                    let common = CType::common(mem.member_type, rhs_type);
+                    let lhs_conv = self.convert_to(current, mem.member_type, common);
+                    let rhs_conv = self.convert_to(rhs, rhs_type, common);
+                    let result = self.fresh_tmp(common);
+                    let tacky_op = Self::convert_binop(op)?;
+                    self.emit(TackyInstr::Binary {
+                        op: tacky_op,
+                        left: lhs_conv,
+                        right: rhs_conv,
+                        dst: result.clone(),
+                    });
+                    let result_conv = self.convert_to(result, common, mem.member_type);
+                    let value = self.store_bit_field_to_ptr(ptr, &mem, result_conv)?;
+                    return Ok((value, mem.member_type));
+                }
                 let (ptr, lhs_type, lhs_ft) = self
                     .scalar_lvalue_address(*left)?
                     .ok_or_else(|| "Expression is not a simple lvalue".to_string())?;
@@ -2120,11 +2286,54 @@ impl TackyGen {
         name: String,
         args: Vec<Exp>,
     ) -> TackyResult<(TackyVal, CType)> {
+        if name == "__builtin___sprintf_chk" && args.len() >= 4 {
+            self.func_types.insert(
+                "sprintf".to_string(),
+                (CType::Int, vec![CType::Pointer, CType::Pointer], None, true),
+            );
+            self.func_full_types
+                .insert("sprintf".to_string(), FullType::Scalar(CType::Int));
+            self.func_param_full_types.insert(
+                "sprintf".to_string(),
+                vec![Self::char_pointer_type(), Self::char_pointer_type()],
+            );
+            let mut lowered_args = Vec::with_capacity(args.len() - 2);
+            lowered_args.push(args[0].clone());
+            lowered_args.push(args[3].clone());
+            lowered_args.extend(args.into_iter().skip(4));
+            return self.emit_function_call("sprintf".to_string(), lowered_args);
+        }
         let builtin_info = Self::builtin_function_info(&name);
         let call_name = builtin_info
             .as_ref()
             .map(|(call_name, _, _, _, _)| (*call_name).to_string())
             .unwrap_or_else(|| name.clone());
+        if matches!(name.as_str(), "alloca" | "__builtin_alloca") && args.len() == 1 {
+            if let Some((size, _, _)) = eval_static_integer_constant_exp_with_context(
+                &args[0],
+                &self.struct_defs,
+                &self.full_types,
+            ) {
+                let size = usize::try_from(size)
+                    .ok()
+                    .filter(|size| *size > 0)
+                    .unwrap_or(1);
+                let name = self.fresh_var_name();
+                let ft = FullType::Array {
+                    elem: Box::new(FullType::Scalar(CType::Char)),
+                    size,
+                };
+                self.register_var(&name, ft);
+                self.array_sizes.insert(name.clone(), size);
+                let ptr_ft = Self::void_pointer_type();
+                let dst = self.fresh_tmp_full(&ptr_ft);
+                self.emit(TackyInstr::GetAddress {
+                    src: TackyVal::Var(name),
+                    dst: dst.clone(),
+                });
+                return Ok((dst, CType::Pointer));
+            }
+        }
         let pointer_sig = self
             .full_types
             .get(&name)
@@ -2382,7 +2591,7 @@ impl TackyGen {
             }
         }
         if param_types.is_empty() {
-            fixed_flat_arg_count = 0;
+            fixed_flat_arg_count = if variadic { tacky_args.len() } else { 0 };
         }
 
         let uses_hidden_ptr = if let Some(FullType::Struct(ref tag)) = ret_ft {
@@ -4596,11 +4805,15 @@ impl TackyGen {
                     _ => {
                         let (val, val_type) = self.emit_exp(elem.clone())?;
                         let val_conv = self.convert_to(val, val_type, mem.member_type);
-                        self.emit(TackyInstr::CopyToOffset {
-                            src: val_conv,
-                            dst_name: arr_name.to_string(),
-                            offset: mem_offset,
-                        });
+                        if mem.bit_width.is_some() {
+                            self.store_bit_field_to_offset(arr_name.to_string(), mem, val_conv)?;
+                        } else {
+                            self.emit(TackyInstr::CopyToOffset {
+                                src: val_conv,
+                                dst_name: arr_name.to_string(),
+                                offset: mem_offset,
+                            });
+                        }
                     }
                 }
             }
@@ -5149,8 +5362,8 @@ impl TackyGen {
                 builder.put(base_offset, StaticInit::PointerInit(label))?;
             }
             (FullType::Pointer(_), _) => {
-                if let Some(label) = Self::static_address_initializer_label(init) {
-                    builder.put(base_offset, StaticInit::PointerInit(label.to_string()))?;
+                if let Some(ptr_init) = self.static_pointer_initializer(init) {
+                    builder.put(base_offset, ptr_init)?;
                 } else {
                     let (v, is_dbl, is_uns) =
                         self.eval_static_constant_init(&Some(init.clone()))?;
@@ -5534,11 +5747,15 @@ impl TackyGen {
                         // Scalar first member — use first element
                         let (val, val_type) = self.emit_exp(elems[0].clone())?;
                         let val_conv = self.convert_to(val, val_type, mem.member_type);
-                        self.emit(TackyInstr::CopyToOffset {
-                            src: val_conv,
-                            dst_name: vd.name.clone(),
-                            offset: 0,
-                        });
+                        if mem.bit_width.is_some() {
+                            self.store_bit_field_to_offset(vd.name.clone(), mem, val_conv)?;
+                        } else {
+                            self.emit(TackyInstr::CopyToOffset {
+                                src: val_conv,
+                                dst_name: vd.name.clone(),
+                                offset: 0,
+                            });
+                        }
                     }
                 } else {
                     let max_members = def.members.len();
@@ -5695,11 +5912,15 @@ impl TackyGen {
                             let (val, val_type) = self.emit_exp(elem.clone())?;
                             let target_type = member.member_type;
                             let val_conv = self.convert_to(val, val_type, target_type);
-                            self.emit(TackyInstr::CopyToOffset {
-                                src: val_conv,
-                                dst_name: vd.name.clone(),
-                                offset: member.offset as i64,
-                            });
+                            if member.bit_width.is_some() {
+                                self.store_bit_field_to_offset(vd.name.clone(), member, val_conv)?;
+                            } else {
+                                self.emit(TackyInstr::CopyToOffset {
+                                    src: val_conv,
+                                    dst_name: vd.name.clone(),
+                                    offset: member.offset as i64,
+                                });
+                            }
                         }
                     }
                 } // end else (non-union compound init)
@@ -5768,11 +5989,11 @@ impl TackyGen {
                 });
                 return Ok(());
             }
-            if let Some(label) = (vd.var_type == CType::Pointer)
+            if let Some(ptr_init) = (vd.var_type == CType::Pointer)
                 .then(|| {
                     vd.init
                         .as_ref()
-                        .and_then(Self::static_address_initializer_label)
+                        .and_then(|init| self.static_pointer_initializer(init))
                 })
                 .flatten()
             {
@@ -5783,7 +6004,7 @@ impl TackyGen {
                     global: false,
                     thread_local: is_thread_local,
                     alignment: align,
-                    init_values: vec![StaticInit::PointerInit(label.to_string())],
+                    init_values: vec![ptr_init],
                 });
                 return Ok(());
             }
@@ -5857,10 +6078,8 @@ impl TackyGen {
                     }
                 }
                 BlockItem::Declaration(Declaration::StructDecl(sd)) => {
-                    if !sd.members.is_empty() {
-                        let def = StructDef::from_declaration(&sd, &self.struct_defs)?;
-                        self.struct_defs.insert(sd.tag.clone(), def);
-                    }
+                    let def = StructDef::from_declaration(&sd, &self.struct_defs)?;
+                    self.struct_defs.insert(sd.tag.clone(), def);
                 }
                 BlockItem::Declaration(Declaration::TypedefDecl) => {}
                 BlockItem::Statement(stmt) => self.emit_statement(stmt)?,
@@ -6287,10 +6506,8 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
                 global_vars.insert(vd.name.clone());
             }
             Declaration::StructDecl(sd) => {
-                if !sd.members.is_empty() {
-                    let def = StructDef::from_declaration(sd, &gen.struct_defs)?;
-                    gen.struct_defs.insert(sd.tag.clone(), def);
-                }
+                let def = StructDef::from_declaration(sd, &gen.struct_defs)?;
+                gen.struct_defs.insert(sd.tag.clone(), def);
             }
             Declaration::TypedefDecl => {}
         }
@@ -6327,7 +6544,7 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
                 Some(Exp::StringLiteral(_)) => None, // String init handled separately
                 Some(exp)
                     if vd.var_type == CType::Pointer
-                        && TackyGen::static_address_initializer_label(exp).is_some() =>
+                        && gen.static_pointer_initializer(exp).is_some() =>
                 {
                     None
                 }
@@ -6528,12 +6745,12 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
                 }
                 continue;
             }
-            if let (None, true, Some(label)) = (
+            if let (None, true, Some(ptr_init)) = (
                 &vd.array_dims,
                 vd.var_type == CType::Pointer,
                 vd.init
                     .as_ref()
-                    .and_then(TackyGen::static_address_initializer_label),
+                    .and_then(|init| gen.static_pointer_initializer(init)),
             ) {
                 let is_global = *linkage.get(&vd.name).unwrap_or(&true);
                 let align = std::cmp::max(vd.var_type.size() as usize, 1);
@@ -6546,7 +6763,7 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
                         .as_ref()
                         .is_some_and(StorageClass::is_thread_local),
                     alignment: align,
-                    init_values: vec![StaticInit::PointerInit(label.to_string())],
+                    init_values: vec![ptr_init],
                 }));
                 file_scope_vars.remove(&vd.name);
                 global_array_names.insert(vd.name.clone());

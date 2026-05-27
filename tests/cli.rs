@@ -6170,6 +6170,105 @@ fn internal_cpp_predefines_gcc_integer_constant_macros() {
 }
 
 #[test]
+fn assignment_from_void_pointer_preserves_declared_pointer_depth() {
+    let src = temp_file("void-pointer-assignment-keeps-declared-depth", "c");
+    let exe = temp_file("void-pointer-assignment-keeps-declared-depth", "bin");
+    std::fs::write(
+        &src,
+        "void *malloc(unsigned long);\n\
+         unsigned long strlen(const char *);\n\
+         char **search_path;\n\
+         int main(void) {\n\
+             search_path = malloc(sizeof(char *));\n\
+             search_path[0] = \"abc\";\n\
+             return strlen(search_path[0]) == 3 ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn typedef_return_type_does_not_leak_into_function_parameters() {
+    let src = temp_file("typedef-return-does-not-leak-into-params", "c");
+    let exe = temp_file("typedef-return-does-not-leak-into-params", "bin");
+    std::fs::write(
+        &src,
+        "typedef int pid_t;\n\
+         struct command { int value; };\n\
+         int seen;\n\
+         void run_child(const struct command *cmd) { seen = cmd->value; }\n\
+         pid_t fork_command(const struct command *cmd) { run_child(cmd); return 0; }\n\
+         int main(void) { struct command c = { 42 }; fork_command(&c); return seen; }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn aarch64_macos_links_external_libc_data_symbols() {
+    if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        return;
+    }
+
+    let src = temp_file("aarch64-macos-external-libc-data", "c");
+    let exe = temp_file("aarch64-macos-external-libc-data", "bin");
+    std::fs::write(
+        &src,
+        "#include <stdio.h>\n\
+         int main(void) { return stdin != 0 && stdout != 0 ? 42 : 1; }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn internal_cpp_provides_basic_virtual_compatibility_headers() {
     let src = temp_file("internal-cpp-virtual-headers", "c");
     let exe = temp_file("internal-cpp-virtual-headers", "bin");

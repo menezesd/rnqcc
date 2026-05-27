@@ -1555,17 +1555,10 @@ impl TackyGen {
                 if lhs_type == CType::Pointer {
                     if let TackyVal::Var(ref lhs_name) = lhs {
                         if let TackyVal::Var(ref rhs_name) = rhs_conv {
-                            if let Some(&info) = self.ptr_info.get(rhs_name) {
-                                self.ptr_info.insert(lhs_name.clone(), info);
-                            }
-                            let lhs_has_specific = self
-                                .full_types
-                                .get(lhs_name)
-                                .map(|ft| {
-                                    matches!(ft, FullType::Pointer(inner) if inner.is_array() || inner.is_struct())
-                                })
-                                .unwrap_or(false);
-                            if !lhs_has_specific {
+                            if !self.full_types.contains_key(lhs_name) {
+                                if let Some(&info) = self.ptr_info.get(rhs_name) {
+                                    self.ptr_info.insert(lhs_name.clone(), info);
+                                }
                                 if let Some(ft) = self.full_types.get(rhs_name).cloned() {
                                     self.full_types.insert(lhs_name.clone(), ft);
                                 }
@@ -2211,11 +2204,12 @@ impl TackyGen {
                 .copied()
                 .unwrap_or_else(|| val_type.promote());
             if let Some(expected_ft) = param_full_types.get(i) {
+                let context = format!("function call to {} argument {}", name, i + 1);
                 self.assert_assignable_exp_full_type(
                     expected_ft,
                     &val_ft,
                     &arg_for_type,
-                    "function call",
+                    &context,
                 )?;
             }
 

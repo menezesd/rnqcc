@@ -1486,6 +1486,9 @@ impl Parser {
     }
 
     fn parse_type(&mut self) -> ParseResult<CType> {
+        self.last_typedef_full_type = None;
+        self.last_struct_tag = None;
+
         // Skip type qualifiers
         while matches!(
             self.peek(),

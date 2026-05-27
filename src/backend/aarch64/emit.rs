@@ -541,15 +541,25 @@ fn emit_load_data(
             )
         }
         TargetOs::MacOs => {
-            writeln!(w, "\tadrp {}, {}@PAGE", addr_reg, label)?;
-            writeln!(
-                w,
-                "\t{} {}, [{}, {}@PAGEOFF]",
-                load_mnemonic(ty),
-                dst_reg,
-                addr_reg,
-                label
-            )
+            if name.contains('+') {
+                writeln!(w, "\tadrp {}, {}@PAGE", addr_reg, label)?;
+                writeln!(
+                    w,
+                    "\t{} {}, [{}, {}@PAGEOFF]",
+                    load_mnemonic(ty),
+                    dst_reg,
+                    addr_reg,
+                    label
+                )
+            } else {
+                writeln!(w, "\tadrp {}, {}@GOTPAGE", addr_reg, label)?;
+                writeln!(
+                    w,
+                    "\tldr {}, [{}, {}@GOTPAGEOFF]",
+                    addr_reg, addr_reg, label
+                )?;
+                writeln!(w, "\t{} {}, [{}]", load_mnemonic(ty), dst_reg, addr_reg)
+            }
         }
     }
 }
@@ -576,15 +586,25 @@ fn emit_store_data(
             )
         }
         TargetOs::MacOs => {
-            writeln!(w, "\tadrp {}, {}@PAGE", addr_reg, label)?;
-            writeln!(
-                w,
-                "\t{} {}, [{}, {}@PAGEOFF]",
-                store_mnemonic(ty),
-                src_reg,
-                addr_reg,
-                label
-            )
+            if name.contains('+') {
+                writeln!(w, "\tadrp {}, {}@PAGE", addr_reg, label)?;
+                writeln!(
+                    w,
+                    "\t{} {}, [{}, {}@PAGEOFF]",
+                    store_mnemonic(ty),
+                    src_reg,
+                    addr_reg,
+                    label
+                )
+            } else {
+                writeln!(w, "\tadrp {}, {}@GOTPAGE", addr_reg, label)?;
+                writeln!(
+                    w,
+                    "\tldr {}, [{}, {}@GOTPAGEOFF]",
+                    addr_reg, addr_reg, label
+                )?;
+                writeln!(w, "\t{} {}, [{}]", store_mnemonic(ty), src_reg, addr_reg)
+            }
         }
     }
 }
@@ -610,12 +630,22 @@ fn emit_load_data_extended(
             )
         }
         TargetOs::MacOs => {
-            writeln!(w, "\tadrp {}, {}@PAGE", addr_reg, label)?;
-            writeln!(
-                w,
-                "\t{} {}, [{}, {}@PAGEOFF]",
-                mnemonic, dst_reg, addr_reg, label
-            )
+            if name.contains('+') {
+                writeln!(w, "\tadrp {}, {}@PAGE", addr_reg, label)?;
+                writeln!(
+                    w,
+                    "\t{} {}, [{}, {}@PAGEOFF]",
+                    mnemonic, dst_reg, addr_reg, label
+                )
+            } else {
+                writeln!(w, "\tadrp {}, {}@GOTPAGE", addr_reg, label)?;
+                writeln!(
+                    w,
+                    "\tldr {}, [{}, {}@GOTPAGEOFF]",
+                    addr_reg, addr_reg, label
+                )?;
+                writeln!(w, "\t{} {}, [{}]", mnemonic, dst_reg, addr_reg)
+            }
         }
     }
 }

@@ -1554,6 +1554,7 @@ impl Parser {
                 | Some(Token::KWVolatile)
                 | Some(Token::KWRestrict)
                 | Some(Token::KWThreadLocal)
+                | Some(Token::KWRegister)
         ) {
             self.advance()?;
         }
@@ -1655,7 +1656,8 @@ impl Parser {
                 Some(Token::KWConst)
                 | Some(Token::KWVolatile)
                 | Some(Token::KWRestrict)
-                | Some(Token::KWThreadLocal) => {
+                | Some(Token::KWThreadLocal)
+                | Some(Token::KWRegister) => {
                     self.advance()?;
                     continue;
                 }
@@ -1753,6 +1755,7 @@ impl Parser {
             | Token::KWVolatile
             | Token::KWAtomic
             | Token::KWThreadLocal
+            | Token::KWRegister
             | Token::KWStaticAssert
             | Token::KWRestrict
             | Token::KWBool
@@ -2671,7 +2674,9 @@ impl Parser {
         if self.eat(&Token::Comma) {
             let mut extra = Vec::new();
             loop {
-                let (name2, full_type2, _) = self.parse_declarator_full(base_type)?;
+                let decl_tree = self.parse_declarator_tree()?;
+                let (name2, full_type2, _) =
+                    Self::process_declarator(&decl_tree, base_type, td_ft.as_ref());
                 let post_alignment = self.consume_alignment_specifiers()?;
                 let declarator_alignment = match (decl_alignment, post_alignment) {
                     (Some(current), Some(post)) => Some(current.max(post)),
@@ -2797,7 +2802,7 @@ impl Parser {
             return Ok((Vec::new(), Vec::new(), false));
         }
         if self.at(&Token::CloseParen) {
-            return Ok((Vec::new(), Vec::new(), false));
+            return Ok((Vec::new(), Vec::new(), true));
         }
         if let Some(Token::Identifier(name)) = self.peek().cloned() {
             if !self.is_type_keyword(&Token::Identifier(name.clone())) {
@@ -3134,7 +3139,10 @@ impl Parser {
             } else {
                 None
             };
-            let (name, full_type, decl_params) = self.parse_declarator_full(base_type)?;
+            let decl_tree = self.parse_declarator_tree()?;
+            let td_ft = self.last_typedef_full_type.take();
+            let (name, full_type, decl_params) =
+                Self::process_declarator(&decl_tree, base_type, td_ft.as_ref());
             let (post_alignment, post_noreturn) = self.consume_declaration_attributes()?;
             let decl_alignment = match (decl_alignment, post_alignment) {
                 (Some(current), Some(post)) => Some(current.max(post)),
@@ -3238,7 +3246,9 @@ impl Parser {
                 if self.eat(&Token::Comma) {
                     let mut extra = Vec::new();
                     loop {
-                        let (name2, full_type2, _) = self.parse_declarator_full(base_type)?;
+                        let decl_tree = self.parse_declarator_tree()?;
+                        let (name2, full_type2, _) =
+                            Self::process_declarator(&decl_tree, base_type, td_ft.as_ref());
                         let full_type2 = if base_type == CType::Struct {
                             if let Some(ref tag) = saved_struct_tag {
                                 Self::replace_scalar_struct(&full_type2, tag)
@@ -3995,6 +4005,25 @@ impl Parser {
                             || matches!(arg, Exp::DoubleConstant(_) | Exp::StringLiteral(_));
                         return Ok(Exp::Constant(is_constant as i64));
                     }
+                    if name == "__builtin_classify_type" {
+                        let Some(arg) = args.first() else {
+                            return Err(
+                                self.format_error("__builtin_classify_type requires an argument")
+                            );
+                        };
+                        let ty = self.typeof_expression(arg)?.to_ctype();
+                        return Ok(Exp::Constant(if ty.is_floating() { 8 } else { 1 }));
+                    }
+                    if name == "__builtin_signbit" {
+                        let Some(arg) = args.first() else {
+                            return Err(self.format_error("__builtin_signbit requires an argument"));
+                        };
+                        return Ok(Exp::Binary(
+                            BinaryOp::LessThan,
+                            Box::new(arg.clone()),
+                            Box::new(Exp::DoubleConstant(0.0)),
+                        ));
+                    }
                     if name == "__builtin_strlen" {
                         let Some(arg) = args.first() else {
                             return Err(self.format_error("__builtin_strlen requires an argument"));
@@ -4030,6 +4059,9 @@ impl Parser {
                         });
                     }
                     if name == "__builtin_prefetch" {
+                        return Ok(Exp::Constant(0));
+                    }
+                    if name == "__builtin_va_end" {
                         return Ok(Exp::Constant(0));
                     }
                     if matches!(

@@ -69,6 +69,17 @@ def main() -> int:
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument(
+        "--max-failures",
+        type=int,
+        default=20,
+        help="maximum number of failures to print; use 0 for all",
+    )
+    parser.add_argument(
+        "--failure-log",
+        type=Path,
+        help="write all failures to this file",
+    )
+    parser.add_argument(
         "--internal-cpp",
         action="store_true",
         help="use rnqcc's internal preprocessor instead of the host preprocessor",
@@ -116,11 +127,19 @@ def main() -> int:
         f"gcc torture {args.mode}: {passed}/{len(selected)} passed "
         f"(start={args.start}, limit={args.limit})"
     )
-    for src, reason in failures[:20]:
+    if args.failure_log:
+        args.failure_log.write_text(
+            "".join(
+                f"{src.relative_to(suite)}\t{reason}\n" for src, reason in failures
+            )
+        )
+
+    shown = failures if args.max_failures == 0 else failures[: args.max_failures]
+    for src, reason in shown:
         rel = src.relative_to(suite)
         print(f"FAIL {rel}: {reason}")
-    if len(failures) > 20:
-        print(f"... {len(failures) - 20} more failures")
+    if args.max_failures != 0 and len(failures) > args.max_failures:
+        print(f"... {len(failures) - args.max_failures} more failures")
     return 1 if failures else 0
 
 

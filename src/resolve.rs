@@ -40,6 +40,19 @@ impl FunctionSignature {
             noreturn: fd.noreturn,
         }
     }
+
+    fn is_old_style_empty(&self) -> bool {
+        self.variadic && self.param_full_types.is_empty()
+    }
+
+    fn compatible_with(&self, other: &Self) -> bool {
+        self.return_type == other.return_type
+            && self.return_full_type == other.return_full_type
+            && (self == other
+                || (self.param_full_types.is_empty()
+                    && other.param_full_types.is_empty()
+                    && (self.is_old_style_empty() || other.is_old_style_empty())))
+    }
 }
 
 struct Resolver {
@@ -637,7 +650,7 @@ impl Resolver {
                 BlockItem::Declaration(Declaration::FunDecl(fd)) => {
                     let signature = FunctionSignature::from_decl(&fd);
                     if let Some(existing) = self.functions.get(&fd.name) {
-                        if existing != &signature {
+                        if !existing.compatible_with(&signature) {
                             return Err(Diagnostic::resolve(
                                 DiagnosticKind::ConflictingFunctionParameterCount {
                                     name: fd.name.clone(),
@@ -927,7 +940,7 @@ pub fn resolve(program: Program) -> ResolveResult<ResolveOutput> {
             Declaration::FunDecl(fd) => {
                 let signature = FunctionSignature::from_decl(fd);
                 if let Some(existing) = resolver.functions.get(&fd.name) {
-                    if existing != &signature {
+                    if !existing.compatible_with(&signature) {
                         return Err(Diagnostic::resolve(
                             DiagnosticKind::ConflictingFunctionParameterCount {
                                 name: fd.name.clone(),

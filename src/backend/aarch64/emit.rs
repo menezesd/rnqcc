@@ -132,6 +132,7 @@ fn store_mnemonic(ty: AsmType) -> &'static str {
 
 fn signed_load_mnemonic(src_ty: AsmType, dst_ty: AsmType) -> io::Result<&'static str> {
     match (src_ty, dst_ty) {
+        (AsmType::Byte, AsmType::Word) => Ok("ldrsb"),
         (AsmType::Byte, AsmType::Longword) => Ok("ldrsb"),
         (AsmType::Byte, AsmType::Quadword) => Ok("ldrsb"),
         (AsmType::Word, AsmType::Longword) => Ok("ldrsh"),
@@ -246,6 +247,37 @@ fn emit_stack_pointer_adjust(w: &mut dyn Write, op: &str, bytes: i32) -> std::io
 
 fn data_label(target: &Target, name: &str) -> String {
     target.show_label(name)
+}
+
+fn split_data_offset(name: &str) -> Option<(&str, i32)> {
+    let (base, offset) = name.rsplit_once('+')?;
+    let offset = offset.parse().ok()?;
+    Some((base, offset))
+}
+
+fn emit_load_macho_data_offset_address(
+    w: &mut dyn Write,
+    target: &Target,
+    name: &str,
+    addr_reg: &'static str,
+) -> std::io::Result<()> {
+    if let Some((base, offset)) = split_data_offset(name) {
+        let base_label = data_label(target, base);
+        writeln!(w, "\tadrp {}, {}@PAGE", addr_reg, base_label)?;
+        writeln!(
+            w,
+            "\tadd {}, {}, {}@PAGEOFF",
+            addr_reg, addr_reg, base_label
+        )?;
+        if offset != 0 {
+            writeln!(w, "\tadd {}, {}, #{}", addr_reg, addr_reg, offset)?;
+        }
+        Ok(())
+    } else {
+        let label = data_label(target, name);
+        writeln!(w, "\tadrp {}, {}@PAGE", addr_reg, label)?;
+        writeln!(w, "\tadd {}, {}, {}@PAGEOFF", addr_reg, addr_reg, label)
+    }
 }
 
 fn emit_load_data_address(
@@ -542,15 +574,8 @@ fn emit_load_data(
         }
         TargetOs::MacOs => {
             if name.contains('+') {
-                writeln!(w, "\tadrp {}, {}@PAGE", addr_reg, label)?;
-                writeln!(
-                    w,
-                    "\t{} {}, [{}, {}@PAGEOFF]",
-                    load_mnemonic(ty),
-                    dst_reg,
-                    addr_reg,
-                    label
-                )
+                emit_load_macho_data_offset_address(w, target, name, addr_reg)?;
+                writeln!(w, "\t{} {}, [{}]", load_mnemonic(ty), dst_reg, addr_reg)
             } else {
                 writeln!(w, "\tadrp {}, {}@GOTPAGE", addr_reg, label)?;
                 writeln!(
@@ -587,15 +612,8 @@ fn emit_store_data(
         }
         TargetOs::MacOs => {
             if name.contains('+') {
-                writeln!(w, "\tadrp {}, {}@PAGE", addr_reg, label)?;
-                writeln!(
-                    w,
-                    "\t{} {}, [{}, {}@PAGEOFF]",
-                    store_mnemonic(ty),
-                    src_reg,
-                    addr_reg,
-                    label
-                )
+                emit_load_macho_data_offset_address(w, target, name, addr_reg)?;
+                writeln!(w, "\t{} {}, [{}]", store_mnemonic(ty), src_reg, addr_reg)
             } else {
                 writeln!(w, "\tadrp {}, {}@GOTPAGE", addr_reg, label)?;
                 writeln!(
@@ -631,12 +649,8 @@ fn emit_load_data_extended(
         }
         TargetOs::MacOs => {
             if name.contains('+') {
-                writeln!(w, "\tadrp {}, {}@PAGE", addr_reg, label)?;
-                writeln!(
-                    w,
-                    "\t{} {}, [{}, {}@PAGEOFF]",
-                    mnemonic, dst_reg, addr_reg, label
-                )
+                emit_load_macho_data_offset_address(w, target, name, addr_reg)?;
+                writeln!(w, "\t{} {}, [{}]", mnemonic, dst_reg, addr_reg)
             } else {
                 writeln!(w, "\tadrp {}, {}@GOTPAGE", addr_reg, label)?;
                 writeln!(
@@ -875,7 +889,9 @@ fn emit_movsx(
         AsmOperand::Reg(reg) => {
             let src_reg = reg_name(*reg, src_ty)?;
             let mnemonic = match (src_ty, dst_ty) {
-                (AsmType::Byte, AsmType::Longword) | (AsmType::Byte, AsmType::Quadword) => "sxtb",
+                (AsmType::Byte, AsmType::Word)
+                | (AsmType::Byte, AsmType::Longword)
+                | (AsmType::Byte, AsmType::Quadword) => "sxtb",
                 (AsmType::Word, AsmType::Longword) | (AsmType::Word, AsmType::Quadword) => "sxth",
                 (AsmType::Longword, AsmType::Quadword) => "sxtw",
                 _ => {
@@ -1396,6 +1412,10 @@ fn alignment_log2(alignment: usize) -> usize {
     alignment.next_power_of_two().trailing_zeros() as usize
 }
 
+fn data_alignment(alignment: usize) -> usize {
+    alignment.max(8)
+}
+
 fn emit_macho_tls_static_var(
     w: &mut dyn Write,
     sv: &AsmStaticVar,
@@ -1465,6 +1485,7 @@ fn emit_static_init(w: &mut dyn Write, init: &StaticInit, target: &Target) -> st
 
 fn emit_static_var(w: &mut dyn Write, sv: &AsmStaticVar, target: &Target) -> std::io::Result<()> {
     let label = target.show_label(&sv.name);
+    let alignment = data_alignment(sv.alignment);
     let all_zero = !sv.init_values.is_empty()
         && sv
             .init_values
@@ -1489,7 +1510,7 @@ fn emit_static_var(w: &mut dyn Write, sv: &AsmStaticVar, target: &Target) -> std
             "\t.zerofill __DATA,__bss,{},{},{}",
             label,
             size,
-            alignment_log2(sv.alignment)
+            alignment_log2(alignment)
         );
     }
 
@@ -1501,7 +1522,7 @@ fn emit_static_var(w: &mut dyn Write, sv: &AsmStaticVar, target: &Target) -> std
     if sv.global {
         writeln!(w, "\t.globl {}", label)?;
     }
-    writeln!(w, "\t.balign {}", sv.alignment)?;
+    writeln!(w, "\t.balign {}", alignment)?;
     writeln!(w, "{}:", label)?;
     for init in &sv.init_values {
         emit_static_init(w, init, target)?;

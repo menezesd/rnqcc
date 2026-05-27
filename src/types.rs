@@ -826,6 +826,7 @@ impl StructDef {
                         CType::Char
                             | CType::SChar
                             | CType::UChar
+                            | CType::Bool
                             | CType::Short
                             | CType::UShort
                             | CType::Int

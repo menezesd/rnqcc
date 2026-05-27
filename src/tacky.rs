@@ -463,6 +463,27 @@ impl TackyGen {
                 vec![CType::Int],
                 None,
             )),
+            "__builtin_printf" => Some((
+                "printf",
+                CType::Int,
+                FullType::Scalar(CType::Int),
+                vec![CType::Pointer],
+                None,
+            )),
+            "__builtin_sprintf" => Some((
+                "sprintf",
+                CType::Int,
+                FullType::Scalar(CType::Int),
+                vec![CType::Pointer, CType::Pointer],
+                None,
+            )),
+            "__builtin_puts" => Some((
+                "puts",
+                CType::Int,
+                FullType::Scalar(CType::Int),
+                vec![CType::Pointer],
+                None,
+            )),
             "__builtin_memcpy" => Some((
                 "memcpy",
                 CType::Pointer,
@@ -2433,7 +2454,12 @@ impl TackyGen {
             .and_then(Self::function_signature_from_full);
         let (ret_type, param_types, ret_pi, variadic) =
             if let Some((_, ret_type, _, param_types, ret_pi)) = builtin_info.as_ref() {
-                (*ret_type, param_types.clone(), *ret_pi, false)
+                (
+                    *ret_type,
+                    param_types.clone(),
+                    *ret_pi,
+                    matches!(name.as_str(), "__builtin_printf" | "__builtin_sprintf"),
+                )
             } else {
                 self.func_types
                     .get(&name)
@@ -4583,6 +4609,18 @@ impl TackyGen {
                 self.emit_exp(exp)?;
             }
             Statement::If(cond, then_stmt, else_stmt) => {
+                if let Some((value, _, _)) = eval_static_integer_constant_exp_with_context(
+                    &cond,
+                    &self.struct_defs,
+                    &self.full_types,
+                ) {
+                    if value != 0 {
+                        self.emit_statement(*then_stmt)?;
+                    } else if let Some(else_s) = else_stmt {
+                        self.emit_statement(*else_s)?;
+                    }
+                    return Ok(());
+                }
                 let (cond_val, _) = self.emit_exp(cond)?;
                 match else_stmt {
                     None => {
@@ -4800,7 +4838,8 @@ impl TackyGen {
                     return Ok(());
                 } else if mem.member_full_type.is_struct() {
                     if let FullType::Struct(ref inner_tag) = mem.member_full_type {
-                        self.emit_struct_init_at(arr_name, init, inner_tag, mem_offset)?;
+                        let member_init = if elems.len() == 1 { &elems[0] } else { init };
+                        self.emit_struct_init_at(arr_name, member_init, inner_tag, mem_offset)?;
                         return Ok(());
                     }
                 }

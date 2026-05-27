@@ -139,7 +139,7 @@ impl TackyGen {
         }
     }
 
-    fn static_pointer_initializer(&self, init: &Exp) -> Option<StaticInit> {
+    fn static_pointer_initializer(&mut self, init: &Exp) -> Option<StaticInit> {
         match self.static_address_constant(init)? {
             (Some(label), 0) => Some(StaticInit::PointerInit(label)),
             (Some(label), offset) => Some(StaticInit::PointerInitOffset(label, offset)),
@@ -147,9 +147,10 @@ impl TackyGen {
         }
     }
 
-    fn static_address_constant(&self, exp: &Exp) -> Option<(Option<String>, i64)> {
+    fn static_address_constant(&mut self, exp: &Exp) -> Option<(Option<String>, i64)> {
         match exp {
             Exp::Var(name) => Some((Some(name.clone()), 0)),
+            Exp::StringLiteral(s) => Some((Some(self.make_string_constant(s)), 0)),
             Exp::Constant(0)
             | Exp::LongConstant(0)
             | Exp::UIntConstant(0)
@@ -168,7 +169,7 @@ impl TackyGen {
     }
 
     fn static_address_add_constant(
-        &self,
+        &mut self,
         address: &Exp,
         constant: &Exp,
         sign: i64,
@@ -222,7 +223,7 @@ impl TackyGen {
             .map(|m| m.member_full_type.clone())
     }
 
-    fn static_lvalue_address_constant(&self, exp: &Exp) -> Option<(Option<String>, i64)> {
+    fn static_lvalue_address_constant(&mut self, exp: &Exp) -> Option<(Option<String>, i64)> {
         match exp {
             Exp::Var(name) => Some((Some(name.clone()), 0)),
             Exp::Dot(inner, member) => {
@@ -443,6 +444,18 @@ impl TackyGen {
             "ptr" => Some(CType::Pointer),
             _ => None,
         }
+    }
+
+    fn resolve_struct_tag_name(&self, tag: &str) -> String {
+        if self.struct_defs.contains_key(tag) {
+            return tag.to_string();
+        }
+        let scoped_prefix = format!("{}.tag.", tag);
+        self.struct_defs
+            .keys()
+            .find(|candidate| candidate.starts_with(&scoped_prefix))
+            .cloned()
+            .unwrap_or_else(|| tag.to_string())
     }
 
     fn builtin_function_info(name: &str) -> Option<BuiltinFunctionInfo> {
@@ -2372,6 +2385,35 @@ impl TackyGen {
                 dst: TackyVal::Var(ap_name.clone()),
             });
             return Ok((TackyVal::Constant(0), CType::Int));
+        }
+        if let Some(tag) = name.strip_prefix("__rnqcc_va_arg_struct_") {
+            if args.len() != 1 {
+                return Err("__builtin_va_arg requires one va_list argument".to_string());
+            }
+            let Exp::Var(ap_name) = &args[0] else {
+                return Err("__builtin_va_arg requires a va_list object".to_string());
+            };
+            let tag = self.resolve_struct_tag_name(tag);
+            let ft = FullType::Struct(tag.to_string());
+            let struct_size = ft.byte_size_with(&self.struct_defs);
+            let (slot_ptr, _) = self.emit_exp(args[0].clone())?;
+            let dst = self.fresh_tmp_full(&ft);
+            if let TackyVal::Var(ref dst_name) = dst {
+                self.emit_struct_copy_to(slot_ptr.clone(), dst_name, struct_size);
+            }
+            let next = self.fresh_tmp(CType::Pointer);
+            let slot_size = struct_size.next_multiple_of(8);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::Add,
+                left: slot_ptr,
+                right: TackyVal::Constant(slot_size as i64),
+                dst: next.clone(),
+            });
+            self.emit(TackyInstr::Copy {
+                src: next,
+                dst: TackyVal::Var(ap_name.clone()),
+            });
+            return Ok((dst, CType::Struct));
         }
         if let Some(arg_type) = name
             .strip_prefix("__rnqcc_va_arg_")

@@ -597,6 +597,7 @@ impl Lexer {
             "_Thread_local" | "thread_local" | "__thread" => Token::KWThreadLocal,
             "_Static_assert" | "static_assert" => Token::KWStaticAssert,
             "register" => Token::KWRegister,
+            "auto" => Token::KWAuto,
             "_Bool" => Token::KWBool,
             "restrict" => Token::KWRestrict,
             "__restrict" => Token::KWRestrict,

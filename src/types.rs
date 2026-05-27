@@ -1131,6 +1131,7 @@ pub enum Token {
     KWThreadLocal,
     KWStaticAssert,
     KWRegister,
+    KWAuto,
     KWBool,
     KWRestrict,
     KWShort,

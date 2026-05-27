@@ -97,6 +97,8 @@ pub struct Parser {
     pending_auto_type: bool,
     /// True when declaration specifiers/attributes mark a function as noreturn.
     pending_noreturn: bool,
+    /// True when declaration specifiers include inline.
+    pending_inline: bool,
     /// True when the most recently parsed type specifier was an enum.
     last_type_was_enum: bool,
     /// Last nonconstant array bound parsed for minimal automatic VLA lowering.
@@ -168,6 +170,7 @@ impl Parser {
             pending_alignment: None,
             pending_auto_type: false,
             pending_noreturn: false,
+            pending_inline: false,
             last_type_was_enum: false,
             pending_vla_bound: None,
             current_function_name: None,
@@ -1267,11 +1270,14 @@ impl Parser {
         loop {
             match self.peek().cloned() {
                 // Ignored qualifiers/specifiers
-                Some(Token::KWConst)
-                | Some(Token::KWVolatile)
-                | Some(Token::KWRestrict)
-                | Some(Token::KWInline) => {
+                Some(Token::KWConst) | Some(Token::KWVolatile) | Some(Token::KWRestrict) => {
                     saw_non_type_specifier = true;
+                    self.advance()?;
+                    continue;
+                }
+                Some(Token::KWInline) => {
+                    saw_non_type_specifier = true;
+                    self.pending_inline = true;
                     self.advance()?;
                     continue;
                 }
@@ -1385,6 +1391,10 @@ impl Parser {
                 Some(Token::KWRegister) if sc.is_none() => {
                     saw_non_type_specifier = true;
                     self.advance()?; // ignore register storage class
+                }
+                Some(Token::KWAuto) if sc.is_none() => {
+                    saw_non_type_specifier = true;
+                    self.advance()?; // ignore auto storage class
                 }
                 Some(Token::KWInt) if !has_int && !has_void && !has_char => {
                     self.advance()?;
@@ -1555,6 +1565,7 @@ impl Parser {
                 | Some(Token::KWRestrict)
                 | Some(Token::KWThreadLocal)
                 | Some(Token::KWRegister)
+                | Some(Token::KWAuto)
         ) {
             self.advance()?;
         }
@@ -1657,7 +1668,8 @@ impl Parser {
                 | Some(Token::KWVolatile)
                 | Some(Token::KWRestrict)
                 | Some(Token::KWThreadLocal)
-                | Some(Token::KWRegister) => {
+                | Some(Token::KWRegister)
+                | Some(Token::KWAuto) => {
                     self.advance()?;
                     continue;
                 }
@@ -1756,6 +1768,7 @@ impl Parser {
             | Token::KWAtomic
             | Token::KWThreadLocal
             | Token::KWRegister
+            | Token::KWAuto
             | Token::KWStaticAssert
             | Token::KWRestrict
             | Token::KWBool
@@ -2503,6 +2516,7 @@ impl Parser {
         let (sc, base_type) = self.parse_specifiers()?;
         let is_auto_type = std::mem::take(&mut self.pending_auto_type);
         let spec_noreturn = std::mem::take(&mut self.pending_noreturn);
+        let spec_inline = std::mem::take(&mut self.pending_inline);
         let decl_alignment = self.pending_alignment.take();
         // Save struct tag before declarator parsing (params may overwrite last_struct_tag)
         let saved_struct_tag = if base_type == CType::Struct {
@@ -2608,7 +2622,8 @@ impl Parser {
             let param_value_types =
                 Self::param_value_types(&func_info.params, &func_info.param_full_types);
             let body = if self.at(&Token::OpenBrace) {
-                Some(self.parse_function_body_with_values(&name, &param_value_types)?)
+                let body = self.parse_function_body_with_values(&name, &param_value_types)?;
+                (!spec_inline || !sc.as_ref().is_some_and(StorageClass::is_extern)).then_some(body)
             } else {
                 self.expect_token(Token::Semicolon)?;
                 None
@@ -2649,7 +2664,8 @@ impl Parser {
             let param_value_types =
                 Self::param_value_types(&func_info.params, &func_info.param_full_types);
             let body = if self.at(&Token::OpenBrace) {
-                Some(self.parse_function_body_with_values(&name, &param_value_types)?)
+                let body = self.parse_function_body_with_values(&name, &param_value_types)?;
+                (!spec_inline || !sc.as_ref().is_some_and(StorageClass::is_extern)).then_some(body)
             } else {
                 self.expect_token(Token::Semicolon)?;
                 None
@@ -2724,6 +2740,7 @@ impl Parser {
         let (sc, base_type) = self.parse_specifiers()?;
         let is_auto_type = std::mem::take(&mut self.pending_auto_type);
         let _spec_noreturn = std::mem::take(&mut self.pending_noreturn);
+        let _spec_inline = std::mem::take(&mut self.pending_inline);
         let decl_alignment = self.pending_alignment.take();
         let (name, full_type, _) = self.parse_declarator_full(base_type)?;
         let post_alignment = self.consume_alignment_specifiers()?;
@@ -3044,6 +3061,7 @@ impl Parser {
             | Some(Token::KWStaticAssert)
             | Some(Token::KWInline)
             | Some(Token::KWRegister)
+            | Some(Token::KWAuto)
             | Some(Token::KWRestrict)
             | Some(Token::KWBool)
             | Some(Token::KWShort)
@@ -3133,6 +3151,7 @@ impl Parser {
             let (sc, base_type) = self.parse_specifiers()?;
             let is_auto_type = std::mem::take(&mut self.pending_auto_type);
             let spec_noreturn = std::mem::take(&mut self.pending_noreturn);
+            let spec_inline = std::mem::take(&mut self.pending_inline);
             let decl_alignment = self.pending_alignment.take();
             let saved_struct_tag = if base_type == CType::Struct {
                 self.last_struct_tag.clone()
@@ -3218,7 +3237,9 @@ impl Parser {
                 let param_value_types =
                     Self::param_value_types(&func_info.params, &func_info.param_full_types);
                 let body = if self.at(&Token::OpenBrace) {
-                    Some(self.parse_function_body_with_values(&name, &param_value_types)?)
+                    let body = self.parse_function_body_with_values(&name, &param_value_types)?;
+                    (!spec_inline || !sc.as_ref().is_some_and(StorageClass::is_extern))
+                        .then_some(body)
                 } else {
                     self.expect_token(Token::Semicolon)?;
                     None
@@ -3970,23 +3991,48 @@ impl Parser {
                         let ap = self.parse_assignment()?;
                         self.expect_token(Token::Comma)?;
                         let ty = self.parse_type()?;
-                        let full_type = self.parse_abstract_declarator_type(ty)?;
-                        self.expect_token(Token::CloseParen)?;
-                        let suffix = match full_type.to_ctype() {
-                            CType::Long => "long",
-                            CType::ULong => "ulong",
-                            CType::Pointer => "ptr",
-                            CType::UInt => "uint",
-                            CType::Short => "short",
-                            CType::UShort => "ushort",
-                            CType::Char | CType::SChar => "char",
-                            CType::UChar => "uchar",
-                            _ => "int",
+                        let struct_tag = if ty == CType::Struct {
+                            self.last_struct_tag.clone()
+                        } else {
+                            None
                         };
-                        return Ok(Exp::FunctionCall(
-                            format!("__rnqcc_va_arg_{}", suffix),
-                            vec![ap],
-                        ));
+                        let full_type = self.parse_abstract_declarator_type(ty)?;
+                        let full_type = if ty == CType::Struct {
+                            if let Some(ref tag) = struct_tag {
+                                Self::replace_scalar_struct(&full_type, tag)
+                            } else {
+                                full_type
+                            }
+                        } else {
+                            full_type
+                        };
+                        self.expect_token(Token::CloseParen)?;
+                        let helper = match &full_type {
+                            FullType::Struct(tag) => format!("__rnqcc_va_arg_struct_{}", tag),
+                            _ => {
+                                let suffix = match full_type.to_ctype() {
+                                    CType::Long => "long",
+                                    CType::ULong => "ulong",
+                                    CType::Pointer => "ptr",
+                                    CType::UInt => "uint",
+                                    CType::Short => "short",
+                                    CType::UShort => "ushort",
+                                    CType::Char | CType::SChar => "char",
+                                    CType::UChar => "uchar",
+                                    _ => "int",
+                                };
+                                format!("__rnqcc_va_arg_{}", suffix)
+                            }
+                        };
+                        let call = Exp::FunctionCall(helper, vec![ap]);
+                        if full_type.is_pointer() {
+                            return Ok(Exp::Cast(
+                                full_type.to_ctype(),
+                                Some(full_type),
+                                Box::new(call),
+                            ));
+                        }
+                        return Ok(call);
                     }
                     let args = self.parse_arg_list()?;
                     self.expect_token(Token::CloseParen)?;

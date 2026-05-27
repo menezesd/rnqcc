@@ -29,6 +29,8 @@ struct NoMacroExpansionHooks;
 
 impl MacroExpansionHooks for NoMacroExpansionHooks {}
 
+type InvocationArgs = (Vec<Vec<PpToken>>, usize);
+
 pub fn expand_macros(tokens: &[PpToken], macros: &MacroTable) -> Result<Vec<PpToken>, String> {
     expand_macros_with_hooks(tokens, macros, &mut NoMacroExpansionHooks)
 }
@@ -74,7 +76,7 @@ fn expand_macros_inner(
                 variadic,
                 body,
             }) => {
-                let Some((args, next_index)) = parse_invocation_args(tokens, index + 1) else {
+                let Some((args, next_index)) = parse_invocation_args(tokens, index + 1)? else {
                     out.push(token.clone());
                     index += 1;
                     continue;
@@ -106,10 +108,13 @@ fn expand_macros_inner(
     Ok(out)
 }
 
-fn parse_invocation_args(tokens: &[PpToken], start: usize) -> Option<(Vec<Vec<PpToken>>, usize)> {
+fn parse_invocation_args(
+    tokens: &[PpToken],
+    start: usize,
+) -> Result<Option<InvocationArgs>, String> {
     let mut index = skip_ws(tokens, start);
     if !is_punct(tokens.get(index), "(") {
-        return None;
+        return Ok(None);
     }
     index += 1;
     let mut args = Vec::new();
@@ -124,7 +129,7 @@ fn parse_invocation_args(tokens: &[PpToken], start: usize) -> Option<(Vec<Vec<Pp
                 if !current.is_empty() || !args.is_empty() {
                     args.push(trim_tokens(&current));
                 }
-                return Some((args, index + 1));
+                return Ok(Some((args, index + 1)));
             }
             depth -= 1;
             current.push(tokens[index].clone());
@@ -136,7 +141,7 @@ fn parse_invocation_args(tokens: &[PpToken], start: usize) -> Option<(Vec<Vec<Pp
         }
         index += 1;
     }
-    None
+    Err("missing ')' in function-like macro invocation".to_string())
 }
 
 fn substitute_function_macro(
@@ -519,6 +524,21 @@ mod tests {
             },
         );
         assert_eq!(text(&expand_macros(&lex("ADD(A, 2)")?, &macros)?), "40 + 2");
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_unterminated_function_macro_invocation() -> Result<(), String> {
+        let mut macros = MacroTable::new();
+        macros.insert(
+            "ADD".to_string(),
+            MacroDef::Function {
+                params: vec!["x".to_string(), "y".to_string()],
+                variadic: false,
+                body: lex("x + y")?,
+            },
+        );
+        assert!(expand_macros(&lex("ADD(1, 2")?, &macros).is_err());
         Ok(())
     }
 

@@ -345,6 +345,7 @@ pub enum FullType {
     Vector {
         elem: Box<FullType>,
         lanes: usize,
+        complex: bool,
     },
     Struct(String), // struct tag name (resolved to unique identifier)
 }
@@ -369,7 +370,7 @@ impl FullType {
             FullType::Pointer(_) => 8,
             FullType::Function { .. } => 8,
             FullType::Array { elem, size } => elem.byte_size() * size,
-            FullType::Vector { elem, lanes } => elem.byte_size() * lanes,
+            FullType::Vector { elem, lanes, .. } => elem.byte_size() * lanes,
             FullType::Struct(_) => 0, // need struct_defs to compute; caller should use byte_size_with
         }
     }
@@ -382,7 +383,7 @@ impl FullType {
         match self {
             FullType::Struct(tag) => struct_defs.get(tag).map(|d| d.size).unwrap_or(0),
             FullType::Array { elem, size } => elem.byte_size_with(struct_defs) * size,
-            FullType::Vector { elem, lanes } => elem.byte_size_with(struct_defs) * lanes,
+            FullType::Vector { elem, lanes, .. } => elem.byte_size_with(struct_defs) * lanes,
             _ => self.byte_size(),
         }
     }
@@ -444,6 +445,10 @@ impl FullType {
 
     pub fn is_vector(&self) -> bool {
         matches!(self, FullType::Vector { .. })
+    }
+
+    pub fn is_complex(&self) -> bool {
+        matches!(self, FullType::Vector { complex: true, .. })
     }
 
     pub fn is_pointer(&self) -> bool {
@@ -1068,7 +1073,7 @@ fn member_size_align(
             // Inside structs, array alignment is just the element alignment
             Ok((total, elem_align))
         }
-        FullType::Vector { elem, lanes } => {
+        FullType::Vector { elem, lanes, .. } => {
             let (elem_size, elem_align) = member_size_align(elem, struct_defs)?;
             Ok((elem_size * lanes, elem_align))
         }

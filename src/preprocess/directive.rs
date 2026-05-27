@@ -100,11 +100,11 @@ pub fn parse_directive_tokens(tokens: &[PpToken]) -> Result<Option<Directive>, S
     let rest = trim_leading_ws(&tokens[name_index + 1..]);
     Ok(Some(match name {
         "include" => Directive::Include {
-            operand: parse_include_operand(rest),
+            operand: parse_include_operand(rest)?,
             include_next: false,
         },
         "include_next" => Directive::Include {
-            operand: parse_include_operand(rest),
+            operand: parse_include_operand(rest)?,
             include_next: true,
         },
         "define" => parse_define(rest)?,
@@ -275,10 +275,18 @@ fn reject_duplicate_macro_param(params: &[String], name: &str) -> Result<(), Str
     Ok(())
 }
 
-pub fn parse_include_operand(tokens: &[PpToken]) -> IncludeOperand {
-    match literal_header(tokens) {
-        Some(header) => IncludeOperand::Literal(header),
-        None => IncludeOperand::Tokens(trim_tokens(tokens)),
+pub fn parse_include_operand(tokens: &[PpToken]) -> Result<IncludeOperand, String> {
+    let tokens = trim_tokens(tokens);
+    match literal_header(&tokens) {
+        Some(HeaderName::Quoted(name)) if name.is_empty() => {
+            Err("malformed include operand: \"\"".to_string())
+        }
+        Some(HeaderName::Angled(name)) if name.is_empty() => {
+            Err("malformed include operand: <>".to_string())
+        }
+        Some(header) => Ok(IncludeOperand::Literal(header)),
+        None if tokens.is_empty() => Err("malformed include operand".to_string()),
+        None => Ok(IncludeOperand::Tokens(tokens)),
     }
 }
 
@@ -523,6 +531,14 @@ mod tests {
 
         assert!(lex(r#"#include "unterminated/header.h"#).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn rejects_empty_literal_include_operands() {
+        assert!(directive("#include <>").is_err());
+        assert!(directive("#include \"\"").is_err());
+        assert!(directive("#include_next <>").is_err());
+        assert!(directive("#include_next \"\"").is_err());
     }
 
     #[test]

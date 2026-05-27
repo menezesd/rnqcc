@@ -318,6 +318,7 @@ impl Parser {
         FullType::Vector {
             elem: Box::new(FullType::Scalar(elem)),
             lanes: 2,
+            complex: true,
         }
     }
 
@@ -1250,6 +1251,7 @@ impl Parser {
         FullType::Vector {
             elem: Box::new(elem),
             lanes: std::cmp::max(vector_size / lane_size, 1),
+            complex: false,
         }
     }
 
@@ -2026,6 +2028,7 @@ impl Parser {
             self.last_typedef_full_type = Some(FullType::Vector {
                 elem: Box::new(FullType::Scalar(ctype)),
                 lanes,
+                complex: false,
             });
         } else if saw_complex {
             self.last_typedef_full_type = Some(Self::complex_full_type(ctype));
@@ -2112,6 +2115,7 @@ impl Parser {
                 self.last_typedef_full_type = Some(FullType::Vector {
                     elem: Box::new(FullType::Scalar(CType::Double)),
                     lanes: std::cmp::max(vector_size / CType::Double.size() as usize, 1),
+                    complex: false,
                 });
             } else if has_complex {
                 self.last_typedef_full_type = Some(Self::complex_full_type(CType::Double));
@@ -2130,6 +2134,7 @@ impl Parser {
                 self.last_typedef_full_type = Some(FullType::Vector {
                     elem: Box::new(FullType::Scalar(CType::Float)),
                     lanes: std::cmp::max(vector_size / CType::Float.size() as usize, 1),
+                    complex: false,
                 });
             } else if has_complex {
                 self.last_typedef_full_type = Some(Self::complex_full_type(CType::Float));
@@ -2320,6 +2325,7 @@ impl Parser {
             self.last_typedef_full_type = Some(FullType::Vector {
                 elem: Box::new(FullType::Scalar(ctype)),
                 lanes: std::cmp::max(vector_size / lane_size, 1),
+                complex: false,
             });
         } else if saw_complex {
             self.last_typedef_full_type = Some(Self::complex_full_type(ctype));
@@ -2941,7 +2947,9 @@ impl Parser {
                     && base_typedef_vla_size.is_some()
                     && matches!(member_full_type, FullType::Array { .. })
                 {
-                    vla_elem_sizes.push((name.clone(), base_typedef_vla_size.clone().unwrap()));
+                    if let Some(base_size) = base_typedef_vla_size.clone() {
+                        vla_elem_sizes.push((name.clone(), base_size));
+                    }
                 }
                 members.push(MemberDeclaration {
                     name,
@@ -5951,6 +5959,47 @@ mod tests {
         assert_eq!(cacosf.params[0].1, CType::Float);
         assert_eq!(cacos.return_type, CType::Double);
         assert_eq!(cacos.params[0].1, CType::Double);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_complex_type_specifiers_with_rich_type_metadata() -> Result<(), String> {
+        let program =
+            parse_source("float _Complex cf;\n_Complex double cd;\n__complex__ float alias;\n")?;
+        let Declaration::VarDecl(cf) = &program.declarations[0] else {
+            return Err("expected cf declaration".to_string());
+        };
+        let Declaration::VarDecl(cd) = &program.declarations[1] else {
+            return Err("expected cd declaration".to_string());
+        };
+        let Declaration::VarDecl(alias) = &program.declarations[2] else {
+            return Err("expected alias declaration".to_string());
+        };
+
+        assert_eq!(
+            cf.decl_full_type,
+            Some(FullType::Vector {
+                elem: Box::new(FullType::Scalar(CType::Float)),
+                lanes: 2,
+                complex: true,
+            })
+        );
+        assert_eq!(
+            cd.decl_full_type,
+            Some(FullType::Vector {
+                elem: Box::new(FullType::Scalar(CType::Double)),
+                lanes: 2,
+                complex: true,
+            })
+        );
+        assert_eq!(
+            alias.decl_full_type,
+            Some(FullType::Vector {
+                elem: Box::new(FullType::Scalar(CType::Float)),
+                lanes: 2,
+                complex: true,
+            })
+        );
         Ok(())
     }
 

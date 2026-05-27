@@ -1074,20 +1074,67 @@ impl TackyGen {
             return true;
         }
         match (dst, src) {
+            (
+                FullType::Vector {
+                    complex: true,
+                    elem,
+                    ..
+                },
+                FullType::Vector {
+                    complex: true,
+                    elem: src_elem,
+                    ..
+                },
+            ) => self.compatible_full_types(elem, src_elem),
+            (
+                FullType::Vector {
+                    complex: true,
+                    elem,
+                    ..
+                },
+                FullType::Scalar(_),
+            ) => self.compatible_full_types(elem, src),
+            (
+                FullType::Scalar(_),
+                FullType::Vector {
+                    complex: true,
+                    elem,
+                    ..
+                },
+            ) => self.compatible_full_types(dst, elem),
             (FullType::Scalar(CType::Bool), FullType::Pointer(_))
             | (FullType::Scalar(CType::Bool), FullType::Scalar(CType::Pointer)) => true,
             (FullType::Scalar(a), FullType::Scalar(b)) => {
                 *a != CType::Struct && *b != CType::Struct && *a != CType::Void && *b != CType::Void
             }
-            (FullType::Vector { elem, .. }, FullType::Scalar(_)) => {
-                self.compatible_full_types(elem, src)
-            }
-            (FullType::Scalar(_), FullType::Vector { elem, .. }) => {
-                self.compatible_full_types(dst, elem)
-            }
-            (FullType::Vector { elem: dst_elem, .. }, FullType::Vector { elem: src_elem, .. }) => {
-                self.compatible_full_types(dst_elem, src_elem)
-            }
+            (
+                FullType::Vector {
+                    complex: false,
+                    elem,
+                    ..
+                },
+                FullType::Scalar(_),
+            ) => self.compatible_full_types(elem, src),
+            (
+                FullType::Scalar(_),
+                FullType::Vector {
+                    complex: false,
+                    elem,
+                    ..
+                },
+            ) => self.compatible_full_types(dst, elem),
+            (
+                FullType::Vector {
+                    complex: false,
+                    elem: dst_elem,
+                    ..
+                },
+                FullType::Vector {
+                    complex: false,
+                    elem: src_elem,
+                    ..
+                },
+            ) => self.compatible_full_types(dst_elem, src_elem),
             (FullType::Pointer(_), FullType::Scalar(CType::Pointer))
             | (FullType::Scalar(CType::Pointer), FullType::Pointer(_)) => true,
             (FullType::Pointer(dst_inner), FullType::Pointer(src_inner)) => {
@@ -2848,6 +2895,46 @@ impl TackyGen {
             }
             Exp::Unary(UnaryOp::LogicalNot, inner) => {
                 let (src, _) = self.emit_exp(*inner)?;
+                let src_ft = self.val_full_type(&src);
+                if src_ft.is_complex() {
+                    let FullType::Vector { elem, .. } = src_ft.clone() else {
+                        unreachable!();
+                    };
+                    let elem_type = elem.to_ctype();
+                    let elem_size = elem.byte_size_with(&self.struct_defs);
+                    let real = self.emit_complex_component_value(
+                        src.clone(),
+                        src_ft.clone(),
+                        elem_type,
+                        elem_size,
+                        0,
+                    )?;
+                    let imag =
+                        self.emit_complex_component_value(src, src_ft, elem_type, elem_size, 1)?;
+                    let zero = self.convert_to(TackyVal::Constant(0), CType::Int, elem_type);
+                    let real_eq = self.fresh_tmp(CType::Int);
+                    let imag_eq = self.fresh_tmp(CType::Int);
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Equal,
+                        left: real,
+                        right: zero.clone(),
+                        dst: real_eq.clone(),
+                    });
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Equal,
+                        left: imag,
+                        right: zero,
+                        dst: imag_eq.clone(),
+                    });
+                    let dst = self.fresh_tmp(CType::Int);
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::BitwiseAnd,
+                        left: real_eq,
+                        right: imag_eq,
+                        dst: dst.clone(),
+                    });
+                    return Ok((dst, CType::Int));
+                }
                 let dst = self.fresh_tmp(CType::Int);
                 self.emit(TackyInstr::Unary {
                     op: TackyUnaryOp::LogicalNot,
@@ -2937,6 +3024,47 @@ impl TackyGen {
     ) -> TackyResult<(TackyVal, CType)> {
         let source_ft = self.typeof_exp(&inner);
         let (val, from_type) = self.emit_exp(inner)?;
+        if let Some(ft) = cast_ft.as_ref() {
+            if ft.is_complex() {
+                let FullType::Vector { elem, .. } = ft.clone() else {
+                    unreachable!();
+                };
+                let elem_type = elem.to_ctype();
+                let elem_size = elem.byte_size_with(&self.struct_defs);
+                let result = self.fresh_tmp_full(ft);
+                let total_bytes = ft.byte_size_with(&self.struct_defs);
+                if let TackyVal::Var(ref result_name) = result {
+                    self.zero_init_local(result_name, total_bytes);
+                    let real = if source_ft.is_complex() {
+                        self.emit_complex_component_value(
+                            val.clone(),
+                            source_ft.clone(),
+                            elem_type,
+                            elem_size,
+                            0,
+                        )?
+                    } else {
+                        self.convert_to(val.clone(), from_type, elem_type)
+                    };
+                    self.emit(TackyInstr::CopyToOffset {
+                        src: real,
+                        dst_name: result_name.clone(),
+                        offset: 0,
+                    });
+                    if source_ft.is_complex() {
+                        let imag = self.emit_complex_component_value(
+                            val, source_ft, elem_type, elem_size, 1,
+                        )?;
+                        self.emit(TackyInstr::CopyToOffset {
+                            src: imag,
+                            dst_name: result_name.clone(),
+                            offset: elem_size as i64,
+                        });
+                    }
+                }
+                return Ok((result, target_type));
+            }
+        }
         if cast_ft.is_none()
             && source_ft.is_vector()
             && target_type.size() as usize == source_ft.byte_size_with(&self.struct_defs)
@@ -3554,7 +3682,7 @@ impl TackyGen {
             let src_exp = args[0].clone();
             let mask_exp = args[1].clone();
             let src_ft = self.typeof_exp(&src_exp);
-            let FullType::Vector { elem, lanes } = src_ft.clone() else {
+            let FullType::Vector { elem, lanes, .. } = src_ft.clone() else {
                 return Err("__builtin_shuffle requires a vector source".to_string());
             };
             let elem_type = elem.to_ctype();
@@ -4412,6 +4540,49 @@ impl TackyGen {
             }
 
             let source_ft = self.typeof_exp(&arg_for_type);
+            let expected_ft_is_complex = param_full_types.get(i).is_some_and(FullType::is_complex);
+            let is_complex_arg =
+                expected_ft_is_complex || val_ft.is_complex() || source_ft.is_complex();
+            if is_complex_arg {
+                let complex_ft = param_full_types
+                    .get(i)
+                    .filter(|ft| ft.is_complex())
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        if val_ft.is_complex() {
+                            val_ft.clone()
+                        } else {
+                            source_ft.clone()
+                        }
+                    });
+                let FullType::Vector { elem, .. } = complex_ft.clone() else {
+                    unreachable!();
+                };
+                let elem_type = elem.to_ctype();
+                let elem_size = elem.byte_size_with(&self.struct_defs);
+                let group_start = tacky_args.len();
+                let real = self.emit_complex_component_value(
+                    val.clone(),
+                    val_ft.clone(),
+                    elem_type,
+                    elem_size,
+                    0,
+                )?;
+                let imag = self.emit_complex_component_value(
+                    val,
+                    val_ft.clone(),
+                    elem_type,
+                    elem_size,
+                    1,
+                )?;
+                tacky_args.push(real);
+                tacky_args.push(imag);
+                struct_arg_groups.push((group_start, 2, vec![true, true]));
+                if i + 1 == param_types.len() {
+                    fixed_flat_arg_count = tacky_args.len();
+                }
+                continue;
+            }
             let is_struct_arg =
                 source_ft.is_struct() || val_ft.is_struct() || val_type == CType::Struct;
             if is_struct_arg || expected == CType::Struct {
@@ -4568,13 +4739,14 @@ impl TackyGen {
             fixed_flat_arg_count = if variadic { tacky_args.len() } else { 0 };
         }
 
-        let uses_hidden_ptr = if let Some(FullType::Struct(ref tag)) = ret_ft {
-            self.struct_defs
+        let uses_hidden_ptr = match ret_ft.as_ref() {
+            Some(FullType::Struct(tag)) => self
+                .struct_defs
                 .get(tag)
                 .map(|d| d.size > 16)
-                .unwrap_or(false)
-        } else {
-            false
+                .unwrap_or(false),
+            Some(ft) => ft.is_complex(),
+            None => false,
         };
         let is_indirect = builtin_info.is_none()
             && !self.func_types.contains_key(&name)
@@ -4589,6 +4761,11 @@ impl TackyGen {
                     if let Some(def) = self.struct_defs.get(tag) {
                         self.array_sizes.insert(tmp_name.clone(), def.size);
                     }
+                }
+            } else if rft.is_complex() {
+                if let TackyVal::Var(ref tmp_name) = tmp {
+                    self.array_sizes
+                        .insert(tmp_name.clone(), rft.byte_size_with(&self.struct_defs));
                 }
             }
             let ret_addr = self.fresh_tmp(CType::Pointer);
@@ -4622,7 +4799,7 @@ impl TackyGen {
                     self.ptr_info.insert(dst_name.clone(), pi);
                 }
             }
-            return Ok((tmp, CType::Struct));
+            return Ok((tmp, ret_type));
         }
 
         let dst = if let Some(ref rft) = ret_ft {
@@ -4634,6 +4811,11 @@ impl TackyGen {
                         let alloc_size = std::cmp::max(def.size, classes.len() * 8);
                         self.array_sizes.insert(tmp_name.clone(), alloc_size);
                     }
+                }
+            } else if rft.is_complex() {
+                if let TackyVal::Var(ref tmp_name) = tmp {
+                    self.array_sizes
+                        .insert(tmp_name.clone(), rft.byte_size_with(&self.struct_defs));
                 }
             }
             tmp
@@ -4676,6 +4858,10 @@ impl TackyGen {
                 )
             })
             .unwrap_or((FullType::Scalar(CType::Int), Vec::new(), false));
+        let param_full_types: Vec<FullType> = pointer_sig
+            .as_ref()
+            .map(|(_, param_fts, _)| param_fts.clone())
+            .unwrap_or_default();
         let has_prototype = pointer_sig.is_some();
         if has_prototype && !variadic && args.len() != param_types.len() {
             return Err(format!(
@@ -4715,30 +4901,64 @@ impl TackyGen {
             let arg_for_type = arg.clone();
             let (val, val_type) = self.emit_exp(arg)?;
             let val_ft = self.val_full_type(&val);
-            let expected = if let Some((_, param_fts, _)) = pointer_sig.as_ref() {
-                param_fts
-                    .get(i)
-                    .map(|ft| self.storage_ctype_for_full(ft))
-                    .or_else(|| param_types.get(i).copied())
-                    .unwrap_or_else(|| val_type.promote())
-            } else {
-                param_types
-                    .get(i)
-                    .copied()
-                    .unwrap_or_else(|| val_type.promote())
-            };
-            if let Some((_, param_fts, _)) = pointer_sig.as_ref() {
-                if let Some(expected_ft) = param_fts.get(i) {
-                    self.assert_assignable_exp_full_type(
-                        expected_ft,
-                        &val_ft,
-                        &arg_for_type,
-                        "function pointer call",
-                    )?;
-                }
+            let expected = param_full_types
+                .get(i)
+                .map(|ft| self.storage_ctype_for_full(ft))
+                .or_else(|| param_types.get(i).copied())
+                .unwrap_or_else(|| val_type.promote());
+            if let Some(expected_ft) = param_full_types.get(i) {
+                self.assert_assignable_exp_full_type(
+                    expected_ft,
+                    &val_ft,
+                    &arg_for_type,
+                    "function pointer call",
+                )?;
             }
 
             let source_ft = self.typeof_exp(&arg_for_type);
+            let expected_ft_is_complex = param_full_types.get(i).is_some_and(FullType::is_complex);
+            let is_complex_arg =
+                expected_ft_is_complex || val_ft.is_complex() || source_ft.is_complex();
+            if is_complex_arg {
+                let complex_ft = param_full_types
+                    .get(i)
+                    .filter(|ft| ft.is_complex())
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        if val_ft.is_complex() {
+                            val_ft.clone()
+                        } else {
+                            source_ft.clone()
+                        }
+                    });
+                let FullType::Vector { elem, .. } = complex_ft.clone() else {
+                    unreachable!();
+                };
+                let elem_type = elem.to_ctype();
+                let elem_size = elem.byte_size_with(&self.struct_defs);
+                let group_start = tacky_args.len();
+                let real = self.emit_complex_component_value(
+                    val.clone(),
+                    val_ft.clone(),
+                    elem_type,
+                    elem_size,
+                    0,
+                )?;
+                let imag = self.emit_complex_component_value(
+                    val,
+                    val_ft.clone(),
+                    elem_type,
+                    elem_size,
+                    1,
+                )?;
+                tacky_args.push(real);
+                tacky_args.push(imag);
+                struct_arg_groups.push((group_start, 2, vec![true, true]));
+                if i + 1 == param_types.len() {
+                    fixed_flat_arg_count = tacky_args.len();
+                }
+                continue;
+            }
             let is_struct_arg =
                 source_ft.is_struct() || val_ft.is_struct() || val_type == CType::Struct;
             if is_struct_arg || expected == CType::Struct {
@@ -4891,13 +5111,13 @@ impl TackyGen {
             fixed_flat_arg_count = 0;
         }
         let ret_type = ret_ft.to_ctype();
-        let uses_hidden_ptr = if let FullType::Struct(ref tag) = ret_ft {
-            self.struct_defs
+        let uses_hidden_ptr = match ret_ft {
+            FullType::Struct(ref tag) => self
+                .struct_defs
                 .get(tag)
                 .map(|def| def.size > 16)
-                .unwrap_or(false)
-        } else {
-            false
+                .unwrap_or(false),
+            _ => ret_ft.is_complex(),
         };
         if uses_hidden_ptr {
             let dst = self.fresh_tmp_full(&ret_ft);
@@ -4906,6 +5126,11 @@ impl TackyGen {
                     if let Some(def) = self.struct_defs.get(tag) {
                         self.array_sizes.insert(dst_name.clone(), def.size);
                     }
+                }
+            } else if ret_ft.is_complex() {
+                if let TackyVal::Var(ref dst_name) = dst {
+                    self.array_sizes
+                        .insert(dst_name.clone(), ret_ft.byte_size_with(&self.struct_defs));
                 }
             }
             let ret_addr = self.fresh_tmp(CType::Pointer);
@@ -4934,7 +5159,7 @@ impl TackyGen {
                 variadic,
                 indirect: true,
             });
-            return Ok((dst, CType::Struct));
+            return Ok((dst, ret_type));
         }
 
         let dst = self.fresh_tmp_full(&ret_ft);
@@ -4945,6 +5170,11 @@ impl TackyGen {
                     let alloc_size = std::cmp::max(def.size, classes.len() * 8);
                     self.array_sizes.insert(dst_name.clone(), alloc_size);
                 }
+            }
+        } else if ret_ft.is_complex() {
+            if let TackyVal::Var(ref dst_name) = dst {
+                self.array_sizes
+                    .insert(dst_name.clone(), ret_ft.byte_size_with(&self.struct_defs));
             }
         }
         self.emit(TackyInstr::FunCall {
@@ -5369,6 +5599,66 @@ impl TackyGen {
     fn emit_unary(&mut self, op: UnaryOp, inner: Exp) -> TackyResult<(TackyVal, CType)> {
         let (src, src_type) = self.emit_exp(inner)?;
         let value_ft = self.val_full_type(&src);
+        if value_ft.is_complex() {
+            let FullType::Vector { elem, .. } = value_ft.clone() else {
+                unreachable!();
+            };
+            let elem_type = elem.to_ctype();
+            let elem_size = elem.byte_size_with(&self.struct_defs);
+            let result = self.fresh_tmp_full(&value_ft);
+            let TackyVal::Var(result_name) = result.clone() else {
+                return Err("complex unary result must be addressable".to_string());
+            };
+            self.zero_init_local(&result_name, value_ft.byte_size_with(&self.struct_defs));
+            match op {
+                UnaryOp::Negate => {
+                    let zero = self.convert_to(TackyVal::Constant(0), CType::Int, elem_type);
+                    let real = self.emit_complex_component_value(
+                        src.clone(),
+                        value_ft.clone(),
+                        elem_type,
+                        elem_size,
+                        0,
+                    )?;
+                    let imag = self.emit_complex_component_value(
+                        src,
+                        value_ft.clone(),
+                        elem_type,
+                        elem_size,
+                        1,
+                    )?;
+                    let neg_real = self.fresh_tmp(elem_type);
+                    let neg_imag = self.fresh_tmp(elem_type);
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Sub,
+                        left: zero.clone(),
+                        right: real,
+                        dst: neg_real.clone(),
+                    });
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Sub,
+                        left: zero,
+                        right: imag,
+                        dst: neg_imag.clone(),
+                    });
+                    self.emit(TackyInstr::CopyToOffset {
+                        src: neg_real,
+                        dst_name: result_name.clone(),
+                        offset: 0,
+                    });
+                    self.emit(TackyInstr::CopyToOffset {
+                        src: neg_imag,
+                        dst_name: result_name.clone(),
+                        offset: elem_size as i64,
+                    });
+                    return Ok((result, value_ft.to_ctype()));
+                }
+                UnaryOp::Complement => {
+                    return Err("invalid complex unary operator".to_string());
+                }
+                _ => unreachable!(),
+            }
+        }
         if !value_ft.is_vector() {
             if src_type.is_floating() && matches!(op, UnaryOp::Negate) {
                 let dst = self.fresh_tmp(src_type);
@@ -5396,7 +5686,7 @@ impl TackyGen {
             return Ok((dst, promoted));
         }
 
-        let FullType::Vector { elem, lanes } = value_ft.clone() else {
+        let FullType::Vector { elem, lanes, .. } = value_ft.clone() else {
             unreachable!();
         };
         let elem_type = elem.to_ctype();
@@ -6546,6 +6836,32 @@ impl TackyGen {
         }
     }
 
+    fn emit_complex_component_value(
+        &mut self,
+        value: TackyVal,
+        value_ft: FullType,
+        elem_type: CType,
+        elem_size: usize,
+        lane: usize,
+    ) -> TackyResult<TackyVal> {
+        if value_ft.is_complex() {
+            let TackyVal::Var(name) = value else {
+                return Err("complex values must lower to addressable temporaries".to_string());
+            };
+            let dst = self.fresh_tmp(elem_type);
+            self.emit(TackyInstr::CopyFromOffset {
+                src_name: name,
+                offset: (lane * elem_size) as i64,
+                dst: dst.clone(),
+            });
+            Ok(dst)
+        } else if lane == 0 {
+            Ok(self.convert_to(value, value_ft.to_ctype(), elem_type))
+        } else {
+            Ok(self.convert_to(TackyVal::Constant(0), CType::Int, elem_type))
+        }
+    }
+
     fn emit_binary(
         &mut self,
         op: BinaryOp,
@@ -6568,13 +6884,270 @@ impl TackyGen {
         let l_full = self.val_full_type(&l);
         let r_full = self.val_full_type(&r);
 
+        if l_full.is_complex() || r_full.is_complex() {
+            let complex_ft = if l_full.is_complex() {
+                l_full.clone()
+            } else {
+                r_full.clone()
+            };
+            let FullType::Vector { elem, .. } = complex_ft.clone() else {
+                unreachable!();
+            };
+            let elem_type = elem.to_ctype();
+            let elem_size = elem.byte_size_with(&self.struct_defs);
+            let result = self.fresh_tmp_full(&complex_ft);
+            let TackyVal::Var(result_name) = result.clone() else {
+                return Err("complex result must be addressable".to_string());
+            };
+            self.zero_init_local(&result_name, complex_ft.byte_size_with(&self.struct_defs));
+
+            let left_real = self.emit_complex_component_value(
+                l.clone(),
+                l_full.clone(),
+                elem_type,
+                elem_size,
+                0,
+            )?;
+            let left_imag = self.emit_complex_component_value(
+                l.clone(),
+                l_full.clone(),
+                elem_type,
+                elem_size,
+                1,
+            )?;
+            let right_real = self.emit_complex_component_value(
+                r.clone(),
+                r_full.clone(),
+                elem_type,
+                elem_size,
+                0,
+            )?;
+            let right_imag = self.emit_complex_component_value(
+                r.clone(),
+                r_full.clone(),
+                elem_type,
+                elem_size,
+                1,
+            )?;
+
+            match op {
+                BinaryOp::Add | BinaryOp::Sub => {
+                    let tacky_op = Self::convert_binop(op)?;
+                    let real = self.fresh_tmp(elem_type);
+                    let imag = self.fresh_tmp(elem_type);
+                    self.emit(TackyInstr::Binary {
+                        op: tacky_op.clone(),
+                        left: left_real,
+                        right: right_real,
+                        dst: real.clone(),
+                    });
+                    self.emit(TackyInstr::Binary {
+                        op: tacky_op,
+                        left: left_imag,
+                        right: right_imag,
+                        dst: imag.clone(),
+                    });
+                    self.emit(TackyInstr::CopyToOffset {
+                        src: real,
+                        dst_name: result_name.clone(),
+                        offset: 0,
+                    });
+                    self.emit(TackyInstr::CopyToOffset {
+                        src: imag,
+                        dst_name: result_name.clone(),
+                        offset: elem_size as i64,
+                    });
+                    return Ok((result, elem_type));
+                }
+                BinaryOp::Mul => {
+                    let ar_br = self.fresh_tmp(elem_type);
+                    let ai_bi = self.fresh_tmp(elem_type);
+                    let ar_bi = self.fresh_tmp(elem_type);
+                    let ai_br = self.fresh_tmp(elem_type);
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Mul,
+                        left: left_real.clone(),
+                        right: right_real.clone(),
+                        dst: ar_br.clone(),
+                    });
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Mul,
+                        left: left_imag.clone(),
+                        right: right_imag.clone(),
+                        dst: ai_bi.clone(),
+                    });
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Mul,
+                        left: left_real,
+                        right: right_imag,
+                        dst: ar_bi.clone(),
+                    });
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Mul,
+                        left: left_imag,
+                        right: right_real,
+                        dst: ai_br.clone(),
+                    });
+                    let real = self.fresh_tmp(elem_type);
+                    let imag = self.fresh_tmp(elem_type);
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Sub,
+                        left: ar_br,
+                        right: ai_bi,
+                        dst: real.clone(),
+                    });
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Add,
+                        left: ar_bi,
+                        right: ai_br,
+                        dst: imag.clone(),
+                    });
+                    self.emit(TackyInstr::CopyToOffset {
+                        src: real,
+                        dst_name: result_name.clone(),
+                        offset: 0,
+                    });
+                    self.emit(TackyInstr::CopyToOffset {
+                        src: imag,
+                        dst_name: result_name.clone(),
+                        offset: elem_size as i64,
+                    });
+                    return Ok((result, elem_type));
+                }
+                BinaryOp::Div => {
+                    let br2 = self.fresh_tmp(elem_type);
+                    let bi2 = self.fresh_tmp(elem_type);
+                    let denom = self.fresh_tmp(elem_type);
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Mul,
+                        left: right_real.clone(),
+                        right: right_real.clone(),
+                        dst: br2.clone(),
+                    });
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Mul,
+                        left: right_imag.clone(),
+                        right: right_imag.clone(),
+                        dst: bi2.clone(),
+                    });
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Add,
+                        left: br2,
+                        right: bi2,
+                        dst: denom.clone(),
+                    });
+                    let ar_br = self.fresh_tmp(elem_type);
+                    let ai_bi = self.fresh_tmp(elem_type);
+                    let ai_br = self.fresh_tmp(elem_type);
+                    let ar_bi = self.fresh_tmp(elem_type);
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Mul,
+                        left: left_real.clone(),
+                        right: right_real.clone(),
+                        dst: ar_br.clone(),
+                    });
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Mul,
+                        left: left_imag.clone(),
+                        right: right_imag.clone(),
+                        dst: ai_bi.clone(),
+                    });
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Mul,
+                        left: left_imag,
+                        right: right_real,
+                        dst: ai_br.clone(),
+                    });
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Mul,
+                        left: left_real,
+                        right: right_imag,
+                        dst: ar_bi.clone(),
+                    });
+                    let real_num = self.fresh_tmp(elem_type);
+                    let imag_num = self.fresh_tmp(elem_type);
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Add,
+                        left: ar_br,
+                        right: ai_bi,
+                        dst: real_num.clone(),
+                    });
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Sub,
+                        left: ai_br,
+                        right: ar_bi,
+                        dst: imag_num.clone(),
+                    });
+                    let real = self.fresh_tmp(elem_type);
+                    let imag = self.fresh_tmp(elem_type);
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Div,
+                        left: real_num,
+                        right: denom.clone(),
+                        dst: real.clone(),
+                    });
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Div,
+                        left: imag_num,
+                        right: denom,
+                        dst: imag.clone(),
+                    });
+                    self.emit(TackyInstr::CopyToOffset {
+                        src: real,
+                        dst_name: result_name.clone(),
+                        offset: 0,
+                    });
+                    self.emit(TackyInstr::CopyToOffset {
+                        src: imag,
+                        dst_name: result_name.clone(),
+                        offset: elem_size as i64,
+                    });
+                    return Ok((result, elem_type));
+                }
+                BinaryOp::Equal | BinaryOp::NotEqual => {
+                    let real_cmp = self.fresh_tmp(CType::Int);
+                    let imag_cmp = self.fresh_tmp(CType::Int);
+                    let is_equal = matches!(op, BinaryOp::Equal);
+                    let cmp_op = Self::convert_binop(op.clone())?;
+                    self.emit(TackyInstr::Binary {
+                        op: cmp_op.clone(),
+                        left: left_real,
+                        right: right_real,
+                        dst: real_cmp.clone(),
+                    });
+                    self.emit(TackyInstr::Binary {
+                        op: cmp_op,
+                        left: left_imag,
+                        right: right_imag,
+                        dst: imag_cmp.clone(),
+                    });
+                    let combine_op = if is_equal {
+                        TackyBinaryOp::BitwiseAnd
+                    } else {
+                        TackyBinaryOp::BitwiseOr
+                    };
+                    let dst = self.fresh_tmp(CType::Int);
+                    self.emit(TackyInstr::Binary {
+                        op: combine_op,
+                        left: real_cmp,
+                        right: imag_cmp,
+                        dst: dst.clone(),
+                    });
+                    return Ok((dst, CType::Int));
+                }
+                _ => {
+                    return Err("unsupported complex operator".to_string());
+                }
+            }
+        }
+
         if is_comparison_op(&op) && (l_full.is_vector() || r_full.is_vector()) {
             let vector_ft = if l_full.is_vector() {
                 l_full.clone()
             } else {
                 r_full.clone()
             };
-            let FullType::Vector { elem, lanes } = vector_ft.clone() else {
+            let FullType::Vector { elem, lanes, .. } = vector_ft.clone() else {
                 unreachable!();
             };
             let elem_type = elem.to_ctype();
@@ -6631,7 +7204,7 @@ impl TackyGen {
             } else {
                 r_full.clone()
             };
-            let FullType::Vector { elem, lanes } = vector_ft.clone() else {
+            let FullType::Vector { elem, lanes, .. } = vector_ft.clone() else {
                 unreachable!();
             };
             let elem_type = elem.to_ctype();
@@ -6933,46 +7506,86 @@ impl TackyGen {
                         let ret_ptr_val = TackyVal::Var(ret_ptr.clone());
                         let ret_ft = self.func_full_types.get(&self.current_function).cloned();
                         let val_ft = self.val_full_type(&val);
-                        let src_addr = if val_type == CType::Struct {
-                            if let TackyVal::Var(ref name) = val {
-                                if self.array_sizes.contains_key(name) {
+                        let src_addr = if let Some(ref ret_ft) = ret_ft {
+                            if ret_ft.is_complex() {
+                                if val_ft.is_complex() {
+                                    self.get_struct_addr(val)
+                                } else {
+                                    let tmp = self.fresh_tmp_full(ret_ft);
+                                    let TackyVal::Var(ref tmp_name) = tmp else {
+                                        unreachable!();
+                                    };
+                                    self.zero_init_local(
+                                        tmp_name,
+                                        ret_ft.byte_size_with(&self.struct_defs),
+                                    );
+                                    let FullType::Vector { elem, .. } = ret_ft.clone() else {
+                                        unreachable!();
+                                    };
+                                    let elem_type = elem.to_ctype();
+                                    let real = self.convert_to(val, val_type, elem_type);
+                                    self.emit(TackyInstr::CopyToOffset {
+                                        src: real,
+                                        dst_name: tmp_name.clone(),
+                                        offset: 0,
+                                    });
+                                    self.get_struct_addr(tmp)
+                                }
+                            } else if val_type == CType::Struct {
+                                if let TackyVal::Var(ref name) = val {
+                                    if self.array_sizes.contains_key(name) {
+                                        let a = self.fresh_tmp(CType::Pointer);
+                                        self.emit(TackyInstr::GetAddress {
+                                            src: val,
+                                            dst: a.clone(),
+                                        });
+                                        a
+                                    } else {
+                                        val
+                                    }
+                                } else {
+                                    val
+                                }
+                            } else {
+                                if let FullType::Struct(ret_tag) = ret_ft {
+                                    if let FullType::Pointer(pointee) = &val_ft {
+                                        if matches!(pointee.as_ref(), FullType::Struct(src_tag) if src_tag == ret_tag)
+                                        {
+                                            val
+                                        } else {
+                                            let a = self.fresh_tmp(CType::Pointer);
+                                            self.emit(TackyInstr::GetAddress {
+                                                src: val,
+                                                dst: a.clone(),
+                                            });
+                                            a
+                                        }
+                                    } else {
+                                        let a = self.fresh_tmp(CType::Pointer);
+                                        self.emit(TackyInstr::GetAddress {
+                                            src: val,
+                                            dst: a.clone(),
+                                        });
+                                        a
+                                    }
+                                } else {
                                     let a = self.fresh_tmp(CType::Pointer);
                                     self.emit(TackyInstr::GetAddress {
                                         src: val,
                                         dst: a.clone(),
                                     });
                                     a
-                                } else {
-                                    val
                                 }
-                            } else {
-                                val
                             }
-                        } else if matches!(
-                            (&ret_ft, &val_ft),
-                            (Some(FullType::Struct(ret_tag)), FullType::Pointer(pointee))
-                                if matches!(pointee.as_ref(), FullType::Struct(src_tag) if src_tag == ret_tag)
-                        ) {
+                        } else {
                             val
-                        } else {
-                            let a = self.fresh_tmp(CType::Pointer);
-                            self.emit(TackyInstr::GetAddress {
-                                src: val,
-                                dst: a.clone(),
-                            });
-                            a
                         };
-                        // Copy struct to hidden return pointer location
-                        let struct_size = if let Some(FullType::Struct(ref tag)) = ret_ft {
-                            self.struct_defs.get(tag).map(|d| d.size).unwrap_or(0)
-                        } else {
-                            0
-                        };
-                        self.emit_struct_copy_ptr_to_ptr(
-                            src_addr,
-                            ret_ptr_val.clone(),
-                            struct_size,
-                        );
+                        // Copy aggregate/complex result to hidden return pointer location
+                        let ret_size = ret_ft
+                            .as_ref()
+                            .map(|ft| ft.byte_size_with(&self.struct_defs))
+                            .unwrap_or(0);
+                        self.emit_struct_copy_ptr_to_ptr(src_addr, ret_ptr_val.clone(), ret_size);
                         self.emit(TackyInstr::Return(ret_ptr_val));
                     } else {
                         let ret_ft = self
@@ -8071,6 +8684,46 @@ impl TackyGen {
         value: &Exp,
         offset: i64,
     ) -> TackyResult<()> {
+        if target_ft.is_complex() {
+            let (elem_type, elem_size) = match target_ft {
+                FullType::Vector { elem, .. } => {
+                    (elem.to_ctype(), elem.byte_size_with(&self.struct_defs))
+                }
+                _ => (CType::Double, 8),
+            };
+            match value {
+                Exp::ArrayInit(elems) => {
+                    if let Some(first) = elems.first() {
+                        let (val, val_type) = self.emit_exp(first.clone())?;
+                        let real = self.convert_to(val, val_type, elem_type);
+                        self.emit(TackyInstr::CopyToOffset {
+                            src: real,
+                            dst_name: arr_name.to_string(),
+                            offset,
+                        });
+                    }
+                    if let Some(second) = elems.get(1) {
+                        let (val, val_type) = self.emit_exp(second.clone())?;
+                        let imag = self.convert_to(val, val_type, elem_type);
+                        self.emit(TackyInstr::CopyToOffset {
+                            src: imag,
+                            dst_name: arr_name.to_string(),
+                            offset: offset + elem_size as i64,
+                        });
+                    }
+                }
+                _ => {
+                    let (val, val_type) = self.emit_exp(value.clone())?;
+                    let real = self.convert_to(val, val_type, elem_type);
+                    self.emit(TackyInstr::CopyToOffset {
+                        src: real,
+                        dst_name: arr_name.to_string(),
+                        offset,
+                    });
+                }
+            }
+            return Ok(());
+        }
         match (target_ft, value) {
             (_, Exp::DesignatedInit(designators, inner)) => {
                 self.emit_designated_init_at(arr_name, target_ft, designators, inner, offset)?;
@@ -8238,6 +8891,37 @@ impl TackyGen {
         init: &Exp,
         base_offset: usize,
     ) -> TackyResult<()> {
+        if base_ft.is_complex() {
+            let (elem_type, elem_size) = match base_ft {
+                FullType::Vector { elem, .. } => {
+                    (elem.to_ctype(), elem.byte_size_with(&self.struct_defs))
+                }
+                _ => (CType::Double, 8),
+            };
+            match init {
+                Exp::ArrayInit(elems) => {
+                    if let Some(first) = elems.first() {
+                        let (v, is_dbl, is_uns) =
+                            self.eval_static_constant_init(&Some(first.clone()))?;
+                        let cv = convert_init_value(v, elem_type, is_dbl, is_uns);
+                        builder.put(base_offset, make_static_init(cv, elem_type))?;
+                    }
+                    if let Some(second) = elems.get(1) {
+                        let (v, is_dbl, is_uns) =
+                            self.eval_static_constant_init(&Some(second.clone()))?;
+                        let cv = convert_init_value(v, elem_type, is_dbl, is_uns);
+                        builder.put(base_offset + elem_size, make_static_init(cv, elem_type))?;
+                    }
+                }
+                _ => {
+                    let (v, is_dbl, is_uns) =
+                        self.eval_static_constant_init(&Some(init.clone()))?;
+                    let cv = convert_init_value(v, elem_type, is_dbl, is_uns);
+                    builder.put(base_offset, make_static_init(cv, elem_type))?;
+                }
+            }
+            return Ok(());
+        }
         if let Exp::DesignatedInit(designators, value) = init {
             if let (FullType::Struct(tag), [Designator::Field(name)]) =
                 (base_ft, designators.as_slice())
@@ -8538,7 +9222,7 @@ impl TackyGen {
                 let label = self.make_string_constant(s);
                 builder.put(base_offset, StaticInit::PointerInit(label))?;
             }
-            (FullType::Vector { elem, lanes }, Exp::ArrayInit(elems)) => {
+            (FullType::Vector { elem, lanes, .. }, Exp::ArrayInit(elems)) => {
                 let elem_size = elem.byte_size_with(&self.struct_defs);
                 for (index, elem_init) in elems.iter().take(*lanes).enumerate() {
                     self.put_static_initializer(
@@ -9413,6 +10097,60 @@ impl TackyGen {
         } else if let Some(init) = init {
             let vd_name = vd.name.clone();
             let init_for_type = init.clone();
+            if ft.is_complex() {
+                let size = ft.byte_size_with(&self.struct_defs);
+                self.zero_init_local(&vd_name, size);
+                if let Exp::ArrayInit(elems) = init {
+                    let (elem_ft, elem_type, elem_size) = match &ft {
+                        FullType::Vector { elem, .. } => (
+                            elem.as_ref().clone(),
+                            elem.to_ctype(),
+                            elem.byte_size_with(&self.struct_defs),
+                        ),
+                        _ => (
+                            FullType::Scalar(vd.var_type),
+                            vd.var_type,
+                            vd.var_type.size() as usize,
+                        ),
+                    };
+                    for (index, elem_init) in elems.into_iter().take(2).enumerate() {
+                        let (val, val_type) = self.emit_exp(elem_init.clone())?;
+                        let val_ft = self.val_full_type(&val);
+                        self.assert_assignable_exp_full_type(
+                            &elem_ft,
+                            &val_ft,
+                            &elem_init,
+                            "initializer",
+                        )?;
+                        let converted = self.convert_to(val, val_type, elem_type);
+                        self.emit(TackyInstr::CopyToOffset {
+                            src: converted,
+                            dst_name: vd_name.clone(),
+                            offset: (index * elem_size) as i64,
+                        });
+                    }
+                    return Ok(());
+                }
+                let (val, val_type) = self.emit_exp(init)?;
+                let val_ft = self.val_full_type(&val);
+                self.assert_assignable_exp_full_type(&ft, &val_ft, &init_for_type, "initializer")?;
+                if val_ft.is_complex() {
+                    let src_addr = self.get_struct_addr(val);
+                    self.emit_struct_copy_to(src_addr, &vd_name, size);
+                } else {
+                    let elem_type = match &ft {
+                        FullType::Vector { elem, .. } => elem.to_ctype(),
+                        _ => vd.var_type,
+                    };
+                    let real = self.convert_to(val, val_type, elem_type);
+                    self.emit(TackyInstr::CopyToOffset {
+                        src: real,
+                        dst_name: vd_name.clone(),
+                        offset: 0,
+                    });
+                }
+                return Ok(());
+            }
             if ft.is_vector() {
                 let size = ft.byte_size_with(&self.struct_defs);
                 self.zero_init_local(&vd_name, size);
@@ -10084,11 +10822,17 @@ impl TackyGen {
         self.local_label_stack.push(local_labels);
 
         // Check if return type requires hidden pointer
-        let ret_needs_hidden_ptr = if let Some(FullType::Struct(ref tag)) = func.return_full_type {
-            self.struct_defs
-                .get(tag)
-                .map(|d| d.size > 16)
-                .unwrap_or(false)
+        let ret_needs_hidden_ptr = if let Some(ref ret_ft) = func.return_full_type {
+            matches!(ret_ft, FullType::Struct(_))
+                && self
+                    .struct_defs
+                    .get(match ret_ft {
+                        FullType::Struct(tag) => tag,
+                        _ => unreachable!(),
+                    })
+                    .map(|d| d.size > 16)
+                    .unwrap_or(false)
+                || ret_ft.is_complex()
         } else {
             false
         };
@@ -10107,6 +10851,7 @@ impl TackyGen {
         let mut stack_params = std::collections::HashSet::new();
         let mut memory_param_blocks = Vec::new();
         let mut struct_param_groups: Vec<(usize, usize, Vec<bool>)> = Vec::new();
+        let mut complex_param_fixups: Vec<(String, usize)> = Vec::new();
         if let Some(ref ret_ptr) = hidden_ret_ptr_name {
             tacky_params.push(ret_ptr.clone());
         }
@@ -10177,6 +10922,26 @@ impl TackyGen {
                     continue;
                 }
             }
+            if ft.is_complex() {
+                let FullType::Vector { elem, .. } = &ft else {
+                    unreachable!();
+                };
+                let elem_type = elem.to_ctype();
+                let elem_size = elem.byte_size_with(&self.struct_defs);
+                let group_start = tacky_params.len();
+                let flat_names = [format!("{}_eb0", name), format!("{}_eb1", name)];
+                for flat_name in &flat_names {
+                    self.var_types.insert(flat_name.clone(), elem_type);
+                    self.symbol_types.insert(flat_name.clone(), elem_type);
+                    tacky_params.push(flat_name.clone());
+                }
+                struct_param_groups.push((group_start, 2, vec![true, true]));
+                complex_param_fixups.push((name.clone(), elem_size));
+                self.register_var(name, ft.clone());
+                self.array_sizes
+                    .insert(name.clone(), ft.byte_size_with(&self.struct_defs));
+                continue;
+            }
 
             let storage_type = self.storage_ctype_for_full(&ft);
             self.var_types.insert(name.clone(), storage_type);
@@ -10206,6 +10971,18 @@ impl TackyGen {
             for eb_idx in 0..num_ebs {
                 let param_name = format!("{}_eb{}", name, eb_idx);
                 let eb_offset = (eb_idx * 8) as i64;
+                self.emit(TackyInstr::CopyToOffset {
+                    src: TackyVal::Var(param_name),
+                    dst_name: name.clone(),
+                    offset: eb_offset,
+                });
+            }
+        }
+
+        for (name, elem_size) in &complex_param_fixups {
+            for eb_idx in 0..2 {
+                let param_name = format!("{}_eb{}", name, eb_idx);
+                let eb_offset = (eb_idx * *elem_size) as i64;
                 self.emit(TackyInstr::CopyToOffset {
                     src: TackyVal::Var(param_name),
                     dst_name: name.clone(),

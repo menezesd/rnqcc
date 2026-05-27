@@ -4132,6 +4132,43 @@ int main(void) {
 }
 
 #[test]
+fn compiles_and_runs_complex_arithmetic() {
+    let src = temp_file("complex-arithmetic", "i");
+    let exe = temp_file("complex-arithmetic", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    float _Complex a = {1.0f, 2.0f};
+    float _Complex b = {3.0f, 4.0f};
+    float _Complex c = a * b;
+    float _Complex d = -c;
+    if (c != (float _Complex){-5.0f, 10.0f}) return 1;
+    if (d != (float _Complex){5.0f, -10.0f}) return 2;
+    if ((float _Complex){0.0f, 0.0f}) return 3;
+    if (!((float _Complex){1.0f, 0.0f})) return 4;
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write test input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn compiles_and_runs_host_printf_variadic_call() {
     let src = temp_file("printf-varargs-src", "i");
     let exe = temp_file("printf-varargs-exe", "bin");
@@ -10234,7 +10271,47 @@ fn internal_cpp_rejects_extra_tokens_after_include() {
     let _ = std::fs::remove_file(src);
 
     assert!(!status.success(), "{stderr}");
-    assert!(stderr.contains("unsupported include directive"), "{stderr}");
+    assert!(stderr.contains("malformed include operand"), "{stderr}");
+}
+
+#[test]
+fn internal_cpp_rejects_empty_angle_include_operand() {
+    let src = temp_file("internal-cpp-empty-angle-include", "c");
+    std::fs::write(&src, "#include <>\nint value = 1;\n").expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+    let status = output.status;
+    let stderr = stderr(output);
+
+    let _ = std::fs::remove_file(src);
+
+    assert!(!status.success(), "{stderr}");
+    assert!(stderr.contains("malformed include operand"), "{stderr}");
+}
+
+#[test]
+fn internal_cpp_rejects_empty_quoted_include_operand() {
+    let src = temp_file("internal-cpp-empty-quoted-include", "c");
+    std::fs::write(&src, "#include \"\"\nint value = 1;\n").expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+    let status = output.status;
+    let stderr = stderr(output);
+
+    let _ = std::fs::remove_file(src);
+
+    assert!(!status.success(), "{stderr}");
+    assert!(stderr.contains("malformed include operand"), "{stderr}");
 }
 
 #[test]
@@ -10262,7 +10339,94 @@ fn internal_cpp_rejects_extra_tokens_in_has_include_operand() {
     let _ = std::fs::remove_file(src);
 
     assert!(!status.success(), "{stderr}");
-    assert!(stderr.contains("unsupported #if expression"), "{stderr}");
+    assert!(stderr.contains("malformed include operand"), "{stderr}");
+}
+
+#[test]
+fn internal_cpp_rejects_empty_quoted_has_include_operand() {
+    let src = temp_file("internal-cpp-empty-quoted-has-include", "c");
+    std::fs::write(&src, "#if __has_include(\"\")\nint value = 1;\n#endif\n")
+        .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+    let status = output.status;
+    let stderr = stderr(output);
+
+    let _ = std::fs::remove_file(src);
+
+    assert!(!status.success(), "{stderr}");
+    assert!(stderr.contains("malformed include operand"), "{stderr}");
+}
+
+#[test]
+fn internal_cpp_rejects_empty_angle_has_include_operand() {
+    let src = temp_file("internal-cpp-empty-angle-has-include", "c");
+    std::fs::write(&src, "#if __has_include(<>)\nint value = 1;\n#endif\n")
+        .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+    let status = output.status;
+    let stderr = stderr(output);
+
+    let _ = std::fs::remove_file(src);
+
+    assert!(!status.success(), "{stderr}");
+    assert!(stderr.contains("malformed include operand"), "{stderr}");
+}
+
+#[test]
+fn internal_cpp_rejects_empty_quoted_has_include_next_operand() {
+    let src = temp_file("internal-cpp-empty-quoted-has-include-next", "c");
+    std::fs::write(
+        &src,
+        "#if __has_include_next(\"\")\nint value = 1;\n#endif\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+    let status = output.status;
+    let stderr = stderr(output);
+
+    let _ = std::fs::remove_file(src);
+
+    assert!(!status.success(), "{stderr}");
+    assert!(stderr.contains("malformed include operand"), "{stderr}");
+}
+
+#[test]
+fn internal_cpp_rejects_empty_angle_has_include_next_operand() {
+    let src = temp_file("internal-cpp-empty-angle-has-include-next", "c");
+    std::fs::write(&src, "#if __has_include_next(<>)\nint value = 1;\n#endif\n")
+        .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+    let status = output.status;
+    let stderr = stderr(output);
+
+    let _ = std::fs::remove_file(src);
+
+    assert!(!status.success(), "{stderr}");
+    assert!(stderr.contains("malformed include operand"), "{stderr}");
 }
 
 #[test]
@@ -10645,6 +10809,35 @@ fn internal_cpp_honors_pragma_pack_push_four_and_pop() {
 }
 
 #[test]
+fn internal_cpp_honors_pragma_push_macro_and_pop_macro() {
+    let src = temp_file("internal-cpp-pragma-push-pop-macro", "c");
+    std::fs::write(
+        &src,
+        "#define VALUE 1\n\
+         #pragma push_macro(\"VALUE\")\n\
+         #undef VALUE\n\
+         #define VALUE 2\n\
+         #pragma pop_macro(\"VALUE\")\n\
+         int result = VALUE;\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("int result = 1;"), "{stdout}");
+    assert!(!stdout.contains("int result = 2;"), "{stdout}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn internal_cpp_honors_standalone_pragma_operator_once() {
     let header = temp_file("internal-cpp-pragma-operator-once", "h");
     let src = temp_file("internal-cpp-pragma-operator-once", "c");
@@ -10863,6 +11056,37 @@ fn internal_cpp_searches_include_paths_for_angle_includes() {
     std::fs::write(
         &src,
         "#include <rnqcc_angle.h>\nint main(void) { return VALUE_FROM_ANGLE; }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-I")
+        .arg(&include_dir)
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("int main(void) { return 42; }"), "{stdout}");
+
+    let _ = std::fs::remove_file(header);
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_dir(include_dir);
+}
+
+#[test]
+fn internal_cpp_expands_macro_generated_angle_includes() {
+    let include_dir = temp_file("internal-cpp-macro-angle-include-dir", "d");
+    let src = temp_file("internal-cpp-macro-angle-include", "c");
+    std::fs::create_dir(&include_dir).expect("failed to create include dir");
+    let header = include_dir.join("rnqcc_macro_angle.h");
+    std::fs::write(&header, "#define MACRO_ANGLE_VALUE 42\n").expect("failed to write header");
+    std::fs::write(
+        &src,
+        "#define ANGLE_HEADER <rnqcc_macro_angle.h>\n#include ANGLE_HEADER\nint main(void) { return MACRO_ANGLE_VALUE; }\n",
     )
     .expect("failed to write source");
 
@@ -11133,6 +11357,59 @@ fn internal_cpp_handles_include_next() {
     std::fs::write(
         &src,
         "#include <rnqcc_next.h>\nint main(void) { return NEXT_VALUE + WRAPPED + HAS_NEXT_CHECK; }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-I")
+        .arg(&first_dir)
+        .arg("-I")
+        .arg(&second_dir)
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(
+        stdout.contains("int main(void) { return 40 + 2 + 1; }"),
+        "{stdout}"
+    );
+
+    let _ = std::fs::remove_file(first_header);
+    let _ = std::fs::remove_file(next);
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_dir(first_dir);
+    let _ = std::fs::remove_dir(second_dir);
+}
+
+#[test]
+fn internal_cpp_handles_macro_generated_include_next_and_has_include_next() {
+    let first_dir = temp_file("internal-cpp-macro-include-next-first", "d");
+    let second_dir = temp_file("internal-cpp-macro-include-next-second", "d");
+    let src = temp_file("internal-cpp-macro-include-next", "c");
+    std::fs::create_dir(&first_dir).expect("failed to create first include dir");
+    std::fs::create_dir(&second_dir).expect("failed to create second include dir");
+    let first_header = first_dir.join("rnqcc_macro_next.h");
+    let next = second_dir.join("rnqcc_macro_next.h");
+    std::fs::write(
+        &first_header,
+        "#define NEXT_HEADER <rnqcc_macro_next.h>\n\
+         #if __has_include_next(NEXT_HEADER)\n\
+         #define HAS_NEXT_MACRO 1\n\
+         #else\n\
+         #define HAS_NEXT_MACRO 0\n\
+         #endif\n\
+         #include_next NEXT_HEADER\n\
+         #define WRAPPED_NEXT 2\n",
+    )
+    .expect("failed to write first header");
+    std::fs::write(&next, "#define NEXT_MACRO_VALUE 40\n").expect("failed to write next header");
+    std::fs::write(
+        &src,
+        "#include <rnqcc_macro_next.h>\nint main(void) { return NEXT_MACRO_VALUE + WRAPPED_NEXT + HAS_NEXT_MACRO; }\n",
     )
     .expect("failed to write source");
 

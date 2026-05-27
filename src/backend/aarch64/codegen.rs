@@ -1150,8 +1150,7 @@ fn convert_function(
                 &stack_slots,
                 global_vars,
             )?;
-            stack_param_count +=
-                size.div_ceil(STACK_SLOT_SIZE as usize);
+            stack_param_count += size.div_ceil(STACK_SLOT_SIZE as usize);
             param_index += 1;
             continue;
         }
@@ -2160,7 +2159,7 @@ fn convert_function(
                                     stack_arg_offset(0, stack_index),
                                     outgoing_bytes,
                                 );
-                    stack_index += size.div_ceil(STACK_SLOT_SIZE as usize);
+                                stack_index += size.div_ceil(STACK_SLOT_SIZE as usize);
                             }
                         }
                     }

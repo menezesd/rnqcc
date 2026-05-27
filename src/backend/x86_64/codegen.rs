@@ -1352,7 +1352,11 @@ fn convert_funcall(
                 StackArg::MemoryBlock { size, .. } => size.next_multiple_of(8),
             })
             .sum();
-        let padding = if !stack_bytes.is_multiple_of(16) { 8 } else { 0 };
+        let padding = if !stack_bytes.is_multiple_of(16) {
+            8
+        } else {
+            0
+        };
         let outgoing_bytes = stack_bytes + padding;
         if outgoing_bytes > 0 {
             out.push(AsmInstr::AllocateStack(outgoing_bytes as i32));

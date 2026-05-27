@@ -779,8 +779,11 @@ impl Lexer {
         }
         if wide && chars.len() > 1 {
             if let Some(decoded) = Self::decode_utf8_byte_chars(&chars) {
-                if decoded.chars().count() == 1 {
-                    value = decoded.chars().next().unwrap() as i64;
+                let mut decoded_chars = decoded.chars();
+                if decoded_chars.clone().count() == 1 {
+                    if let Some(ch) = decoded_chars.next() {
+                        value = ch as i64;
+                    }
                 }
             }
         }
@@ -1480,6 +1483,14 @@ mod tests {
         let tokens = lex("int x = '\\x41'; int y = '\\101'; int z = '\\377';")?;
         assert!(tokens.contains(&Token::CharLiteral(65)));
         assert!(tokens.contains(&Token::CharLiteral(255)));
+        Ok(())
+    }
+
+    #[test]
+    fn lexes_wide_character_literals_without_panicking() -> Result<(), String> {
+        let tokens = lex("int x = L'a'; int y = L'π';")?;
+        assert!(tokens.contains(&Token::CharLiteral('a' as i64)));
+        assert!(tokens.contains(&Token::CharLiteral('π' as i64)));
         Ok(())
     }
 

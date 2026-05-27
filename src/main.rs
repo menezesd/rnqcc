@@ -967,19 +967,21 @@ fn parse_include_tokens(
     line_number: usize,
     include_level: usize,
     state: &mut PreprocessorState,
-) -> Option<IncludeSpec> {
-    strict_include_spec_from_tokens(tokens).or_else(|| {
-        let token_macros = token_macro_table(macros).ok()?;
-        let mut hooks = LiveMacroExpansionHooks {
-            file,
-            line_number,
-            include_level,
-            state,
-        };
-        let expanded =
-            preprocess::macro_expand::expand_macros_with_hooks(tokens, &token_macros, &mut hooks)
-                .ok()?;
-        strict_include_spec_from_tokens(&expanded)
+) -> Result<IncludeSpec, String> {
+    let token_macros = token_macro_table(macros)?;
+    let mut hooks = LiveMacroExpansionHooks {
+        file,
+        line_number,
+        include_level,
+        state,
+    };
+    let expanded =
+        preprocess::macro_expand::expand_macros_with_hooks(tokens, &token_macros, &mut hooks)?;
+    strict_include_spec_from_tokens(&expanded).ok_or_else(|| {
+        format!(
+            "malformed include operand: {}",
+            preprocess::emit::emit_tokens(&expanded).trim()
+        )
     })
 }
 
@@ -987,6 +989,9 @@ fn strict_include_spec_from_tokens(tokens: &[preprocess::token::PpToken]) -> Opt
     let start = skip_include_ws(tokens, 0);
     match tokens.get(start).map(|token| &token.kind) {
         Some(preprocess::token::PpTokenKind::StringLit(text)) => {
+            if text.trim_matches('"').is_empty() {
+                return None;
+            }
             if !only_include_ws(tokens, start + 1) {
                 return None;
             }
@@ -1001,6 +1006,9 @@ fn strict_include_spec_from_tokens(tokens: &[preprocess::token::PpToken]) -> Opt
             for (index, token) in tokens.iter().enumerate().skip(start + 1) {
                 if matches!(&token.kind, preprocess::token::PpTokenKind::Punct(value) if value == ">")
                 {
+                    if name.is_empty() {
+                        return None;
+                    }
                     if !only_include_ws(tokens, index + 1) {
                         return None;
                     }
@@ -1036,14 +1044,20 @@ fn parse_token_include_operand(
     line_number: usize,
     include_level: usize,
     state: &mut PreprocessorState,
-) -> Option<IncludeSpec> {
+) -> Result<IncludeSpec, String> {
     match operand {
         preprocess::directive::IncludeOperand::Literal(header) => match header {
             preprocess::directive::HeaderName::Quoted(name) => {
-                Some(IncludeSpec::Quoted(name.clone()))
+                if name.is_empty() {
+                    return Err("malformed include operand: \"\"".to_string());
+                }
+                Ok(IncludeSpec::Quoted(name.clone()))
             }
             preprocess::directive::HeaderName::Angled(name) => {
-                Some(IncludeSpec::Angled(name.clone()))
+                if name.is_empty() {
+                    return Err("malformed include operand: <>".to_string());
+                }
+                Ok(IncludeSpec::Angled(name.clone()))
             }
         },
         preprocess::directive::IncludeOperand::Tokens(tokens) => {
@@ -1182,7 +1196,7 @@ fn process_pragma_operators(line: &str) -> Result<(String, Vec<String>), String>
     let mut pragmas = Vec::new();
     let mut index = 0usize;
     while index < tokens.len() {
-        if let Some((pragma, next_index)) = parse_pragma_operator(&tokens, index) {
+        if let Some((pragma, next_index)) = parse_pragma_operator(&tokens, index)? {
             pragmas.push(pragma);
             index = next_index;
         } else {
@@ -1196,19 +1210,19 @@ fn process_pragma_operators(line: &str) -> Result<(String, Vec<String>), String>
 fn parse_pragma_operator(
     tokens: &[preprocess::token::PpToken],
     start: usize,
-) -> Option<(String, usize)> {
+) -> Result<Option<(String, usize)>, String> {
     if !matches!(
         tokens.get(start).map(|token| &token.kind),
         Some(preprocess::token::PpTokenKind::Ident(name)) if name == "_Pragma"
     ) {
-        return None;
+        return Ok(None);
     }
     let mut index = skip_include_ws(tokens, start + 1);
     if !matches!(
         tokens.get(index).map(|token| &token.kind),
         Some(preprocess::token::PpTokenKind::Punct(value)) if value == "("
     ) {
-        return None;
+        return Err("malformed _Pragma operator: expected '('".to_string());
     }
     index = skip_include_ws(tokens, index + 1);
     let Some(preprocess::token::PpToken {
@@ -1216,7 +1230,7 @@ fn parse_pragma_operator(
         ..
     }) = tokens.get(index)
     else {
-        return None;
+        return Err("malformed _Pragma operator: expected string literal".to_string());
     };
     let pragma = decode_line_filename(
         text.trim_start_matches('"')
@@ -1228,9 +1242,9 @@ fn parse_pragma_operator(
         tokens.get(index).map(|token| &token.kind),
         Some(preprocess::token::PpTokenKind::Punct(value)) if value == ")"
     ) {
-        return None;
+        return Err("malformed _Pragma operator: expected ')'".to_string());
     }
-    Some((pragma, index + 1))
+    Ok(Some((pragma, index + 1)))
 }
 
 fn line_operand_error(error: preprocess::directive::LineOperandError) -> String {
@@ -3588,6 +3602,7 @@ struct InternalPreprocessContext<'a> {
     once_files: &'a mut HashSet<PathBuf>,
     system_header_files: &'a mut HashSet<PathBuf>,
     poisoned_identifiers: &'a mut HashSet<String>,
+    saved_macros: &'a mut HashMap<String, Vec<Option<MacroDef>>>,
     pragma_pack_stack: &'a mut Vec<Option<usize>>,
     pragma_pack_alignment: &'a mut Option<usize>,
     include_paths: &'a IncludePaths,
@@ -3681,6 +3696,16 @@ fn poison_identifiers_from_pragma(pragma: &str, context: &mut InternalPreprocess
     }
 }
 
+fn parse_pragma_macro_name(pragma: &str, prefix: &str) -> Option<String> {
+    let rest = pragma.trim().strip_prefix(prefix)?.trim();
+    let inner = rest.strip_prefix('(')?.strip_suffix(')')?.trim();
+    let name = inner.strip_prefix('"')?.strip_suffix('"')?;
+    if !name.chars().next().is_some_and(is_ident_start) || !name.chars().all(is_ident_continue) {
+        return None;
+    }
+    Some(name.to_string())
+}
+
 enum PragmaPackAction {
     Set(Option<usize>),
     Push(Option<usize>),
@@ -3717,13 +3742,40 @@ fn parse_pragma_pack(pragma: &str) -> Option<PragmaPackAction> {
 fn handle_internal_pragma(
     pragma: &str,
     canonical: &Path,
+    macros: &mut HashMap<String, MacroDef>,
     context: &mut InternalPreprocessContext<'_>,
-) {
+) -> Result<(), String> {
     if pragma == "once" {
         context.once_files.insert(canonical.to_path_buf());
     } else if pragma == "GCC system_header" || pragma == "clang system_header" {
         context.system_header_files.insert(canonical.to_path_buf());
-    } else if let Some(action) = parse_pragma_pack(pragma) {
+    } else if pragma.trim().starts_with("push_macro") {
+        let Some(name) = parse_pragma_macro_name(pragma, "push_macro") else {
+            return Err(format!("malformed #pragma push_macro: {}", pragma));
+        };
+        context
+            .saved_macros
+            .entry(name.clone())
+            .or_default()
+            .push(macros.get(&name).cloned());
+    } else if pragma.trim().starts_with("pop_macro") {
+        let Some(name) = parse_pragma_macro_name(pragma, "pop_macro") else {
+            return Err(format!("malformed #pragma pop_macro: {}", pragma));
+        };
+        if let Some(saved) = context.saved_macros.get_mut(&name).and_then(Vec::pop) {
+            match saved {
+                Some(def) => {
+                    macros.insert(name, def);
+                }
+                None => {
+                    macros.remove(&name);
+                }
+            }
+        }
+    } else if pragma.trim().starts_with("pack") {
+        let Some(action) = parse_pragma_pack(pragma) else {
+            return Err(format!("malformed #pragma pack: {}", pragma));
+        };
         match action {
             PragmaPackAction::Set(alignment) => *context.pragma_pack_alignment = alignment,
             PragmaPackAction::Push(alignment) => {
@@ -3741,6 +3793,7 @@ fn handle_internal_pragma(
     } else {
         poison_identifiers_from_pragma(pragma, context);
     }
+    Ok(())
 }
 
 fn inject_pack_attributes(text: &str, alignment: usize) -> String {
@@ -4318,7 +4371,7 @@ struct PendingSource {
 fn flush_pending_source(
     pending: &mut Option<PendingSource>,
     out: &mut String,
-    macros: &HashMap<String, MacroDef>,
+    macros: &mut HashMap<String, MacroDef>,
     context: &mut InternalPreprocessContext<'_>,
     canonical: &Path,
     include_level: usize,
@@ -4344,7 +4397,7 @@ fn flush_pending_source(
     )?;
     let (expanded, pragmas) = process_pragma_operators(&expanded)?;
     for pragma in pragmas {
-        handle_internal_pragma(pragma.trim(), canonical, context);
+        handle_internal_pragma(pragma.trim(), canonical, macros, context)?;
     }
     let expanded = context
         .pragma_pack_alignment
@@ -4371,7 +4424,7 @@ fn replace_preprocessor_predicates(
     let mut out = Vec::new();
     let mut index = 0usize;
     while index < tokens.len() {
-        if let Some(parsed) = preprocess::predicate::parse_predicate_operand(&tokens, index) {
+        if let Some(parsed) = preprocess::predicate::parse_predicate_operand(&tokens, index)? {
             match parsed.operand {
                 preprocess::predicate::PredicateOperand::Defined { name } => {
                     out.push(tokens[index].clone_with_text(
@@ -4385,19 +4438,25 @@ fn replace_preprocessor_predicates(
                     operand,
                     include_next,
                 } => {
-                    let Some(spec) = parse_token_include_operand(
+                    if matches!(
+                        operand,
+                        preprocess::directive::IncludeOperand::Literal(
+                            preprocess::directive::HeaderName::Angled(ref name)
+                        ) if name.is_empty()
+                    ) {
+                        return Err(format!(
+                            "unsupported #if expression '{}': malformed include operand: <>",
+                            expr
+                        ));
+                    }
+                    let spec = parse_token_include_operand(
                         &operand,
                         macros,
                         context.file,
                         context.line_number,
                         context.include_level,
                         state,
-                    ) else {
-                        return Err(format!(
-                            "unsupported #if expression '{}': malformed __has_include operand",
-                            expr
-                        ));
-                    };
+                    )?;
                     let found = resolve_include_path(
                         &spec,
                         context.base_dir,
@@ -5156,20 +5215,14 @@ fn internal_preprocess_source(
                         operand,
                         include_next,
                     } => {
-                        let Some(spec) = parse_token_include_operand(
+                        let spec = parse_token_include_operand(
                             &operand,
                             macros,
                             &logical_file,
                             current_line_number,
                             include_level,
                             state,
-                        ) else {
-                            return Err(pp_location(
-                                &logical_file,
-                                current_line_number,
-                                format!("unsupported include directive: {}", line.trim()),
-                            ));
-                        };
+                        )?;
                         let Some(include_path) = resolve_include_path(
                             &spec,
                             base_dir,
@@ -5293,7 +5346,7 @@ fn internal_preprocess_source(
                         )?;
                         let pragma = preprocess::emit::emit_tokens(&expanded);
                         let pragma = pragma.trim();
-                        handle_internal_pragma(pragma, &canonical, context);
+                        handle_internal_pragma(pragma, &canonical, macros, context)?;
                         continue;
                     }
                     Directive::Ident => continue,
@@ -5403,6 +5456,7 @@ fn internal_preprocess(
     let mut once_files = HashSet::new();
     let mut system_header_files = HashSet::new();
     let mut poisoned_identifiers = HashSet::new();
+    let mut saved_macros: HashMap<String, Vec<Option<MacroDef>>> = HashMap::new();
     let mut pragma_pack_stack = Vec::new();
     let mut pragma_pack_alignment = None;
     let mut state = PreprocessorState::new(invocation.src.to_string());
@@ -5414,6 +5468,7 @@ fn internal_preprocess(
         once_files: &mut once_files,
         system_header_files: &mut system_header_files,
         poisoned_identifiers: &mut poisoned_identifiers,
+        saved_macros: &mut saved_macros,
         pragma_pack_stack: &mut pragma_pack_stack,
         pragma_pack_alignment: &mut pragma_pack_alignment,
         include_paths: &effective_include_paths,
@@ -6719,4 +6774,214 @@ fn real_main() -> Result<(), String> {
         assembler_args,
         extra_preprocessor_args,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn processes_pragma_macro_push_and_pop() -> Result<(), String> {
+        let (expanded, pragmas) = process_pragma_operators(r#"_Pragma("push_macro(\"X\")") X"#)?;
+        assert_eq!(expanded.trim(), "X");
+        assert_eq!(pragmas, vec![r#"push_macro("X")"#.to_string()]);
+
+        let mut include_stack = Vec::new();
+        let mut once_files = HashSet::new();
+        let mut system_header_files = HashSet::new();
+        let mut poisoned_identifiers = HashSet::new();
+        let mut saved_macros: HashMap<String, Vec<Option<MacroDef>>> = HashMap::new();
+        let mut pragma_pack_stack = Vec::new();
+        let mut pragma_pack_alignment = None;
+        let mut dependencies = Vec::new();
+        let include_paths = IncludePaths::default();
+        let mut context = InternalPreprocessContext {
+            include_stack: &mut include_stack,
+            once_files: &mut once_files,
+            system_header_files: &mut system_header_files,
+            poisoned_identifiers: &mut poisoned_identifiers,
+            saved_macros: &mut saved_macros,
+            pragma_pack_stack: &mut pragma_pack_stack,
+            pragma_pack_alignment: &mut pragma_pack_alignment,
+            include_paths: &include_paths,
+            dependencies: &mut dependencies,
+            user_dependencies_only: false,
+            missing_headers_generated: false,
+            suppress_preprocessed_output: false,
+            trace_includes: false,
+            line_markers: false,
+        };
+        let canonical = PathBuf::from("/tmp/pragma-test.h");
+        let mut macros = HashMap::new();
+        macros.insert("X".to_string(), MacroDef::Object("1".to_string()));
+        handle_internal_pragma(r#"push_macro("X")"#, &canonical, &mut macros, &mut context)
+            .unwrap();
+        macros.insert("X".to_string(), MacroDef::Object("2".to_string()));
+        handle_internal_pragma(r#"pop_macro("X")"#, &canonical, &mut macros, &mut context).unwrap();
+        assert!(matches!(macros.get("X"), Some(MacroDef::Object(body)) if body == "1"));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_pragma_macro_names_and_pack_actions() {
+        assert_eq!(
+            parse_pragma_macro_name(r#"push_macro("VALUE")"#, "push_macro"),
+            Some("VALUE".to_string())
+        );
+        assert_eq!(
+            parse_pragma_macro_name(r#"pop_macro("VALUE")"#, "pop_macro"),
+            Some("VALUE".to_string())
+        );
+        assert_eq!(
+            parse_pragma_macro_name(r#"push_macro(VALUE)"#, "push_macro"),
+            None
+        );
+        assert!(matches!(
+            parse_pragma_pack("pack(push, 8)"),
+            Some(PragmaPackAction::Push(Some(8)))
+        ));
+        assert!(matches!(
+            parse_pragma_pack("pack(pop)"),
+            Some(PragmaPackAction::Pop)
+        ));
+        assert!(matches!(
+            parse_pragma_pack("pack(0)"),
+            Some(PragmaPackAction::Set(None))
+        ));
+    }
+
+    #[test]
+    fn processes_multiple_pragma_operators_in_one_line() -> Result<(), String> {
+        let (expanded, pragmas) =
+            process_pragma_operators(r#"_Pragma("once") int x; _Pragma("GCC poison bad") bad"#)?;
+        assert!(expanded.contains("int x;"));
+        assert_eq!(
+            pragmas,
+            vec![r#"once"#.to_string(), r#"GCC poison bad"#.to_string()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_malformed_pragma_operators() {
+        assert!(process_pragma_operators(r#"_Pragma(42)"#).is_err());
+        assert!(process_pragma_operators(r#"_Pragma("once""#).is_err());
+    }
+
+    #[test]
+    fn marks_pragma_once_headers_by_canonical_path() {
+        let mut include_stack = Vec::new();
+        let mut once_files = HashSet::new();
+        let mut system_header_files = HashSet::new();
+        let mut poisoned_identifiers = HashSet::new();
+        let mut saved_macros: HashMap<String, Vec<Option<MacroDef>>> = HashMap::new();
+        let mut pragma_pack_stack = Vec::new();
+        let mut pragma_pack_alignment = None;
+        let mut dependencies = Vec::new();
+        let include_paths = IncludePaths::default();
+        let mut context = InternalPreprocessContext {
+            include_stack: &mut include_stack,
+            once_files: &mut once_files,
+            system_header_files: &mut system_header_files,
+            poisoned_identifiers: &mut poisoned_identifiers,
+            saved_macros: &mut saved_macros,
+            pragma_pack_stack: &mut pragma_pack_stack,
+            pragma_pack_alignment: &mut pragma_pack_alignment,
+            include_paths: &include_paths,
+            dependencies: &mut dependencies,
+            user_dependencies_only: false,
+            missing_headers_generated: false,
+            suppress_preprocessed_output: false,
+            trace_includes: false,
+            line_markers: false,
+        };
+        let canonical = PathBuf::from("/tmp/pragma-once-test.h");
+        let mut macros = HashMap::new();
+        handle_internal_pragma("once", &canonical, &mut macros, &mut context).unwrap();
+        assert!(context.once_files.contains(&canonical));
+    }
+
+    #[test]
+    fn rejects_malformed_push_and_pack_pragmas() {
+        let mut include_stack = Vec::new();
+        let mut once_files = HashSet::new();
+        let mut system_header_files = HashSet::new();
+        let mut poisoned_identifiers = HashSet::new();
+        let mut saved_macros: HashMap<String, Vec<Option<MacroDef>>> = HashMap::new();
+        let mut pragma_pack_stack = Vec::new();
+        let mut pragma_pack_alignment = None;
+        let mut dependencies = Vec::new();
+        let include_paths = IncludePaths::default();
+        let mut context = InternalPreprocessContext {
+            include_stack: &mut include_stack,
+            once_files: &mut once_files,
+            system_header_files: &mut system_header_files,
+            poisoned_identifiers: &mut poisoned_identifiers,
+            saved_macros: &mut saved_macros,
+            pragma_pack_stack: &mut pragma_pack_stack,
+            pragma_pack_alignment: &mut pragma_pack_alignment,
+            include_paths: &include_paths,
+            dependencies: &mut dependencies,
+            user_dependencies_only: false,
+            missing_headers_generated: false,
+            suppress_preprocessed_output: false,
+            trace_includes: false,
+            line_markers: false,
+        };
+        let canonical = PathBuf::from("/tmp/pragma-malformed-test.h");
+        let mut macros = HashMap::new();
+        let err = handle_internal_pragma(
+            r#"push_macro(VALUE)"#,
+            &canonical,
+            &mut macros,
+            &mut context,
+        )
+        .unwrap_err();
+        assert!(err.contains("malformed #pragma push_macro"), "{err}");
+        let err =
+            handle_internal_pragma(r#"pop_macro(VALUE)"#, &canonical, &mut macros, &mut context)
+                .unwrap_err();
+        assert!(err.contains("malformed #pragma pop_macro"), "{err}");
+        let err = handle_internal_pragma("pack(push, bad)", &canonical, &mut macros, &mut context)
+            .unwrap_err();
+        assert!(err.contains("malformed #pragma pack"), "{err}");
+    }
+
+    #[test]
+    fn reports_malformed_has_include_operands() {
+        let macros = HashMap::new();
+        let include_paths = IncludePaths::default();
+        let mut state = PreprocessorState::new("base.c".to_string());
+        let context = IfEvalContext {
+            file: "source.c",
+            line_number: 1,
+            base_dir: Path::new("."),
+            include_paths: &include_paths,
+            include_level: 0,
+        };
+        let err = replace_preprocessor_predicates(
+            "__has_include(FOO BAR)",
+            &macros,
+            &mut state,
+            &context,
+        )
+        .unwrap_err();
+        assert!(err.contains("malformed include operand"), "{err}");
+    }
+
+    #[test]
+    fn reports_malformed_include_directives() -> Result<(), String> {
+        let macros = HashMap::new();
+        let mut state = PreprocessorState::new("base.c".to_string());
+        let operand = match preprocess::directive::parse_directive_tokens(&preprocess::lexer::lex(
+            "#include FOO BAR",
+        )?)? {
+            Some(preprocess::directive::Directive::Include { operand, .. }) => operand,
+            other => return Err(format!("unexpected directive: {:?}", other)),
+        };
+        let err = parse_token_include_operand(&operand, &macros, "source.c", 1, 0, &mut state)
+            .unwrap_err();
+        assert!(err.contains("malformed include operand"), "{err}");
+        Ok(())
+    }
 }

@@ -38,6 +38,7 @@ TackyProgram {
                     ),
                 ],
                 stack_params: {},
+                memory_param_blocks: [],
                 struct_param_groups: [],
             },
         ),

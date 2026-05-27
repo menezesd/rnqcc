@@ -433,6 +433,9 @@ fn normalize_driver_arg_text(text: &str) -> Vec<OsString> {
             normalized.push(OsString::from("--linker-arg"));
             normalized.push(OsString::from(text));
         }
+        "-finstrument-functions" => {
+            normalized.push(OsString::from("--finstrument-functions"));
+        }
         _ if text.starts_with("-fsanitize=")
             || text.starts_with("-fuse-ld=")
             || text.starts_with("-static-lib")
@@ -4533,6 +4536,7 @@ fn internal_has_builtin(name: &str) -> bool {
             | "__builtin_memset"
             | "__builtin_memcmp"
             | "__builtin_memchr"
+            | "__builtin_mempcpy"
             | "__builtin_strlen"
             | "__builtin_strcmp"
             | "__builtin_strncmp"
@@ -4542,13 +4546,18 @@ fn internal_has_builtin(name: &str) -> bool {
             | "__builtin_strspn"
             | "__builtin_strcspn"
             | "__builtin_strcpy"
+            | "__builtin_stpcpy"
             | "__builtin_strncpy"
             | "__builtin_strcat"
             | "__builtin_strncat"
+            | "__builtin_extract_return_addr"
+            | "__builtin_stack_save"
+            | "__builtin_stack_restore"
             | "__builtin___memcpy_chk"
             | "__builtin___memmove_chk"
             | "__builtin___memset_chk"
             | "__builtin___strcpy_chk"
+            | "__builtin___stpcpy_chk"
             | "__builtin___strncpy_chk"
             | "__builtin___strcat_chk"
             | "__builtin___strncat_chk"
@@ -5663,6 +5672,7 @@ struct CompileInvocation<'a> {
     target: &'a Target,
     opt_flags: &'a optimize::OptimizationFlags,
     no_coalescing: bool,
+    instrument_functions: bool,
     keep_temps: bool,
     cleanup_preprocessed: bool,
     dumps: compile::DumpOptions,
@@ -5676,6 +5686,7 @@ fn do_compile(invocation: CompileInvocation<'_>) -> Result<String, String> {
         invocation.target,
         invocation.opt_flags,
         invocation.no_coalescing,
+        invocation.instrument_functions,
         invocation.dumps,
         invocation.warnings,
     );
@@ -5766,6 +5777,7 @@ struct DriverOptions<'a> {
     opt_flags: &'a optimize::OptimizationFlags,
     cc: &'a str,
     no_coalescing: bool,
+    instrument_functions: bool,
     keep_temps: bool,
     internal_cpp: bool,
     include_paths: IncludePaths,
@@ -5877,6 +5889,7 @@ fn driver(options: DriverOptions<'_>) -> Result<(), String> {
         opt_flags,
         cc,
         no_coalescing,
+        instrument_functions,
         keep_temps,
         internal_cpp,
         include_paths,
@@ -6024,6 +6037,7 @@ fn driver(options: DriverOptions<'_>) -> Result<(), String> {
             target: &target,
             opt_flags,
             no_coalescing,
+            instrument_functions,
             keep_temps,
             cleanup_preprocessed: preprocessed_name.generated,
             dumps,
@@ -6524,6 +6538,12 @@ fn real_main() -> Result<(), String> {
                 .help("Disable register coalescing"),
         )
         .arg(
+            Arg::with_name("instrument_functions")
+                .long("finstrument-functions")
+                .takes_value(false)
+                .help("Emit __cyg_profile_func_enter/exit calls"),
+        )
+        .arg(
             Arg::with_name("src_files")
                 .index(1)
                 .required_unless_present("print_targets")
@@ -6604,6 +6624,7 @@ fn real_main() -> Result<(), String> {
     };
 
     let no_coalescing = matches.is_present("no_coalescing");
+    let instrument_functions = matches.is_present("instrument_functions");
     let internal_cpp = matches.is_present("internal_cpp");
     let include_paths = IncludePaths {
         quote: matches
@@ -6676,6 +6697,7 @@ fn real_main() -> Result<(), String> {
         opt_flags: &opt_flags,
         cc: &cc,
         no_coalescing,
+        instrument_functions,
         keep_temps,
         internal_cpp,
         include_paths,

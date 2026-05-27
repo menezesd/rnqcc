@@ -125,6 +125,7 @@ pub fn validate_tacky_program(program: &TackyProgram) -> Result<(), String> {
                     args,
                     dst,
                     stack_arg_indices,
+                    memory_arg_blocks,
                     struct_arg_groups,
                     fixed_flat_arg_count,
                     ..
@@ -159,6 +160,15 @@ pub fn validate_tacky_program(program: &TackyProgram) -> Result<(), String> {
                                 "function '{}' has invalid struct argument group {:?}",
                                 function.name,
                                 (start, count, classes)
+                            ));
+                        }
+                    }
+                    for (index, size) in memory_arg_blocks {
+                        if *index >= args.len() || *size == 0 {
+                            return Err(format!(
+                                "function '{}' has invalid memory argument block {:?}",
+                                function.name,
+                                (index, size)
                             ));
                         }
                     }
@@ -291,6 +301,7 @@ pub fn compile(
     target: &Target,
     opt_flags: &optimize::OptimizationFlags,
     no_coalescing: bool,
+    instrument_functions: bool,
     dumps: DumpOptions,
     warnings: WarningOptions,
 ) -> Result<(), String> {
@@ -347,8 +358,8 @@ pub fn compile(
     }
 
     // Generate TACKY IR
-    let mut tacky_program =
-        tacky::generate(resolved_ast).map_err(|err| Diagnostic::tacky(err).render())?;
+    let mut tacky_program = tacky::generate_with_options(resolved_ast, instrument_functions)
+        .map_err(|err| Diagnostic::tacky(err).render())?;
     validate_tacky_program(&tacky_program).map_err(|err| Diagnostic::tacky(err).render())?;
     if dumps.tacky_pre_opt {
         eprintln!("{:#?}", tacky_program);
@@ -543,6 +554,7 @@ mod tests {
                 global: true,
                 body: vec![TackyInstr::Jump("missing".to_string())],
                 stack_params: HashSet::new(),
+                memory_param_blocks: Vec::new(),
                 struct_param_groups: Vec::new(),
             })],
             global_vars: HashSet::new(),

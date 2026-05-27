@@ -5,6 +5,14 @@ fn invalid_input<T>(message: impl Into<String>) -> io::Result<T> {
     Err(io::Error::new(io::ErrorKind::InvalidInput, message.into()))
 }
 
+fn static_label_name(target: &Target, label: &str) -> String {
+    if label.starts_with("label.") {
+        format!(".L{}", label)
+    } else {
+        target.show_label(label)
+    }
+}
+
 fn reg_name(reg: Reg, ty: AsmType) -> io::Result<&'static str> {
     match (reg, ty) {
         (Reg::AX, AsmType::Byte | AsmType::Word | AsmType::Longword) => Ok("w0"),
@@ -25,6 +33,12 @@ fn reg_name(reg: Reg, ty: AsmType) -> io::Result<&'static str> {
         (Reg::R12, AsmType::Quadword) => Ok("x7"),
         (Reg::R13, AsmType::Byte | AsmType::Word | AsmType::Longword) => Ok("w11"),
         (Reg::R13, AsmType::Quadword) => Ok("x11"),
+        (Reg::R14, AsmType::Byte | AsmType::Word | AsmType::Longword) => Ok("w12"),
+        (Reg::R14, AsmType::Quadword) => Ok("x12"),
+        (Reg::R15, AsmType::Byte | AsmType::Word | AsmType::Longword) => Ok("w13"),
+        (Reg::R15, AsmType::Quadword) => Ok("x13"),
+        (Reg::BP, AsmType::Byte | AsmType::Word | AsmType::Longword) => Ok("w29"),
+        (Reg::BP, AsmType::Quadword) => Ok("x29"),
         (Reg::R10, AsmType::Byte | AsmType::Word | AsmType::Longword) => Ok("w9"),
         (Reg::R10, AsmType::Quadword) => Ok("x9"),
         (Reg::R11, AsmType::Byte | AsmType::Word | AsmType::Longword) => Ok("w10"),
@@ -114,6 +128,7 @@ fn load_mnemonic(ty: AsmType) -> &'static str {
         AsmType::Word => "ldrh",
         AsmType::Longword => "ldr",
         AsmType::Quadword => "ldr",
+        AsmType::Octword => "ldr",
         AsmType::Float => "ldr",
         AsmType::Double => "ldr",
     }
@@ -125,6 +140,7 @@ fn store_mnemonic(ty: AsmType) -> &'static str {
         AsmType::Word => "strh",
         AsmType::Longword => "str",
         AsmType::Quadword => "str",
+        AsmType::Octword => "str",
         AsmType::Float => "str",
         AsmType::Double => "str",
     }
@@ -177,6 +193,7 @@ fn stack_offset_fits_unsigned(ty: AsmType, offset: i32) -> bool {
         AsmType::Word => offset % 2 == 0 && offset / 2 <= 4095,
         AsmType::Longword => offset % 4 == 0 && offset / 4 <= 4095,
         AsmType::Float => offset % 4 == 0 && offset / 4 <= 4095,
+        AsmType::Octword => offset % 16 == 0 && offset / 16 <= 4095,
         AsmType::Quadword | AsmType::Double => offset % 8 == 0 && offset / 8 <= 4095,
     }
 }
@@ -249,10 +266,50 @@ fn data_label(target: &Target, name: &str) -> String {
     target.show_label(name)
 }
 
+fn offset_data_name(name: &str, add: i32) -> String {
+    if let Some((base, offset)) = split_data_offset(name) {
+        format!("{}+{}", base, offset + add)
+    } else {
+        format!("{}+{}", name, add)
+    }
+}
+
+fn offset_operand(op: &AsmOperand, add: i32) -> std::io::Result<AsmOperand> {
+    match op {
+        AsmOperand::Stack(offset) => Ok(AsmOperand::Stack(offset + add)),
+        AsmOperand::Data(name) => Ok(AsmOperand::Data(offset_data_name(name, add))),
+        AsmOperand::Reg(Reg::AX) if add == 8 => Ok(AsmOperand::Reg(Reg::DI)),
+        AsmOperand::Reg(reg) if add == 0 => Ok(AsmOperand::Reg(*reg)),
+        other => invalid_input(format!(
+            "AArch64 backend cannot offset operand {:?} by {}",
+            other, add
+        )),
+    }
+}
+
 fn split_data_offset(name: &str) -> Option<(&str, i32)> {
     let (base, offset) = name.rsplit_once('+')?;
     let offset = offset.parse().ok()?;
     Some((base, offset))
+}
+
+fn emit_add_immediate(
+    w: &mut dyn Write,
+    reg: &'static str,
+    mut offset: i32,
+) -> std::io::Result<()> {
+    let op = if offset < 0 {
+        offset = -offset;
+        "sub"
+    } else {
+        "add"
+    };
+    while offset > 0 {
+        let chunk = offset.min(4095);
+        writeln!(w, "\t{} {}, {}, #{}", op, reg, reg, chunk)?;
+        offset -= chunk;
+    }
+    Ok(())
 }
 
 fn emit_load_macho_data_offset_address(
@@ -270,7 +327,7 @@ fn emit_load_macho_data_offset_address(
             addr_reg, addr_reg, base_label
         )?;
         if offset != 0 {
-            writeln!(w, "\tadd {}, {}, #{}", addr_reg, addr_reg, offset)?;
+            emit_add_immediate(w, addr_reg, offset)?;
         }
         Ok(())
     } else {
@@ -542,6 +599,7 @@ fn emit_store_tls_data(
             AsmType::Double => "d16",
             AsmType::Byte | AsmType::Word | AsmType::Longword => "w17",
             AsmType::Quadword => "x17",
+            AsmType::Octword => return invalid_input("AArch64 emitter needs 128-bit TLS lowering"),
         };
         writeln!(w, "\t{} {}, [sp]", load_mnemonic(ty), scratch)?;
         writeln!(w, "\t{} {}, [x16]", store_mnemonic(ty), scratch)?;
@@ -677,6 +735,7 @@ fn emit_load_immediate(
     let width = match ty {
         AsmType::Byte | AsmType::Word | AsmType::Longword => 32,
         AsmType::Quadword => 64,
+        AsmType::Octword => return invalid_input("AArch64 emitter needs 128-bit immediates"),
         AsmType::Float => 32,
         AsmType::Double => 64,
     };
@@ -777,6 +836,14 @@ fn emit_mov(
     src: &AsmOperand,
     dst: &AsmOperand,
 ) -> std::io::Result<()> {
+    if ty == AsmType::Octword {
+        let src_low = offset_operand(src, 0)?;
+        let src_high = offset_operand(src, 8)?;
+        let dst_low = offset_operand(dst, 0)?;
+        let dst_high = offset_operand(dst, 8)?;
+        emit_mov(w, target, AsmType::Quadword, &src_low, &dst_low)?;
+        return emit_mov(w, target, AsmType::Quadword, &src_high, &dst_high);
+    }
     match (src, dst) {
         (AsmOperand::Imm(value), AsmOperand::Xmm(reg))
             if matches!(ty, AsmType::Float | AsmType::Double) =>
@@ -863,6 +930,13 @@ fn emit_movsx(
     src: &AsmOperand,
     dst: &AsmOperand,
 ) -> std::io::Result<()> {
+    if src_ty == dst_ty {
+        return emit_mov(w, target, dst_ty, src, dst);
+    }
+    if src_ty == AsmType::Octword {
+        let src_low = offset_operand(src, 0)?;
+        return emit_mov(w, target, dst_ty, &src_low, dst);
+    }
     let dst_reg = reg_name(Reg::R10, dst_ty)?;
     match src {
         AsmOperand::Stack(offset) => {
@@ -924,6 +998,59 @@ fn emit_mov_zero_extend(
     src: &AsmOperand,
     dst: &AsmOperand,
 ) -> std::io::Result<()> {
+    fn int_size(ty: AsmType) -> Option<usize> {
+        match ty {
+            AsmType::Byte => Some(1),
+            AsmType::Word => Some(2),
+            AsmType::Longword => Some(4),
+            AsmType::Quadword => Some(8),
+            AsmType::Octword => Some(16),
+            AsmType::Float | AsmType::Double => None,
+        }
+    }
+
+    if int_size(src_ty)
+        .zip(int_size(dst_ty))
+        .is_some_and(|(src, dst)| src >= dst)
+        && dst_ty != AsmType::Octword
+    {
+        return emit_mov(w, target, dst_ty, src, dst);
+    }
+
+    if dst_ty == AsmType::Octword {
+        if src_ty == AsmType::Octword {
+            return emit_mov(w, target, AsmType::Octword, src, dst);
+        }
+        let src_reg = load_operand(w, target, src_ty, src, Reg::R10)?;
+        match src_ty {
+            AsmType::Byte => writeln!(w, "\tand w9, {}, #255", src_reg)?,
+            AsmType::Word => writeln!(w, "\tand w9, {}, #65535", src_reg)?,
+            AsmType::Longword => {
+                if src_reg != "w9" {
+                    writeln!(w, "\tmov w9, {}", src_reg)?;
+                }
+            }
+            AsmType::Quadword => {
+                if src_reg != "x9" {
+                    writeln!(w, "\tmov x9, {}", src_reg)?;
+                }
+            }
+            AsmType::Octword => unreachable!(),
+            AsmType::Float | AsmType::Double => {
+                return invalid_input("AArch64 backend does not support float zero extension")
+            }
+        }
+        let dst_low = offset_operand(dst, 0)?;
+        let dst_high = offset_operand(dst, 8)?;
+        store_operand(w, target, AsmType::Quadword, "x9", &dst_low)?;
+        writeln!(w, "\tmov x11, #0")?;
+        return store_operand(w, target, AsmType::Quadword, "x11", &dst_high);
+    }
+    if src_ty == AsmType::Octword {
+        let src_low = offset_operand(src, 0)?;
+        return emit_mov(w, target, dst_ty, &src_low, dst);
+    }
+
     if let AsmOperand::Reg(reg) = src {
         let src_reg = reg_name(*reg, src_ty)?;
         match src_ty {
@@ -947,6 +1074,7 @@ fn emit_mov_zero_extend(
     let store_reg = match dst_ty {
         AsmType::Byte | AsmType::Word | AsmType::Longword => reg_name(Reg::R10, AsmType::Longword)?,
         AsmType::Quadword => reg_name(Reg::R10, AsmType::Quadword)?,
+        AsmType::Octword => unreachable!(),
         AsmType::Float | AsmType::Double => {
             return invalid_input("AArch64 backend does not support double zero extension")
         }
@@ -965,7 +1093,7 @@ fn emit_unary(
     dst: &AsmOperand,
 ) -> std::io::Result<()> {
     let reg = load_operand(w, target, ty, dst, Reg::R10)?;
-    if ty == AsmType::Double {
+    if matches!(ty, AsmType::Float | AsmType::Double) {
         let mnemonic = match op {
             AsmUnaryOp::Neg => "fneg",
             AsmUnaryOp::Not => {
@@ -1016,7 +1144,11 @@ fn emit_binary(
     let src_reg = load_operand(w, target, ty, src, Reg::R11)?;
     let mnemonic = match op {
         AsmBinaryOp::Add => "add",
+        AsmBinaryOp::AddSetFlags => "adds",
+        AsmBinaryOp::Adc => "adcs",
         AsmBinaryOp::Sub => "sub",
+        AsmBinaryOp::SubSetFlags => "subs",
+        AsmBinaryOp::Sbb => "sbcs",
         AsmBinaryOp::Mul => "mul",
         AsmBinaryOp::SDiv => "sdiv",
         AsmBinaryOp::UDiv => "udiv",
@@ -1085,6 +1217,64 @@ fn emit_lea(
     }
 }
 
+fn emit_operand_address_into(
+    w: &mut dyn Write,
+    target: &Target,
+    src: &AsmOperand,
+    dst_reg: &'static str,
+) -> std::io::Result<()> {
+    match src {
+        AsmOperand::Stack(offset) => emit_stack_address_into(w, dst_reg, *offset),
+        AsmOperand::Data(name) => emit_load_data_address(w, target, name, dst_reg),
+        AsmOperand::TlsData(name, offset) => {
+            emit_load_tls_address(w, target, name, *offset, dst_reg)
+        }
+        other => invalid_input(format!(
+            "AArch64 backend cannot take address of operand yet: {:?}",
+            other
+        )),
+    }
+}
+
+fn emit_byte_copy_loop(w: &mut dyn Write, size: usize) -> std::io::Result<()> {
+    if size == 0 {
+        return Ok(());
+    }
+    emit_load_immediate(w, AsmType::Quadword, "x13", size as i64)?;
+    writeln!(w, "1:")?;
+    writeln!(w, "\tldrb w10, [x11], #1")?;
+    writeln!(w, "\tstrb w10, [x12], #1")?;
+    writeln!(w, "\tsubs x13, x13, #1")?;
+    writeln!(w, "\tb.ne 1b")
+}
+
+fn emit_copy_to_stack_arg(
+    w: &mut dyn Write,
+    target: &Target,
+    src_ptr: &AsmOperand,
+    dst_offset: i32,
+    size: usize,
+) -> std::io::Result<()> {
+    let src = load_operand(w, target, AsmType::Quadword, src_ptr, Reg::R11)?;
+    if src != "x11" {
+        writeln!(w, "\tmov x11, {}", src)?;
+    }
+    emit_stack_address_into(w, "x12", dst_offset)?;
+    emit_byte_copy_loop(w, size)
+}
+
+fn emit_copy_from_stack_arg(
+    w: &mut dyn Write,
+    target: &Target,
+    src_offset: i32,
+    dst: &AsmOperand,
+    size: usize,
+) -> std::io::Result<()> {
+    emit_stack_address_into(w, "x11", src_offset)?;
+    emit_operand_address_into(w, target, dst, "x12")?;
+    emit_byte_copy_loop(w, size)
+}
+
 fn emit_load_indirect(
     w: &mut dyn Write,
     target: &Target,
@@ -1093,6 +1283,14 @@ fn emit_load_indirect(
     dst: &AsmOperand,
 ) -> std::io::Result<()> {
     let base_reg = reg_name(base, AsmType::Quadword)?;
+    if ty == AsmType::Octword {
+        let dst_low = offset_operand(dst, 0)?;
+        let dst_high = offset_operand(dst, 8)?;
+        writeln!(w, "\tldr x9, [{}]", base_reg)?;
+        writeln!(w, "\tldr x11, [{}, #8]", base_reg)?;
+        store_operand(w, target, AsmType::Quadword, "x9", &dst_low)?;
+        return store_operand(w, target, AsmType::Quadword, "x11", &dst_high);
+    }
     let scratch = if matches!(ty, AsmType::Float | AsmType::Double) {
         fp_scratch_name_typed(Reg::R10, ty)?
     } else {
@@ -1110,6 +1308,14 @@ fn emit_store_indirect(
     base: Reg,
 ) -> std::io::Result<()> {
     let base_reg = reg_name(base, AsmType::Quadword)?;
+    if ty == AsmType::Octword {
+        let src_low = offset_operand(src, 0)?;
+        let src_high = offset_operand(src, 8)?;
+        let low = load_operand(w, target, AsmType::Quadword, &src_low, Reg::R10)?;
+        let high = load_operand(w, target, AsmType::Quadword, &src_high, Reg::R13)?;
+        writeln!(w, "\tstr {}, [{}]", low, base_reg)?;
+        return writeln!(w, "\tstr {}, [{}, #8]", high, base_reg);
+    }
     let scratch = load_operand(w, target, ty, src, Reg::R10)?;
     writeln!(w, "\t{} {}, [{}]", store_mnemonic(ty), scratch, base_reg)
 }
@@ -1313,13 +1519,63 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, target: &Target) -> std
         AsmInstr::Lea(src, dst) => emit_lea(w, target, src, dst),
         AsmInstr::LoadIndirect(ty, base, dst) => emit_load_indirect(w, target, *ty, *base, dst),
         AsmInstr::StoreIndirect(ty, src, base) => emit_store_indirect(w, target, *ty, src, *base),
+        AsmInstr::CopyToStackArg {
+            src_ptr,
+            dst_offset,
+            size,
+        } => emit_copy_to_stack_arg(w, target, src_ptr, *dst_offset, *size),
+        AsmInstr::CopyFromStackArg {
+            src_offset,
+            dst,
+            size,
+        } => emit_copy_from_stack_arg(w, target, *src_offset, dst, *size),
         AsmInstr::Jmp(label) => writeln!(w, "\tb .L{}", label),
+        AsmInstr::NonlocalJmp(label) => writeln!(w, "\tb .L{}", label),
+        AsmInstr::JmpIndirect(target_op) => {
+            let reg = load_operand(w, target, AsmType::Quadword, target_op, Reg::R10)?;
+            writeln!(w, "\tbr {}", reg)
+        }
         AsmInstr::JmpCC(cc, label) => writeln!(w, "\tb.{} .L{}", condition_name(cc), label),
         AsmInstr::SetCC(cc, dst) => {
             writeln!(w, "\tcset w9, {}", condition_name(cc))?;
             store_operand(w, target, AsmType::Longword, "w9", dst)
         }
         AsmInstr::Label(label) => writeln!(w, ".L{}:", label),
+        AsmInstr::LoadLabelAddress(label, dst) => {
+            writeln!(w, "\tadrp x9, .L{}@PAGE", label)?;
+            writeln!(w, "\tadd x9, x9, .L{}@PAGEOFF", label)?;
+            store_operand(w, target, AsmType::Quadword, "x9", dst)
+        }
+        AsmInstr::BuiltinSetjmp {
+            buf,
+            dst,
+            label,
+            end_label,
+        } => {
+            let buf_reg = load_operand(w, target, AsmType::Quadword, buf, Reg::R11)?;
+            writeln!(w, "\tadrp x9, .L{}@PAGE", label)?;
+            writeln!(w, "\tadd x9, x9, .L{}@PAGEOFF", label)?;
+            writeln!(w, "\tstr x9, [{}]", buf_reg)?;
+            writeln!(w, "\tadd x10, {}, #8", buf_reg)?;
+            writeln!(w, "\tmov x9, sp")?;
+            writeln!(w, "\tstr x9, [x10]")?;
+            writeln!(w, "\tadd x10, {}, #16", buf_reg)?;
+            writeln!(w, "\tstr x30, [x10]")?;
+            store_operand(w, target, AsmType::Longword, "wzr", dst)?;
+            writeln!(w, "\tb .L{}", end_label)?;
+            writeln!(w, ".L{}:", label)?;
+            writeln!(w, "\tmov w9, #1")?;
+            store_operand(w, target, AsmType::Longword, "w9", dst)?;
+            writeln!(w, ".L{}:", end_label)
+        }
+        AsmInstr::BuiltinLongjmp { buf, value: _ } => {
+            let buf_reg = load_operand(w, target, AsmType::Quadword, buf, Reg::R10)?;
+            writeln!(w, "\tldr x12, [{}]", buf_reg)?;
+            writeln!(w, "\tldr x11, [{}, #8]", buf_reg)?;
+            writeln!(w, "\tldr x30, [{}, #16]", buf_reg)?;
+            writeln!(w, "\tmov sp, x11")?;
+            writeln!(w, "\tbr x12")
+        }
         AsmInstr::Call(name, _, _, false) => writeln!(w, "\tbl {}", target.show_label(name)),
         AsmInstr::Call(_, _, _, true) => writeln!(w, "\tblr x9"),
         AsmInstr::AArch64AddPtr(ptr, index, scale, dst) => {
@@ -1390,6 +1646,32 @@ fn escape_string_for_asm(s: &str) -> String {
     out
 }
 
+fn emit_string_init(w: &mut dyn Write, s: &str, null_terminated: bool) -> std::io::Result<()> {
+    let string_bytes = c_string_bytes(s);
+    if string_bytes.contains(&0) {
+        let mut bytes = string_bytes;
+        if null_terminated {
+            bytes.push(0);
+        }
+        for chunk in bytes.chunks(16) {
+            let values = chunk
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(w, "\t.byte {}", values)?;
+        }
+        Ok(())
+    } else {
+        let escaped = escape_string_for_asm(s);
+        if null_terminated {
+            writeln!(w, "\t.asciz \"{}\"", escaped)
+        } else {
+            writeln!(w, "\t.ascii \"{}\"", escaped)
+        }
+    }
+}
+
 fn static_init_size(init: &StaticInit) -> usize {
     match init {
         StaticInit::CharInit(_) | StaticInit::UCharInit(_) => 1,
@@ -1400,6 +1682,8 @@ fn static_init_size(init: &StaticInit) -> usize {
         | StaticInit::DoubleInit(_)
         | StaticInit::PointerInit(_)
         | StaticInit::PointerInitOffset(_, _) => 8,
+        StaticInit::LabelDiffInit(_, _, bytes) => *bytes,
+        StaticInit::Int128Init(_) | StaticInit::UInt128Init(_) => 16,
         StaticInit::FloatInit(_) => 4,
         StaticInit::ZeroInit(n) => *n,
         StaticInit::StringInit(s, null_terminated) => {
@@ -1464,22 +1748,46 @@ fn emit_static_init(w: &mut dyn Write, init: &StaticInit, target: &Target) -> st
         StaticInit::UIntInit(v) => writeln!(w, "\t.long {}", v),
         StaticInit::LongInit(v) => writeln!(w, "\t.quad {}", v),
         StaticInit::ULongInit(v) => writeln!(w, "\t.quad {}", v),
+        StaticInit::Int128Init(v) => {
+            writeln!(w, "\t.quad {}", *v as i64)?;
+            writeln!(w, "\t.quad {}", (*v >> 64) as i64)
+        }
+        StaticInit::UInt128Init(v) => {
+            writeln!(w, "\t.quad {}", *v as u64)?;
+            writeln!(w, "\t.quad {}", (*v >> 64) as u64)
+        }
         StaticInit::FloatInit(v) => writeln!(w, "\t.long {}", v.to_bits()),
         StaticInit::DoubleInit(v) => writeln!(w, "\t.quad {}", v.to_bits()),
         StaticInit::ZeroInit(n) => writeln!(w, "\t.zero {}", n),
-        StaticInit::StringInit(s, null_terminated) => {
-            let escaped = escape_string_for_asm(s);
-            if *null_terminated {
-                writeln!(w, "\t.asciz \"{}\"", escaped)
-            } else {
-                writeln!(w, "\t.ascii \"{}\"", escaped)
-            }
+        StaticInit::StringInit(s, null_terminated) => emit_string_init(w, s, *null_terminated),
+        StaticInit::PointerInit(label) => {
+            writeln!(w, "\t.quad {}", static_label_name(target, label))
         }
-        StaticInit::PointerInit(label) => writeln!(w, "\t.quad {}", target.show_label(label)),
         StaticInit::PointerInitOffset(label, offset) => {
             let sign = if *offset >= 0 { "+" } else { "" };
-            writeln!(w, "\t.quad {}{}{}", target.show_label(label), sign, offset)
+            writeln!(
+                w,
+                "\t.quad {}{}{}",
+                static_label_name(target, label),
+                sign,
+                offset
+            )
         }
+        StaticInit::LabelDiffInit(left, right, 4) => writeln!(
+            w,
+            "\t.long {}-{}",
+            static_label_name(target, left),
+            static_label_name(target, right)
+        ),
+        StaticInit::LabelDiffInit(left, right, 8) => writeln!(
+            w,
+            "\t.quad {}-{}",
+            static_label_name(target, left),
+            static_label_name(target, right)
+        ),
+        StaticInit::LabelDiffInit(_, _, bytes) => invalid_input(format!(
+            "unsupported label difference initializer size: {bytes}"
+        )),
     }
 }
 
@@ -1537,13 +1845,28 @@ fn emit_static_constant(
 ) -> std::io::Result<()> {
     match target.os {
         TargetOs::Linux => writeln!(w, "\t.section .rodata")?,
-        TargetOs::MacOs => writeln!(w, "\t.section __TEXT,__cstring,cstring_literals")?,
+        TargetOs::MacOs if matches!(&sc.init, StaticInit::StringInit(s, _) if !c_string_bytes(s).contains(&0)) => {
+            writeln!(w, "\t.section __TEXT,__cstring,cstring_literals")?
+        }
+        TargetOs::MacOs => writeln!(w, "\t.section __TEXT,__const")?,
     }
     if sc.alignment > 1 {
         writeln!(w, "\t.balign {}", sc.alignment)?;
     }
     writeln!(w, "{}:", target.show_label(&sc.name))?;
     emit_static_init(w, &sc.init, target)
+}
+
+fn emit_alias(
+    w: &mut dyn Write,
+    name: &str,
+    alias_target: &str,
+    target: &Target,
+) -> std::io::Result<()> {
+    let name = target.show_label(name);
+    let alias_target = target.show_label(alias_target);
+    writeln!(w, "\t.globl {}", name)?;
+    writeln!(w, "\t.set {}, {}", name, alias_target)
 }
 
 fn emit_stack_note(w: &mut dyn Write, target: &Target) -> std::io::Result<()> {
@@ -1560,6 +1883,10 @@ pub fn emit(assembly_file: &str, program: &AsmProgram, target: &Target) -> std::
             AsmTopLevel::Function(function) => emit_function(&mut file, function, target)?,
             AsmTopLevel::StaticVar(sv) => emit_static_var(&mut file, sv, target)?,
             AsmTopLevel::StaticConstant(sc) => emit_static_constant(&mut file, sc, target)?,
+            AsmTopLevel::Alias {
+                name,
+                target: alias_target,
+            } => emit_alias(&mut file, name, alias_target, target)?,
         }
     }
     emit_stack_note(&mut file, target)

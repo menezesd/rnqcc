@@ -5,6 +5,14 @@ fn invalid_input<T>(message: impl Into<String>) -> io::Result<T> {
     Err(io::Error::new(io::ErrorKind::InvalidInput, message.into()))
 }
 
+fn static_label_name(platform: &Target, label: &str) -> String {
+    if label.starts_with("label.") {
+        format!(".L{}", label)
+    } else {
+        platform.show_label(label)
+    }
+}
+
 fn reg_name(reg: &Reg, t: AsmType) -> io::Result<&'static str> {
     match (reg, t) {
         (Reg::AX, AsmType::Longword) => Ok("%eax"),
@@ -72,6 +80,7 @@ fn reg_name(reg: &Reg, t: AsmType) -> io::Result<&'static str> {
         (Reg::SP, AsmType::Word) => Ok("%sp"),
         (Reg::BP, AsmType::Byte) => Ok("%bpl"),
         (Reg::BP, AsmType::Word) => Ok("%bp"),
+        (_, AsmType::Octword) => invalid_input("x86-64 emitter needs 128-bit integer lowering"),
         (r, AsmType::Float | AsmType::Double) => {
             invalid_input(format!("Cannot use integer register {:?} for float", r))
         }
@@ -111,6 +120,7 @@ fn show_operand(op: &AsmOperand, t: AsmType, target: &Target) -> io::Result<Stri
             invalid_input(format!("PseudoMem '{}' not replaced", name))
         }
         AsmOperand::Stack(offset) => Ok(format!("{}(%rbp)", offset)),
+        AsmOperand::StackArg(offset) => Ok(format!("{}(%rsp)", offset)),
         AsmOperand::Data(name) => Ok(format!("{}(%rip)", target.show_label(name))),
         AsmOperand::TlsData(name, offset) => show_tls_operand(name, *offset, target),
         AsmOperand::Indexed(base, index, scale) => Ok(format!(
@@ -126,6 +136,7 @@ fn show_operand_byte(op: &AsmOperand, target: &Target) -> io::Result<String> {
     match op {
         AsmOperand::Reg(reg) => Ok(reg_name(reg, AsmType::Byte)?.to_string()),
         AsmOperand::Stack(offset) => Ok(format!("{}(%rbp)", offset)),
+        AsmOperand::StackArg(offset) => Ok(format!("{}(%rsp)", offset)),
         AsmOperand::Data(name) => Ok(format!("{}(%rip)", target.show_label(name))),
         AsmOperand::TlsData(name, offset) => show_tls_operand(name, *offset, target),
         other => invalid_input(format!("Cannot get byte-sized version of {:?}", other)),
@@ -442,6 +453,7 @@ fn suffix(t: AsmType) -> &'static str {
         AsmType::Word => "w",
         AsmType::Longword => "l",
         AsmType::Quadword => "q",
+        AsmType::Octword => "q",
         AsmType::Float => "ss",
         AsmType::Double => "sd",
     }
@@ -633,8 +645,11 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                 );
             }
             let mnemonic = match op {
-                AsmBinaryOp::Add => "add",
+                AsmBinaryOp::Add | AsmBinaryOp::AddSetFlags => "add",
+                AsmBinaryOp::Adc => "adc",
                 AsmBinaryOp::Sub => "sub",
+                AsmBinaryOp::SubSetFlags => "sub",
+                AsmBinaryOp::Sbb => "sbb",
                 AsmBinaryOp::Mul => "imul",
                 AsmBinaryOp::SDiv | AsmBinaryOp::UDiv => {
                     return invalid_input("AArch64 integer division op reached x86_64 emitter")
@@ -821,6 +836,34 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                 )
             }
         }
+        AsmInstr::CopyToStackArg {
+            src_ptr,
+            dst_offset,
+            size,
+        } => {
+            writeln!(
+                w,
+                "\tmovq {}, %rsi",
+                show_operand(src_ptr, AsmType::Quadword, platform)?
+            )?;
+            writeln!(w, "\tleaq {}(%rsp), %rdi", dst_offset)?;
+            writeln!(w, "\tmovq ${}, %rcx", size)?;
+            writeln!(w, "\trep movsb")
+        }
+        AsmInstr::CopyFromStackArg {
+            src_offset,
+            dst,
+            size,
+        } => {
+            writeln!(w, "\tleaq {}(%rbp), %rsi", src_offset)?;
+            writeln!(
+                w,
+                "\tleaq {}, %rdi",
+                show_operand(dst, AsmType::Quadword, platform)?
+            )?;
+            writeln!(w, "\tmovq ${}, %rcx", size)?;
+            writeln!(w, "\trep movsb")
+        }
         AsmInstr::AArch64Rem(..) => {
             invalid_input("AArch64 remainder instruction reached x86_64 emitter")
         }
@@ -923,6 +966,17 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
         }
         AsmInstr::AtomicFence => writeln!(w, "\tmfence"),
         AsmInstr::Jmp(label) => writeln!(w, "\tjmp .L{}", label),
+        AsmInstr::NonlocalJmp(label) => {
+            writeln!(w, "\tmovq %rbp, %rsp")?;
+            writeln!(w, "\tpopq %rbp")?;
+            writeln!(w, "\taddq $8, %rsp")?;
+            writeln!(w, "\tjmp .L{}", label)
+        }
+        AsmInstr::JmpIndirect(target) => writeln!(
+            w,
+            "\tjmp *{}",
+            show_operand(target, AsmType::Quadword, platform)?
+        ),
         AsmInstr::JmpCC(cc, label) => writeln!(w, "\tj{} .L{}", show_cc(cc), label),
         AsmInstr::SetCC(cc, operand) => {
             writeln!(
@@ -933,6 +987,51 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
             )
         }
         AsmInstr::Label(label) => writeln!(w, ".L{}:", label),
+        AsmInstr::LoadLabelAddress(label, dst) => writeln!(
+            w,
+            "\tleaq .L{}(%rip), {}",
+            label,
+            show_operand(dst, AsmType::Quadword, platform)?
+        ),
+        AsmInstr::BuiltinSetjmp {
+            buf,
+            dst,
+            label,
+            end_label,
+        } => {
+            writeln!(
+                w,
+                "\tmovq {}, %r11",
+                show_operand(buf, AsmType::Quadword, platform)?
+            )?;
+            writeln!(w, "\tleaq .L{}(%rip), %r10", label)?;
+            writeln!(w, "\tmovq %r10, (%r11)")?;
+            writeln!(w, "\tmovq %rsp, 8(%r11)")?;
+            writeln!(w, "\tmovq %rbp, 16(%r11)")?;
+            writeln!(
+                w,
+                "\tmovl $0, {}",
+                show_operand(dst, AsmType::Longword, platform)?
+            )?;
+            writeln!(w, "\tjmp .L{}", end_label)?;
+            writeln!(w, ".L{}:", label)?;
+            writeln!(
+                w,
+                "\tmovl $1, {}",
+                show_operand(dst, AsmType::Longword, platform)?
+            )?;
+            writeln!(w, ".L{}:", end_label)
+        }
+        AsmInstr::BuiltinLongjmp { buf, value: _ } => {
+            writeln!(
+                w,
+                "\tmovq {}, %r11",
+                show_operand(buf, AsmType::Quadword, platform)?
+            )?;
+            writeln!(w, "\tmovq 8(%r11), %rsp")?;
+            writeln!(w, "\tmovq 16(%r11), %rbp")?;
+            writeln!(w, "\tjmp *(%r11)")
+        }
         AsmInstr::Push(operand) => {
             // pushq doesn't support XMM registers
             if let AsmOperand::Xmm(xmm) = operand {
@@ -1018,6 +1117,8 @@ fn static_init_size(init: &StaticInit) -> usize {
         | StaticInit::DoubleInit(_)
         | StaticInit::PointerInit(_)
         | StaticInit::PointerInitOffset(_, _) => 8,
+        StaticInit::LabelDiffInit(_, _, bytes) => *bytes,
+        StaticInit::Int128Init(_) | StaticInit::UInt128Init(_) => 16,
         StaticInit::ZeroInit(n) => *n,
         StaticInit::StringInit(s, null_terminated) => {
             c_string_byte_len(s) + usize::from(*null_terminated)
@@ -1122,6 +1223,32 @@ fn escape_string_for_asm(s: &str) -> String {
     out
 }
 
+fn emit_string_init(w: &mut dyn Write, s: &str, null_terminated: bool) -> std::io::Result<()> {
+    let string_bytes = c_string_bytes(s);
+    if string_bytes.contains(&0) {
+        let mut bytes = string_bytes;
+        if null_terminated {
+            bytes.push(0);
+        }
+        for chunk in bytes.chunks(16) {
+            let values = chunk
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(w, "\t.byte {}", values)?;
+        }
+        Ok(())
+    } else {
+        let escaped = escape_string_for_asm(s);
+        if null_terminated {
+            writeln!(w, "\t.asciz \"{}\"", escaped)
+        } else {
+            writeln!(w, "\t.ascii \"{}\"", escaped)
+        }
+    }
+}
+
 fn emit_static_init(
     w: &mut dyn Write,
     init: &StaticInit,
@@ -1136,30 +1263,46 @@ fn emit_static_init(
         StaticInit::LongInit(v) => writeln!(w, "\t.quad {}", v),
         StaticInit::UIntInit(v) => writeln!(w, "\t.long {}", v),
         StaticInit::ULongInit(v) => writeln!(w, "\t.quad {}", v),
+        StaticInit::Int128Init(v) => {
+            writeln!(w, "\t.quad {}", *v as i64)?;
+            writeln!(w, "\t.quad {}", (*v >> 64) as i64)
+        }
+        StaticInit::UInt128Init(v) => {
+            writeln!(w, "\t.quad {}", *v as u64)?;
+            writeln!(w, "\t.quad {}", (*v >> 64) as u64)
+        }
         StaticInit::FloatInit(v) => writeln!(w, "\t.long {}", v.to_bits()),
         StaticInit::DoubleInit(v) => writeln!(w, "\t.quad {}", v.to_bits()),
         StaticInit::ZeroInit(n) => writeln!(w, "\t.zero {}", n),
-        StaticInit::StringInit(s, null_terminated) => {
-            let escaped = escape_string_for_asm(s);
-            if *null_terminated {
-                writeln!(w, "\t.asciz \"{}\"", escaped)
-            } else {
-                writeln!(w, "\t.ascii \"{}\"", escaped)
-            }
-        }
+        StaticInit::StringInit(s, null_terminated) => emit_string_init(w, s, *null_terminated),
         StaticInit::PointerInit(label) => {
-            writeln!(w, "\t.quad {}", platform.show_label(label))
+            writeln!(w, "\t.quad {}", static_label_name(platform, label))
         }
         StaticInit::PointerInitOffset(label, offset) => {
             let sign = if *offset >= 0 { "+" } else { "" };
             writeln!(
                 w,
                 "\t.quad {}{}{}",
-                platform.show_label(label),
+                static_label_name(platform, label),
                 sign,
                 offset
             )
         }
+        StaticInit::LabelDiffInit(left, right, 4) => writeln!(
+            w,
+            "\t.long {}-{}",
+            static_label_name(platform, left),
+            static_label_name(platform, right)
+        ),
+        StaticInit::LabelDiffInit(left, right, 8) => writeln!(
+            w,
+            "\t.quad {}-{}",
+            static_label_name(platform, left),
+            static_label_name(platform, right)
+        ),
+        StaticInit::LabelDiffInit(_, _, bytes) => invalid_input(format!(
+            "unsupported label difference initializer size: {bytes}"
+        )),
     }
 }
 
@@ -1169,9 +1312,11 @@ fn emit_static_constant(
     platform: &Target,
 ) -> std::io::Result<()> {
     let label = platform.show_label(&sc.name);
-    // Constant strings go in read-only section
     match platform.os {
-        TargetOs::MacOs => writeln!(w, "\t.section __TEXT,__cstring")?,
+        TargetOs::MacOs if matches!(&sc.init, StaticInit::StringInit(s, _) if !c_string_bytes(s).contains(&0)) => {
+            writeln!(w, "\t.section __TEXT,__cstring")?
+        }
+        TargetOs::MacOs => writeln!(w, "\t.section __TEXT,__const")?,
         TargetOs::Linux => writeln!(w, "\t.section .rodata")?,
     }
     if sc.alignment > 1 {
@@ -1180,6 +1325,18 @@ fn emit_static_constant(
     writeln!(w, "{}:", label)?;
     emit_static_init(w, &sc.init, platform)?;
     Ok(())
+}
+
+fn emit_alias(
+    w: &mut dyn Write,
+    name: &str,
+    alias_target: &str,
+    platform: &Target,
+) -> std::io::Result<()> {
+    let name = platform.show_label(name);
+    let alias_target = platform.show_label(alias_target);
+    writeln!(w, "\t.globl {}", name)?;
+    writeln!(w, "\t.set {}, {}", name, alias_target)
 }
 
 fn emit_stack_note(w: &mut dyn Write, platform: &Target) -> std::io::Result<()> {
@@ -1196,6 +1353,7 @@ pub fn emit(assembly_file: &str, program: &AsmProgram, platform: &Target) -> std
             AsmTopLevel::Function(func) => emit_function(&mut w, func, platform)?,
             AsmTopLevel::StaticVar(sv) => emit_static_var(&mut w, sv, platform)?,
             AsmTopLevel::StaticConstant(sc) => emit_static_constant(&mut w, sc, platform)?,
+            AsmTopLevel::Alias { name, target } => emit_alias(&mut w, name, target, platform)?,
         }
     }
     emit_stack_note(&mut w, platform)?;

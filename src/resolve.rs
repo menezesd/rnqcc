@@ -48,10 +48,7 @@ impl FunctionSignature {
     fn compatible_with(&self, other: &Self) -> bool {
         self.return_type == other.return_type
             && self.return_full_type == other.return_full_type
-            && (self == other
-                || (self.param_full_types.is_empty()
-                    && other.param_full_types.is_empty()
-                    && (self.is_old_style_empty() || other.is_old_style_empty())))
+            && (self == other || self.is_old_style_empty() || other.is_old_style_empty())
     }
 }
 
@@ -67,6 +64,7 @@ struct Resolver {
     implicit_functions: HashMap<String, FunctionSignature>,
     defined_labels: Vec<String>,
     goto_targets: Vec<String>,
+    function_depth: usize,
     case_counter: usize,
     switch_depth: usize,
     warnings: Vec<Warning>,
@@ -112,6 +110,7 @@ impl Resolver {
             implicit_functions: HashMap::new(),
             defined_labels: Vec::new(),
             goto_targets: Vec::new(),
+            function_depth: 0,
             case_counter: 0,
             switch_depth: 0,
             warnings: Vec::new(),
@@ -202,6 +201,17 @@ impl Resolver {
         Ok(())
     }
 
+    fn declare_block_function(&mut self, name: &str) -> ResolveResult<String> {
+        if let Some(existing) = self.current_scope_mut()?.get(name).cloned() {
+            return Ok(existing);
+        }
+        let unique = format!("{}.{}", name, self.var_counter);
+        self.var_counter += 1;
+        self.current_scope_mut()?
+            .insert(name.to_string(), unique.clone());
+        Ok(unique)
+    }
+
     fn resolve_tag(&self, tag: &str) -> String {
         for scope in self.tag_scopes.iter().rev() {
             if let Some(unique) = scope.get(tag) {
@@ -257,8 +267,10 @@ impl Resolver {
                     return_full_type: signature.return_full_type.clone(),
                     params: Vec::new(),
                     param_full_types: signature.param_full_types.clone(),
+                    param_vla_bounds: Vec::new(),
                     variadic: signature.variadic,
                     noreturn: signature.noreturn,
+                    no_instrument_function: false,
                     body: None,
                     storage_class: None,
                 }))
@@ -322,10 +334,13 @@ impl Resolver {
         Ok(match exp {
             Exp::Constant(_)
             | Exp::LongConstant(_)
+            | Exp::Int128Constant(_)
             | Exp::UIntConstant(_)
             | Exp::ULongConstant(_)
+            | Exp::UInt128Constant(_)
             | Exp::DoubleConstant(_)
             | Exp::StringLiteral(_)
+            | Exp::WideStringLiteral(_)
             | Exp::Unreachable
             | Exp::AtomicFence => exp,
             Exp::AtomicFetch {
@@ -382,11 +397,16 @@ impl Resolver {
                         Designator::Index(index) => {
                             Ok(Designator::Index(Box::new(self.resolve_exp(*index)?)))
                         }
+                        Designator::IndexRange(start, end) => Ok(Designator::IndexRange(
+                            Box::new(self.resolve_exp(*start)?),
+                            Box::new(self.resolve_exp(*end)?),
+                        )),
                     })
                     .collect::<ResolveResult<Vec<_>>>()?;
                 Exp::DesignatedInit(designators, Box::new(self.resolve_exp(*value)?))
             }
             Exp::Var(name) => Exp::Var(self.resolve_var(&name)?),
+            Exp::LabelAddress(label) => Exp::LabelAddress(label),
             Exp::Cast(t, ft, inner) => {
                 let resolved_ft = ft.map(|f| self.resolve_struct_tags_in_ft(f));
                 Exp::Cast(t, resolved_ft, Box::new(self.resolve_exp(*inner)?))
@@ -411,22 +431,40 @@ impl Resolver {
                 Box::new(self.resolve_exp(*then_exp)?),
                 Box::new(self.resolve_exp(*else_exp)?),
             ),
+            Exp::BuiltinExpect(value, hints) => Exp::BuiltinExpect(
+                Box::new(self.resolve_exp(*value)?),
+                hints
+                    .into_iter()
+                    .map(|arg| self.resolve_exp(arg))
+                    .collect::<ResolveResult<Vec<_>>>()?,
+            ),
             Exp::FunctionCall(name, args) => {
                 let resolved_args = args
                     .into_iter()
                     .map(|a| self.resolve_exp(a))
                     .collect::<ResolveResult<Vec<_>>>()?;
-                if self.functions.contains_key(&name) || name.starts_with("__builtin_") {
+                if name.starts_with("__builtin_") {
                     Exp::FunctionCall(name, resolved_args)
                 } else {
-                    // Could be an indirect call through a function pointer variable
                     match self.resolve_var(&name) {
-                        Ok(resolved_name) => Exp::FunctionCall(resolved_name, resolved_args),
+                        Ok(resolved_name) => {
+                            if self.functions.contains_key(&resolved_name) {
+                                Exp::FunctionCall(resolved_name, resolved_args)
+                            } else if self.functions.contains_key(&name) {
+                                Exp::FunctionCall(name, resolved_args)
+                            } else {
+                                Exp::FunctionCall(resolved_name, resolved_args)
+                            }
+                        }
                         Err(err)
                             if matches!(err.kind, DiagnosticKind::UndeclaredVariable { .. }) =>
                         {
-                            self.declare_implicit_function(&name);
-                            Exp::FunctionCall(name, resolved_args)
+                            if self.functions.contains_key(&name) {
+                                Exp::FunctionCall(name, resolved_args)
+                            } else {
+                                self.declare_implicit_function(&name);
+                                Exp::FunctionCall(name, resolved_args)
+                            }
                         }
                         Err(err) => return Err(err),
                     }
@@ -556,6 +594,7 @@ impl Resolver {
                 self.goto_targets.push(label.clone());
                 Statement::Goto(label)
             }
+            Statement::IndirectGoto(exp) => Statement::IndirectGoto(self.resolve_exp(exp)?),
             Statement::Label(name, body) => {
                 if self.defined_labels.contains(&name) {
                     return Err(Diagnostic::resolve(DiagnosticKind::DuplicateLabel { name }));
@@ -581,13 +620,21 @@ impl Resolver {
                     cases,
                 }
             }
-            Statement::Case { value, body, .. } => {
+            Statement::Case {
+                value,
+                end_value,
+                body,
+                ..
+            } => {
                 if self.switch_depth == 0 {
                     return Err(Diagnostic::resolve(DiagnosticKind::CaseOutsideSwitch));
                 }
                 let label = self.make_case_label();
                 Statement::Case {
                     value: self.resolve_exp(value)?,
+                    end_value: end_value
+                        .map(|end_value| self.resolve_exp(end_value))
+                        .transpose()?,
                     body: Box::new(self.resolve_statement(*body)?),
                     label,
                 }
@@ -635,6 +682,7 @@ impl Resolver {
             init,
             storage_class: vd.storage_class,
             alignment: vd.alignment,
+            alias: vd.alias,
         })
     }
 
@@ -648,24 +696,43 @@ impl Resolver {
                     BlockItem::Declaration(Declaration::VarDecl(self.resolve_var_decl(vd)?))
                 }
                 BlockItem::Declaration(Declaration::FunDecl(fd)) => {
-                    let signature = FunctionSignature::from_decl(&fd);
-                    if let Some(existing) = self.functions.get(&fd.name) {
-                        if !existing.compatible_with(&signature) {
-                            return Err(Diagnostic::resolve(
-                                DiagnosticKind::ConflictingFunctionParameterCount {
-                                    name: fd.name.clone(),
-                                },
-                            ));
+                    let original_name = fd.name.clone();
+                    if fd.body.is_none() {
+                        let signature = FunctionSignature::from_decl(&fd);
+                        if let Some(existing) = self.functions.get(&original_name) {
+                            if !existing.compatible_with(&signature) {
+                                return Err(Diagnostic::resolve(
+                                    DiagnosticKind::ConflictingFunctionParameterCount {
+                                        name: original_name,
+                                    },
+                                ));
+                            }
                         }
+                        self.functions.insert(original_name, signature);
+                        BlockItem::Declaration(Declaration::FunDecl(self.resolve_function(fd)?))
+                    } else {
+                        let unique_name = self.declare_block_function(&original_name)?;
+                        let mut fd = fd;
+                        fd.name = unique_name.clone();
+                        let signature = FunctionSignature::from_decl(&fd);
+                        if let Some(existing) = self.functions.get(&unique_name) {
+                            if !existing.compatible_with(&signature) {
+                                return Err(Diagnostic::resolve(
+                                    DiagnosticKind::ConflictingFunctionParameterCount {
+                                        name: original_name,
+                                    },
+                                ));
+                            }
+                        }
+                        let mut signature = signature;
+                        signature.noreturn = signature.noreturn
+                            || self
+                                .functions
+                                .get(&unique_name)
+                                .is_some_and(|existing| existing.noreturn);
+                        self.functions.insert(unique_name, signature);
+                        BlockItem::Declaration(Declaration::FunDecl(self.resolve_function(fd)?))
                     }
-                    let mut signature = signature;
-                    signature.noreturn = signature.noreturn
-                        || self
-                            .functions
-                            .get(&fd.name)
-                            .is_some_and(|existing| existing.noreturn);
-                    self.functions.insert(fd.name.clone(), signature);
-                    BlockItem::Declaration(Declaration::FunDecl(self.resolve_function(fd)?))
                 }
                 BlockItem::Declaration(Declaration::StructDecl(sd)) => {
                     let unique_tag = self.declare_tag(&sd.tag)?;
@@ -679,6 +746,7 @@ impl Resolver {
                                 member_type: m.member_type,
                                 member_full_type: resolved_ft,
                                 bit_width: m.bit_width,
+                                flexible_array: m.flexible_array,
                                 alignment: m.alignment,
                                 packed: m.packed,
                             }
@@ -758,26 +826,31 @@ impl Resolver {
             }
             Some(body) => {
                 self.push_scope();
-                self.defined_labels.clear();
-                self.goto_targets.clear();
+                let saved_defined_labels = std::mem::take(&mut self.defined_labels);
+                let saved_goto_targets = std::mem::take(&mut self.goto_targets);
+                self.function_depth += 1;
                 let mut resolved_params = Vec::new();
                 for (name, ptype, pi) in &func.params {
                     resolved_params.push((self.declare_var(name)?, *ptype, *pi));
                 }
                 let resolved_body = self.resolve_block(body)?;
-                if func.return_type != CType::Void
+                if func.name != "main"
+                    && func.return_type != CType::Void
                     && !block_guarantees_return(&resolved_body, &self.functions)
                 {
                     self.warn_missing_return(&func.name);
                 }
                 self.pop_scope();
                 for target in &self.goto_targets {
-                    if !self.defined_labels.contains(target) {
+                    if !self.defined_labels.contains(target) && self.function_depth == 1 {
                         return Err(Diagnostic::resolve(DiagnosticKind::UndefinedGotoLabel {
                             name: target.clone(),
                         }));
                     }
                 }
+                self.function_depth -= 1;
+                self.defined_labels = saved_defined_labels;
+                self.goto_targets = saved_goto_targets;
                 let resolved_rft = func
                     .return_full_type
                     .map(|ft| self.resolve_struct_tags_in_ft(ft));
@@ -795,8 +868,10 @@ impl Resolver {
                     body: Some(resolved_body),
                     storage_class: func.storage_class,
                     param_full_types: resolved_pfts,
+                    param_vla_bounds: func.param_vla_bounds,
                     variadic: func.variadic,
                     noreturn: func.noreturn,
+                    no_instrument_function: func.no_instrument_function,
                 })
             }
         }
@@ -805,11 +880,25 @@ impl Resolver {
 
 fn collect_cases(stmt: &Statement, cases: &mut Vec<SwitchCase>) -> ResolveResult<()> {
     match stmt {
-        Statement::Case { value, body, label } => {
+        Statement::Case {
+            value,
+            end_value,
+            body,
+            label,
+        } => {
             let val = eval_integer_constant_exp(value)
                 .ok_or_else(|| Diagnostic::resolve(DiagnosticKind::NonConstantCaseValue))?;
+            let end_val = if let Some(end_value) = end_value {
+                Some(
+                    eval_integer_constant_exp(end_value)
+                        .ok_or_else(|| Diagnostic::resolve(DiagnosticKind::NonConstantCaseValue))?,
+                )
+            } else {
+                None
+            };
             cases.push(SwitchCase {
                 value: Some(val),
+                end_value: end_val,
                 label: label.clone(),
             });
             collect_cases(body, cases)?;
@@ -817,6 +906,7 @@ fn collect_cases(stmt: &Statement, cases: &mut Vec<SwitchCase>) -> ResolveResult
         Statement::Default { body, label } => {
             cases.push(SwitchCase {
                 value: None,
+                end_value: None,
                 label: label.clone(),
             });
             collect_cases(body, cases)?;
@@ -986,6 +1076,7 @@ pub fn resolve(program: Program) -> ResolveResult<ResolveOutput> {
                         init,
                         storage_class: vd.storage_class,
                         alignment: vd.alignment,
+                        alias: vd.alias,
                     })
                 }
                 Declaration::StructDecl(sd) => {
@@ -1001,6 +1092,7 @@ pub fn resolve(program: Program) -> ResolveResult<ResolveOutput> {
                                 member_type: m.member_type,
                                 member_full_type: resolved_ft,
                                 bit_width: m.bit_width,
+                                flexible_array: m.flexible_array,
                                 alignment: m.alignment,
                                 packed: m.packed,
                             }
@@ -1153,6 +1245,14 @@ mod tests {
                 function: "f".to_string()
             }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn does_not_warn_when_main_falls_off_end() -> Result<(), String> {
+        let warnings = warnings_for("int main(void) { int x = 1; x = x + 1; }\n")?;
+
+        assert!(warnings.is_empty(), "{warnings:?}");
         Ok(())
     }
 

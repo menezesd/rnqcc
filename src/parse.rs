@@ -6,6 +6,7 @@ use crate::types::*;
 
 type ParseResult<T> = Result<T, String>;
 const MAX_SUPPORTED_ALIGNMENT: usize = 1 << 30;
+const VLA_STATIC_SCALE_FALLBACK: usize = 16;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct AggregateAttributes {
@@ -33,7 +34,13 @@ enum Declarator {
     Ident(String),
     Pointer(Box<Declarator>),
     Array(Box<Declarator>, usize),
-    Function(Vec<ParamDecl>, Vec<FullType>, bool, Box<Declarator>),
+    Function(
+        Vec<ParamDecl>,
+        Vec<FullType>,
+        bool,
+        Vec<Exp>,
+        Box<Declarator>,
+    ),
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +48,7 @@ struct FunctionDeclaratorInfo {
     params: Vec<ParamDecl>,
     param_full_types: Vec<FullType>,
     variadic: bool,
+    param_vla_bounds: Vec<Exp>,
 }
 
 fn ptr_info_from_full(ft: &FullType) -> (CType, usize) {
@@ -54,6 +62,7 @@ fn ptr_info_from_full(ft: &FullType) -> (CType, usize) {
             let base_ct = elem.to_ctype();
             (base_ct, 1)
         }
+        FullType::Vector { elem, .. } => (elem.to_ctype(), 1),
         FullType::Function { return_type, .. } => ptr_info_from_full(return_type),
         FullType::Struct(_) => (CType::Struct, 1),
     }
@@ -69,6 +78,15 @@ struct TypedefInfo {
     base_type: CType,
     full_type: FullType,
     struct_tag: Option<String>,
+    is_enum: bool,
+    vla_size: Option<Exp>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CompatTypeMeta {
+    pointee_qualified: bool,
+    long_double: bool,
+    enum_typedef: Option<String>,
 }
 
 pub struct Parser {
@@ -81,14 +99,27 @@ pub struct Parser {
     pending_struct_decls: Vec<StructDeclaration>,
     /// Parser-time struct/union layouts for constant-expression helpers like offsetof.
     struct_defs: std::collections::HashMap<String, StructDef>,
+    /// Dynamic element sizes for struct members declared with VLA typedef element types.
+    struct_member_vla_elem_sizes: std::collections::HashMap<(String, String), Exp>,
+    pending_struct_member_vla_elem_sizes: Vec<Vec<(String, Exp)>>,
     /// Full type from the last typedef used as a type specifier
     last_typedef_full_type: Option<FullType>,
+    /// Dynamic byte-size expression from the last VLA typedef used as a type specifier.
+    last_typedef_vla_size: Option<Exp>,
+    /// Dynamic byte-size expression from the most recently parsed type name.
+    last_type_name_vla_size: Option<Exp>,
     /// Scoped enum constant table: maps constant names to their integer values.
     enum_scopes: Vec<std::collections::HashMap<String, i64>>,
     /// Scoped object table for parser-time typeof(expr) support.
     value_scopes: Vec<std::collections::HashMap<String, FullType>>,
+    value_vla_size_scopes: Vec<std::collections::HashMap<String, Exp>>,
+    value_vla_elem_size_scopes: Vec<std::collections::HashMap<String, Exp>>,
+    /// Function-specific alignment attributes for GNU __alignof__(function).
+    function_alignments: std::collections::HashMap<String, usize>,
     /// Extra block items from multi-declarator parsing (e.g., `int x, y;`)
     pending_block_items: Vec<BlockItem>,
+    /// Block items that must precede the currently parsed item, such as captured VLA bounds.
+    pending_pre_block_items: Vec<BlockItem>,
     /// Extra top-level declarations from multi-declarator parsing
     pending_declarations: Vec<Declaration>,
     /// Alignment specifier collected while parsing declaration specifiers.
@@ -97,12 +128,20 @@ pub struct Parser {
     pending_auto_type: bool,
     /// True when declaration specifiers/attributes mark a function as noreturn.
     pending_noreturn: bool,
+    /// True when declaration attributes disable function instrumentation.
+    pending_no_instrument_function: bool,
+    /// GNU alias attribute collected for the next object declaration.
+    pending_alias: Option<String>,
     /// True when declaration specifiers include inline.
     pending_inline: bool,
     /// True when the most recently parsed type specifier was an enum.
     last_type_was_enum: bool,
     /// Last nonconstant array bound parsed for minimal automatic VLA lowering.
     pending_vla_bound: Option<Exp>,
+    vla_bound_counter: usize,
+    param_parse_depth: usize,
+    /// True when the most recent declarator contained a syntactic flexible array bound `[]`.
+    pending_flexible_array_bound: bool,
     /// Function currently being parsed, for predefined function-name identifiers.
     current_function_name: Option<String>,
 }
@@ -123,6 +162,21 @@ impl Parser {
         }
     }
 
+    fn merge_member_attributes(
+        prefix: MemberAttributes,
+        suffix: MemberAttributes,
+    ) -> MemberAttributes {
+        MemberAttributes {
+            packed: prefix.packed || suffix.packed,
+            alignment: match (prefix.alignment, suffix.alignment) {
+                (Some(prefix), Some(suffix)) => Some(prefix.max(suffix)),
+                (Some(prefix), None) => Some(prefix),
+                (None, Some(suffix)) => Some(suffix),
+                (None, None) => None,
+            },
+        }
+    }
+
     pub fn new(tokens: Vec<Token>) -> Self {
         let mut builtin_typedefs = std::collections::HashMap::new();
         builtin_typedefs.insert(
@@ -131,6 +185,8 @@ impl Parser {
                 base_type: CType::Pointer,
                 full_type: FullType::Pointer(Box::new(FullType::Scalar(CType::Char))),
                 struct_tag: None,
+                is_enum: false,
+                vla_size: None,
             },
         );
         builtin_typedefs.insert(
@@ -139,21 +195,30 @@ impl Parser {
                 base_type: CType::Pointer,
                 full_type: FullType::Pointer(Box::new(FullType::Scalar(CType::Char))),
                 struct_tag: None,
+                is_enum: false,
+                vla_size: None,
             },
         );
-        for name in ["__int128_t", "__uint128_t"] {
-            builtin_typedefs.insert(
-                name.to_string(),
-                TypedefInfo {
-                    base_type: CType::ULong,
-                    full_type: FullType::Array {
-                        elem: Box::new(FullType::Scalar(CType::ULong)),
-                        size: 2,
-                    },
-                    struct_tag: None,
-                },
-            );
-        }
+        builtin_typedefs.insert(
+            "__int128_t".to_string(),
+            TypedefInfo {
+                base_type: CType::Int128,
+                full_type: FullType::Scalar(CType::Int128),
+                struct_tag: None,
+                is_enum: false,
+                vla_size: None,
+            },
+        );
+        builtin_typedefs.insert(
+            "__uint128_t".to_string(),
+            TypedefInfo {
+                base_type: CType::UInt128,
+                full_type: FullType::Scalar(CType::UInt128),
+                struct_tag: None,
+                is_enum: false,
+                vla_size: None,
+            },
+        );
 
         Parser {
             tokens,
@@ -162,17 +227,30 @@ impl Parser {
             typedef_scopes: vec![builtin_typedefs],
             pending_struct_decls: Vec::new(),
             struct_defs: std::collections::HashMap::new(),
+            struct_member_vla_elem_sizes: std::collections::HashMap::new(),
+            pending_struct_member_vla_elem_sizes: Vec::new(),
             last_typedef_full_type: None,
+            last_typedef_vla_size: None,
+            last_type_name_vla_size: None,
             enum_scopes: vec![std::collections::HashMap::new()],
             value_scopes: vec![std::collections::HashMap::new()],
+            value_vla_size_scopes: vec![std::collections::HashMap::new()],
+            value_vla_elem_size_scopes: vec![std::collections::HashMap::new()],
+            function_alignments: std::collections::HashMap::new(),
             pending_block_items: Vec::new(),
+            pending_pre_block_items: Vec::new(),
             pending_declarations: Vec::new(),
             pending_alignment: None,
             pending_auto_type: false,
             pending_noreturn: false,
+            pending_no_instrument_function: false,
+            pending_alias: None,
             pending_inline: false,
             last_type_was_enum: false,
             pending_vla_bound: None,
+            vla_bound_counter: 0,
+            param_parse_depth: 0,
+            pending_flexible_array_bound: false,
             current_function_name: None,
         }
     }
@@ -181,12 +259,18 @@ impl Parser {
         self.typedef_scopes.push(std::collections::HashMap::new());
         self.enum_scopes.push(std::collections::HashMap::new());
         self.value_scopes.push(std::collections::HashMap::new());
+        self.value_vla_size_scopes
+            .push(std::collections::HashMap::new());
+        self.value_vla_elem_size_scopes
+            .push(std::collections::HashMap::new());
     }
 
     fn pop_typedef_scope(&mut self) {
         self.typedef_scopes.pop();
         self.enum_scopes.pop();
         self.value_scopes.pop();
+        self.value_vla_size_scopes.pop();
+        self.value_vla_elem_size_scopes.pop();
     }
 
     fn add_typedef(&mut self, name: String, info: TypedefInfo) -> ParseResult<()> {
@@ -220,11 +304,25 @@ impl Parser {
                 | "_Float32x"
                 | "_Float64x"
                 | "_Float128x"
+                | "_Decimal32"
+                | "_Decimal64"
+                | "_Decimal128"
         )
     }
 
     fn is_complex_type_name(name: &str) -> bool {
         name == "_Complex" || name == "__complex" || name == "__complex__"
+    }
+
+    fn is_builtin_int128_type_name(name: &str) -> bool {
+        name == "__int128" || name == "__int128__"
+    }
+
+    fn is_gnu_qualifier_name(name: &str) -> bool {
+        matches!(
+            name,
+            "__const" | "__const__" | "__volatile" | "__volatile__" | "__restrict" | "__restrict__"
+        )
     }
 
     fn make_var_decl(
@@ -252,20 +350,24 @@ impl Parser {
         let full_type = self.infer_unsized_array_type(full_type.clone(), init.as_ref())?;
         let array_dims = Self::extract_array_dims(&full_type);
         if let (Some(bound), Some(_)) = (self.pending_vla_bound.take(), array_dims.as_ref()) {
-            let elem = match full_type {
-                FullType::Array { elem, .. } => *elem,
-                ref other => other.clone(),
+            let elem = match &full_type {
+                FullType::Array { elem, .. } => elem.as_ref().clone(),
+                other => other.clone(),
             };
-            let size_exp = Exp::Binary(
-                BinaryOp::Mul,
-                Box::new(bound),
-                Box::new(Exp::SizeOfType(elem.to_ctype(), elem.clone())),
-            );
+            let size_exp = Self::vla_size_expr_from_bound(bound.clone(), &full_type)
+                .unwrap_or_else(|| {
+                    Exp::Binary(
+                        BinaryOp::Mul,
+                        Box::new(bound),
+                        Box::new(Exp::SizeOfType(elem.to_ctype(), elem.clone())),
+                    )
+                });
             let ptr_ft = FullType::Pointer(Box::new(elem));
             let ptr_info = match &ptr_ft {
                 FullType::Pointer(inner) => Some(ptr_info_from_full(inner)),
                 _ => None,
             };
+            self.add_value_vla_size(name.clone(), size_exp.clone())?;
             return Ok(VarDeclaration {
                 name,
                 var_type: CType::Pointer,
@@ -275,6 +377,7 @@ impl Parser {
                 init: Some(Exp::FunctionCall("alloca".to_string(), vec![size_exp])),
                 storage_class: sc,
                 alignment,
+                alias: self.pending_alias.take(),
             });
         }
         let var_type = if array_dims.is_some() {
@@ -295,6 +398,7 @@ impl Parser {
             init,
             storage_class: sc,
             alignment,
+            alias: self.pending_alias.take(),
         })
     }
 
@@ -327,6 +431,7 @@ impl Parser {
             init: Some(init),
             storage_class: sc,
             alignment,
+            alias: None,
         })
     }
 
@@ -352,11 +457,17 @@ impl Parser {
         };
         let inferred = match init {
             Exp::StringLiteral(s) if elem.to_ctype().is_char() => c_string_byte_len(s) + 1,
+            Exp::WideStringLiteral(s) => s.chars().count() + 1,
+            Exp::StringLiteral(s) => s.chars().count() + 1,
             Exp::ArrayInit(elems) if elem.to_ctype().is_char() => match elems.as_slice() {
                 [Exp::StringLiteral(s)] => c_string_byte_len(s) + 1,
                 _ => self.infer_array_init_len(elems)?,
             },
-            Exp::ArrayInit(elems) => self.infer_array_init_len(elems)?,
+            Exp::ArrayInit(elems) => match elems.as_slice() {
+                [Exp::WideStringLiteral(s)] => s.chars().count() + 1,
+                [Exp::StringLiteral(s)] => s.chars().count() + 1,
+                _ => self.infer_array_init_len(elems)?,
+            },
             _ => 0,
         };
         Ok(FullType::Array {
@@ -374,6 +485,17 @@ impl Parser {
                     Some(Designator::Index(index_exp)) => {
                         let value = self
                             .eval_integer_constant_exp_with_layout(index_exp)
+                            .ok_or_else(|| {
+                                self.format_error("array designator must be constant")
+                            })?;
+                        if value < 0 {
+                            return Err(self.format_error("array designator must be non-negative"));
+                        }
+                        value as usize
+                    }
+                    Some(Designator::IndexRange(_, end_exp)) => {
+                        let value = self
+                            .eval_integer_constant_exp_with_layout(end_exp)
                             .ok_or_else(|| {
                                 self.format_error("array designator must be constant")
                             })?;
@@ -449,6 +571,40 @@ impl Parser {
         None
     }
 
+    fn add_value_vla_size(&mut self, name: String, size: Exp) -> ParseResult<()> {
+        let Some(scope) = self.value_vla_size_scopes.last_mut() else {
+            return Err(self.format_error("parser value scope stack is empty"));
+        };
+        scope.insert(name, size);
+        Ok(())
+    }
+
+    fn lookup_value_vla_size(&self, name: &str) -> Option<Exp> {
+        for scope in self.value_vla_size_scopes.iter().rev() {
+            if let Some(size) = scope.get(name) {
+                return Some(size.clone());
+            }
+        }
+        None
+    }
+
+    fn add_value_vla_elem_size(&mut self, name: String, size: Exp) -> ParseResult<()> {
+        let Some(scope) = self.value_vla_elem_size_scopes.last_mut() else {
+            return Err(self.format_error("parser value VLA elem-size scope stack is empty"));
+        };
+        scope.insert(name, size);
+        Ok(())
+    }
+
+    fn lookup_value_vla_elem_size(&self, name: &str) -> Option<Exp> {
+        for scope in self.value_vla_elem_size_scopes.iter().rev() {
+            if let Some(size) = scope.get(name) {
+                return Some(size.clone());
+            }
+        }
+        None
+    }
+
     fn record_struct_definition(&mut self, sd: &StructDeclaration) -> ParseResult<()> {
         let def = StructDef::from_declaration(sd, &self.struct_defs)
             .map_err(|err| self.format_error(&err))?;
@@ -456,33 +612,56 @@ impl Parser {
         Ok(())
     }
 
-    fn offsetof_member_designator(&mut self, base_type: FullType) -> ParseResult<usize> {
+    fn record_struct_member_vla_elem_sizes(&mut self, tag: &str, sizes: Vec<(String, Exp)>) {
+        for (member, size) in sizes {
+            self.struct_member_vla_elem_sizes
+                .insert((tag.to_string(), member), size);
+        }
+    }
+
+    fn add_offset_exp(left: Exp, right: Exp) -> Exp {
+        if matches!(left, Exp::ULongConstant(0)) {
+            right
+        } else if matches!(right, Exp::ULongConstant(0)) {
+            left
+        } else {
+            Exp::Binary(BinaryOp::Add, Box::new(left), Box::new(right))
+        }
+    }
+
+    fn offsetof_member_designator(&mut self, base_type: FullType) -> ParseResult<Exp> {
         let mut current_type = base_type;
-        let mut offset = 0usize;
+        let mut offset = Exp::ULongConstant(0);
         let first_member = self.parse_identifier()?;
-        offset += self.offsetof_member_step(&mut current_type, &first_member)?;
+        let (member_offset, member_dynamic_elem_size) =
+            self.offsetof_member_step(&mut current_type, &first_member)?;
+        offset = Self::add_offset_exp(offset, Exp::ULongConstant(member_offset as i64));
+        let mut dynamic_elem_size = member_dynamic_elem_size;
 
         loop {
             if self.eat(&Token::Dot) {
                 let member = self.parse_identifier()?;
-                offset += self.offsetof_member_step(&mut current_type, &member)?;
+                let (member_offset, member_dynamic_elem_size) =
+                    self.offsetof_member_step(&mut current_type, &member)?;
+                offset = Self::add_offset_exp(offset, Exp::ULongConstant(member_offset as i64));
+                dynamic_elem_size = member_dynamic_elem_size;
             } else if self.eat(&Token::OpenBracket) {
                 let index_exp = self.parse_expression()?;
-                let index = self
-                    .eval_integer_constant_exp_with_layout(&index_exp)
-                    .ok_or_else(|| {
-                        self.format_error(
-                            "offsetof array index must be an integer constant expression",
-                        )
-                    })?;
-                if index < 0 {
-                    return Err(self.format_error("offsetof array index may not be negative"));
+                if let Some(index) = self.eval_integer_constant_exp_with_layout(&index_exp) {
+                    if index < 0 {
+                        return Err(self.format_error("offsetof array index may not be negative"));
+                    }
                 }
                 let FullType::Array { elem, .. } = current_type.clone() else {
                     return Err(self.format_error("offsetof array index requires an array member"));
                 };
-                let elem_size = elem.byte_size_with(&self.struct_defs);
-                offset += index as usize * elem_size;
+                let elem_size = dynamic_elem_size.take().unwrap_or_else(|| {
+                    Exp::ULongConstant(elem.byte_size_with(&self.struct_defs) as i64)
+                });
+                offset = Self::add_offset_exp(
+                    offset,
+                    Exp::Binary(BinaryOp::Mul, Box::new(index_exp), Box::new(elem_size)),
+                );
                 current_type = *elem;
                 self.expect_token(Token::CloseBracket)?;
             } else {
@@ -497,10 +676,11 @@ impl Parser {
         &self,
         current_type: &mut FullType,
         member: &str,
-    ) -> ParseResult<usize> {
+    ) -> ParseResult<(usize, Option<Exp>)> {
         let FullType::Struct(tag) = current_type else {
             return Err(self.format_error("offsetof member access requires a struct or union"));
         };
+        let tag_name = tag.clone();
         let def = self
             .struct_defs
             .get(tag)
@@ -512,7 +692,11 @@ impl Parser {
             return Err(self.format_error("offsetof may not name a bit-field"));
         }
         *current_type = mem.member_full_type.clone();
-        Ok(mem.offset)
+        let dynamic_elem_size = self
+            .struct_member_vla_elem_sizes
+            .get(&(tag_name, member.to_string()))
+            .cloned();
+        Ok((mem.offset, dynamic_elem_size))
     }
 
     fn member_expression_type(&self, base_type: &FullType, member: &str) -> ParseResult<FullType> {
@@ -553,6 +737,8 @@ impl Parser {
             | Exp::LongConstant(c)
             | Exp::UIntConstant(c)
             | Exp::ULongConstant(c) => Some(*c),
+            Exp::Int128Constant(c) => i64::try_from(*c).ok(),
+            Exp::UInt128Constant(c) => i64::try_from(*c).ok(),
             Exp::SizeOfType(_, ft) => Some(ft.byte_size_with(struct_defs) as i64),
             Exp::AlignOfType(ft) => Some(ft.alignment_with(struct_defs) as i64),
             Exp::Cast(_, _, inner) => Self::eval_integer_constant_exp_with_defs(inner, struct_defs),
@@ -569,11 +755,11 @@ impl Parser {
                 let left = Self::eval_integer_constant_exp_with_defs(left, struct_defs)?;
                 let right = Self::eval_integer_constant_exp_with_defs(right, struct_defs)?;
                 match op {
-                    BinaryOp::Add => Some(left + right),
-                    BinaryOp::Sub => Some(left - right),
-                    BinaryOp::Mul => Some(left * right),
-                    BinaryOp::Div => (right != 0).then_some(left / right),
-                    BinaryOp::Mod => (right != 0).then_some(left % right),
+                    BinaryOp::Add => Some(left.wrapping_add(right)),
+                    BinaryOp::Sub => Some(left.wrapping_sub(right)),
+                    BinaryOp::Mul => Some(left.wrapping_mul(right)),
+                    BinaryOp::Div => left.checked_div(right),
+                    BinaryOp::Mod => left.checked_rem(right),
                     BinaryOp::BitwiseAnd => Some(left & right),
                     BinaryOp::BitwiseNand => Some(!(left & right)),
                     BinaryOp::BitwiseOr => Some(left | right),
@@ -696,6 +882,7 @@ impl Parser {
             "__builtin___memmove_chk" => ("__builtin_memmove", 3),
             "__builtin___memset_chk" => ("__builtin_memset", 3),
             "__builtin___strcpy_chk" => ("__builtin_strcpy", 2),
+            "__builtin___stpcpy_chk" => ("__builtin_stpcpy", 2),
             "__builtin___strncpy_chk" => ("__builtin_strncpy", 3),
             "__builtin___strcat_chk" => ("__builtin_strcat", 2),
             "__builtin___strncat_chk" => ("__builtin_strncat", 3),
@@ -716,6 +903,7 @@ impl Parser {
     }
 
     fn parse_type_name_full(&mut self) -> ParseResult<FullType> {
+        self.last_type_name_vla_size = None;
         let base_type = self.parse_type()?;
         let base_struct_tag = if base_type == CType::Struct {
             self.last_struct_tag.clone()
@@ -723,12 +911,16 @@ impl Parser {
             None
         };
         let typedef_full_type = self.last_typedef_full_type.take();
+        let typedef_vla_size = self.last_typedef_vla_size.take();
         let tree = self.parse_abstract_decl_tree()?;
         let full_type = if let Some(base_full_type) = typedef_full_type {
             Self::process_abstract_tree(&tree, base_full_type)
         } else {
             Self::process_abstract_tree(&tree, FullType::Scalar(base_type))
         };
+        if matches!(tree, AbstractDecl::Base) {
+            self.last_type_name_vla_size = typedef_vla_size;
+        }
         Ok(if base_type == CType::Struct {
             if let Some(ref tag) = base_struct_tag {
                 Self::replace_scalar_struct(&full_type, tag)
@@ -782,6 +974,54 @@ impl Parser {
             }
             _ => false,
         }
+    }
+
+    fn is_type_qualifier_token(token: &Token) -> bool {
+        matches!(
+            token,
+            Token::KWConst | Token::KWVolatile | Token::KWRestrict | Token::KWAtomic
+        )
+    }
+
+    fn compat_type_meta(&self, full_type: &FullType, tokens: &[Token]) -> CompatTypeMeta {
+        let first_star = tokens
+            .iter()
+            .position(|token| matches!(token, Token::Star))
+            .unwrap_or(tokens.len());
+        let pointee_qualified = matches!(full_type, FullType::Pointer(_))
+            && tokens[..first_star]
+                .iter()
+                .any(Self::is_type_qualifier_token);
+        let long_double = tokens
+            .windows(2)
+            .any(|pair| matches!(pair, [Token::KWLong, Token::KWDouble]));
+        let enum_typedef = match tokens {
+            [Token::Identifier(name)] => self
+                .lookup_typedef(name)
+                .filter(|info| info.is_enum)
+                .map(|_| name.clone()),
+            [Token::KWTypeOf, Token::OpenParen, Token::Identifier(name), Token::CloseParen] => self
+                .lookup_typedef(name)
+                .filter(|info| info.is_enum)
+                .map(|_| name.clone()),
+            _ => None,
+        };
+
+        CompatTypeMeta {
+            pointee_qualified,
+            long_double,
+            enum_typedef,
+        }
+    }
+
+    fn gnu_type_meta_compatible(left: &CompatTypeMeta, right: &CompatTypeMeta) -> bool {
+        left.pointee_qualified == right.pointee_qualified
+            && left.long_double == right.long_double
+            && match (&left.enum_typedef, &right.enum_typedef) {
+                (Some(left), Some(right)) => left == right,
+                (Some(_), None) | (None, Some(_)) => false,
+                (None, None) => true,
+            }
     }
 
     fn parse_alignment_specifier(&mut self) -> ParseResult<std::num::NonZeroUsize> {
@@ -840,6 +1080,46 @@ impl Parser {
         Self::validate_alignment_value(value).map_err(|err| self.format_error(&err))
     }
 
+    fn parse_attribute_vector_size(&self, expression: &str) -> ParseResult<usize> {
+        let tokens = lex::lex(expression).map_err(|err| self.format_error(&err))?;
+        let mut parser = Parser::new(tokens);
+        parser.typedef_scopes = self.typedef_scopes.clone();
+        parser.enum_scopes = self.enum_scopes.clone();
+        parser.value_scopes = self.value_scopes.clone();
+        parser.struct_defs = self.struct_defs.clone();
+        let exp = parser.parse_assignment()?;
+        if parser.peek().is_some() {
+            return Err(self.format_error("unexpected tokens in vector_size attribute"));
+        }
+        let value = parser
+            .eval_integer_constant_exp_with_layout(&exp)
+            .ok_or_else(|| self.format_error("expected constant vector_size"))?;
+        if value <= 0 {
+            return Err(self.format_error("vector_size must be positive"));
+        }
+        Ok(value as usize)
+    }
+
+    fn ctype_for_gnu_mode(mode: &str, unsigned: bool) -> Option<CType> {
+        let normalized = mode.trim_matches('_').to_ascii_uppercase();
+        match normalized.as_str() {
+            "QI" => Some(if unsigned { CType::UChar } else { CType::SChar }),
+            "HI" => Some(if unsigned {
+                CType::UShort
+            } else {
+                CType::Short
+            }),
+            "SI" => Some(if unsigned { CType::UInt } else { CType::Int }),
+            "DI" => Some(if unsigned { CType::ULong } else { CType::Long }),
+            "TI" => Some(if unsigned {
+                CType::UInt128
+            } else {
+                CType::Int128
+            }),
+            _ => None,
+        }
+    }
+
     fn consume_member_attributes(&mut self) -> ParseResult<MemberAttributes> {
         let mut attrs = MemberAttributes::default();
         loop {
@@ -876,6 +1156,9 @@ impl Parser {
                     attrs.alignment = Self::merge_alignment(attrs.alignment, value);
                     attrs.packed = true;
                 }
+                Some(Token::AttributeMode(_)) | Some(Token::AttributeVectorSize(_)) => {
+                    self.advance()?;
+                }
                 _ => break,
             }
         }
@@ -888,9 +1171,10 @@ impl Parser {
 
     fn consume_declaration_attributes(
         &mut self,
-    ) -> ParseResult<(Option<std::num::NonZeroUsize>, bool)> {
+    ) -> ParseResult<(Option<std::num::NonZeroUsize>, bool, Option<usize>)> {
         let mut alignment = None;
         let mut noreturn = false;
+        let mut vector_size = None;
         loop {
             match self.peek().cloned() {
                 Some(Token::KWAlignAs) => {
@@ -912,6 +1196,14 @@ impl Parser {
                     self.advance()?;
                     noreturn = true;
                 }
+                Some(Token::AttributeNoInstrumentFunction) => {
+                    self.advance()?;
+                    self.pending_no_instrument_function = true;
+                }
+                Some(Token::AttributeAlias(target)) => {
+                    self.advance()?;
+                    self.pending_alias = Some(target);
+                }
                 Some(Token::AttributePacked) => {
                     self.advance()?;
                 }
@@ -926,10 +1218,32 @@ impl Parser {
                     alignment = Self::merge_alignment(alignment, value);
                     noreturn = true;
                 }
+                Some(Token::AttributeMode(_)) => {
+                    self.advance()?;
+                }
+                Some(Token::AttributeVectorSize(expression)) => {
+                    vector_size = Some(self.parse_attribute_vector_size(&expression)?);
+                    self.advance()?;
+                }
                 _ => break,
             }
         }
-        Ok((alignment, noreturn))
+        Ok((alignment, noreturn, vector_size))
+    }
+
+    fn apply_vector_size_attr(&self, full_type: FullType, vector_size: Option<usize>) -> FullType {
+        let Some(vector_size) = vector_size else {
+            return full_type;
+        };
+        let elem = match full_type {
+            FullType::Vector { elem, .. } => *elem,
+            other => other,
+        };
+        let lane_size = elem.byte_size().max(1);
+        FullType::Vector {
+            elem: Box::new(elem),
+            lanes: std::cmp::max(vector_size / lane_size, 1),
+        }
     }
 
     fn consume_aggregate_attributes(&mut self) -> ParseResult<AggregateAttributes> {
@@ -962,6 +1276,9 @@ impl Parser {
                     attrs.alignment = Self::merge_alignment(attrs.alignment, value);
                     attrs.packed = true;
                 }
+                Some(Token::AttributeMode(_)) | Some(Token::AttributeVectorSize(_)) => {
+                    self.advance()?;
+                }
                 _ => break,
             }
         }
@@ -985,12 +1302,18 @@ impl Parser {
         match exp {
             Exp::Constant(_) => Ok(FullType::Scalar(CType::Int)),
             Exp::LongConstant(_) => Ok(FullType::Scalar(CType::Long)),
+            Exp::Int128Constant(_) => Ok(FullType::Scalar(CType::Int128)),
             Exp::UIntConstant(_) => Ok(FullType::Scalar(CType::UInt)),
             Exp::ULongConstant(_) => Ok(FullType::Scalar(CType::ULong)),
+            Exp::UInt128Constant(_) => Ok(FullType::Scalar(CType::UInt128)),
             Exp::DoubleConstant(_) => Ok(FullType::Scalar(CType::Double)),
             Exp::StringLiteral(value) => Ok(FullType::Array {
                 elem: Box::new(FullType::Scalar(CType::Char)),
                 size: c_string_byte_len(value) + 1,
+            }),
+            Exp::WideStringLiteral(value) => Ok(FullType::Array {
+                elem: Box::new(FullType::Scalar(CType::Int)),
+                size: value.chars().count() + 1,
             }),
             Exp::Var(name) => self.lookup_value_type(name).ok_or_else(|| {
                 self.format_error(&format!("unknown expression type for typeof({})", name))
@@ -1006,7 +1329,9 @@ impl Parser {
                 _ => Err(self.format_error("typeof cannot dereference non-pointer expression")),
             },
             Exp::Subscript(array, _) => match self.typeof_expression(array)? {
-                FullType::Pointer(inner) | FullType::Array { elem: inner, .. } => Ok(*inner),
+                FullType::Pointer(inner)
+                | FullType::Array { elem: inner, .. }
+                | FullType::Vector { elem: inner, .. } => Ok(*inner),
                 _ => Err(self.format_error("typeof cannot subscript non-array expression")),
             },
             Exp::Dot(base, member) => {
@@ -1065,6 +1390,7 @@ impl Parser {
                 )))
             }
             Exp::Comma(_, right) => self.typeof_expression(right),
+            Exp::BuiltinExpect(value, _) => self.typeof_expression(value),
             Exp::Assign(left, _) | Exp::CompoundAssign(_, left, _) => self.typeof_expression(left),
             Exp::StatementExpr(_, _, Some(full_type)) => Ok(full_type.clone()),
             Exp::StatementExpr(_, _, None) => Ok(FullType::Scalar(CType::Void)),
@@ -1129,6 +1455,7 @@ impl Parser {
             }
         }
         if allow_empty && self.at(&Token::CloseBracket) {
+            self.pending_flexible_array_bound = true;
             return Ok(0);
         }
         if self.eat(&Token::Star) {
@@ -1136,13 +1463,92 @@ impl Parser {
         }
         let exp = self.parse_assignment()?;
         let Some(value) = self.eval_integer_constant_exp_with_layout(&exp) else {
-            self.pending_vla_bound = Some(exp);
-            return Ok(0);
+            let bound = if self.current_function_name.is_some() && self.param_parse_depth == 0 {
+                let name = format!("__rnqcc_vla_bound_{}", self.vla_bound_counter);
+                self.vla_bound_counter += 1;
+                let decl = VarDeclaration {
+                    name: name.clone(),
+                    var_type: CType::Long,
+                    ptr_info: None,
+                    array_dims: None,
+                    decl_full_type: Some(FullType::Scalar(CType::Long)),
+                    init: Some(exp),
+                    storage_class: None,
+                    alignment: None,
+                    alias: None,
+                };
+                let _ = self.add_value_type(name.clone(), FullType::Scalar(CType::Long));
+                self.pending_pre_block_items
+                    .push(BlockItem::Declaration(Declaration::VarDecl(decl)));
+                Exp::Var(name)
+            } else {
+                exp
+            };
+            self.pending_vla_bound = Some(bound);
+            return Ok(VLA_STATIC_SCALE_FALLBACK);
         };
         if value < 0 {
             return Err(self.format_error("array size must be non-negative"));
         }
         Ok(value as usize)
+    }
+
+    fn vla_size_expr_from_bound(bound: Exp, full_type: &FullType) -> Option<Exp> {
+        match full_type {
+            FullType::Array { elem, size } => {
+                if *size == VLA_STATIC_SCALE_FALLBACK {
+                    return Some(Exp::Binary(
+                        BinaryOp::Mul,
+                        Box::new(bound),
+                        Box::new(Exp::SizeOfType(elem.to_ctype(), elem.as_ref().clone())),
+                    ));
+                }
+                let inner = Self::vla_size_expr_from_bound(bound, elem)?;
+                return Some(Exp::Binary(
+                    BinaryOp::Mul,
+                    Box::new(Exp::ULongConstant(*size as i64)),
+                    Box::new(inner),
+                ));
+            }
+            FullType::Struct(_) => None,
+            _ => None,
+        }
+    }
+
+    fn pending_vla_size_expr_for_type(&mut self, full_type: &FullType) -> Option<Exp> {
+        let bound = self.pending_vla_bound.take()?;
+        if let Some(size) = Self::vla_size_expr_from_bound(bound.clone(), full_type) {
+            return Some(size);
+        }
+        match full_type {
+            FullType::Struct(tag) => {
+                let def = self.struct_defs.get(tag)?;
+                let mem = def.members.iter().find(|mem| {
+                    matches!(
+                        mem.member_full_type,
+                        FullType::Array {
+                            size: VLA_STATIC_SCALE_FALLBACK,
+                            ..
+                        }
+                    ) || matches!(mem.member_full_type, FullType::Array { .. })
+                })?;
+                let size = Self::vla_size_expr_from_bound(bound, &mem.member_full_type)?;
+                return if mem.offset == 0 {
+                    Some(size)
+                } else {
+                    Some(Exp::Binary(
+                        BinaryOp::Add,
+                        Box::new(Exp::ULongConstant(mem.offset as i64)),
+                        Box::new(size),
+                    ))
+                };
+            }
+            _ => None,
+        }
+    }
+
+    fn typedef_vla_size_expr(&mut self, full_type: &FullType) -> Option<Exp> {
+        self.pending_vla_size_expr_for_type(full_type)
     }
 
     /// Parse enum body: { A, B = 5, C }
@@ -1265,12 +1671,20 @@ impl Parser {
         let mut has_void = false;
         let mut has_float = false;
         let mut has_double = false;
+        let mut has_int128 = false;
+        let mut mode_attr: Option<String> = None;
+        let mut vector_size_attr: Option<usize> = None;
         let mut saw_non_type_specifier = false;
 
         loop {
             match self.peek().cloned() {
                 // Ignored qualifiers/specifiers
                 Some(Token::KWConst) | Some(Token::KWVolatile) | Some(Token::KWRestrict) => {
+                    saw_non_type_specifier = true;
+                    self.advance()?;
+                    continue;
+                }
+                Some(Token::Identifier(name)) if Self::is_gnu_qualifier_name(&name) => {
                     saw_non_type_specifier = true;
                     self.advance()?;
                     continue;
@@ -1286,9 +1700,19 @@ impl Parser {
                     self.advance()?;
                     continue;
                 }
+                Some(Token::Identifier(name)) if Self::is_builtin_int128_type_name(&name) => {
+                    self.advance()?;
+                    has_int128 = true;
+                }
                 Some(Token::KWNoreturn) | Some(Token::AttributeNoreturn) => {
                     saw_non_type_specifier = true;
                     self.pending_noreturn = true;
+                    self.advance()?;
+                    continue;
+                }
+                Some(Token::AttributeNoInstrumentFunction) => {
+                    saw_non_type_specifier = true;
+                    self.pending_no_instrument_function = true;
                     self.advance()?;
                     continue;
                 }
@@ -1331,6 +1755,18 @@ impl Parser {
                     self.advance()?;
                     continue;
                 }
+                Some(Token::AttributeMode(mode)) => {
+                    saw_non_type_specifier = true;
+                    mode_attr = Some(mode);
+                    self.advance()?;
+                    continue;
+                }
+                Some(Token::AttributeVectorSize(expression)) => {
+                    saw_non_type_specifier = true;
+                    vector_size_attr = Some(self.parse_attribute_vector_size(&expression)?);
+                    self.advance()?;
+                    continue;
+                }
                 Some(Token::KWAtomic) => {
                     saw_non_type_specifier = true;
                     self.advance()?;
@@ -1344,6 +1780,7 @@ impl Parser {
                 Some(Token::KWTypeOf)
                     if !has_int
                         && !has_long
+                        && !has_int128
                         && !has_short
                         && !has_void
                         && !has_unsigned
@@ -1357,6 +1794,7 @@ impl Parser {
                 Some(Token::KWAutoType)
                     if !has_int
                         && !has_long
+                        && !has_int128
                         && !has_short
                         && !has_void
                         && !has_unsigned
@@ -1400,11 +1838,13 @@ impl Parser {
                     self.advance()?;
                     has_int = true;
                 }
-                Some(Token::KWLong) if !has_void && !has_char => {
+                Some(Token::KWLong) if !has_void && !has_char && !has_int128 => {
                     self.advance()?;
                     has_long = true; // long long is the same as long (both 64-bit)
                 }
-                Some(Token::KWChar) if !has_char && !has_int && !has_long && !has_void => {
+                Some(Token::KWChar)
+                    if !has_char && !has_int && !has_long && !has_void && !has_int128 =>
+                {
                     self.advance()?;
                     has_char = true;
                 }
@@ -1429,6 +1869,7 @@ impl Parser {
                 Some(Token::KWFloat)
                     if !has_int
                         && !has_long
+                        && !has_int128
                         && !has_void
                         && !has_unsigned
                         && !has_signed
@@ -1440,6 +1881,7 @@ impl Parser {
                 Some(Token::KWVoid)
                     if !has_int
                         && !has_long
+                        && !has_int128
                         && !has_void
                         && !has_unsigned
                         && !has_signed
@@ -1465,6 +1907,7 @@ impl Parser {
 
         if !has_int
             && !has_long
+            && !has_int128
             && !has_short
             && !has_void
             && !has_unsigned
@@ -1499,15 +1942,24 @@ impl Parser {
                     self.last_typedef_full_type = None;
                     return Ok((sc, CType::Double));
                 }
+                if Self::is_builtin_int128_type_name(name) {
+                    self.advance()?;
+                    self.last_typedef_full_type = None;
+                    return Ok((sc, CType::Int128));
+                }
                 if let Some(info) = self.lookup_typedef(name) {
                     let ct = info.base_type;
                     let tag = info.struct_tag.clone();
                     let ft = info.full_type.clone();
+                    let vla_size = info.vla_size.clone();
+                    let is_enum = info.is_enum;
                     self.advance()?;
                     if let Some(tag) = tag {
                         self.last_struct_tag = Some(tag);
                     }
                     self.last_typedef_full_type = Some(ft);
+                    self.last_typedef_vla_size = vla_size;
+                    self.last_type_was_enum = is_enum;
                     return Ok((sc, ct));
                 }
             }
@@ -1523,8 +1975,12 @@ impl Parser {
         }
         self.last_typedef_full_type = None;
 
-        let ctype = if has_void {
+        let mut ctype = if has_void {
             CType::Void
+        } else if has_int128 && has_unsigned {
+            CType::UInt128
+        } else if has_int128 {
+            CType::Int128
         } else if has_char && has_unsigned {
             CType::UChar
         } else if has_char && has_signed {
@@ -1549,6 +2005,22 @@ impl Parser {
             CType::Int // 'signed', 'signed int', 'int' all map to Int
         };
 
+        if let Some(mode) = mode_attr {
+            if let Some(mode_ctype) = Self::ctype_for_gnu_mode(&mode, has_unsigned) {
+                ctype = mode_ctype;
+            }
+        }
+
+        if let Some(vector_size) = vector_size_attr {
+            let lane_size = ctype.size().max(1) as usize;
+            let lanes = std::cmp::max(vector_size / lane_size, 1);
+            self.last_typedef_full_type = Some(FullType::Vector {
+                elem: Box::new(FullType::Scalar(ctype)),
+                lanes,
+            });
+        }
+
+        self.last_type_was_enum = false;
         Ok((sc, ctype))
     }
 
@@ -1556,16 +2028,44 @@ impl Parser {
         self.last_type_was_enum = false;
         self.last_typedef_full_type = None;
         self.last_struct_tag = None;
+        let mut vector_size_attr = None;
+        let mut mode_attr: Option<String> = None;
 
         // Skip type qualifiers
-        while matches!(
-            self.peek(),
-            Some(Token::KWConst)
-                | Some(Token::KWVolatile)
-                | Some(Token::KWRestrict)
-                | Some(Token::KWThreadLocal)
-                | Some(Token::KWRegister)
-                | Some(Token::KWAuto)
+        loop {
+            match self.peek().cloned() {
+                Some(
+                    Token::KWConst
+                    | Token::KWVolatile
+                    | Token::KWRestrict
+                    | Token::KWThreadLocal
+                    | Token::KWRegister
+                    | Token::KWAuto,
+                ) => {
+                    self.advance()?;
+                }
+                Some(Token::AttributeVectorSize(expression)) => {
+                    vector_size_attr = Some(self.parse_attribute_vector_size(&expression)?);
+                    self.advance()?;
+                }
+                Some(Token::AttributeMode(mode)) => {
+                    mode_attr = Some(mode);
+                    self.advance()?;
+                }
+                Some(
+                    Token::AttributeAligned(_)
+                    | Token::AttributeAlignedNoreturn(_)
+                    | Token::AttributePacked
+                    | Token::AttributePackedAligned(_)
+                    | Token::AttributePackedAlignedNoreturn(_),
+                ) => {
+                    self.advance()?;
+                }
+                _ => break,
+            }
+        }
+        while self.peek().is_some_and(
+            |tok| matches!(tok, Token::Identifier(name) if Self::is_gnu_qualifier_name(name)),
         ) {
             self.advance()?;
         }
@@ -1595,6 +2095,12 @@ impl Parser {
             ) {
                 self.advance()?;
             }
+            if let Some(vector_size) = vector_size_attr {
+                self.last_typedef_full_type = Some(FullType::Vector {
+                    elem: Box::new(FullType::Scalar(CType::Double)),
+                    lanes: std::cmp::max(vector_size / CType::Double.size() as usize, 1),
+                });
+            }
             return Ok(CType::Double);
         }
         if self.at(&Token::KWFloat) {
@@ -1603,6 +2109,12 @@ impl Parser {
                 |tok| matches!(tok, Token::Identifier(name) if Self::is_complex_type_name(name)),
             ) {
                 self.advance()?;
+            }
+            if let Some(vector_size) = vector_size_attr {
+                self.last_typedef_full_type = Some(FullType::Vector {
+                    elem: Box::new(FullType::Scalar(CType::Float)),
+                    lanes: std::cmp::max(vector_size / CType::Float.size() as usize, 1),
+                });
             }
             return Ok(CType::Float);
         }
@@ -1618,7 +2130,18 @@ impl Parser {
                 self.advance()?;
                 return Ok(CType::Double);
             }
-            return Ok(CType::Double);
+            if !matches!(
+                self.peek(),
+                Some(Token::KWInt)
+                    | Some(Token::KWLong)
+                    | Some(Token::KWUnsigned)
+                    | Some(Token::KWSigned)
+                    | Some(Token::KWShort)
+                    | Some(Token::KWChar)
+                    | Some(Token::KWBool)
+            ) {
+                return Ok(CType::Double);
+            }
         }
         if self.at(&Token::KWBool) {
             self.advance()?;
@@ -1642,15 +2165,24 @@ impl Parser {
                 self.last_typedef_full_type = None;
                 return Ok(CType::Double);
             }
+            if Self::is_builtin_int128_type_name(name) {
+                self.advance()?;
+                self.last_typedef_full_type = None;
+                return Ok(CType::Int128);
+            }
             if let Some(info) = self.lookup_typedef(name) {
                 let ct = info.base_type;
                 let tag = info.struct_tag.clone();
                 let ft = info.full_type.clone();
+                let vla_size = info.vla_size.clone();
+                let is_enum = info.is_enum;
                 self.advance()?;
                 if let Some(tag) = tag {
                     self.last_struct_tag = Some(tag);
                 }
                 self.last_typedef_full_type = Some(ft);
+                self.last_typedef_vla_size = vla_size;
+                self.last_type_was_enum = is_enum;
                 return Ok(ct);
             }
         }
@@ -1662,6 +2194,7 @@ impl Parser {
         let mut has_unsigned = false;
         let mut has_signed = false;
         let mut has_double = false;
+        let mut has_int128 = false;
         loop {
             match self.peek() {
                 Some(Token::KWConst)
@@ -1673,9 +2206,17 @@ impl Parser {
                     self.advance()?;
                     continue;
                 }
+                Some(Token::Identifier(name)) if Self::is_gnu_qualifier_name(name) => {
+                    self.advance()?;
+                    continue;
+                }
                 Some(Token::Identifier(name)) if Self::is_complex_type_name(name) => {
                     self.advance()?;
                     continue;
+                }
+                Some(Token::Identifier(name)) if Self::is_builtin_int128_type_name(name) => {
+                    self.advance()?;
+                    has_int128 = true;
                 }
                 Some(Token::KWAlignAs) => {
                     let alignment = self.parse_alignment_specifier()?;
@@ -1693,7 +2234,7 @@ impl Parser {
                     self.advance()?;
                     has_int = true;
                 }
-                Some(Token::KWLong) if !has_char => {
+                Some(Token::KWLong) if !has_char && !has_int128 => {
                     self.advance()?;
                     has_long = true;
                 }
@@ -1724,6 +2265,10 @@ impl Parser {
         }
         let ctype = if has_char && has_unsigned {
             CType::UChar
+        } else if has_int128 && has_unsigned {
+            CType::UInt128
+        } else if has_int128 {
+            CType::Int128
         } else if has_char && has_signed {
             CType::SChar
         } else if has_char {
@@ -1745,6 +2290,17 @@ impl Parser {
         } else {
             return Err(self.format_error("expected type specifier"));
         };
+        let ctype = mode_attr
+            .and_then(|mode| Self::ctype_for_gnu_mode(&mode, has_unsigned))
+            .unwrap_or(ctype);
+        if let Some(vector_size) = vector_size_attr {
+            let lane_size = ctype.size().max(1) as usize;
+            self.last_typedef_full_type = Some(FullType::Vector {
+                elem: Box::new(FullType::Scalar(ctype)),
+                lanes: std::cmp::max(vector_size / lane_size, 1),
+            });
+        }
+        self.last_type_was_enum = false;
         Ok(ctype)
     }
 
@@ -1761,7 +2317,6 @@ impl Parser {
             | Token::KWChar
             | Token::KWStruct
             | Token::KWUnion
-            | Token::KWAlignOf
             | Token::KWEnum
             | Token::KWConst
             | Token::KWVolatile
@@ -1780,11 +2335,16 @@ impl Parser {
             | Token::AttributePackedAlignedNoreturn(_)
             | Token::AttributeAlignedNoreturn(_)
             | Token::AttributeNoreturn
+            | Token::AttributeNoInstrumentFunction
+            | Token::AttributeMode(_)
+            | Token::AttributeVectorSize(_)
             | Token::KWNoreturn => true,
             Token::Identifier(name) => {
                 self.is_typedef_name(name)
                     || Self::is_builtin_float_type_name(name)
+                    || Self::is_builtin_int128_type_name(name)
                     || Self::is_complex_type_name(name)
+                    || Self::is_gnu_qualifier_name(name)
             }
             _ => false,
         }
@@ -1812,7 +2372,7 @@ impl Parser {
                 };
                 Self::process_declarator_with_type(inner, derived)
             }
-            Declarator::Function(params, pfts, variadic, inner) => {
+            Declarator::Function(params, pfts, variadic, bounds, inner) => {
                 if let Declarator::Ident(name) = inner.as_ref() {
                     (
                         name.clone(),
@@ -1821,6 +2381,7 @@ impl Parser {
                             params: params.clone(),
                             param_full_types: pfts.clone(),
                             variadic: *variadic,
+                            param_vla_bounds: bounds.clone(),
                         }),
                     )
                 } else {
@@ -1852,7 +2413,7 @@ impl Parser {
                 };
                 Self::process_declarator_with_type(inner, derived)
             }
-            Declarator::Function(params, pfts, variadic, inner) => {
+            Declarator::Function(params, pfts, variadic, bounds, inner) => {
                 if let Declarator::Ident(name) = inner.as_ref() {
                     // Function returning current_type: void *func() or int *func()
                     (
@@ -1862,6 +2423,7 @@ impl Parser {
                             params: params.clone(),
                             param_full_types: pfts.clone(),
                             variadic: *variadic,
+                            param_vla_bounds: bounds.clone(),
                         }),
                     )
                 } else {
@@ -1944,6 +2506,22 @@ impl Parser {
                 let mut temp_stars = 0;
                 while self.eat(&Token::Star) {
                     temp_stars += 1;
+                    while matches!(
+                        self.peek(),
+                        Some(Token::KWConst)
+                            | Some(Token::KWVolatile)
+                            | Some(Token::KWRestrict)
+                            | Some(Token::KWAtomic)
+                    ) || matches!(
+                        self.peek(),
+                        Some(Token::Identifier(name))
+                            if matches!(
+                                name.as_str(),
+                                "_Nonnull" | "_Nullable" | "_Null_unspecified"
+                            )
+                    ) {
+                        self.advance()?;
+                    }
                 }
                 let is_grouped = matches!(self.peek(), Some(Token::Identifier(_)))
                     || (temp_stars > 0
@@ -1993,9 +2571,9 @@ impl Parser {
         // Trailing suffixes: (params) or [size]
         if self.at(&Token::OpenParen) {
             self.expect_token(Token::OpenParen)?;
-            let (params, param_fts, variadic) = self.parse_param_list()?;
+            let (params, param_fts, variadic, bounds) = self.parse_param_list()?;
             self.expect_token(Token::CloseParen)?;
-            decl = Declarator::Function(params, param_fts, variadic, Box::new(decl));
+            decl = Declarator::Function(params, param_fts, variadic, bounds, Box::new(decl));
         }
         while self.eat(&Token::OpenBracket) {
             let size = self.parse_array_size(true)?;
@@ -2049,7 +2627,7 @@ impl Parser {
 
         if self.at(&Token::OpenParen) {
             self.expect_token(Token::OpenParen)?;
-            let (_, param_fts, variadic) = self.parse_param_list()?;
+            let (_, param_fts, variadic, _) = self.parse_param_list()?;
             self.expect_token(Token::CloseParen)?;
             decl = AbstractDecl::Function(param_fts, variadic, Box::new(decl));
         }
@@ -2160,6 +2738,12 @@ impl Parser {
                 designators.push(Designator::Field(self.parse_identifier()?));
             } else if self.eat(&Token::OpenBracket) {
                 let index = self.parse_expression()?;
+                if self.eat(&Token::Ellipsis) {
+                    let end = self.parse_expression()?;
+                    self.expect_token(Token::CloseBracket)?;
+                    designators.push(Designator::IndexRange(Box::new(index), Box::new(end)));
+                    continue;
+                }
                 self.expect_token(Token::CloseBracket)?;
                 designators.push(Designator::Index(Box::new(index)));
             } else {
@@ -2221,17 +2805,13 @@ impl Parser {
         }
     }
 
-    fn is_flexible_array_member(ft: &FullType) -> bool {
-        matches!(ft, FullType::Array { size: 0, .. })
-    }
-
     fn validate_flexible_array_members(
         &self,
         members: &[MemberDeclaration],
         is_union: bool,
     ) -> ParseResult<()> {
         for (index, member) in members.iter().enumerate() {
-            if !Self::is_flexible_array_member(&member.member_full_type) {
+            if !member.flexible_array {
                 continue;
             }
             if is_union {
@@ -2256,6 +2836,7 @@ impl Parser {
     fn parse_struct_members(&mut self) -> ParseResult<Vec<MemberDeclaration>> {
         self.expect_token(Token::OpenBrace)?;
         let mut members = Vec::new();
+        let mut vla_elem_sizes = Vec::new();
         while !self.at(&Token::CloseBrace) {
             if self.peek().is_none() {
                 return Err(self.format_error("expected CloseBrace but found end of input"));
@@ -2266,10 +2847,14 @@ impl Parser {
             }
             let member_attrs = self.consume_member_attributes()?;
             let base_type = self.parse_type()?;
+            let type_attrs = self.consume_member_attributes()?;
+            let member_attrs = Self::merge_member_attributes(member_attrs, type_attrs);
             let base_was_enum = self.last_type_was_enum;
             let base_typedef_full_type = self.last_typedef_full_type.clone();
+            let base_typedef_vla_size = self.last_typedef_vla_size.clone();
             loop {
                 self.last_typedef_full_type = base_typedef_full_type.clone();
+                self.pending_flexible_array_bound = false;
                 let (name, full_type, _) =
                     if base_type == CType::Struct && self.at(&Token::Semicolon) {
                         let Some(tag) = self.last_struct_tag.clone() else {
@@ -2281,6 +2866,8 @@ impl Parser {
                     } else {
                         self.parse_declarator_full(base_type)?
                     };
+                let flexible_array = self.pending_flexible_array_bound;
+                self.pending_flexible_array_bound = false;
                 // Replace Scalar(Struct) with FullType::Struct(tag)
                 let mut member_full_type = if base_type == CType::Struct {
                     if let Some(ref tag) = self.last_struct_tag {
@@ -2312,19 +2899,34 @@ impl Parser {
                 }
                 let member_type = member_full_type.to_ctype();
                 let post_attrs = self.consume_member_attributes()?;
-                let member_alignment = match (member_attrs.alignment, post_attrs.alignment) {
-                    (Some(current), Some(post)) => Some(current.max(post)),
-                    (Some(current), None) => Some(current),
-                    (None, Some(post)) => Some(post),
-                    (None, None) => None,
-                };
+                let member_attrs = Self::merge_member_attributes(member_attrs, post_attrs);
+                if let Some(alignment) = member_attrs.alignment {
+                    if let FullType::Array { elem, .. } = &member_full_type {
+                        if let FullType::Struct(tag) = elem.as_ref() {
+                            if let Some(def) = self.struct_defs.get_mut(tag) {
+                                let align = alignment.get();
+                                if align > def.alignment {
+                                    def.alignment = align;
+                                    def.size = def.size.next_multiple_of(align);
+                                }
+                            }
+                        }
+                    }
+                }
+                if !name.is_empty()
+                    && base_typedef_vla_size.is_some()
+                    && matches!(member_full_type, FullType::Array { .. })
+                {
+                    vla_elem_sizes.push((name.clone(), base_typedef_vla_size.clone().unwrap()));
+                }
                 members.push(MemberDeclaration {
                     name,
                     member_type,
                     member_full_type,
                     bit_width,
-                    alignment: member_alignment,
-                    packed: member_attrs.packed || post_attrs.packed,
+                    flexible_array,
+                    alignment: member_attrs.alignment,
+                    packed: member_attrs.packed,
                 });
                 if self.eat(&Token::Comma) {
                     continue;
@@ -2335,6 +2937,8 @@ impl Parser {
             self.last_typedef_full_type = None;
         }
         self.expect_token(Token::CloseBrace)?;
+        self.pending_struct_member_vla_elem_sizes
+            .push(vla_elem_sizes);
         Ok(members)
     }
 
@@ -2357,6 +2961,10 @@ impl Parser {
         // If followed by { members }, parse the struct body and record a pending definition
         if self.at(&Token::OpenBrace) {
             let members = self.parse_struct_members()?;
+            let member_vla_sizes = self
+                .pending_struct_member_vla_elem_sizes
+                .pop()
+                .unwrap_or_default();
             let suffix_attrs = self.consume_aggregate_attributes()?;
             self.validate_flexible_array_members(&members, is_union)?;
             let attrs = Self::merge_aggregate_attributes(prefix_attrs, suffix_attrs);
@@ -2368,6 +2976,7 @@ impl Parser {
                 alignment: attrs.alignment,
             };
             self.record_struct_definition(&declaration)?;
+            self.record_struct_member_vla_elem_sizes(&tag, member_vla_sizes);
             self.pending_struct_decls.push(declaration);
         }
         self.last_struct_tag = Some(tag.clone());
@@ -2438,19 +3047,24 @@ impl Parser {
                 let tag = self.parse_identifier()?;
                 if self.at(&Token::OpenBrace) {
                     let members = self.parse_struct_members()?;
+                    let member_vla_sizes = self
+                        .pending_struct_member_vla_elem_sizes
+                        .pop()
+                        .unwrap_or_default();
                     let suffix_attrs = self.consume_aggregate_attributes()?;
                     self.validate_flexible_array_members(&members, is_union)?;
                     if self.at(&Token::Semicolon) {
                         self.advance()?;
                         let attrs = Self::merge_aggregate_attributes(prefix_attrs, suffix_attrs);
                         let declaration = StructDeclaration {
-                            tag,
+                            tag: tag.clone(),
                             members,
                             is_union,
                             packed: attrs.packed,
                             alignment: attrs.alignment,
                         };
                         self.record_struct_definition(&declaration)?;
+                        self.record_struct_member_vla_elem_sizes(&tag, member_vla_sizes);
                         return Ok(Declaration::StructDecl(declaration));
                     }
                 } else if self.at(&Token::Semicolon) {
@@ -2474,12 +3088,14 @@ impl Parser {
             {
                 let name = self.parse_identifier()?;
                 self.expect_token(Token::OpenParen)?;
-                let (params, param_full_types, variadic) = self.parse_param_list()?;
+                let (params, param_full_types, variadic, param_vla_bounds) =
+                    self.parse_param_list()?;
                 self.expect_token(Token::CloseParen)?;
                 let func_info = FunctionDeclaratorInfo {
                     params,
                     param_full_types,
                     variadic,
+                    param_vla_bounds,
                 };
                 let func_info = if self.at(&Token::Semicolon) || self.at(&Token::OpenBrace) {
                     func_info
@@ -2494,7 +3110,11 @@ impl Parser {
                 let param_value_types =
                     Self::param_value_types(&func_info.params, &func_info.param_full_types);
                 let body = if self.at(&Token::OpenBrace) {
-                    Some(self.parse_function_body_with_values(&name, &param_value_types)?)
+                    Some(self.parse_function_body_with_values(
+                        &name,
+                        &param_value_types,
+                        &func_info.param_vla_bounds,
+                    )?)
                 } else {
                     self.expect_token(Token::Semicolon)?;
                     None
@@ -2508,35 +3128,52 @@ impl Parser {
                     body,
                     storage_class: None,
                     param_full_types: func_info.param_full_types,
+                    param_vla_bounds: func_info.param_vla_bounds,
                     variadic: func_info.variadic,
                     noreturn: false,
+                    no_instrument_function: false,
                 }));
             }
         }
-        let (sc, base_type) = self.parse_specifiers()?;
+        let (mut sc, base_type) = self.parse_specifiers()?;
         let is_auto_type = std::mem::take(&mut self.pending_auto_type);
         let spec_noreturn = std::mem::take(&mut self.pending_noreturn);
+        let spec_no_instrument = std::mem::take(&mut self.pending_no_instrument_function);
         let spec_inline = std::mem::take(&mut self.pending_inline);
         let decl_alignment = self.pending_alignment.take();
+        if sc.is_none() {
+            if self.eat(&Token::KWStatic) {
+                sc = Some(StorageClass::Static);
+            } else if self.eat(&Token::KWExtern) {
+                sc = Some(StorageClass::Extern);
+            }
+        }
         // Save struct tag before declarator parsing (params may overwrite last_struct_tag)
         let saved_struct_tag = if base_type == CType::Struct {
             self.last_struct_tag.clone()
         } else {
             None
         };
+        let base_typedef_full_type = self.last_typedef_full_type.clone();
 
+        let (pre_alignment, pre_noreturn, pre_vector_size) =
+            self.consume_declaration_attributes()?;
         let decl_tree = self.parse_declarator_tree()?;
-        let (post_alignment, post_noreturn) = self.consume_declaration_attributes()?;
-        let first_alignment = match (decl_alignment, post_alignment) {
-            (Some(current), Some(post)) => Some(current.max(post)),
-            (Some(current), None) => Some(current),
-            (None, Some(post)) => Some(post),
-            (None, None) => None,
-        };
-        let first_noreturn = spec_noreturn || post_noreturn;
-        let td_ft = self.last_typedef_full_type.take();
+        let (post_alignment, post_noreturn, post_vector_size) =
+            self.consume_declaration_attributes()?;
+        let first_alignment = [decl_alignment, pre_alignment, post_alignment]
+            .into_iter()
+            .flatten()
+            .max();
+        let first_noreturn = spec_noreturn || pre_noreturn || post_noreturn;
+        let first_no_instrument =
+            spec_no_instrument || std::mem::take(&mut self.pending_no_instrument_function);
+        let td_ft = base_typedef_full_type;
+        self.last_typedef_full_type = None;
         let (name, full_type, decl_params) =
             Self::process_declarator(&decl_tree, base_type, td_ft.as_ref());
+        let full_type =
+            self.apply_vector_size_attr(full_type, post_vector_size.or(pre_vector_size));
 
         // Replace Scalar(Struct) with FullType::Struct(tag) if applicable
         let full_type = if base_type == CType::Struct {
@@ -2564,12 +3201,15 @@ impl Parser {
 
         // Handle typedef declarations
         if sc.as_ref().is_some_and(StorageClass::is_typedef) {
+            let vla_size = self.typedef_vla_size_expr(&full_type);
             self.add_typedef(
                 name,
                 TypedefInfo {
                     base_type: full_type.to_ctype(),
                     full_type: full_type.clone(),
                     struct_tag: saved_struct_tag.clone(),
+                    is_enum: self.last_type_was_enum,
+                    vla_size,
                 },
             )?;
             while self.eat(&Token::Comma) {
@@ -2577,6 +3217,7 @@ impl Parser {
                 let decl_tree = self.parse_declarator_tree()?;
                 let (name2, full_type2, _) =
                     Self::process_declarator(&decl_tree, base_type, td_ft.as_ref());
+                let full_type2 = self.apply_vector_size_attr(full_type2, post_vector_size);
                 let full_type2 = if base_type == CType::Struct {
                     if let Some(ref tag) = saved_struct_tag {
                         Self::replace_scalar_struct(&full_type2, tag)
@@ -2586,12 +3227,15 @@ impl Parser {
                 } else {
                     full_type2
                 };
+                let vla_size = self.typedef_vla_size_expr(&full_type2);
                 self.add_typedef(
                     name2,
                     TypedefInfo {
                         base_type: full_type2.to_ctype(),
                         full_type: full_type2,
                         struct_tag: saved_struct_tag.clone(),
+                        is_enum: self.last_type_was_enum,
+                        vla_size,
                     },
                 )?;
             }
@@ -2610,7 +3254,10 @@ impl Parser {
         };
         // Is it a function?
         if let Some(func_info) = decl_params {
-            let func_info = if self.at(&Token::Semicolon) || self.at(&Token::OpenBrace) {
+            let func_info = if self.at(&Token::Semicolon)
+                || self.at(&Token::OpenBrace)
+                || self.at(&Token::Comma)
+            {
                 func_info
             } else {
                 self.parse_old_style_param_declarations(func_info)?
@@ -2622,12 +3269,83 @@ impl Parser {
             let param_value_types =
                 Self::param_value_types(&func_info.params, &func_info.param_full_types);
             let body = if self.at(&Token::OpenBrace) {
-                let body = self.parse_function_body_with_values(&name, &param_value_types)?;
-                (!spec_inline || !sc.as_ref().is_some_and(StorageClass::is_extern)).then_some(body)
+                let body = self.parse_function_body_with_values(
+                    &name,
+                    &param_value_types,
+                    &func_info.param_vla_bounds,
+                )?;
+                Some(body)
             } else {
-                self.expect_token(Token::Semicolon)?;
+                if self.eat(&Token::Comma) {
+                    let mut extra = Vec::new();
+                    loop {
+                        let decl_tree = self.parse_declarator_tree()?;
+                        let (name2, full_type2, decl_params2) =
+                            Self::process_declarator(&decl_tree, base_type, td_ft.as_ref());
+                        let full_type2 = if base_type == CType::Struct {
+                            if let Some(ref tag) = saved_struct_tag {
+                                Self::replace_scalar_struct(&full_type2, tag)
+                            } else {
+                                full_type2
+                            }
+                        } else {
+                            full_type2
+                        };
+                        let ctype2 = full_type2.to_ctype();
+                        let pi2 = match &full_type2 {
+                            FullType::Pointer(inner) => Some(ptr_info_from_full(inner)),
+                            _ => None,
+                        };
+                        if let Some(func_info2) = decl_params2 {
+                            self.add_value_type(
+                                name2.clone(),
+                                Self::function_full_type(full_type2.clone(), &func_info2),
+                            )?;
+                            if let Some(alignment) = first_alignment {
+                                self.function_alignments
+                                    .insert(name2.clone(), alignment.get());
+                            }
+                            extra.push(Declaration::FunDecl(FunctionDeclaration {
+                                name: name2,
+                                return_type: ctype2,
+                                return_ptr_info: pi2,
+                                return_full_type: Some(full_type2),
+                                params: func_info2.params,
+                                body: None,
+                                storage_class: sc.clone(),
+                                param_full_types: func_info2.param_full_types,
+                                param_vla_bounds: func_info2.param_vla_bounds,
+                                variadic: func_info2.variadic,
+                                noreturn: first_noreturn,
+                                no_instrument_function: first_no_instrument,
+                            }));
+                        } else {
+                            let decl = self.make_var_decl(
+                                name2,
+                                &full_type2,
+                                ctype2,
+                                pi2,
+                                sc.clone(),
+                                first_alignment,
+                            )?;
+                            self.add_value_type(decl.name.clone(), full_type2.clone())?;
+                            extra.push(Declaration::VarDecl(decl));
+                        }
+                        if !self.eat(&Token::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect_token(Token::Semicolon)?;
+                    self.pending_declarations.extend(extra);
+                } else {
+                    self.expect_token(Token::Semicolon)?;
+                }
                 None
             };
+            if let Some(alignment) = first_alignment {
+                self.function_alignments
+                    .insert(name.clone(), alignment.get());
+            }
             return Ok(Declaration::FunDecl(FunctionDeclaration {
                 name,
                 return_type: ctype,
@@ -2637,22 +3355,28 @@ impl Parser {
                 body,
                 storage_class: sc,
                 param_full_types: func_info.param_full_types,
+                param_vla_bounds: func_info.param_vla_bounds,
                 variadic: func_info.variadic,
                 noreturn: first_noreturn,
+                no_instrument_function: first_no_instrument,
             }));
         }
 
         // Check for function (in case declarator didn't catch params)
         if self.at(&Token::OpenParen) {
             self.expect_token(Token::OpenParen)?;
-            let (params, param_fts, variadic) = self.parse_param_list()?;
+            let (params, param_fts, variadic, param_vla_bounds) = self.parse_param_list()?;
             self.expect_token(Token::CloseParen)?;
             let func_info = FunctionDeclaratorInfo {
                 params,
                 param_full_types: param_fts,
                 variadic,
+                param_vla_bounds,
             };
-            let func_info = if self.at(&Token::Semicolon) || self.at(&Token::OpenBrace) {
+            let func_info = if self.at(&Token::Semicolon)
+                || self.at(&Token::OpenBrace)
+                || self.at(&Token::Comma)
+            {
                 func_info
             } else {
                 self.parse_old_style_param_declarations(func_info)?
@@ -2664,12 +3388,79 @@ impl Parser {
             let param_value_types =
                 Self::param_value_types(&func_info.params, &func_info.param_full_types);
             let body = if self.at(&Token::OpenBrace) {
-                let body = self.parse_function_body_with_values(&name, &param_value_types)?;
+                let body = self.parse_function_body_with_values(
+                    &name,
+                    &param_value_types,
+                    &func_info.param_vla_bounds,
+                )?;
                 (!spec_inline || !sc.as_ref().is_some_and(StorageClass::is_extern)).then_some(body)
             } else {
-                self.expect_token(Token::Semicolon)?;
+                if self.eat(&Token::Comma) {
+                    let mut extra = Vec::new();
+                    loop {
+                        let decl_tree = self.parse_declarator_tree()?;
+                        let (name2, full_type2, decl_params2) =
+                            Self::process_declarator(&decl_tree, base_type, td_ft.as_ref());
+                        let full_type2 = if base_type == CType::Struct {
+                            if let Some(ref tag) = saved_struct_tag {
+                                Self::replace_scalar_struct(&full_type2, tag)
+                            } else {
+                                full_type2
+                            }
+                        } else {
+                            full_type2
+                        };
+                        let ctype2 = full_type2.to_ctype();
+                        let pi2 = match &full_type2 {
+                            FullType::Pointer(inner) => Some(ptr_info_from_full(inner)),
+                            _ => None,
+                        };
+                        if let Some(func_info2) = decl_params2 {
+                            self.add_value_type(
+                                name2.clone(),
+                                Self::function_full_type(full_type2.clone(), &func_info2),
+                            )?;
+                            extra.push(Declaration::FunDecl(FunctionDeclaration {
+                                name: name2,
+                                return_type: ctype2,
+                                return_ptr_info: pi2,
+                                return_full_type: Some(full_type2),
+                                params: func_info2.params,
+                                body: None,
+                                storage_class: sc.clone(),
+                                param_full_types: func_info2.param_full_types,
+                                param_vla_bounds: func_info2.param_vla_bounds,
+                                variadic: func_info2.variadic,
+                                noreturn: first_noreturn,
+                                no_instrument_function: first_no_instrument,
+                            }));
+                        } else {
+                            let decl = self.make_var_decl(
+                                name2,
+                                &full_type2,
+                                ctype2,
+                                pi2,
+                                sc.clone(),
+                                first_alignment,
+                            )?;
+                            self.add_value_type(decl.name.clone(), full_type2.clone())?;
+                            extra.push(Declaration::VarDecl(decl));
+                        }
+                        if !self.eat(&Token::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect_token(Token::Semicolon)?;
+                    self.pending_declarations.extend(extra);
+                } else {
+                    self.expect_token(Token::Semicolon)?;
+                }
                 None
             };
+            if let Some(alignment) = first_alignment {
+                self.function_alignments
+                    .insert(name.clone(), alignment.get());
+            }
             return Ok(Declaration::FunDecl(FunctionDeclaration {
                 name,
                 return_type: ctype,
@@ -2679,8 +3470,10 @@ impl Parser {
                 body,
                 storage_class: sc,
                 param_full_types: func_info.param_full_types,
+                param_vla_bounds: func_info.param_vla_bounds,
                 variadic: func_info.variadic,
                 noreturn: first_noreturn,
+                no_instrument_function: first_no_instrument,
             }));
         }
 
@@ -2806,20 +3599,21 @@ impl Parser {
             init,
             storage_class: sc,
             alignment: decl_alignment,
+            alias: self.pending_alias.take(),
         })
     }
 
-    fn parse_param_list(&mut self) -> ParseResult<(Vec<ParamDecl>, Vec<FullType>, bool)> {
+    fn parse_param_list(&mut self) -> ParseResult<(Vec<ParamDecl>, Vec<FullType>, bool, Vec<Exp>)> {
         // "void" or empty or "int x, long y, ..."
         if self.at(&Token::KWVoid)
             && self.pos + 1 < self.tokens.len()
             && self.tokens[self.pos + 1] == Token::CloseParen
         {
             self.advance()?;
-            return Ok((Vec::new(), Vec::new(), false));
+            return Ok((Vec::new(), Vec::new(), false, Vec::new()));
         }
         if self.at(&Token::CloseParen) {
-            return Ok((Vec::new(), Vec::new(), true));
+            return Ok((Vec::new(), Vec::new(), true, Vec::new()));
         }
         if let Some(Token::Identifier(name)) = self.peek().cloned() {
             if !self.is_type_keyword(&Token::Identifier(name.clone())) {
@@ -2833,18 +3627,31 @@ impl Parser {
                         break;
                     }
                 }
-                return Ok((params, param_fts, false));
+                return Ok((params, param_fts, false, Vec::new()));
             }
         }
         let mut params = Vec::new();
         let mut param_fts = Vec::new();
-        let parse_one_param = |s: &mut Self, fts: &mut Vec<FullType>| -> ParseResult<ParamDecl> {
+        let mut param_vla_bounds = Vec::new();
+        let parse_one_param = |s: &mut Self,
+                               fts: &mut Vec<FullType>,
+                               vla_bounds: &mut Vec<Exp>|
+         -> ParseResult<ParamDecl> {
+            s.param_parse_depth += 1;
             let base = s.parse_type()?;
             // Use abstract declarator parsing (name optional) for params
             let tree = s.parse_declarator_tree_inner(true)?;
+            s.param_parse_depth -= 1;
             let td_ft = s.last_typedef_full_type.take();
-            let (name, full_type, _) = Self::process_declarator(&tree, base, td_ft.as_ref());
-            let _ = s.pending_vla_bound.take();
+            let (name, full_type, decl_params) =
+                Self::process_declarator(&tree, base, td_ft.as_ref());
+            let full_type = decl_params
+                .as_ref()
+                .map(|info| Self::function_full_type(full_type.clone(), info))
+                .unwrap_or(full_type);
+            if let Some(bound) = s.pending_vla_bound.take() {
+                vla_bounds.push(bound);
+            }
             // Generate a dummy name for unnamed params
             let name = if name.is_empty() {
                 format!("__unnamed_{}", s.pos)
@@ -2864,6 +3671,7 @@ impl Parser {
             // Array parameters decay to pointers (first dimension dropped)
             let ft = match full_type {
                 FullType::Array { elem, .. } => FullType::Pointer(elem),
+                FullType::Function { .. } => FullType::Pointer(Box::new(full_type)),
                 other => other,
             };
             fts.push(ft.clone());
@@ -2874,7 +3682,11 @@ impl Parser {
             };
             Ok((name, t, pi))
         };
-        params.push(parse_one_param(self, &mut param_fts)?);
+        params.push(parse_one_param(
+            self,
+            &mut param_fts,
+            &mut param_vla_bounds,
+        )?);
         let mut variadic = false;
         while self.eat(&Token::Comma) {
             // Check for ... (variadic)
@@ -2882,9 +3694,13 @@ impl Parser {
                 variadic = true;
                 break;
             }
-            params.push(parse_one_param(self, &mut param_fts)?);
+            params.push(parse_one_param(
+                self,
+                &mut param_fts,
+                &mut param_vla_bounds,
+            )?);
         }
-        Ok((params, param_fts, variadic))
+        Ok((params, param_fts, variadic, param_vla_bounds))
     }
 
     fn parse_old_style_param_declarations(
@@ -2921,6 +3737,7 @@ impl Parser {
                 };
                 let ft = match full_type {
                     FullType::Array { elem, .. } => FullType::Pointer(elem),
+                    FullType::Function { .. } => FullType::Pointer(Box::new(full_type)),
                     other => other,
                 };
                 let ty = ft.to_ctype();
@@ -2964,6 +3781,7 @@ impl Parser {
                 return Err(self.format_error("expected CloseBrace but found end of input"));
             }
             let item = self.parse_block_item()?;
+            items.append(&mut self.pending_pre_block_items);
             // Emit any pending struct/union definitions from type specifier parsing
             for sd in self.pending_struct_decls.drain(..) {
                 items.push(BlockItem::Declaration(Declaration::StructDecl(sd)));
@@ -3000,11 +3818,69 @@ impl Parser {
         &mut self,
         function_name: &str,
         initial_values: &[(String, FullType)],
+        param_vla_bounds: &[Exp],
     ) -> ParseResult<Block> {
         let previous = self
             .current_function_name
             .replace(function_name.to_string());
-        let result = self.parse_block_with_values(initial_values);
+        self.expect_token(Token::OpenBrace)?;
+        self.push_typedef_scope();
+        let mut captured_bounds = Vec::new();
+        for bound in param_vla_bounds {
+            let name = format!("__rnqcc_param_vla_bound_{}", self.vla_bound_counter);
+            self.vla_bound_counter += 1;
+            self.add_value_type(name.clone(), FullType::Scalar(CType::Long))?;
+            captured_bounds.push((
+                Exp::Var(name.clone()),
+                BlockItem::Declaration(Declaration::VarDecl(VarDeclaration {
+                    name,
+                    var_type: CType::Long,
+                    ptr_info: None,
+                    array_dims: None,
+                    decl_full_type: Some(FullType::Scalar(CType::Long)),
+                    init: Some(bound.clone()),
+                    storage_class: None,
+                    alignment: None,
+                    alias: None,
+                })),
+            ));
+        }
+        let mut bounds = captured_bounds.iter().map(|(bound, _)| bound);
+        for (name, full_type) in initial_values {
+            self.add_value_type(name.clone(), full_type.clone())?;
+            if let FullType::Pointer(pointee) = full_type {
+                if let FullType::Array { elem, size } = pointee.as_ref() {
+                    if *size == VLA_STATIC_SCALE_FALLBACK {
+                        if let Some(bound) = bounds.next() {
+                            self.add_value_vla_elem_size(
+                                name.clone(),
+                                Exp::Binary(
+                                    BinaryOp::Mul,
+                                    Box::new(bound.clone()),
+                                    Box::new(Exp::SizeOfType(
+                                        elem.to_ctype(),
+                                        elem.as_ref().clone(),
+                                    )),
+                                ),
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+        let result = match self.parse_scoped_block_items() {
+            Ok(mut block) => {
+                for (_, item) in captured_bounds.iter().rev() {
+                    block.insert(0, item.clone());
+                }
+                match self.expect_token(Token::CloseBrace) {
+                    Ok(()) => Ok(block),
+                    Err(err) => Err(err),
+                }
+            }
+            Err(err) => Err(err),
+        };
+        self.pop_typedef_scope();
         self.current_function_name = previous;
         result
     }
@@ -3073,8 +3949,17 @@ impl Parser {
             | Some(Token::AttributePackedAligned(_))
             | Some(Token::AttributePackedAlignedNoreturn(_))
             | Some(Token::AttributeNoreturn)
+            | Some(Token::AttributeNoInstrumentFunction)
+            | Some(Token::AttributeMode(_))
+            | Some(Token::AttributeVectorSize(_))
             | Some(Token::KWNoreturn) => true,
-            Some(Token::Identifier(name)) => self.is_typedef_name(name),
+            Some(Token::Identifier(name)) => {
+                self.is_typedef_name(name)
+                    || Self::is_builtin_int128_type_name(name)
+                    || Self::is_complex_type_name(name)
+                    || Self::is_builtin_float_type_name(name)
+                    || Self::is_gnu_qualifier_name(name)
+            }
             _ => false,
         }
     }
@@ -3116,20 +4001,27 @@ impl Parser {
                     let tag = self.parse_identifier()?;
                     if self.at(&Token::OpenBrace) {
                         let members = self.parse_struct_members()?;
+                        let member_vla_sizes = self
+                            .pending_struct_member_vla_elem_sizes
+                            .pop()
+                            .unwrap_or_default();
                         let suffix_attrs = self.consume_aggregate_attributes()?;
                         self.validate_flexible_array_members(&members, is_union)?;
                         if self.at(&Token::Semicolon) {
                             self.advance()?;
                             let attrs =
                                 Self::merge_aggregate_attributes(prefix_attrs, suffix_attrs);
+                            let declaration = StructDeclaration {
+                                tag: tag.clone(),
+                                members,
+                                is_union,
+                                packed: attrs.packed,
+                                alignment: attrs.alignment,
+                            };
+                            self.record_struct_definition(&declaration)?;
+                            self.record_struct_member_vla_elem_sizes(&tag, member_vla_sizes);
                             return Ok(BlockItem::Declaration(Declaration::StructDecl(
-                                StructDeclaration {
-                                    tag,
-                                    members,
-                                    is_union,
-                                    packed: attrs.packed,
-                                    alignment: attrs.alignment,
-                                },
+                                declaration,
                             )));
                         }
                     } else if self.at(&Token::Semicolon) {
@@ -3151,25 +4043,33 @@ impl Parser {
             let (sc, base_type) = self.parse_specifiers()?;
             let is_auto_type = std::mem::take(&mut self.pending_auto_type);
             let spec_noreturn = std::mem::take(&mut self.pending_noreturn);
-            let spec_inline = std::mem::take(&mut self.pending_inline);
+            let spec_no_instrument = std::mem::take(&mut self.pending_no_instrument_function);
+            let _spec_inline = std::mem::take(&mut self.pending_inline);
             let decl_alignment = self.pending_alignment.take();
             let saved_struct_tag = if base_type == CType::Struct {
                 self.last_struct_tag.clone()
             } else {
                 None
             };
+            let base_typedef_full_type = self.last_typedef_full_type.clone();
+            let (pre_alignment, pre_noreturn, pre_vector_size) =
+                self.consume_declaration_attributes()?;
             let decl_tree = self.parse_declarator_tree()?;
-            let td_ft = self.last_typedef_full_type.take();
+            let td_ft = base_typedef_full_type;
+            self.last_typedef_full_type = None;
             let (name, full_type, decl_params) =
                 Self::process_declarator(&decl_tree, base_type, td_ft.as_ref());
-            let (post_alignment, post_noreturn) = self.consume_declaration_attributes()?;
-            let decl_alignment = match (decl_alignment, post_alignment) {
-                (Some(current), Some(post)) => Some(current.max(post)),
-                (Some(current), None) => Some(current),
-                (None, Some(post)) => Some(post),
-                (None, None) => None,
-            };
-            let decl_noreturn = spec_noreturn || post_noreturn;
+            let (post_alignment, post_noreturn, post_vector_size) =
+                self.consume_declaration_attributes()?;
+            let full_type =
+                self.apply_vector_size_attr(full_type, post_vector_size.or(pre_vector_size));
+            let decl_alignment = [decl_alignment, pre_alignment, post_alignment]
+                .into_iter()
+                .flatten()
+                .max();
+            let decl_noreturn = spec_noreturn || pre_noreturn || post_noreturn;
+            let decl_no_instrument =
+                spec_no_instrument || std::mem::take(&mut self.pending_no_instrument_function);
             // Replace Scalar(Struct) with FullType::Struct(tag)
             let full_type = if base_type == CType::Struct {
                 if let Some(ref tag) = saved_struct_tag {
@@ -3199,12 +4099,15 @@ impl Parser {
             // Handle typedef declarations
             if sc.as_ref().is_some_and(StorageClass::is_typedef) {
                 self.expect_token(Token::Semicolon)?;
+                let vla_size = self.typedef_vla_size_expr(&full_type);
                 self.add_typedef(
                     name,
                     TypedefInfo {
-                        base_type,
+                        base_type: full_type.to_ctype(),
                         full_type: full_type.clone(),
                         struct_tag: saved_struct_tag,
+                        is_enum: self.last_type_was_enum,
+                        vla_size,
                     },
                 )?;
                 return Ok(BlockItem::Declaration(Declaration::TypedefDecl));
@@ -3221,12 +4124,14 @@ impl Parser {
                     info
                 } else {
                     self.expect_token(Token::OpenParen)?;
-                    let (params, param_full_types, variadic) = self.parse_param_list()?;
+                    let (params, param_full_types, variadic, param_vla_bounds) =
+                        self.parse_param_list()?;
                     self.expect_token(Token::CloseParen)?;
                     FunctionDeclaratorInfo {
                         params,
                         param_full_types,
                         variadic,
+                        param_vla_bounds,
                     }
                 };
 
@@ -3237,11 +4142,77 @@ impl Parser {
                 let param_value_types =
                     Self::param_value_types(&func_info.params, &func_info.param_full_types);
                 let body = if self.at(&Token::OpenBrace) {
-                    let body = self.parse_function_body_with_values(&name, &param_value_types)?;
-                    (!spec_inline || !sc.as_ref().is_some_and(StorageClass::is_extern))
-                        .then_some(body)
+                    let body = self.parse_function_body_with_values(
+                        &name,
+                        &param_value_types,
+                        &func_info.param_vla_bounds,
+                    )?;
+                    Some(body)
                 } else {
-                    self.expect_token(Token::Semicolon)?;
+                    if self.eat(&Token::Comma) {
+                        let mut extra = Vec::new();
+                        loop {
+                            let decl_tree = self.parse_declarator_tree()?;
+                            let (name2, full_type2, decl_params2) =
+                                Self::process_declarator(&decl_tree, base_type, td_ft.as_ref());
+                            let full_type2 =
+                                self.apply_vector_size_attr(full_type2, post_vector_size);
+                            let full_type2 = if base_type == CType::Struct {
+                                if let Some(ref tag) = saved_struct_tag {
+                                    Self::replace_scalar_struct(&full_type2, tag)
+                                } else {
+                                    full_type2
+                                }
+                            } else {
+                                full_type2
+                            };
+                            let ctype2 = full_type2.to_ctype();
+                            let pi2 = match &full_type2 {
+                                FullType::Pointer(inner) => Some(ptr_info_from_full(inner)),
+                                _ => None,
+                            };
+                            if let Some(func_info2) = decl_params2 {
+                                self.add_value_type(
+                                    name2.clone(),
+                                    Self::function_full_type(full_type2.clone(), &func_info2),
+                                )?;
+                                extra.push(BlockItem::Declaration(Declaration::FunDecl(
+                                    FunctionDeclaration {
+                                        name: name2,
+                                        return_type: ctype2,
+                                        return_ptr_info: pi2,
+                                        return_full_type: Some(full_type2),
+                                        params: func_info2.params,
+                                        body: None,
+                                        storage_class: sc.clone(),
+                                        param_full_types: func_info2.param_full_types,
+                                        param_vla_bounds: func_info2.param_vla_bounds,
+                                        variadic: func_info2.variadic,
+                                        noreturn: decl_noreturn,
+                                        no_instrument_function: decl_no_instrument,
+                                    },
+                                )));
+                            } else {
+                                let decl = self.make_var_decl(
+                                    name2,
+                                    &full_type2,
+                                    ctype2,
+                                    pi2,
+                                    sc.clone(),
+                                    decl_alignment,
+                                )?;
+                                self.add_value_type(decl.name.clone(), full_type2.clone())?;
+                                extra.push(BlockItem::Declaration(Declaration::VarDecl(decl)));
+                            }
+                            if !self.eat(&Token::Comma) {
+                                break;
+                            }
+                        }
+                        self.expect_token(Token::Semicolon)?;
+                        self.pending_block_items.extend(extra);
+                    } else {
+                        self.expect_token(Token::Semicolon)?;
+                    }
                     None
                 };
 
@@ -3255,8 +4226,10 @@ impl Parser {
                         body,
                         storage_class: sc,
                         param_full_types: func_info.param_full_types,
+                        param_vla_bounds: func_info.param_vla_bounds,
                         variadic: func_info.variadic,
                         noreturn: decl_noreturn,
+                        no_instrument_function: decl_no_instrument,
                     },
                 )))
             } else {
@@ -3412,9 +4385,15 @@ impl Parser {
             }
             Some(Token::KWGoto) => {
                 self.advance()?;
-                let label = self.parse_identifier()?;
-                self.expect_token(Token::Semicolon)?;
-                Ok(Statement::Goto(label))
+                if self.eat(&Token::Star) {
+                    let target = self.parse_expression()?;
+                    self.expect_token(Token::Semicolon)?;
+                    Ok(Statement::IndirectGoto(target))
+                } else {
+                    let label = self.parse_identifier()?;
+                    self.expect_token(Token::Semicolon)?;
+                    Ok(Statement::Goto(label))
+                }
             }
             Some(Token::KWSwitch) => {
                 self.advance()?;
@@ -3432,10 +4411,16 @@ impl Parser {
             Some(Token::KWCase) => {
                 self.advance()?;
                 let value = self.parse_expression()?;
+                let end_value = if self.eat(&Token::Ellipsis) {
+                    Some(self.parse_expression()?)
+                } else {
+                    None
+                };
                 self.expect_token(Token::Colon)?;
                 let body = Box::new(self.parse_statement()?);
                 Ok(Statement::Case {
                     value,
+                    end_value,
                     body,
                     label: String::new(),
                 })
@@ -3452,6 +4437,17 @@ impl Parser {
             Some(Token::OpenBrace) => Ok(Statement::Block(self.parse_block()?)),
             Some(Token::Semicolon) => {
                 self.advance()?;
+                Ok(Statement::Null)
+            }
+            Some(Token::Identifier(name)) if name == "__label__" => {
+                self.advance()?;
+                loop {
+                    self.parse_identifier()?;
+                    if !self.eat(&Token::Comma) {
+                        break;
+                    }
+                }
+                self.expect_token(Token::Semicolon)?;
                 Ok(Statement::Null)
             }
             // Check for labeled statement: identifier ':'
@@ -3526,7 +4522,11 @@ impl Parser {
     fn parse_conditional(&mut self) -> ParseResult<Exp> {
         let cond = self.parse_logical_or()?;
         if self.eat(&Token::Question) {
-            let then_exp = self.parse_expression()?;
+            let then_exp = if self.at(&Token::Colon) {
+                cond.clone()
+            } else {
+                self.parse_expression()?
+            };
             self.expect_token(Token::Colon)?;
             let else_exp = self.parse_conditional()?; // right-associative
             Ok(Exp::Conditional(
@@ -3701,6 +4701,10 @@ impl Parser {
 
     fn parse_unary(&mut self) -> ParseResult<Exp> {
         match self.peek().cloned() {
+            Some(Token::Plus) => {
+                self.advance()?;
+                self.parse_unary()
+            }
             Some(Token::Minus) => {
                 self.advance()?;
                 Ok(Exp::Unary(UnaryOp::Negate, Box::new(self.parse_unary()?)))
@@ -3741,6 +4745,12 @@ impl Parser {
                 self.advance()?;
                 Ok(Exp::Unary(UnaryOp::AddrOf, Box::new(self.parse_unary()?)))
             }
+            Some(Token::Identifier(name))
+                if matches!(name.as_str(), "__real__" | "__imag__" | "__real" | "__imag") =>
+            {
+                self.advance()?;
+                self.parse_unary()
+            }
             // sizeof expression or sizeof(type)
             Some(Token::KWSizeOf) => {
                 self.advance()?;
@@ -3751,12 +4761,36 @@ impl Parser {
                 {
                     self.advance()?; // consume '('
                     let full_type = self.parse_type_name_full()?;
+                    let vla_size = self
+                        .last_type_name_vla_size
+                        .take()
+                        .or_else(|| self.pending_vla_size_expr_for_type(&full_type));
                     self.expect_token(Token::CloseParen)?;
+                    if let Some(size) = vla_size {
+                        return Ok(size);
+                    }
+                    if self.at(&Token::OpenBrace) {
+                        let _init = self.parse_array_init()?;
+                        let ctype = full_type.to_ctype();
+                        return Ok(Exp::SizeOfType(ctype, full_type));
+                    }
                     let ctype = full_type.to_ctype();
                     Ok(Exp::SizeOfType(ctype, full_type))
                 } else {
                     // sizeof <unary-exp> (not a cast expression)
                     let operand = self.parse_unary()?;
+                    if let Exp::Var(name) = &operand {
+                        if let Some(size) = self.lookup_value_vla_size(name) {
+                            return Ok(size);
+                        }
+                    }
+                    if let Exp::Subscript(arr, _) = &operand {
+                        if let Exp::Var(name) = arr.as_ref() {
+                            if let Some(size) = self.lookup_value_vla_elem_size(name) {
+                                return Ok(size);
+                            }
+                        }
+                    }
                     Ok(Exp::SizeOf(Box::new(operand)))
                 }
             }
@@ -3772,6 +4806,11 @@ impl Parser {
                     Ok(Exp::AlignOfType(full_type))
                 } else {
                     let operand = self.parse_unary()?;
+                    if let Exp::Var(name) = &operand {
+                        if let Some(alignment) = self.function_alignments.get(name) {
+                            return Ok(Exp::Constant(*alignment as i64));
+                        }
+                    }
                     let full_type = self.typeof_expression(&operand)?;
                     Ok(Exp::AlignOfType(full_type))
                 }
@@ -3789,16 +4828,18 @@ impl Parser {
                     let init = self.parse_array_init()?;
                     // Treat as a cast of the initializer to the target type
                     let target_type = full_type.to_ctype();
-                    let cast_ft = if target_type == CType::Pointer || target_type == CType::Struct {
-                        Some(full_type)
-                    } else {
-                        None
-                    };
-                    Ok(Exp::Cast(target_type, cast_ft, Box::new(init)))
+                    self.parse_postfix_suffix(Exp::Cast(
+                        target_type,
+                        Some(full_type),
+                        Box::new(init),
+                    ))
                 } else {
                     let target_type = full_type.to_ctype();
                     let operand = self.parse_unary()?;
-                    let cast_ft = if target_type == CType::Pointer || target_type == CType::Struct {
+                    let cast_ft = if target_type == CType::Pointer
+                        || target_type == CType::Struct
+                        || full_type.is_vector()
+                    {
                         Some(full_type)
                     } else {
                         None
@@ -3811,7 +4852,11 @@ impl Parser {
     }
 
     fn parse_postfix(&mut self) -> ParseResult<Exp> {
-        let mut expr = self.parse_primary()?;
+        let expr = self.parse_primary()?;
+        self.parse_postfix_suffix(expr)
+    }
+
+    fn parse_postfix_suffix(&mut self, mut expr: Exp) -> ParseResult<Exp> {
         loop {
             match self.peek().cloned() {
                 Some(Token::Increment) => {
@@ -3909,6 +4954,11 @@ impl Parser {
 
     fn parse_primary(&mut self) -> ParseResult<Exp> {
         match self.peek().cloned() {
+            Some(Token::LogicalAnd) => {
+                self.advance()?;
+                let label = self.parse_identifier()?;
+                Ok(Exp::LabelAddress(label))
+            }
             Some(Token::KWGeneric) => self.parse_generic_selection(),
             Some(Token::IntLiteral(val)) => {
                 self.advance()?;
@@ -3921,6 +4971,10 @@ impl Parser {
             Some(Token::LongLiteral(val)) => {
                 self.advance()?;
                 Ok(Exp::LongConstant(val))
+            }
+            Some(Token::Int128Literal(val)) => {
+                self.advance()?;
+                Ok(Exp::Int128Constant(val))
             }
             Some(Token::UIntLiteral(val)) => {
                 self.advance()?;
@@ -3935,6 +4989,10 @@ impl Parser {
                 self.advance()?;
                 Ok(Exp::ULongConstant(val))
             }
+            Some(Token::UInt128Literal(val)) => {
+                self.advance()?;
+                Ok(Exp::UInt128Constant(val))
+            }
             Some(Token::DoubleLiteral(val)) => {
                 self.advance()?;
                 Ok(Exp::DoubleConstant(val))
@@ -3943,18 +5001,40 @@ impl Parser {
                 self.advance()?;
                 Ok(Exp::Constant(val)) // char constants have type int
             }
-            Some(Token::StringLiteral(_)) => {
-                // Concatenate adjacent string literals
+            Some(Token::StringLiteral(_) | Token::WideStringLiteral(_)) => {
+                // Concatenate adjacent string literals. If any literal is wide,
+                // the concatenated literal is wide.
                 let mut s = String::new();
-                while let Some(Token::StringLiteral(part)) = self.peek().cloned() {
-                    self.advance()?;
-                    s.push_str(&part);
+                let mut wide = false;
+                while matches!(
+                    self.peek(),
+                    Some(Token::StringLiteral(_) | Token::WideStringLiteral(_))
+                ) {
+                    match self.peek().cloned() {
+                        Some(Token::StringLiteral(part)) => {
+                            self.advance()?;
+                            s.push_str(&part);
+                        }
+                        Some(Token::WideStringLiteral(part)) => {
+                            self.advance()?;
+                            wide = true;
+                            s.push_str(&part);
+                        }
+                        _ => unreachable!(),
+                    }
                 }
-                Ok(Exp::StringLiteral(s))
+                if wide {
+                    Ok(Exp::WideStringLiteral(s))
+                } else {
+                    Ok(Exp::StringLiteral(s))
+                }
             }
             Some(Token::Identifier(name)) => {
                 self.advance()?;
-                if matches!(name.as_str(), "__FUNCTION__" | "__func__") {
+                if matches!(
+                    name.as_str(),
+                    "__FUNCTION__" | "__PRETTY_FUNCTION__" | "__func__"
+                ) {
                     return Ok(Exp::StringLiteral(
                         self.current_function_name.clone().unwrap_or_default(),
                     ));
@@ -3962,13 +5042,20 @@ impl Parser {
                 // Check for function call
                 if self.eat(&Token::OpenParen) {
                     if name == "__builtin_types_compatible_p" {
+                        let left_start = self.pos;
                         let left = self.parse_type_name_full()?;
+                        let left_tokens = self.tokens[left_start..self.pos].to_vec();
                         self.expect_token(Token::Comma)?;
+                        let right_start = self.pos;
                         let right = self.parse_type_name_full()?;
+                        let right_tokens = self.tokens[right_start..self.pos].to_vec();
                         self.expect_token(Token::CloseParen)?;
-                        return Ok(Exp::Constant(
-                            Self::gnu_types_compatible(&left, &right) as i64
-                        ));
+                        let compatible = Self::gnu_types_compatible(&left, &right)
+                            && Self::gnu_type_meta_compatible(
+                                &self.compat_type_meta(&left, &left_tokens),
+                                &self.compat_type_meta(&right, &right_tokens),
+                            );
+                        return Ok(Exp::Constant(compatible as i64));
                     }
                     if name == "__builtin_offsetof" {
                         let base_type = self.parse_type()?;
@@ -3985,18 +5072,20 @@ impl Parser {
                         self.expect_token(Token::Comma)?;
                         let offset = self.offsetof_member_designator(full_type)?;
                         self.expect_token(Token::CloseParen)?;
-                        return Ok(Exp::ULongConstant(offset as i64));
+                        return Ok(offset);
                     }
                     if name == "__builtin_va_arg" {
                         let ap = self.parse_assignment()?;
                         self.expect_token(Token::Comma)?;
                         let ty = self.parse_type()?;
+                        let parsed_full_type = self.last_typedef_full_type.take();
                         let struct_tag = if ty == CType::Struct {
                             self.last_struct_tag.clone()
                         } else {
                             None
                         };
-                        let full_type = self.parse_abstract_declarator_type(ty)?;
+                        let abstract_full_type = self.parse_abstract_declarator_type(ty)?;
+                        let full_type = parsed_full_type.unwrap_or(abstract_full_type);
                         let full_type = if ty == CType::Struct {
                             if let Some(ref tag) = struct_tag {
                                 Self::replace_scalar_struct(&full_type, tag)
@@ -4019,6 +5108,10 @@ impl Parser {
                                     CType::UShort => "ushort",
                                     CType::Char | CType::SChar => "char",
                                     CType::UChar => "uchar",
+                                    CType::Float => "float",
+                                    CType::Double => "double",
+                                    CType::Int128 => "int128",
+                                    CType::UInt128 => "uint128",
                                     _ => "int",
                                 };
                                 format!("__rnqcc_va_arg_{}", suffix)
@@ -4037,9 +5130,11 @@ impl Parser {
                     let args = self.parse_arg_list()?;
                     self.expect_token(Token::CloseParen)?;
                     if name == "__builtin_expect" || name == "__builtin_expect_with_probability" {
-                        return args.into_iter().next().ok_or_else(|| {
+                        let mut args = args;
+                        let value = args.drain(..1).next().ok_or_else(|| {
                             self.format_error(&format!("{} requires an argument", name))
-                        });
+                        })?;
+                        return Ok(Exp::BuiltinExpect(Box::new(value), args));
                     }
                     if name == "__builtin_constant_p" {
                         let Some(arg) = args.first() else {
@@ -4064,10 +5159,24 @@ impl Parser {
                         let Some(arg) = args.first() else {
                             return Err(self.format_error("__builtin_signbit requires an argument"));
                         };
-                        return Ok(Exp::Binary(
+                        let reciprocal_is_negative = Exp::Binary(
+                            BinaryOp::LessThan,
+                            Box::new(Exp::Binary(
+                                BinaryOp::Div,
+                                Box::new(Exp::DoubleConstant(1.0)),
+                                Box::new(arg.clone()),
+                            )),
+                            Box::new(Exp::DoubleConstant(0.0)),
+                        );
+                        let value_is_negative = Exp::Binary(
                             BinaryOp::LessThan,
                             Box::new(arg.clone()),
                             Box::new(Exp::DoubleConstant(0.0)),
+                        );
+                        return Ok(Exp::Binary(
+                            BinaryOp::LogicalOr,
+                            Box::new(reciprocal_is_negative),
+                            Box::new(value_is_negative),
                         ));
                     }
                     if name == "__builtin_strlen" {
@@ -4105,10 +5214,19 @@ impl Parser {
                         });
                     }
                     if name == "__builtin_prefetch" {
-                        return Ok(Exp::Constant(0));
+                        let Some(addr) = args.into_iter().next() else {
+                            return Err(
+                                self.format_error("__builtin_prefetch requires an argument")
+                            );
+                        };
+                        return Ok(Exp::Comma(Box::new(addr), Box::new(Exp::Constant(0))));
                     }
                     if name == "__builtin_va_end" {
-                        return Ok(Exp::Constant(0));
+                        return Ok(args
+                            .into_iter()
+                            .next()
+                            .map(|arg| Exp::Comma(Box::new(arg), Box::new(Exp::Constant(0))))
+                            .unwrap_or(Exp::Constant(0)));
                     }
                     if matches!(
                         name.as_str(),
@@ -4292,11 +5410,17 @@ mod tests {
         let Some(body) = func.body.as_ref() else {
             return Err("expected function body".to_string());
         };
-        let BlockItem::Declaration(Declaration::VarDecl(vd)) = &body[1] else {
+        let Some(vd) = body.iter().find_map(|item| match item {
+            BlockItem::Declaration(Declaration::VarDecl(vd))
+                if matches!(vd.init, Some(Exp::FunctionCall(ref name, _)) if name == "alloca") =>
+            {
+                Some(vd)
+            }
+            _ => None,
+        }) else {
             return Err("expected VLA declaration".to_string());
         };
         assert_eq!(vd.var_type, CType::Pointer);
-        assert!(matches!(vd.init, Some(Exp::FunctionCall(ref name, _)) if name == "alloca"));
         Ok(())
     }
 
@@ -4374,7 +5498,7 @@ mod tests {
             ft,
             FullType::Array {
                 elem: Box::new(FullType::Scalar(CType::Int)),
-                size: 0
+                size: VLA_STATIC_SCALE_FALLBACK
             }
         );
         Ok(())
@@ -4712,6 +5836,8 @@ mod tests {
                     base_type: CType::Int,
                     full_type: FullType::Scalar(CType::Int),
                     struct_tag: None,
+                    is_enum: false,
+                    vla_size: None,
                 },
             ),
             "missing typedef scope should fail",
@@ -4804,32 +5930,28 @@ mod tests {
     }
 
     #[test]
-    fn parses_builtin_int128_typedef_names_as_opaque_two_word_arrays() -> Result<(), String> {
-        let program = parse_source("__uint128_t vector[4];\n__int128_t scalar;\n")?;
+    fn parses_builtin_int128_typedef_names_as_scalar_types() -> Result<(), String> {
+        let program =
+            parse_source("__uint128_t vector[4];\n__int128_t scalar;\nunsigned __int128 word;\n")?;
         let Declaration::VarDecl(vector) = &program.declarations[0] else {
             return Err("expected vector declaration".to_string());
         };
         let Declaration::VarDecl(scalar) = &program.declarations[1] else {
             return Err("expected scalar declaration".to_string());
         };
+        let Declaration::VarDecl(word) = &program.declarations[2] else {
+            return Err("expected word declaration".to_string());
+        };
 
         assert_eq!(
             vector.decl_full_type,
             Some(FullType::Array {
-                elem: Box::new(FullType::Array {
-                    elem: Box::new(FullType::Scalar(CType::ULong)),
-                    size: 2,
-                }),
+                elem: Box::new(FullType::Scalar(CType::UInt128)),
                 size: 4,
             })
         );
-        assert_eq!(
-            scalar.decl_full_type,
-            Some(FullType::Array {
-                elem: Box::new(FullType::Scalar(CType::ULong)),
-                size: 2,
-            })
-        );
+        assert_eq!(scalar.decl_full_type, Some(FullType::Scalar(CType::Int128)));
+        assert_eq!(word.decl_full_type, Some(FullType::Scalar(CType::UInt128)));
         Ok(())
     }
 
@@ -4899,8 +6021,24 @@ mod tests {
             return Err("expected struct declaration".to_string());
         };
         assert_eq!(decl.members.len(), 2);
+        assert!(decl.members[1].flexible_array);
         assert!(matches!(
             decl.members[1].member_full_type,
+            FullType::Array { size: 0, .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_gnu_zero_length_array_member_without_flexible_rules() -> Result<(), String> {
+        let program = parse_source("struct zero { int data[0]; };\n")?;
+        let Declaration::StructDecl(decl) = &program.declarations[0] else {
+            return Err("expected struct declaration".to_string());
+        };
+        assert_eq!(decl.members.len(), 1);
+        assert!(!decl.members[0].flexible_array);
+        assert!(matches!(
+            decl.members[0].member_full_type,
             FullType::Array { size: 0, .. }
         ));
         Ok(())

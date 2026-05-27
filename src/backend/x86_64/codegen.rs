@@ -10,6 +10,8 @@ const ARG_REGISTERS: [Reg; 6] = [Reg::DI, Reg::SI, Reg::DX, Reg::CX, Reg::R8, Re
 fn convert_val(val: &TackyVal) -> AsmOperand {
     match val {
         TackyVal::Constant(c) => AsmOperand::Imm(*c),
+        TackyVal::Int128Constant(c) => AsmOperand::Imm(*c as i64),
+        TackyVal::UInt128Constant(c) => AsmOperand::Imm(*c as i64),
         TackyVal::DoubleConstant(d) => {
             // Treat as integer bits when used in non-double context
             AsmOperand::Imm(d.to_bits() as i64)
@@ -27,6 +29,7 @@ fn val_type(val: &TackyVal, types: &HashMap<String, CType>) -> AsmType {
                 AsmType::Longword
             }
         }
+        TackyVal::Int128Constant(_) | TackyVal::UInt128Constant(_) => AsmType::Octword,
         TackyVal::DoubleConstant(_) => AsmType::Double,
         TackyVal::Var(name) => {
             let ct = types.get(name).copied().unwrap_or(CType::Int);
@@ -67,8 +70,87 @@ fn convert_double_val(val: &TackyVal, static_doubles: &mut Vec<(String, f64)>) -
             AsmOperand::Data(label)
         }
         TackyVal::Constant(c) => AsmOperand::Imm(*c),
+        TackyVal::Int128Constant(c) => AsmOperand::Imm(*c as i64),
+        TackyVal::UInt128Constant(c) => AsmOperand::Imm(*c as i64),
         TackyVal::Var(name) => AsmOperand::Pseudo(name.clone()),
     }
+}
+
+fn i128_parts_signed(value: i128) -> (i64, i64) {
+    (value as i64, (value >> 64) as i64)
+}
+
+fn i128_parts_unsigned(value: u128) -> (i64, i64) {
+    (value as u64 as i64, (value >> 64) as u64 as i64)
+}
+
+fn low64_operand(op: AsmOperand) -> Result<AsmOperand, String> {
+    match op {
+        AsmOperand::Pseudo(name) => Ok(AsmOperand::PseudoMem(name, 0)),
+        AsmOperand::PseudoMem(name, offset) => Ok(AsmOperand::PseudoMem(name, offset)),
+        AsmOperand::Reg(reg) => Ok(AsmOperand::Reg(reg)),
+        AsmOperand::Imm(value) => Ok(AsmOperand::Imm(value)),
+        other => Err(format!(
+            "x86-64 backend cannot address low half of {:?}",
+            other
+        )),
+    }
+}
+
+fn high64_operand(op: AsmOperand) -> Result<AsmOperand, String> {
+    match op {
+        AsmOperand::Pseudo(name) => Ok(AsmOperand::PseudoMem(name, 8)),
+        AsmOperand::PseudoMem(name, offset) => Ok(AsmOperand::PseudoMem(name, offset + 8)),
+        AsmOperand::Reg(Reg::AX) => Ok(AsmOperand::Reg(Reg::DX)),
+        AsmOperand::Reg(reg) => Err(format!(
+            "x86-64 backend cannot address high half of 128-bit register {:?}",
+            reg
+        )),
+        AsmOperand::Imm(_) => {
+            Err("x86-64 backend cannot address high half of immediate".to_string())
+        }
+        other => Err(format!(
+            "x86-64 backend cannot address high half of {:?}",
+            other
+        )),
+    }
+}
+
+fn i128_part_operands(val: &TackyVal) -> Result<(AsmOperand, AsmOperand), String> {
+    match val {
+        TackyVal::Constant(value) => Ok((
+            AsmOperand::Imm(*value),
+            AsmOperand::Imm(if *value < 0 { -1 } else { 0 }),
+        )),
+        TackyVal::Int128Constant(value) => {
+            let (low, high) = i128_parts_signed(*value);
+            Ok((AsmOperand::Imm(low), AsmOperand::Imm(high)))
+        }
+        TackyVal::UInt128Constant(value) => {
+            let (low, high) = i128_parts_unsigned(*value);
+            Ok((AsmOperand::Imm(low), AsmOperand::Imm(high)))
+        }
+        _ => {
+            let op = convert_val(val);
+            Ok((low64_operand(op.clone())?, high64_operand(op)?))
+        }
+    }
+}
+
+fn emit_i128_copy(out: &mut Vec<AsmInstr>, src: &TackyVal, dst: &TackyVal) -> Result<(), String> {
+    let (src_low, src_high) = i128_part_operands(src)?;
+    let dst_op = convert_val(dst);
+    out.push(AsmInstr::Mov(
+        AsmType::Quadword,
+        src_low,
+        low64_operand(dst_op.clone())?,
+    ));
+    out.push(AsmInstr::Mov(
+        AsmType::Quadword,
+        src_high,
+        high64_operand(dst_op)?,
+    ));
+    Ok(())
 }
 
 fn get_struct_def<'a>(
@@ -321,24 +403,65 @@ fn convert_instruction(
                     src,
                     AsmOperand::Xmm(XmmReg::XMM0),
                 ));
-            } else {
-                // Use Quadword for return to preserve all 64 bits
-                let ret_type = if t == AsmType::Longword {
-                    AsmType::Quadword
-                } else {
-                    t
-                };
+            } else if t == AsmType::Octword {
+                let (low, high) = i128_part_operands(val)?;
                 out.push(AsmInstr::Mov(
-                    ret_type,
-                    convert_val(val),
+                    AsmType::Quadword,
+                    low,
                     AsmOperand::Reg(Reg::AX),
                 ));
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    high,
+                    AsmOperand::Reg(Reg::DX),
+                ));
+            } else {
+                out.push(AsmInstr::Mov(t, convert_val(val), AsmOperand::Reg(Reg::AX)));
             }
             out.push(AsmInstr::Ret);
         }
         TackyInstr::SignExtend { src, dst } => {
             let src_t = val_type(src, types);
             let dst_t = val_type(dst, types);
+            if dst_t == AsmType::Octword {
+                let dst_op = convert_val(dst);
+                match src {
+                    TackyVal::Constant(c) => {
+                        out.push(AsmInstr::Mov(
+                            AsmType::Quadword,
+                            AsmOperand::Imm(*c),
+                            low64_operand(dst_op.clone())?,
+                        ));
+                        out.push(AsmInstr::Mov(
+                            AsmType::Quadword,
+                            AsmOperand::Imm(if *c < 0 { -1 } else { 0 }),
+                            high64_operand(dst_op)?,
+                        ));
+                    }
+                    _ => {
+                        if src_t == AsmType::Quadword {
+                            out.push(AsmInstr::Mov(
+                                AsmType::Quadword,
+                                convert_val(src),
+                                low64_operand(dst_op.clone())?,
+                            ));
+                        } else {
+                            out.push(AsmInstr::Movsx(
+                                src_t,
+                                AsmType::Quadword,
+                                convert_val(src),
+                                low64_operand(dst_op.clone())?,
+                            ));
+                        }
+                        out.push(AsmInstr::Mov(
+                            AsmType::Quadword,
+                            AsmOperand::Imm(0),
+                            high64_operand(dst_op)?,
+                        ));
+                    }
+                }
+                return Ok(());
+            }
             match src {
                 TackyVal::Constant(c) if dst_t != AsmType::Byte => {
                     out.push(AsmInstr::Mov(dst_t, AsmOperand::Imm(*c), convert_val(dst)));
@@ -356,6 +479,20 @@ fn convert_instruction(
         TackyInstr::ZeroExtend { src, dst } => {
             let src_t = val_type(src, types);
             let dst_t = val_type(dst, types);
+            if dst_t == AsmType::Octword {
+                let dst_op = convert_val(dst);
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    convert_val(src),
+                    low64_operand(dst_op.clone())?,
+                ));
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    AsmOperand::Imm(0),
+                    high64_operand(dst_op)?,
+                ));
+                return Ok(());
+            }
             match src {
                 TackyVal::Constant(c) if dst_t != AsmType::Byte => {
                     out.push(AsmInstr::Mov(dst_t, AsmOperand::Imm(*c), convert_val(dst)));
@@ -372,7 +509,13 @@ fn convert_instruction(
         }
         TackyInstr::Truncate { src, dst } => {
             let dst_t = val_type(dst, types);
-            out.push(AsmInstr::Mov(dst_t, convert_val(src), convert_val(dst)));
+            let src_t = val_type(src, types);
+            let src_op = if src_t == AsmType::Octword {
+                low64_operand(convert_val(src))?
+            } else {
+                convert_val(src)
+            };
+            out.push(AsmInstr::Mov(dst_t, src_op, convert_val(dst)));
         }
         TackyInstr::Unary {
             op: TackyUnaryOp::LogicalNot,
@@ -543,6 +686,10 @@ fn convert_instruction(
         }
         TackyInstr::Copy { src, dst } => {
             let t = val_type(dst, types);
+            if t == AsmType::Octword {
+                emit_i128_copy(out, src, dst)?;
+                return Ok(());
+            }
             let src_op = if matches!(t, AsmType::Float | AsmType::Double)
                 || matches!(src, TackyVal::DoubleConstant(_))
             {
@@ -971,6 +1118,12 @@ fn convert_instruction(
         TackyInstr::Jump(label) => {
             out.push(AsmInstr::Jmp(label.clone()));
         }
+        TackyInstr::NonlocalJump(label) => {
+            out.push(AsmInstr::NonlocalJmp(label.clone()));
+        }
+        TackyInstr::JumpIndirect(target) => {
+            out.push(AsmInstr::JmpIndirect(convert_val(target)));
+        }
         TackyInstr::JumpIfZero(val, label) => {
             let t = val_type(val, types);
             if matches!(t, AsmType::Float | AsmType::Double) {
@@ -1015,11 +1168,41 @@ fn convert_instruction(
         TackyInstr::Label(label) => {
             out.push(AsmInstr::Label(label.clone()));
         }
+        TackyInstr::LoadLabelAddress(label, dst) => {
+            out.push(AsmInstr::LoadLabelAddress(label.clone(), convert_val(dst)));
+        }
+        TackyInstr::FrameAddress { dst } => {
+            out.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Reg(Reg::BP),
+                convert_val(dst),
+            ));
+        }
+        TackyInstr::BuiltinSetjmp {
+            buf,
+            dst,
+            label,
+            end_label,
+        } => {
+            out.push(AsmInstr::BuiltinSetjmp {
+                buf: convert_val(buf),
+                dst: convert_val(dst),
+                label: label.clone(),
+                end_label: end_label.clone(),
+            });
+        }
+        TackyInstr::BuiltinLongjmp { buf, value } => {
+            out.push(AsmInstr::BuiltinLongjmp {
+                buf: convert_val(buf),
+                value: convert_val(value),
+            });
+        }
         TackyInstr::FunCall {
             name,
             args,
             dst,
             stack_arg_indices,
+            memory_arg_blocks,
             struct_arg_groups,
             variadic,
             fixed_flat_arg_count: _,
@@ -1038,6 +1221,7 @@ fn convert_instruction(
                 args,
                 dst,
                 stack_arg_indices,
+                memory_arg_blocks,
                 struct_arg_groups,
                 *indirect,
                 &mut ctx,
@@ -1061,6 +1245,7 @@ fn convert_funcall(
     args: &[TackyVal],
     dst: &TackyVal,
     stack_arg_indices: &std::collections::HashSet<usize>,
+    memory_arg_blocks: &[(usize, usize)],
     struct_arg_groups: &[(usize, usize, Vec<bool>)],
     indirect: bool,
     ctx: &mut FuncallContext<'_>,
@@ -1070,6 +1255,8 @@ fn convert_funcall(
     let static_doubles = &mut *ctx.static_doubles;
     let var_struct_tags = ctx.var_struct_tags;
     let struct_defs = ctx.struct_defs;
+    let memory_blocks: std::collections::HashMap<usize, usize> =
+        memory_arg_blocks.iter().copied().collect();
 
     {
         // Pre-compute which args must go on stack due to struct group overflow
@@ -1079,6 +1266,9 @@ fn convert_funcall(
             let mut sim_int = 0usize;
             let mut sim_xmm = 0usize;
             for (arg_idx, arg) in args.iter().enumerate() {
+                if memory_blocks.contains_key(&arg_idx) {
+                    continue;
+                }
                 if stack_arg_indices.contains(&arg_idx) {
                     force_stack_args.insert(arg_idx);
                     continue;
@@ -1115,6 +1305,11 @@ fn convert_funcall(
             }
         }
 
+        enum StackArg<'a> {
+            Scalar(&'a TackyVal),
+            MemoryBlock { src_ptr: &'a TackyVal, size: usize },
+        }
+
         // Classify args into int regs, xmm regs, and stack
         let mut int_reg_args = Vec::new();
         let mut xmm_reg_args = Vec::new();
@@ -1123,8 +1318,12 @@ fn convert_funcall(
         let mut xmm_idx = 0usize;
 
         for (arg_idx, arg) in args.iter().enumerate() {
+            if let Some(size) = memory_blocks.get(&arg_idx).copied() {
+                stack_args_list.push(StackArg::MemoryBlock { src_ptr: arg, size });
+                continue;
+            }
             if force_stack_args.contains(&arg_idx) {
-                stack_args_list.push(arg);
+                stack_args_list.push(StackArg::Scalar(arg));
                 continue;
             }
             let t = val_type(arg, types);
@@ -1133,34 +1332,55 @@ fn convert_funcall(
                     xmm_reg_args.push((xmm_idx, arg));
                     xmm_idx += 1;
                 } else {
-                    stack_args_list.push(arg);
+                    stack_args_list.push(StackArg::Scalar(arg));
                 }
             } else {
                 if int_idx < 6 {
                     int_reg_args.push((int_idx, arg));
                     int_idx += 1;
                 } else {
-                    stack_args_list.push(arg);
+                    stack_args_list.push(StackArg::Scalar(arg));
                 }
             }
         }
 
-        let stack_count = stack_args_list.len();
-        let padding = if stack_count % 2 != 0 { 8 } else { 0 };
-        if padding > 0 {
-            out.push(AsmInstr::AllocateStack(padding as i32));
-        }
-        // Push stack args in reverse
-        for arg in stack_args_list.iter().rev() {
-            let t = val_type(arg, types);
-            if t == AsmType::Double {
-                // For doubles on the stack, just pushq the memory location
-                // For double constants (Data), push via memory reference
-                let src = convert_double_val(arg, static_doubles);
-                // pushq works with memory operands (64-bit)
-                out.push(AsmInstr::Push(src));
-            } else {
-                out.push(AsmInstr::Push(convert_val(arg)));
+        let stack_bytes: usize = stack_args_list
+            .iter()
+            .map(|item| match item {
+                StackArg::Scalar(_) => 8,
+                StackArg::MemoryBlock { size, .. } => size.next_multiple_of(8),
+            })
+            .sum();
+        let padding = if stack_bytes % 16 != 0 { 8 } else { 0 };
+        let outgoing_bytes = stack_bytes + padding;
+        if outgoing_bytes > 0 {
+            out.push(AsmInstr::AllocateStack(outgoing_bytes as i32));
+            let mut stack_offset = 0i32;
+            for item in &stack_args_list {
+                match item {
+                    StackArg::Scalar(arg) => {
+                        let t = val_type(arg, types);
+                        if t == AsmType::Double {
+                            let src = convert_double_val(arg, static_doubles);
+                            out.push(AsmInstr::Mov(t, src, AsmOperand::StackArg(stack_offset)));
+                        } else {
+                            out.push(AsmInstr::Mov(
+                                t,
+                                convert_val(arg),
+                                AsmOperand::StackArg(stack_offset),
+                            ));
+                        }
+                        stack_offset += 8;
+                    }
+                    StackArg::MemoryBlock { src_ptr, size } => {
+                        out.push(AsmInstr::CopyToStackArg {
+                            src_ptr: convert_val(src_ptr),
+                            dst_offset: stack_offset,
+                            size: *size,
+                        });
+                        stack_offset += size.next_multiple_of(8) as i32;
+                    }
+                }
             }
         }
         // Move int register args
@@ -1205,7 +1425,7 @@ fn convert_funcall(
             xmm_reg_args.len(),
             indirect,
         ));
-        let bytes_to_dealloc = (stack_count * 8 + padding) as i32;
+        let bytes_to_dealloc = outgoing_bytes as i32;
         if bytes_to_dealloc > 0 {
             out.push(AsmInstr::DeallocateStack(bytes_to_dealloc));
         }
@@ -1250,6 +1470,20 @@ fn convert_funcall(
                 AsmOperand::Xmm(XmmReg::XMM0),
                 convert_val(dst),
             ));
+        } else if ret_t == AsmType::Octword {
+            let dst_op = convert_val(dst);
+            out.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Reg(Reg::AX),
+                low64_operand(dst_op.clone()).unwrap_or_else(|_| convert_val(dst)),
+            ));
+            if let Ok(high) = high64_operand(dst_op) {
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    AsmOperand::Reg(Reg::DX),
+                    high,
+                ));
+            }
         } else {
             out.push(AsmInstr::Mov(
                 ret_t,
@@ -1272,11 +1506,15 @@ fn convert_binary(
     let left_ctype = match left {
         TackyVal::Var(n) => types.get(n).copied().unwrap_or(CType::Int),
         TackyVal::Constant(_) => CType::Int,
+        TackyVal::Int128Constant(_) => CType::Int128,
+        TackyVal::UInt128Constant(_) => CType::UInt128,
         TackyVal::DoubleConstant(_) => CType::Double,
     };
     let right_ctype = match right {
         TackyVal::Var(n) => types.get(n).copied().unwrap_or(CType::Int),
         TackyVal::Constant(_) => CType::Int,
+        TackyVal::Int128Constant(_) => CType::Int128,
+        TackyVal::UInt128Constant(_) => CType::UInt128,
         TackyVal::DoubleConstant(_) => CType::Double,
     };
     let is_unsigned = !left_ctype.is_signed()
@@ -1289,6 +1527,7 @@ fn convert_binary(
             match v {
                 TackyVal::Var(n) => Some(match types.get(n).copied().unwrap_or(CType::Int) {
                     CType::Long | CType::ULong | CType::Pointer => AsmType::Quadword,
+                    CType::Int128 | CType::UInt128 => AsmType::Octword,
                     CType::Float => AsmType::Float,
                     CType::Double => AsmType::Double,
                     _ => AsmType::Longword,
@@ -1343,6 +1582,203 @@ fn convert_binary(
             let r = convert_double_val(right, static_doubles);
             out.push(AsmInstr::Mov(t, l, convert_val(dst)));
             out.push(AsmInstr::Binary(t, asm_op, r, convert_val(dst)));
+        } else if t == AsmType::Octword {
+            match op {
+                TackyBinaryOp::Add
+                | TackyBinaryOp::Sub
+                | TackyBinaryOp::Mul
+                | TackyBinaryOp::BitwiseAnd
+                | TackyBinaryOp::BitwiseOr
+                | TackyBinaryOp::BitwiseXor
+                | TackyBinaryOp::ShiftLeft
+                | TackyBinaryOp::ShiftRight => {
+                    emit_i128_copy(out, left, dst)?;
+                    let (right_low, right_high) = i128_part_operands(right)?;
+                    let dst_op = convert_val(dst);
+                    if matches!(op, TackyBinaryOp::ShiftLeft) {
+                        let TackyVal::Constant(amount) = right else {
+                            return Err("x86-64 backend only supports constant 128-bit shifts yet"
+                                .to_string());
+                        };
+                        if *amount == 64 {
+                            out.push(AsmInstr::Mov(
+                                AsmType::Quadword,
+                                low64_operand(dst_op.clone())?,
+                                high64_operand(dst_op.clone())?,
+                            ));
+                            out.push(AsmInstr::Mov(
+                                AsmType::Quadword,
+                                AsmOperand::Imm(0),
+                                low64_operand(dst_op)?,
+                            ));
+                            return Ok(());
+                        }
+                        if (1..64).contains(amount) {
+                            let dst_low = low64_operand(dst_op.clone())?;
+                            let dst_high = high64_operand(dst_op.clone())?;
+                            out.push(AsmInstr::Mov(
+                                AsmType::Quadword,
+                                dst_low.clone(),
+                                AsmOperand::Reg(Reg::R10),
+                            ));
+                            out.push(AsmInstr::Binary(
+                                AsmType::Quadword,
+                                AsmBinaryOp::Sal,
+                                AsmOperand::Imm(*amount),
+                                dst_high.clone(),
+                            ));
+                            out.push(AsmInstr::Binary(
+                                AsmType::Quadword,
+                                AsmBinaryOp::Shr,
+                                AsmOperand::Imm(64 - *amount),
+                                AsmOperand::Reg(Reg::R10),
+                            ));
+                            out.push(AsmInstr::Binary(
+                                AsmType::Quadword,
+                                AsmBinaryOp::Or,
+                                AsmOperand::Reg(Reg::R10),
+                                dst_high,
+                            ));
+                            out.push(AsmInstr::Binary(
+                                AsmType::Quadword,
+                                AsmBinaryOp::Sal,
+                                AsmOperand::Imm(*amount),
+                                dst_low,
+                            ));
+                            return Ok(());
+                        }
+                        return Err(format!(
+                            "x86-64 backend does not support 128-bit shift amount yet: {}",
+                            amount
+                        ));
+                    }
+                    if matches!(op, TackyBinaryOp::ShiftRight) {
+                        let TackyVal::Constant(amount) = right else {
+                            return Err("x86-64 backend only supports constant 128-bit shifts yet"
+                                .to_string());
+                        };
+                        let dst_low = low64_operand(dst_op.clone())?;
+                        let dst_high = high64_operand(dst_op.clone())?;
+                        let high_shift = if is_unsigned {
+                            AsmBinaryOp::Shr
+                        } else {
+                            AsmBinaryOp::Sar
+                        };
+                        if *amount == 64 {
+                            out.push(AsmInstr::Mov(AsmType::Quadword, dst_high.clone(), dst_low));
+                            out.push(AsmInstr::Mov(
+                                AsmType::Quadword,
+                                AsmOperand::Imm(0),
+                                dst_high,
+                            ));
+                            return Ok(());
+                        }
+                        if (1..64).contains(amount) {
+                            out.push(AsmInstr::Mov(
+                                AsmType::Quadword,
+                                dst_high.clone(),
+                                AsmOperand::Reg(Reg::R10),
+                            ));
+                            out.push(AsmInstr::Binary(
+                                AsmType::Quadword,
+                                AsmBinaryOp::Shr,
+                                AsmOperand::Imm(*amount),
+                                dst_low.clone(),
+                            ));
+                            out.push(AsmInstr::Binary(
+                                AsmType::Quadword,
+                                AsmBinaryOp::Sal,
+                                AsmOperand::Imm(64 - *amount),
+                                AsmOperand::Reg(Reg::R10),
+                            ));
+                            out.push(AsmInstr::Binary(
+                                AsmType::Quadword,
+                                AsmBinaryOp::Or,
+                                AsmOperand::Reg(Reg::R10),
+                                dst_low,
+                            ));
+                            out.push(AsmInstr::Binary(
+                                AsmType::Quadword,
+                                high_shift,
+                                AsmOperand::Imm(*amount),
+                                dst_high,
+                            ));
+                            return Ok(());
+                        }
+                        return Err(format!(
+                            "x86-64 backend does not support 128-bit shift amount yet: {}",
+                            amount
+                        ));
+                    }
+                    if matches!(op, TackyBinaryOp::Mul) {
+                        out.push(AsmInstr::Binary(
+                            AsmType::Quadword,
+                            AsmBinaryOp::Mul,
+                            right_low,
+                            low64_operand(dst_op.clone())?,
+                        ));
+                        out.push(AsmInstr::Mov(
+                            AsmType::Quadword,
+                            AsmOperand::Imm(0),
+                            high64_operand(dst_op)?,
+                        ));
+                        return Ok(());
+                    }
+                    if matches!(
+                        op,
+                        TackyBinaryOp::BitwiseAnd
+                            | TackyBinaryOp::BitwiseOr
+                            | TackyBinaryOp::BitwiseXor
+                    ) {
+                        let asm_op = match op {
+                            TackyBinaryOp::BitwiseAnd => AsmBinaryOp::And,
+                            TackyBinaryOp::BitwiseOr => AsmBinaryOp::Or,
+                            TackyBinaryOp::BitwiseXor => AsmBinaryOp::Xor,
+                            _ => unreachable!(),
+                        };
+                        out.push(AsmInstr::Binary(
+                            AsmType::Quadword,
+                            asm_op.clone(),
+                            right_low,
+                            low64_operand(dst_op.clone())?,
+                        ));
+                        out.push(AsmInstr::Binary(
+                            AsmType::Quadword,
+                            asm_op,
+                            right_high,
+                            high64_operand(dst_op)?,
+                        ));
+                        return Ok(());
+                    }
+                    let asm_op = if matches!(op, TackyBinaryOp::Add) {
+                        AsmBinaryOp::AddSetFlags
+                    } else {
+                        AsmBinaryOp::SubSetFlags
+                    };
+                    out.push(AsmInstr::Binary(
+                        AsmType::Quadword,
+                        asm_op.clone(),
+                        right_low,
+                        low64_operand(dst_op.clone())?,
+                    ));
+                    out.push(AsmInstr::Binary(
+                        AsmType::Quadword,
+                        if matches!(op, TackyBinaryOp::Add) {
+                            AsmBinaryOp::Adc
+                        } else {
+                            AsmBinaryOp::Sbb
+                        },
+                        right_high,
+                        high64_operand(dst_op)?,
+                    ));
+                }
+                _ => {
+                    return Err(format!(
+                        "x86-64 backend does not support 128-bit binary op yet: {:?}",
+                        op
+                    ));
+                }
+            }
         } else {
             let asm_op = match op {
                 TackyBinaryOp::Add => AsmBinaryOp::Add,
@@ -1390,6 +1826,11 @@ fn convert_function(
     let mut int_reg_idx = 0usize;
     let mut xmm_reg_idx = 0usize;
     let mut stack_arg_idx = 0usize;
+    let memory_param_blocks: HashMap<usize, (&String, usize)> = func
+        .memory_param_blocks
+        .iter()
+        .map(|(index, name, size)| (*index, (name, *size)))
+        .collect();
 
     // Pre-compute which params must go on stack due to struct group overflow
     let mut force_stack: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -1398,6 +1839,9 @@ fn convert_function(
         let mut sim_xmm_idx = 0usize;
         // Account for hidden return pointer
         for (i, param) in func.params.iter().enumerate() {
+            if memory_param_blocks.contains_key(&i) {
+                continue;
+            }
             if func.stack_params.contains(param) {
                 force_stack.insert(i);
                 continue;
@@ -1442,6 +1886,16 @@ fn convert_function(
     }
 
     for (i, param) in func.params.iter().enumerate() {
+        if let Some((dst_name, size)) = memory_param_blocks.get(&i).copied() {
+            let offset = 16 + (stack_arg_idx * 8) as i32;
+            instructions.push(AsmInstr::CopyFromStackArg {
+                src_offset: offset,
+                dst: AsmOperand::PseudoMem(dst_name.clone(), 0),
+                size,
+            });
+            stack_arg_idx += size.next_multiple_of(8) / 8;
+            continue;
+        }
         if force_stack.contains(&i) || func.stack_params.contains(param) {
             let offset = 16 + (stack_arg_idx * 8) as i32;
             let t: AsmType = types.get(param).copied().unwrap_or(CType::Long).into();
@@ -1623,6 +2077,7 @@ fn replace_pseudos(
                     *op = AsmOperand::Stack(base_off + mem_off);
                 }
             }
+            AsmOperand::StackArg(_) => {}
             _ => {}
         }
     }
@@ -1682,6 +2137,12 @@ fn replace_pseudos(
             AsmInstr::LoadIndirect(_, _, dst) => {
                 replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
             }
+            AsmInstr::CopyToStackArg { src_ptr, .. } => {
+                replace_operand(src_ptr, &mut pseudo_map, &mut stack_offset, &ctx);
+            }
+            AsmInstr::CopyFromStackArg { dst, .. } => {
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
+            }
             AsmInstr::StoreIndirect(_, src, _) => {
                 replace_operand(src, &mut pseudo_map, &mut stack_offset, &ctx);
             }
@@ -1699,7 +2160,10 @@ fn replace_pseudos(
 fn is_memory(op: &AsmOperand) -> bool {
     matches!(
         op,
-        AsmOperand::Stack(_) | AsmOperand::Data(_) | AsmOperand::TlsData(_, _)
+        AsmOperand::Stack(_)
+            | AsmOperand::Data(_)
+            | AsmOperand::TlsData(_, _)
+            | AsmOperand::StackArg(_)
     )
 }
 
@@ -2101,7 +2565,7 @@ fn fixup_instructions(func: &mut AsmFunction, stack_size: i32, callee_saved: &[R
                 }
             }
             // Ret → pop callee-saved registers (reverse order), then epilogue
-            instr @ (AsmInstr::Ret | AsmInstr::Unreachable) => {
+            instr @ (AsmInstr::Ret | AsmInstr::Unreachable | AsmInstr::NonlocalJmp(_)) => {
                 for reg in callee_saved.iter().rev() {
                     new_instructions.push(AsmInstr::Pop(*reg));
                 }
@@ -2161,6 +2625,12 @@ fn verify_final_function(func: &AsmFunction) -> Result<(), String> {
             | AsmInstr::AtomicExchange(_, dst)
             | AsmInstr::AtomicCompareExchange(_, dst)
             | AsmInstr::AtomicCompareSwap(_, _, dst) => {
+                assert_no_pseudo_operand(dst, instr)?;
+            }
+            AsmInstr::CopyToStackArg { src_ptr, .. } => {
+                assert_no_pseudo_operand(src_ptr, instr)?;
+            }
+            AsmInstr::CopyFromStackArg { dst, .. } => {
                 assert_no_pseudo_operand(dst, instr)?;
             }
             _ => {}
@@ -2347,6 +2817,12 @@ pub fn gen(program: &TackyProgram, no_coalescing: bool) -> Result<AsmProgram, St
                     alignment: sc.alignment,
                     init: sc.init.clone(),
                 }));
+            }
+            TackyTopLevel::Alias { name, target } => {
+                top_level.push(AsmTopLevel::Alias {
+                    name: name.clone(),
+                    target: target.clone(),
+                });
             }
         }
     }

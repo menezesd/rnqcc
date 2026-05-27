@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::types::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 type FileScopeVarInfo = (bool, bool, Option<(i64, bool, bool)>, CType);
 type BuiltinFunctionInfo = (
@@ -12,6 +12,18 @@ type BuiltinFunctionInfo = (
     Option<(CType, usize)>,
 );
 pub type TackyResult<T> = Result<T, String>;
+
+const VLA_STATIC_SCALE_FALLBACK: usize = 16;
+
+#[derive(Copy, Clone)]
+enum BitBuiltinKind {
+    Ffs,
+    Clz,
+    Ctz,
+    Clrsb,
+    Popcount,
+    Parity,
+}
 
 struct StaticInitBuilder {
     pieces: Vec<(usize, StaticInit)>,
@@ -41,6 +53,88 @@ impl StaticInitBuilder {
             return Err("overlapping static initializer designators".to_string());
         }
         self.pieces.push((offset, init));
+        Ok(())
+    }
+
+    fn required_bytes(&self) -> usize {
+        self.pieces
+            .iter()
+            .map(|(offset, init)| offset + TackyGen::static_init_size(init))
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn init_to_u64(init: &StaticInit) -> Option<u64> {
+        match init {
+            StaticInit::IntInit(v) => Some(*v as u32 as u64),
+            StaticInit::LongInit(v) => Some(*v as u64),
+            StaticInit::UIntInit(v) => Some(*v as u64),
+            StaticInit::ULongInit(v) => Some(*v),
+            StaticInit::ShortInit(v) => Some(*v as u16 as u64),
+            StaticInit::UShortInit(v) => Some(*v as u64),
+            StaticInit::CharInit(v) => Some(*v as u8 as u64),
+            StaticInit::UCharInit(v) => Some(*v as u64),
+            StaticInit::ZeroInit(_) => Some(0),
+            _ => None,
+        }
+    }
+
+    fn init_to_u8(init: &StaticInit) -> Option<u8> {
+        match init {
+            StaticInit::CharInit(v) => Some(*v as u8),
+            StaticInit::UCharInit(v) => Some(*v),
+            StaticInit::ZeroInit(_) => Some(0),
+            _ => None,
+        }
+    }
+
+    fn put_byte_masked(&mut self, offset: usize, value: u8, mask: u8) -> TackyResult<()> {
+        if mask == 0 {
+            return Ok(());
+        }
+        if let Some(pos) = self.pieces.iter().position(|(existing_offset, existing)| {
+            *existing_offset == offset && TackyGen::static_init_size(existing) == 1
+        }) {
+            let current = Self::init_to_u8(&self.pieces[pos].1)
+                .ok_or_else(|| "cannot merge byte static initializer".to_string())?;
+            self.pieces[pos].1 = StaticInit::UCharInit((current & !mask) | (value & mask));
+            return Ok(());
+        }
+        self.put(offset, StaticInit::UCharInit(value & mask))
+    }
+
+    fn put_bit_field(
+        &mut self,
+        offset: usize,
+        storage_type: CType,
+        value: i64,
+        bit_offset: u8,
+        bit_width: u8,
+    ) -> TackyResult<()> {
+        let storage_bits = (storage_type.size() as usize).saturating_mul(8);
+        let field_end = (bit_offset as usize)
+            .saturating_add(bit_width as usize)
+            .min(storage_bits);
+        if field_end <= bit_offset as usize {
+            return Ok(());
+        }
+        let value_mask = if bit_width as usize >= 128 {
+            u128::MAX
+        } else {
+            (1_u128 << bit_width) - 1
+        };
+        let shifted = ((value as u128) & value_mask) << bit_offset;
+        let first_byte = bit_offset as usize / 8;
+        let last_byte = (field_end - 1) / 8;
+        for byte_index in first_byte..=last_byte {
+            let byte_start_bit = byte_index * 8;
+            let field_start_in_byte = (bit_offset as usize).saturating_sub(byte_start_bit);
+            let field_end_in_byte = field_end.saturating_sub(byte_start_bit).min(8);
+            let width = field_end_in_byte - field_start_in_byte;
+            let mask = (((1u16 << width) - 1) << field_start_in_byte) as u8;
+            let byte_value = ((shifted >> byte_start_bit) & 0xff) as u8;
+            self.put_byte_masked(offset + byte_index, byte_value, mask)?;
+        }
         Ok(())
     }
 
@@ -76,6 +170,8 @@ struct TackyGen {
     string_counter: usize,
     instructions: Vec<TackyInstr>,
     current_function: String,
+    label_address_function: Option<String>,
+    local_label_stack: Vec<HashSet<String>>,
     /// Hidden return pointer name for functions returning large structs
     hidden_ret_ptr: Option<String>,
     static_vars: Vec<TackyStaticVar>,
@@ -91,15 +187,19 @@ struct TackyGen {
     func_full_types: HashMap<String, FullType>,
     /// Function parameter full types.
     func_param_full_types: HashMap<String, Vec<FullType>>,
+    vla_param_bounds: HashMap<String, Exp>,
     /// Scalar type cache for variables and temporaries.
     var_types: HashMap<String, CType>,
     symbol_alignments: HashMap<String, usize>,
     ptr_info: HashMap<String, (CType, usize)>,
+    bit_precisions: HashMap<String, u8>,
     /// Array storage sizes for stack allocation
     array_sizes: HashMap<String, usize>,
     /// Struct definitions
     struct_defs: HashMap<String, StructDef>,
     nested_functions: Vec<TackyFunction>,
+    instrument_functions: bool,
+    no_instrument_functions: std::collections::HashSet<String>,
 }
 
 impl TackyGen {
@@ -110,6 +210,8 @@ impl TackyGen {
             string_counter: 0,
             instructions: Vec::new(),
             current_function: String::new(),
+            label_address_function: None,
+            local_label_stack: Vec::new(),
             hidden_ret_ptr: None,
             static_vars: Vec::new(),
             static_constants: Vec::new(),
@@ -119,20 +221,72 @@ impl TackyGen {
             func_types: HashMap::new(),
             func_full_types: HashMap::new(),
             func_param_full_types: HashMap::new(),
+            vla_param_bounds: HashMap::new(),
             var_types: HashMap::new(),
             symbol_alignments: HashMap::new(),
             ptr_info: HashMap::new(),
+            bit_precisions: HashMap::new(),
             array_sizes: HashMap::new(),
             struct_defs: HashMap::new(),
             nested_functions: Vec::new(),
+            instrument_functions: false,
+            no_instrument_functions: std::collections::HashSet::new(),
         }
+    }
+
+    fn instrumentation_call(&mut self, hook: &str) -> Vec<TackyInstr> {
+        self.extern_vars.push(self.current_function.clone());
+        let fn_addr = self.fresh_tmp(CType::Pointer);
+        let dst = self.fresh_tmp(CType::Void);
+        vec![
+            TackyInstr::GetAddress {
+                src: TackyVal::Var(self.current_function.clone()),
+                dst: fn_addr.clone(),
+            },
+            TackyInstr::FunCall {
+                name: hook.to_string(),
+                args: vec![fn_addr, TackyVal::Constant(0)],
+                dst,
+                stack_arg_indices: std::collections::HashSet::new(),
+                memory_arg_blocks: Vec::new(),
+                struct_arg_groups: Vec::new(),
+                variadic: false,
+                fixed_flat_arg_count: 2,
+                indirect: false,
+            },
+        ]
+    }
+
+    fn apply_function_instrumentation(&mut self, no_instrument_function: bool) {
+        if !self.instrument_functions
+            || no_instrument_function
+            || self
+                .no_instrument_functions
+                .contains(&self.current_function)
+            || matches!(
+                self.current_function.as_str(),
+                "__cyg_profile_func_enter" | "__cyg_profile_func_exit"
+            )
+        {
+            return;
+        }
+
+        let mut instrumented = self.instrumentation_call("__cyg_profile_func_enter");
+        let body = std::mem::take(&mut self.instructions);
+        for instr in body {
+            if matches!(instr, TackyInstr::Return(_)) {
+                instrumented.extend(self.instrumentation_call("__cyg_profile_func_exit"));
+            }
+            instrumented.push(instr);
+        }
+        self.instructions = instrumented;
     }
 
     fn string_array_initializer(init: &Exp) -> Option<&String> {
         match init {
-            Exp::StringLiteral(s) => Some(s),
+            Exp::StringLiteral(s) | Exp::WideStringLiteral(s) => Some(s),
             Exp::ArrayInit(elems) => match elems.as_slice() {
-                [Exp::StringLiteral(s)] => Some(s),
+                [Exp::StringLiteral(s)] | [Exp::WideStringLiteral(s)] => Some(s),
                 _ => None,
             },
             _ => None,
@@ -147,9 +301,41 @@ impl TackyGen {
         }
     }
 
+    fn static_label_diff_initializer(&self, init: &Exp, ctype: CType) -> Option<StaticInit> {
+        let Exp::Binary(BinaryOp::Sub, left, right) = init else {
+            return None;
+        };
+        let (Exp::LabelAddress(left_label), Exp::LabelAddress(right_label)) =
+            (left.as_ref(), right.as_ref())
+        else {
+            return None;
+        };
+        let bytes = match ctype {
+            CType::Int | CType::UInt => 4,
+            CType::Long | CType::ULong | CType::Pointer => 8,
+            _ => return None,
+        };
+        let function = self
+            .label_address_function
+            .as_ref()
+            .unwrap_or(&self.current_function);
+        Some(StaticInit::LabelDiffInit(
+            format!("label.{}.{}", function, left_label),
+            format!("label.{}.{}", function, right_label),
+            bytes,
+        ))
+    }
+
     fn static_address_constant(&mut self, exp: &Exp) -> Option<(Option<String>, i64)> {
         match exp {
             Exp::Var(name) => Some((Some(name.clone()), 0)),
+            Exp::LabelAddress(label) => {
+                let function = self
+                    .label_address_function
+                    .as_ref()
+                    .unwrap_or(&self.current_function);
+                Some((Some(format!("label.{}.{}", function, label)), 0))
+            }
             Exp::StringLiteral(s) => Some((Some(self.make_string_constant(s)), 0)),
             Exp::Constant(0)
             | Exp::LongConstant(0)
@@ -180,7 +366,12 @@ impl TackyGen {
             &self.struct_defs,
             &self.full_types,
         )?;
-        Some((base, offset + sign * value))
+        let scale = match self.static_exp_full_type(address) {
+            Some(FullType::Array { elem, .. }) => elem.byte_size_with(&self.struct_defs) as i64,
+            Some(FullType::Pointer(pointee)) => pointee.byte_size_with(&self.struct_defs) as i64,
+            _ => 1,
+        };
+        Some((base, offset + sign * value * scale))
     }
 
     fn static_exp_full_type(&self, exp: &Exp) -> Option<FullType> {
@@ -189,6 +380,10 @@ impl TackyGen {
             Exp::Arrow(inner, member) => {
                 let tag = match self.static_exp_full_type(inner)? {
                     FullType::Pointer(pointee) => match *pointee {
+                        FullType::Struct(tag) => tag,
+                        _ => return None,
+                    },
+                    FullType::Array { elem, .. } => match *elem {
                         FullType::Struct(tag) => tag,
                         _ => return None,
                     },
@@ -206,6 +401,13 @@ impl TackyGen {
                 FullType::Pointer(pointee) => Some(*pointee),
                 _ => None,
             },
+            Exp::Binary(BinaryOp::Add | BinaryOp::Sub, left, right) => self
+                .static_exp_full_type(left)
+                .filter(|ft| matches!(ft, FullType::Array { .. } | FullType::Pointer(_)))
+                .or_else(|| {
+                    self.static_exp_full_type(right)
+                        .filter(|ft| matches!(ft, FullType::Array { .. } | FullType::Pointer(_)))
+                }),
             _ => eval_static_expr_full_type(exp, &self.full_types),
         }
     }
@@ -226,6 +428,10 @@ impl TackyGen {
     fn static_lvalue_address_constant(&mut self, exp: &Exp) -> Option<(Option<String>, i64)> {
         match exp {
             Exp::Var(name) => Some((Some(name.clone()), 0)),
+            Exp::Cast(_, Some(ft), inner) if matches!(inner.as_ref(), Exp::ArrayInit(_)) => {
+                let label = self.make_static_compound_literal(ft, inner).ok()?;
+                Some((Some(label), 0))
+            }
             Exp::Dot(inner, member) => {
                 let (base, offset) = self.static_lvalue_address_constant(inner)?;
                 let tag = match self.static_exp_full_type(inner)? {
@@ -248,6 +454,10 @@ impl TackyGen {
                         FullType::Struct(tag) => tag,
                         _ => return None,
                     },
+                    FullType::Array { elem, .. } => match *elem {
+                        FullType::Struct(tag) => tag,
+                        _ => return None,
+                    },
                     _ => return None,
                 };
                 let member_offset = self
@@ -260,7 +470,9 @@ impl TackyGen {
                 Some((base, offset + member_offset))
             }
             Exp::Subscript(arr, idx) => {
-                let (base, offset) = self.static_address_constant(arr)?;
+                let (base, offset) = self
+                    .static_address_constant(arr)
+                    .or_else(|| self.static_lvalue_address_constant(arr))?;
                 let elem_size = match self.static_exp_full_type(arr)? {
                     FullType::Array { elem, .. } => elem.byte_size_with(&self.struct_defs),
                     FullType::Pointer(pointee) => pointee.byte_size_with(&self.struct_defs),
@@ -281,7 +493,7 @@ impl TackyGen {
 
     fn static_aggregate_initializer(init: &Exp) -> Option<&Exp> {
         match init {
-            Exp::ArrayInit(_) => Some(init),
+            Exp::ArrayInit(_) | Exp::WideStringLiteral(_) => Some(init),
             Exp::Cast(_, _, inner) if matches!(inner.as_ref(), Exp::ArrayInit(_)) => Some(inner),
             _ => None,
         }
@@ -298,10 +510,22 @@ impl TackyGen {
         )
     }
 
+    fn next_tmp_name(&mut self) -> String {
+        loop {
+            let name = format!("tmp.{}", self.tmp_counter);
+            self.tmp_counter += 1;
+            if !self.symbol_types.contains_key(&name)
+                && !self.var_types.contains_key(&name)
+                && !self.full_types.contains_key(&name)
+                && !self.array_sizes.contains_key(&name)
+            {
+                return name;
+            }
+        }
+    }
+
     fn fresh_var_name(&mut self) -> String {
-        let name = format!("tmp.{}", self.tmp_counter);
-        self.tmp_counter += 1;
-        name
+        self.next_tmp_name()
     }
 
     fn zero_init_local(&mut self, name: &str, total_bytes: usize) {
@@ -348,16 +572,27 @@ impl TackyGen {
     }
 
     fn fresh_tmp(&mut self, t: CType) -> TackyVal {
-        let name = format!("tmp.{}", self.tmp_counter);
-        self.tmp_counter += 1;
+        let name = self.next_tmp_name();
         self.symbol_types.insert(name.clone(), t);
         TackyVal::Var(name)
     }
 
+    fn storage_ctype_for_full(&self, ft: &FullType) -> CType {
+        if !ft.is_vector() {
+            return ft.to_ctype();
+        }
+        match ft.byte_size_with(&self.struct_defs) {
+            0 | 1 => CType::UChar,
+            2 => CType::UShort,
+            3 | 4 => CType::UInt,
+            5..=8 => CType::ULong,
+            _ => CType::UInt128,
+        }
+    }
+
     fn fresh_tmp_full(&mut self, ft: &FullType) -> TackyVal {
-        let name = format!("tmp.{}", self.tmp_counter);
-        self.tmp_counter += 1;
-        let ct = ft.to_ctype();
+        let name = self.next_tmp_name();
+        let ct = self.storage_ctype_for_full(ft);
         self.symbol_types.insert(name.clone(), ct);
         self.var_types.insert(name.clone(), ct);
         self.full_types.insert(name.clone(), ft.clone());
@@ -366,12 +601,16 @@ impl TackyGen {
             let (base, depth) = Self::ptr_info_from_full(inner);
             self.ptr_info.insert(name.clone(), (base, depth));
         }
+        if ft.is_vector() {
+            self.array_sizes
+                .insert(name.clone(), ft.byte_size_with(&self.struct_defs));
+        }
         TackyVal::Var(name)
     }
 
     /// Register a variable with its full type
     fn register_var(&mut self, name: &str, ft: FullType) {
-        let ct = ft.to_ctype();
+        let ct = self.storage_ctype_for_full(&ft);
         self.symbol_types.insert(name.to_string(), ct);
         self.var_types.insert(name.to_string(), ct);
         self.full_types.insert(name.to_string(), ft.clone());
@@ -382,8 +621,8 @@ impl TackyGen {
             self.ptr_info.insert(name.to_string(), (base, depth));
         }
 
-        // Track array/struct sizes
-        if ft.is_array() {
+        // Track aggregate-sized scalar storage.
+        if ft.is_array() || ft.is_vector() {
             self.array_sizes
                 .insert(name.to_string(), ft.byte_size_with(&self.struct_defs));
         }
@@ -407,6 +646,7 @@ impl TackyGen {
                 let base_ct = elem.to_ctype();
                 (base_ct, 1)
             }
+            FullType::Vector { elem, .. } => (elem.to_ctype(), 1),
             FullType::Struct(_) => (CType::Struct, 1),
         }
     }
@@ -442,6 +682,10 @@ impl TackyGen {
             "long" => Some(CType::Long),
             "ulong" => Some(CType::ULong),
             "ptr" => Some(CType::Pointer),
+            "float" => Some(CType::Double),
+            "double" => Some(CType::Double),
+            "int128" => Some(CType::Int128),
+            "uint128" => Some(CType::UInt128),
             _ => None,
         }
     }
@@ -497,6 +741,20 @@ impl TackyGen {
                 vec![CType::Pointer],
                 None,
             )),
+            "__builtin_stack_save" => Some((
+                "__builtin_stack_save",
+                CType::Pointer,
+                void_ptr.clone(),
+                vec![],
+                Some((CType::Void, 1)),
+            )),
+            "__builtin_stack_restore" => Some((
+                "__builtin_stack_restore",
+                CType::Void,
+                FullType::Scalar(CType::Void),
+                vec![CType::Pointer],
+                None,
+            )),
             "__builtin_memcpy" => Some((
                 "memcpy",
                 CType::Pointer,
@@ -530,6 +788,13 @@ impl TackyGen {
                 CType::Pointer,
                 void_ptr,
                 vec![CType::Pointer, CType::Int, CType::ULong],
+                Some((CType::Void, 1)),
+            )),
+            "__builtin_mempcpy" => Some((
+                "mempcpy",
+                CType::Pointer,
+                void_ptr,
+                vec![CType::Pointer, CType::Pointer, CType::ULong],
                 Some((CType::Void, 1)),
             )),
             "__builtin_strlen" => Some((
@@ -595,6 +860,13 @@ impl TackyGen {
                 vec![CType::Pointer, CType::Pointer],
                 Some((CType::Char, 1)),
             )),
+            "__builtin_stpcpy" => Some((
+                "stpcpy",
+                CType::Pointer,
+                char_ptr.clone(),
+                vec![CType::Pointer, CType::Pointer],
+                Some((CType::Char, 1)),
+            )),
             "__builtin_strncpy" => Some((
                 "strncpy",
                 CType::Pointer,
@@ -616,11 +888,158 @@ impl TackyGen {
                 vec![CType::Pointer, CType::Pointer, CType::ULong],
                 Some((CType::Char, 1)),
             )),
+            "__builtin_snprintf" => Some((
+                "snprintf",
+                CType::Int,
+                FullType::Scalar(CType::Int),
+                vec![CType::Pointer, CType::ULong, CType::Pointer],
+                Some((CType::Char, 1)),
+            )),
+            "__builtin_fabs" => Some((
+                "fabs",
+                CType::Double,
+                FullType::Scalar(CType::Double),
+                vec![CType::Double],
+                None,
+            )),
+            "__builtin_fabsf" => Some((
+                "fabsf",
+                CType::Float,
+                FullType::Scalar(CType::Float),
+                vec![CType::Float],
+                None,
+            )),
+            "__builtin_fabsl" => Some((
+                "fabsl",
+                CType::Double,
+                FullType::Scalar(CType::Double),
+                vec![CType::Double],
+                None,
+            )),
+            "__builtin_copysign" => Some((
+                "copysign",
+                CType::Double,
+                FullType::Scalar(CType::Double),
+                vec![CType::Double, CType::Double],
+                None,
+            )),
+            "__builtin_copysignf" => Some((
+                "copysignf",
+                CType::Float,
+                FullType::Scalar(CType::Float),
+                vec![CType::Float, CType::Float],
+                None,
+            )),
+            "__builtin_copysignl" => Some((
+                "copysignl",
+                CType::Double,
+                FullType::Scalar(CType::Double),
+                vec![CType::Double, CType::Double],
+                None,
+            )),
+            "__builtin_conjf" => Some((
+                "conjf",
+                CType::Float,
+                FullType::Scalar(CType::Float),
+                vec![CType::Float],
+                None,
+            )),
+            "__builtin_conj" => Some((
+                "conj",
+                CType::Double,
+                FullType::Scalar(CType::Double),
+                vec![CType::Double],
+                None,
+            )),
+            "__builtin_conjl" => Some((
+                "conjl",
+                CType::Double,
+                FullType::Scalar(CType::Double),
+                vec![CType::Double],
+                None,
+            )),
+            "__builtin_isinf" => Some((
+                "isinf",
+                CType::Int,
+                FullType::Scalar(CType::Int),
+                vec![CType::Double],
+                None,
+            )),
+            "__builtin_isinff" => Some((
+                "isinf",
+                CType::Int,
+                FullType::Scalar(CType::Int),
+                vec![CType::Float],
+                None,
+            )),
+            "__builtin_isinfl" => Some((
+                "isinf",
+                CType::Int,
+                FullType::Scalar(CType::Int),
+                vec![CType::Double],
+                None,
+            )),
             "alloca" | "__builtin_alloca" => Some((
                 "alloca",
                 CType::Pointer,
                 void_ptr,
                 vec![CType::ULong],
+                Some((CType::Void, 1)),
+            )),
+            "__builtin_malloc" => Some((
+                "malloc",
+                CType::Pointer,
+                void_ptr,
+                vec![CType::ULong],
+                Some((CType::Void, 1)),
+            )),
+            "__builtin_free" => Some((
+                "free",
+                CType::Void,
+                FullType::Scalar(CType::Void),
+                vec![CType::Pointer],
+                Some((CType::Void, 1)),
+            )),
+            "abs" | "__builtin_abs" => Some((
+                "abs",
+                CType::Int,
+                FullType::Scalar(CType::Int),
+                vec![CType::Int],
+                None,
+            )),
+            "labs" | "__builtin_labs" => Some((
+                "labs",
+                CType::Long,
+                FullType::Scalar(CType::Long),
+                vec![CType::Long],
+                None,
+            )),
+            "llabs" | "__builtin_llabs" => Some((
+                "llabs",
+                CType::Long,
+                FullType::Scalar(CType::Long),
+                vec![CType::Long],
+                None,
+            )),
+            "__builtin_ffs" => Some((
+                "ffs",
+                CType::Int,
+                FullType::Scalar(CType::Int),
+                vec![CType::Int],
+                None,
+            )),
+            "__builtin_setjmp" => Some((
+                "setjmp",
+                CType::Int,
+                FullType::Scalar(CType::Int),
+                vec![CType::Pointer],
+                Some((CType::Void, 1)),
+            )),
+            "__builtin_longjmp" => Some((
+                "longjmp",
+                CType::Void,
+                FullType::Scalar(CType::Void),
+                vec![CType::Pointer, CType::Int],
                 Some((CType::Void, 1)),
             )),
             _ => None,
@@ -660,11 +1079,25 @@ impl TackyGen {
             (FullType::Scalar(a), FullType::Scalar(b)) => {
                 *a != CType::Struct && *b != CType::Struct && *a != CType::Void && *b != CType::Void
             }
+            (FullType::Vector { elem, .. }, FullType::Scalar(_)) => {
+                self.compatible_full_types(elem, src)
+            }
+            (FullType::Scalar(_), FullType::Vector { elem, .. }) => {
+                self.compatible_full_types(dst, elem)
+            }
+            (FullType::Vector { elem: dst_elem, .. }, FullType::Vector { elem: src_elem, .. }) => {
+                self.compatible_full_types(dst_elem, src_elem)
+            }
             (FullType::Pointer(_), FullType::Scalar(CType::Pointer))
             | (FullType::Scalar(CType::Pointer), FullType::Pointer(_)) => true,
             (FullType::Pointer(dst_inner), FullType::Pointer(src_inner)) => {
                 Self::is_void_pointer(dst)
                     || Self::is_void_pointer(src)
+                    || matches!(
+                        src_inner.as_ref(),
+                        FullType::Array { elem, .. }
+                            if self.compatible_full_types(dst_inner, elem)
+                    )
                     || self.compatible_pointer_pointees(dst_inner, src_inner)
             }
             (FullType::Pointer(pointee), FullType::Array { elem, .. }) => {
@@ -715,6 +1148,7 @@ impl TackyGen {
                         | Exp::Arrow(_, _)
                         | Exp::Subscript(_, _)
                         | Exp::Unary(UnaryOp::Deref, _)
+                        | Exp::Assign(_, _)
                 )
             {
                 return Ok(());
@@ -752,6 +1186,8 @@ impl TackyGen {
     fn val_full_type(&self, val: &TackyVal) -> FullType {
         match val {
             TackyVal::Constant(_) => FullType::Scalar(CType::Int),
+            TackyVal::Int128Constant(_) => FullType::Scalar(CType::Int128),
+            TackyVal::UInt128Constant(_) => FullType::Scalar(CType::UInt128),
             TackyVal::DoubleConstant(_) => FullType::Scalar(CType::Double),
             TackyVal::Var(name) => self.get_full_type(name),
         }
@@ -772,14 +1208,21 @@ impl TackyGen {
         match exp {
             Exp::Constant(_) => FullType::Scalar(CType::Int),
             Exp::LongConstant(_) => FullType::Scalar(CType::Long),
+            Exp::Int128Constant(_) => FullType::Scalar(CType::Int128),
             Exp::UIntConstant(_) => FullType::Scalar(CType::UInt),
             Exp::ULongConstant(_) => FullType::Scalar(CType::ULong),
+            Exp::UInt128Constant(_) => FullType::Scalar(CType::UInt128),
             Exp::DoubleConstant(_) => FullType::Scalar(CType::Double),
             Exp::StringLiteral(s) => FullType::Array {
                 elem: Box::new(FullType::Scalar(CType::Char)),
                 size: c_string_byte_len(s) + 1,
             },
+            Exp::WideStringLiteral(s) => FullType::Array {
+                elem: Box::new(FullType::Scalar(CType::Int)),
+                size: s.chars().count() + 1,
+            },
             Exp::Var(name) => self.get_full_type(name),
+            Exp::LabelAddress(_) => FullType::Pointer(Box::new(FullType::Scalar(CType::Void))),
             Exp::Cast(ct, ft, _) => {
                 if let Some(ref full) = ft {
                     full.clone()
@@ -803,6 +1246,7 @@ impl TackyGen {
                 match arr_ft {
                     FullType::Array { elem, .. } => *elem,
                     FullType::Pointer(inner) => *inner,
+                    FullType::Vector { elem, .. } => *elem,
                     _ => FullType::Scalar(CType::Int),
                 }
             }
@@ -821,6 +1265,7 @@ impl TackyGen {
                 let inner_ft = self.typeof_exp(inner);
                 let pointee = match inner_ft {
                     FullType::Pointer(p) => *p,
+                    FullType::Array { elem, .. } => *elem,
                     _ => inner_ft,
                 };
                 if let FullType::Struct(tag) = &pointee {
@@ -947,6 +1392,8 @@ impl TackyGen {
             | StaticInit::DoubleInit(_)
             | StaticInit::PointerInit(_)
             | StaticInit::PointerInitOffset(_, _) => 8,
+            StaticInit::LabelDiffInit(_, _, bytes) => *bytes,
+            StaticInit::Int128Init(_) | StaticInit::UInt128Init(_) => 16,
             StaticInit::FloatInit(_) => 4,
             StaticInit::ZeroInit(n) => *n,
             StaticInit::StringInit(s, null_terminated) => {
@@ -971,6 +1418,27 @@ impl TackyGen {
             init: StaticInit::StringInit(s.to_string(), true),
         });
         label
+    }
+
+    fn make_static_compound_literal(&mut self, ft: &FullType, init: &Exp) -> TackyResult<String> {
+        let label = format!("__compound_literal_{}", self.string_counter);
+        self.string_counter += 1;
+        let total_bytes = ft.byte_size_with(&self.struct_defs);
+        let alignment = ft.alignment_with(&self.struct_defs).max(1);
+        let init_values = self.build_static_initializer(ft, init)?;
+        self.register_var(&label, ft.clone());
+        self.static_vars.push(TackyStaticVar {
+            name: label.clone(),
+            global: false,
+            thread_local: false,
+            alignment,
+            init_values: if init_values.is_empty() {
+                vec![StaticInit::ZeroInit(total_bytes)]
+            } else {
+                init_values
+            },
+        });
+        Ok(label)
     }
 
     /// Get the type you get when dereferencing a pointer variable
@@ -1002,12 +1470,29 @@ impl TackyGen {
     fn type_of(&self, val: &TackyVal) -> CType {
         match val {
             TackyVal::Constant(_) => CType::Int,
+            TackyVal::Int128Constant(_) => CType::Int128,
+            TackyVal::UInt128Constant(_) => CType::UInt128,
             TackyVal::DoubleConstant(_) => CType::Double,
             TackyVal::Var(name) => *self
                 .symbol_types
                 .get(name)
                 .or_else(|| self.var_types.get(name))
                 .unwrap_or(&CType::Int),
+        }
+    }
+
+    fn integer_range_for_type(ty: CType) -> Option<(i128, i128)> {
+        match ty {
+            CType::Bool => Some((0, 1)),
+            CType::Char | CType::SChar => Some((i8::MIN as i128, i8::MAX as i128)),
+            CType::Short => Some((i16::MIN as i128, i16::MAX as i128)),
+            CType::Int => Some((i32::MIN as i128, i32::MAX as i128)),
+            CType::Long => Some((i64::MIN as i128, i64::MAX as i128)),
+            CType::UChar => Some((0, u8::MAX as i128)),
+            CType::UShort => Some((0, u16::MAX as i128)),
+            CType::UInt => Some((0, u32::MAX as i128)),
+            CType::ULong => Some((0, u64::MAX as i128)),
+            _ => None,
         }
     }
 
@@ -1093,6 +1578,62 @@ impl TackyGen {
             }
             return dst;
         }
+        if from == CType::Double && matches!(to, CType::Int128 | CType::UInt128) {
+            let intermediate_type = if to.is_signed() {
+                CType::Long
+            } else {
+                CType::ULong
+            };
+            let intermediate = self.fresh_tmp(intermediate_type);
+            if to.is_signed() {
+                self.emit(TackyInstr::DoubleToInt {
+                    src: val,
+                    dst: intermediate.clone(),
+                });
+                self.emit(TackyInstr::SignExtend {
+                    src: intermediate,
+                    dst: dst.clone(),
+                });
+            } else {
+                self.emit(TackyInstr::DoubleToUInt {
+                    src: val,
+                    dst: intermediate.clone(),
+                });
+                self.emit(TackyInstr::ZeroExtend {
+                    src: intermediate,
+                    dst: dst.clone(),
+                });
+            }
+            return dst;
+        }
+        if from == CType::Float && matches!(to, CType::Int128 | CType::UInt128) {
+            let intermediate_type = if to.is_signed() {
+                CType::Long
+            } else {
+                CType::ULong
+            };
+            let intermediate = self.fresh_tmp(intermediate_type);
+            if to.is_signed() {
+                self.emit(TackyInstr::FloatToInt {
+                    src: val,
+                    dst: intermediate.clone(),
+                });
+                self.emit(TackyInstr::SignExtend {
+                    src: intermediate,
+                    dst: dst.clone(),
+                });
+            } else {
+                self.emit(TackyInstr::FloatToUInt {
+                    src: val,
+                    dst: intermediate.clone(),
+                });
+                self.emit(TackyInstr::ZeroExtend {
+                    src: intermediate,
+                    dst: dst.clone(),
+                });
+            }
+            return dst;
+        }
         if from == CType::Double && !to.is_floating() {
             if to.is_signed() {
                 self.emit(TackyInstr::DoubleToInt {
@@ -1160,6 +1701,16 @@ impl TackyGen {
             Exp::Unreachable => {
                 self.emit(TackyInstr::Unreachable);
                 Ok((TackyVal::Constant(0), CType::Void))
+            }
+            Exp::LabelAddress(label) => {
+                let function = self.label_address_owner(&label);
+                let dst = self
+                    .fresh_tmp_full(&FullType::Pointer(Box::new(FullType::Scalar(CType::Void))));
+                self.emit(TackyInstr::LoadLabelAddress(
+                    format!("label.{}.{}", function, label),
+                    dst.clone(),
+                ));
+                Ok((dst, CType::Pointer))
             }
             Exp::AtomicFence => {
                 self.emit(TackyInstr::AtomicFence);
@@ -1292,6 +1843,14 @@ impl TackyGen {
                 });
                 Ok((dst, CType::Long))
             }
+            Exp::Int128Constant(val) => {
+                let dst = self.fresh_tmp(CType::Int128);
+                self.emit(TackyInstr::Copy {
+                    src: TackyVal::Int128Constant(val),
+                    dst: dst.clone(),
+                });
+                Ok((dst, CType::Int128))
+            }
             Exp::UIntConstant(val) => {
                 let dst = self.fresh_tmp(CType::UInt);
                 self.emit(TackyInstr::Copy {
@@ -1307,6 +1866,14 @@ impl TackyGen {
                     dst: dst.clone(),
                 });
                 Ok((dst, CType::ULong))
+            }
+            Exp::UInt128Constant(val) => {
+                let dst = self.fresh_tmp(CType::UInt128);
+                self.emit(TackyInstr::Copy {
+                    src: TackyVal::UInt128Constant(val),
+                    dst: dst.clone(),
+                });
+                Ok((dst, CType::UInt128))
             }
             Exp::DoubleConstant(val) => {
                 let dst = self.fresh_tmp(CType::Double);
@@ -1346,6 +1913,16 @@ impl TackyGen {
             Exp::StringLiteral(s) => {
                 let label = self.make_string_constant(&s);
                 let decayed_ft = FullType::Pointer(Box::new(FullType::Scalar(CType::Char)));
+                let ptr = self.fresh_tmp_full(&decayed_ft);
+                self.emit(TackyInstr::GetAddress {
+                    src: TackyVal::Var(label),
+                    dst: ptr.clone(),
+                });
+                Ok((ptr, CType::Pointer))
+            }
+            Exp::WideStringLiteral(s) => {
+                let label = self.make_string_constant(&wide_string_bytes(&s));
+                let decayed_ft = FullType::Pointer(Box::new(FullType::Scalar(CType::Int)));
                 let ptr = self.fresh_tmp_full(&decayed_ft);
                 self.emit(TackyInstr::GetAddress {
                     src: TackyVal::Var(label),
@@ -1395,12 +1972,12 @@ impl TackyGen {
                         "assignment",
                     )?;
                     let src_addr = if rhs_type == CType::Pointer {
-                        rhs
+                        rhs.clone()
                     } else {
-                        self.get_struct_addr(rhs)
+                        self.get_struct_addr(rhs.clone())
                     };
                     self.emit_struct_copy_ptr_to_ptr(src_addr, ptr.clone(), struct_size);
-                    return Ok((ptr, CType::Pointer));
+                    return Ok((rhs, rhs_type));
                 }
                 let Exp::Subscript(arr, idx) = *left else {
                     return Err("Expression is not a subscript lvalue".to_string());
@@ -1424,7 +2001,7 @@ impl TackyGen {
             }
             Exp::Assign(left, right) if matches!(left.as_ref(), Exp::Unary(UnaryOp::Deref, _)) => {
                 let lhs_ft = self.typeof_exp(&left);
-                if lhs_ft.is_struct() {
+                if lhs_ft.is_struct() || lhs_ft.is_vector() {
                     let struct_size = lhs_ft.byte_size_with(&self.struct_defs);
                     let Exp::Unary(UnaryOp::Deref, ptr_exp) = *left else {
                         return Err("Expression is not a dereference lvalue".to_string());
@@ -1433,7 +2010,7 @@ impl TackyGen {
                     let ptr_ft = self.val_full_type(&ptr);
                     let pointee_ft = match ptr_ft {
                         FullType::Pointer(inner) => *inner,
-                        _ => lhs_ft,
+                        _ => lhs_ft.clone(),
                     };
                     let right_for_type = (*right).clone();
                     let (rhs, _rhs_type) = self.emit_exp(*right)?;
@@ -1448,23 +2025,23 @@ impl TackyGen {
                         if self.array_sizes.contains_key(n) {
                             let a = self.fresh_tmp(CType::Pointer);
                             self.emit(TackyInstr::GetAddress {
-                                src: rhs,
+                                src: rhs.clone(),
                                 dst: a.clone(),
                             });
                             a
                         } else {
-                            rhs
+                            rhs.clone()
                         }
                     } else {
                         let a = self.fresh_tmp(CType::Pointer);
                         self.emit(TackyInstr::GetAddress {
-                            src: rhs,
+                            src: rhs.clone(),
                             dst: a.clone(),
                         });
                         a
                     };
                     self.emit_struct_copy_ptr_to_ptr(src_addr, ptr, struct_size);
-                    return Ok((TackyVal::Constant(0), CType::Struct));
+                    return Ok((rhs, lhs_ft.to_ctype()));
                 }
                 let Exp::Unary(UnaryOp::Deref, ptr_exp) = *left else {
                     return Err("Expression is not a dereference lvalue".to_string());
@@ -1535,16 +2112,16 @@ impl TackyGen {
                             "assignment",
                         )?;
                         let src_addr = if rhs_type == CType::Pointer {
-                            rhs
+                            rhs.clone()
                         } else {
-                            self.get_struct_addr(rhs)
+                            self.get_struct_addr(rhs.clone())
                         };
                         self.emit_struct_copy_ptr_to_ptr(
                             src_addr,
                             dst_addr,
                             mem_ft.byte_size_with(&self.struct_defs),
                         );
-                        return Ok((TackyVal::Constant(0), CType::Struct));
+                        return Ok((rhs, CType::Struct));
                     }
                     let right_for_type = (*right).clone();
                     let (rhs, rhs_type) = self.emit_exp(*right)?;
@@ -1600,16 +2177,16 @@ impl TackyGen {
                             "assignment",
                         )?;
                         let src_addr = if rhs_type == CType::Pointer {
-                            rhs
+                            rhs.clone()
                         } else {
-                            self.get_struct_addr(rhs)
+                            self.get_struct_addr(rhs.clone())
                         };
                         self.emit_struct_copy_ptr_to_ptr(
                             src_addr,
                             dst_addr,
                             mem_ft.byte_size_with(&self.struct_defs),
                         );
-                        return Ok((TackyVal::Constant(0), CType::Struct));
+                        return Ok((rhs, CType::Struct));
                     }
                     let member_addr = self.emit_dot_address(&left_exp)?;
                     let mem_type = mem_ft.to_ctype();
@@ -1687,16 +2264,16 @@ impl TackyGen {
                         "assignment",
                     )?;
                     let src_addr = if rhs_type == CType::Pointer {
-                        rhs
+                        rhs.clone()
                     } else {
-                        self.get_struct_addr(rhs)
+                        self.get_struct_addr(rhs.clone())
                     };
                     self.emit_struct_copy_ptr_to_ptr(
                         src_addr,
                         mem_ptr,
                         mem_ft.byte_size_with(&self.struct_defs),
                     );
-                    return Ok((TackyVal::Constant(0), CType::Struct));
+                    return Ok((rhs, CType::Struct));
                 }
                 let right_for_type = (*right).clone();
                 let (rhs, rhs_type) = self.emit_exp(*right)?;
@@ -1721,7 +2298,7 @@ impl TackyGen {
             Exp::Assign(left, right) if matches!(left.as_ref(), Exp::Var(_)) => {
                 let lhs_type = self.lvalue_type(&left);
                 let lhs_ft = self.typeof_exp(&left);
-                if lhs_ft.is_struct() {
+                if lhs_ft.is_struct() || lhs_ft.is_vector() {
                     let Exp::Var(lhs_name) = *left else {
                         return Err("Expression is not a variable lvalue".to_string());
                     };
@@ -1735,7 +2312,7 @@ impl TackyGen {
                         &right_for_type,
                         "assignment",
                     )?;
-                    let rhs_struct_name = if rhs_type == CType::Struct {
+                    let rhs_struct_name = if rhs_type == CType::Struct || rhs_ft.is_vector() {
                         if let TackyVal::Var(ref n) = rhs {
                             Some(n.clone())
                         } else {
@@ -1745,19 +2322,29 @@ impl TackyGen {
                         None
                     };
                     let src_addr = if rhs_type == CType::Pointer {
-                        rhs
+                        Some(rhs.clone())
+                    } else if rhs_ft.is_vector() {
+                        Some(self.get_struct_addr(rhs.clone()))
                     } else {
-                        self.get_struct_addr(rhs)
+                        None
                     };
-                    if let Some(src_name) = rhs_struct_name {
+                    if let Some(src_addr) = src_addr {
+                        self.emit_struct_copy_to(src_addr, &lhs_name, struct_size);
+                    } else if let Some(src_name) = rhs_struct_name {
                         self.emit(TackyInstr::CopyStruct {
                             src_name,
                             dst_name: lhs_name.clone(),
                         });
                     } else {
-                        self.emit_struct_copy_to(src_addr, &lhs_name, struct_size);
+                        self.zero_init_local(&lhs_name, struct_size);
+                        let rhs_conv = self.convert_to(rhs, rhs_type, lhs_ft.to_ctype());
+                        self.emit(TackyInstr::CopyToOffset {
+                            src: rhs_conv,
+                            dst_name: lhs_name.clone(),
+                            offset: 0,
+                        });
                     }
-                    return Ok((TackyVal::Var(lhs_name), CType::Struct));
+                    return Ok((TackyVal::Var(lhs_name), lhs_ft.to_ctype()));
                 }
                 let right_for_type = (*right).clone();
                 let (rhs, rhs_type) = self.emit_exp(*right)?;
@@ -1812,12 +2399,12 @@ impl TackyGen {
                     return Err("Expression is not a subscript lvalue".to_string());
                 };
                 let (ptr, elem_type, elem_full) = self.emit_subscript_addr(*arr, *idx)?;
+                let (rhs, rhs_type) = self.emit_exp(*right)?;
                 let cur_val = self.fresh_tmp_full(&elem_full);
                 self.emit(TackyInstr::Load {
                     src_ptr: ptr.clone(),
                     dst: cur_val.clone(),
                 });
-                let (rhs, rhs_type) = self.emit_exp(*right)?;
                 if elem_type == CType::Pointer && matches!(op, BinaryOp::Add | BinaryOp::Sub) {
                     let elem_size = match &elem_full {
                         FullType::Pointer(inner) => inner.byte_size_with(&self.struct_defs) as i64,
@@ -1884,12 +2471,12 @@ impl TackyGen {
                 } else {
                     CType::Int
                 };
+                let (rhs, rhs_type) = self.emit_exp(*right)?;
                 let cur_val = self.fresh_tmp(pointee_type);
                 self.emit(TackyInstr::Load {
                     src_ptr: ptr.clone(),
                     dst: cur_val.clone(),
                 });
-                let (rhs, rhs_type) = self.emit_exp(*right)?;
                 let common = CType::common(pointee_type, rhs_type);
                 let lhs_conv = self.convert_to(cur_val, pointee_type, common);
                 let rhs_conv = self.convert_to(rhs, rhs_type, common);
@@ -1924,15 +2511,19 @@ impl TackyGen {
                 };
                 if mem.bit_width.is_some() {
                     let ptr = self.emit_dot_address(&left)?;
+                    let (rhs, rhs_type) = self.emit_exp(*right)?;
                     let unit = self.fresh_tmp(mem.member_type);
                     self.emit(TackyInstr::Load {
                         src_ptr: ptr.clone(),
                         dst: unit.clone(),
                     });
                     let current = self.extract_bit_field(unit, &mem)?;
-                    let (rhs, rhs_type) = self.emit_exp(*right)?;
-                    let common = CType::common(mem.member_type, rhs_type);
-                    let lhs_conv = self.convert_to(current, mem.member_type, common);
+                    let current_type = mem
+                        .bit_width
+                        .map(|width| Self::bit_field_promoted_type(&mem, width))
+                        .unwrap_or(mem.member_type);
+                    let common = CType::common(current_type, rhs_type);
+                    let lhs_conv = self.convert_to(current, current_type, common);
                     let rhs_conv = self.convert_to(rhs, rhs_type, common);
                     let result = self.fresh_tmp(common);
                     let tacky_op = Self::convert_binop(op)?;
@@ -1949,12 +2540,32 @@ impl TackyGen {
                 let (ptr, lhs_type, lhs_ft) = self
                     .scalar_lvalue_address(*left)?
                     .ok_or_else(|| "Expression is not a simple lvalue".to_string())?;
+                if lhs_ft.is_vector() {
+                    let cur_val = self.fresh_tmp_full(&lhs_ft);
+                    self.emit(TackyInstr::Load {
+                        src_ptr: ptr.clone(),
+                        dst: cur_val.clone(),
+                    });
+                    let TackyVal::Var(cur_name) = cur_val else {
+                        return Err(
+                            "vector compound assignment requires a named temporary".to_string()
+                        );
+                    };
+                    let (result, _) = self.emit_binary(op, Exp::Var(cur_name), *right)?;
+                    let src_addr = self.get_struct_addr(result);
+                    self.emit_struct_copy_ptr_to_ptr(
+                        src_addr,
+                        ptr,
+                        lhs_ft.byte_size_with(&self.struct_defs),
+                    );
+                    return Ok((TackyVal::Constant(0), lhs_type));
+                }
+                let (rhs, rhs_type) = self.emit_exp(*right)?;
                 let cur_val = self.fresh_tmp_full(&lhs_ft);
                 self.emit(TackyInstr::Load {
                     src_ptr: ptr.clone(),
                     dst: cur_val.clone(),
                 });
-                let (rhs, rhs_type) = self.emit_exp(*right)?;
                 if lhs_type == CType::Pointer && matches!(op, BinaryOp::Add | BinaryOp::Sub) {
                     let elem_size = match &lhs_ft {
                         FullType::Pointer(inner) => inner.byte_size_with(&self.struct_defs) as i64,
@@ -2009,6 +2620,19 @@ impl TackyGen {
                 let lhs_ft = self.typeof_exp(&left);
                 if lhs_ft.is_struct() {
                     return Err("compound assignment to non-scalar lvalue".to_string());
+                }
+                if lhs_ft.is_vector() {
+                    let Exp::Var(lhs_name) = *left else {
+                        return Err("Expression is not a variable lvalue".to_string());
+                    };
+                    let (result, _) = self.emit_binary(op, Exp::Var(lhs_name.clone()), *right)?;
+                    let src_addr = self.get_struct_addr(result.clone());
+                    self.emit_struct_copy_to(
+                        src_addr,
+                        &lhs_name,
+                        lhs_ft.byte_size_with(&self.struct_defs),
+                    );
+                    return Ok((TackyVal::Var(lhs_name), lhs_ft.to_ctype()));
                 }
                 let lhs_type = self.lvalue_type(&left);
                 let lhs = self.emit_lvalue(*left)?;
@@ -2140,14 +2764,22 @@ impl TackyGen {
                         }
                         return Ok((ptr, CType::Pointer));
                     }
-                    let result = self.fresh_tmp_full(&mem_ft);
+                    let result = if mem.bit_width.is_some() {
+                        self.fresh_tmp(mem.member_type)
+                    } else {
+                        self.fresh_tmp_full(&mem_ft)
+                    };
                     self.emit(TackyInstr::CopyFromOffset {
                         src_name: n.clone(),
                         offset: mem.offset as i64,
                         dst: result.clone(),
                     });
                     let result = self.extract_bit_field(result, &mem)?;
-                    Ok((result, mem.member_type))
+                    let result_type = mem
+                        .bit_width
+                        .map(|width| Self::bit_field_promoted_type(&mem, width))
+                        .unwrap_or(mem.member_type);
+                    Ok((result, result_type))
                 } else {
                     let (val, _) = self.emit_exp(*inner)?;
                     let val_ft = self.val_full_type(&val);
@@ -2185,6 +2817,19 @@ impl TackyGen {
                 self.emit_exp(*left)?;
                 self.emit_exp(*right)
             }
+            Exp::BuiltinExpect(value, hints) => {
+                let (val, val_type) = self.emit_exp(*value)?;
+                let ft = self.val_full_type(&val);
+                let saved = self.fresh_tmp_full(&ft);
+                self.emit(TackyInstr::Copy {
+                    src: val,
+                    dst: saved.clone(),
+                });
+                for hint in hints {
+                    self.emit_exp(hint)?;
+                }
+                Ok((saved, val_type))
+            }
             Exp::Subscript(arr, idx) => self.emit_subscript(*arr, *idx),
             Exp::Conditional(cond, then_exp, else_exp) => {
                 self.emit_conditional(*cond, *then_exp, *else_exp)
@@ -2199,7 +2844,7 @@ impl TackyGen {
             }
             Exp::Binary(op, left, right) => self.emit_binary(op, *left, *right),
             Exp::Unary(op @ (UnaryOp::Negate | UnaryOp::Complement), inner) => {
-                self.emit_scalar_unary(op, *inner)
+                self.emit_unary(op, *inner)
             }
             Exp::Unary(UnaryOp::LogicalNot, inner) => {
                 let (src, _) = self.emit_exp(*inner)?;
@@ -2223,6 +2868,20 @@ impl TackyGen {
             Exp::Assign(_, _) => Err("Expression is not a simple lvalue".to_string()),
             Exp::CompoundAssign(_, _, _) => Err("Expression is not a simple lvalue".to_string()),
         }
+    }
+
+    fn label_address_owner(&self, label: &str) -> String {
+        if self
+            .local_label_stack
+            .last()
+            .is_some_and(|labels| labels.contains(label))
+        {
+            return self.current_function.clone();
+        }
+        self.label_address_function
+            .as_ref()
+            .unwrap_or(&self.current_function)
+            .clone()
     }
 
     fn emit_var(&mut self, name: String) -> TackyResult<(TackyVal, CType)> {
@@ -2276,7 +2935,70 @@ impl TackyGen {
         cast_ft: Option<FullType>,
         inner: Exp,
     ) -> TackyResult<(TackyVal, CType)> {
+        let source_ft = self.typeof_exp(&inner);
         let (val, from_type) = self.emit_exp(inner)?;
+        if cast_ft.is_none()
+            && source_ft.is_vector()
+            && target_type.size() as usize == source_ft.byte_size_with(&self.struct_defs)
+        {
+            let target_ft = FullType::Scalar(target_type);
+            let result = self.fresh_tmp_full(&target_ft);
+            if let TackyVal::Var(ref result_name) = result {
+                let src_addr = self.get_struct_addr(val);
+                self.emit_struct_copy_to(src_addr, result_name, target_type.size() as usize);
+            }
+            return Ok((result, target_type));
+        }
+        if let Some(ft) = cast_ft.as_ref() {
+            if source_ft.is_vector()
+                && matches!(ft, FullType::Scalar(_))
+                && ft.byte_size_with(&self.struct_defs)
+                    == source_ft.byte_size_with(&self.struct_defs)
+            {
+                let result = self.fresh_tmp_full(ft);
+                let size = ft.byte_size_with(&self.struct_defs);
+                if let TackyVal::Var(ref result_name) = result {
+                    let src_addr = self.get_struct_addr(val);
+                    self.emit_struct_copy_to(src_addr, result_name, size);
+                }
+                return Ok((result, target_type));
+            }
+            if ft.is_vector()
+                && matches!(source_ft, FullType::Scalar(_))
+                && ft.byte_size_with(&self.struct_defs)
+                    == source_ft.byte_size_with(&self.struct_defs)
+            {
+                let source = self.fresh_tmp(from_type);
+                self.emit(TackyInstr::Copy {
+                    src: val,
+                    dst: source.clone(),
+                });
+                let src_addr = self.fresh_tmp(CType::Pointer);
+                self.emit(TackyInstr::GetAddress {
+                    src: source,
+                    dst: src_addr.clone(),
+                });
+                let result = self.fresh_tmp_full(ft);
+                let size = ft.byte_size_with(&self.struct_defs);
+                if let TackyVal::Var(ref result_name) = result {
+                    self.emit_struct_copy_to(src_addr, result_name, size);
+                }
+                return Ok((result, target_type));
+            }
+            if ft.is_vector()
+                && source_ft.is_vector()
+                && ft.byte_size_with(&self.struct_defs)
+                    == source_ft.byte_size_with(&self.struct_defs)
+            {
+                let result = self.fresh_tmp_full(ft);
+                let size = ft.byte_size_with(&self.struct_defs);
+                if let TackyVal::Var(ref result_name) = result {
+                    let src_addr = self.get_struct_addr(val);
+                    self.emit_struct_copy_to(src_addr, result_name, size);
+                }
+                return Ok((result, target_type));
+            }
+        }
         let converted = self.convert_to(val, from_type, target_type);
         if let Some(ft) = cast_ft {
             let result = if from_type == target_type {
@@ -2326,15 +3048,52 @@ impl TackyGen {
                 .get(tag)
                 .map(|def| def.size)
                 .unwrap_or_else(|| ft.byte_size_with(&self.struct_defs));
+            self.array_sizes.insert(tmp_name.clone(), size);
             self.zero_init_local(&tmp_name, size);
             self.emit_struct_init_at(&tmp_name, &inner, tag, 0)?;
             return Ok((TackyVal::Var(tmp_name), target_type));
         }
 
+        if ft.is_vector() {
+            let result = self.fresh_tmp_full(&ft);
+            let total_bytes = ft.byte_size_with(&self.struct_defs);
+            if let TackyVal::Var(ref name) = result {
+                self.zero_init_local(name, total_bytes);
+            }
+            if let Exp::ArrayInit(elems) = inner {
+                let elem_ft = match &ft {
+                    FullType::Vector { elem, .. } => elem.as_ref().clone(),
+                    _ => FullType::Scalar(target_type),
+                };
+                let elem_type = elem_ft.to_ctype();
+                let elem_size = elem_ft.byte_size_with(&self.struct_defs);
+                if let TackyVal::Var(ref name) = result {
+                    for (index, elem) in elems.into_iter().enumerate() {
+                        let (val, from_type) = self.emit_exp(elem)?;
+                        let converted = self.convert_to(val, from_type, elem_type);
+                        self.emit(TackyInstr::CopyToOffset {
+                            src: converted,
+                            dst_name: name.clone(),
+                            offset: (index * elem_size) as i64,
+                        });
+                    }
+                }
+            }
+            return Ok((result, target_type));
+        }
+
         if ft.is_array() {
             let tmp_name = self.fresh_var_name();
+            let ft = match (&ft, &inner) {
+                (FullType::Array { elem, size: 0 }, Exp::ArrayInit(elems)) => FullType::Array {
+                    elem: elem.clone(),
+                    size: elems.len(),
+                },
+                _ => ft.clone(),
+            };
             self.register_var(&tmp_name, ft.clone());
             let size = ft.byte_size_with(&self.struct_defs);
+            self.array_sizes.insert(tmp_name.clone(), size);
             self.zero_init_local(&tmp_name, size);
             let elem_sizes = Self::compute_elem_sizes(&ft, &self.struct_defs);
             let inner_scalar = {
@@ -2364,6 +3123,321 @@ impl TackyGen {
         Ok((TackyVal::Constant(0), target_type))
     }
 
+    fn bit_builtin_signature(name: &str) -> Option<(BitBuiltinKind, CType, i64)> {
+        let (kind, suffix) = if let Some(suffix) = name.strip_prefix("__builtin_ffs") {
+            (BitBuiltinKind::Ffs, suffix)
+        } else if let Some(suffix) = name.strip_prefix("__builtin_clz") {
+            (BitBuiltinKind::Clz, suffix)
+        } else if let Some(suffix) = name.strip_prefix("__builtin_ctz") {
+            (BitBuiltinKind::Ctz, suffix)
+        } else if let Some(suffix) = name.strip_prefix("__builtin_clrsb") {
+            (BitBuiltinKind::Clrsb, suffix)
+        } else if let Some(suffix) = name.strip_prefix("__builtin_popcount") {
+            (BitBuiltinKind::Popcount, suffix)
+        } else if let Some(suffix) = name.strip_prefix("__builtin_parity") {
+            (BitBuiltinKind::Parity, suffix)
+        } else {
+            return None;
+        };
+
+        match suffix {
+            "" => Some((kind, CType::UInt, 32)),
+            "l" | "ll" => Some((kind, CType::ULong, 64)),
+            _ => None,
+        }
+    }
+
+    fn bit_mask_constant(width: i64, bit: i64) -> TackyVal {
+        if width == 64 && bit == 63 {
+            TackyVal::Constant(i64::MIN)
+        } else {
+            TackyVal::Constant(1_i64 << bit)
+        }
+    }
+
+    fn emit_bit_builtin(
+        &mut self,
+        kind: BitBuiltinKind,
+        arg_type: CType,
+        width: i64,
+        arg_exp: Exp,
+    ) -> TackyResult<(TackyVal, CType)> {
+        let (arg, from_type) = self.emit_exp(arg_exp)?;
+        let value = self.convert_to(arg, from_type, arg_type);
+        let result = self.fresh_tmp(CType::Int);
+        self.emit(TackyInstr::Copy {
+            src: TackyVal::Constant(0),
+            dst: result.clone(),
+        });
+
+        match kind {
+            BitBuiltinKind::Ffs => {
+                let mask = self.fresh_tmp(arg_type);
+                self.emit(TackyInstr::Copy {
+                    src: TackyVal::Constant(1),
+                    dst: mask.clone(),
+                });
+                let index = self.fresh_tmp(CType::Int);
+                self.emit(TackyInstr::Copy {
+                    src: TackyVal::Constant(1),
+                    dst: index.clone(),
+                });
+                let loop_label = self.fresh_label("builtin_ffs_loop");
+                let next_label = self.fresh_label("builtin_ffs_next");
+                let end_label = self.fresh_label("builtin_ffs_end");
+                self.emit(TackyInstr::Label(loop_label.clone()));
+                let exhausted = self.fresh_tmp(CType::Int);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::GreaterThan,
+                    left: index.clone(),
+                    right: TackyVal::Constant(width),
+                    dst: exhausted.clone(),
+                });
+                self.emit(TackyInstr::JumpIfNotZero(exhausted, end_label.clone()));
+                let bit = self.fresh_tmp(arg_type);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::BitwiseAnd,
+                    left: value.clone(),
+                    right: mask.clone(),
+                    dst: bit.clone(),
+                });
+                self.emit(TackyInstr::JumpIfZero(bit, next_label.clone()));
+                self.emit(TackyInstr::Copy {
+                    src: index.clone(),
+                    dst: result.clone(),
+                });
+                self.emit(TackyInstr::Jump(end_label.clone()));
+                self.emit(TackyInstr::Label(next_label));
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::ShiftLeft,
+                    left: mask.clone(),
+                    right: TackyVal::Constant(1),
+                    dst: mask,
+                });
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::Add,
+                    left: index.clone(),
+                    right: TackyVal::Constant(1),
+                    dst: index,
+                });
+                self.emit(TackyInstr::Jump(loop_label));
+                self.emit(TackyInstr::Label(end_label));
+            }
+            BitBuiltinKind::Ctz => {
+                let current = self.fresh_tmp(arg_type);
+                self.emit(TackyInstr::Copy {
+                    src: value,
+                    dst: current.clone(),
+                });
+                let loop_label = self.fresh_label("builtin_ctz_loop");
+                let end_label = self.fresh_label("builtin_ctz_end");
+                self.emit(TackyInstr::Label(loop_label.clone()));
+                let exhausted = self.fresh_tmp(CType::Int);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::GreaterEqual,
+                    left: result.clone(),
+                    right: TackyVal::Constant(width),
+                    dst: exhausted.clone(),
+                });
+                self.emit(TackyInstr::JumpIfNotZero(exhausted, end_label.clone()));
+                let bit = self.fresh_tmp(arg_type);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::BitwiseAnd,
+                    left: current.clone(),
+                    right: TackyVal::Constant(1),
+                    dst: bit.clone(),
+                });
+                self.emit(TackyInstr::JumpIfNotZero(bit, end_label.clone()));
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::Add,
+                    left: result.clone(),
+                    right: TackyVal::Constant(1),
+                    dst: result.clone(),
+                });
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::ShiftRight,
+                    left: current.clone(),
+                    right: TackyVal::Constant(1),
+                    dst: current,
+                });
+                self.emit(TackyInstr::Jump(loop_label));
+                self.emit(TackyInstr::Label(end_label));
+            }
+            BitBuiltinKind::Clz => {
+                let mask = self.fresh_tmp(arg_type);
+                self.emit(TackyInstr::Copy {
+                    src: Self::bit_mask_constant(width, width - 1),
+                    dst: mask.clone(),
+                });
+                let loop_label = self.fresh_label("builtin_clz_loop");
+                let end_label = self.fresh_label("builtin_clz_end");
+                self.emit(TackyInstr::Label(loop_label.clone()));
+                let exhausted = self.fresh_tmp(CType::Int);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::GreaterEqual,
+                    left: result.clone(),
+                    right: TackyVal::Constant(width),
+                    dst: exhausted.clone(),
+                });
+                self.emit(TackyInstr::JumpIfNotZero(exhausted, end_label.clone()));
+                let bit = self.fresh_tmp(arg_type);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::BitwiseAnd,
+                    left: value.clone(),
+                    right: mask.clone(),
+                    dst: bit.clone(),
+                });
+                self.emit(TackyInstr::JumpIfNotZero(bit, end_label.clone()));
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::Add,
+                    left: result.clone(),
+                    right: TackyVal::Constant(1),
+                    dst: result.clone(),
+                });
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::ShiftRight,
+                    left: mask.clone(),
+                    right: TackyVal::Constant(1),
+                    dst: mask,
+                });
+                self.emit(TackyInstr::Jump(loop_label));
+                self.emit(TackyInstr::Label(end_label));
+            }
+            BitBuiltinKind::Clrsb => {
+                let sign_mask = self.fresh_tmp(arg_type);
+                self.emit(TackyInstr::Copy {
+                    src: Self::bit_mask_constant(width, width - 1),
+                    dst: sign_mask.clone(),
+                });
+                let sign_bit = self.fresh_tmp(arg_type);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::BitwiseAnd,
+                    left: value.clone(),
+                    right: sign_mask.clone(),
+                    dst: sign_bit.clone(),
+                });
+                let sign_is_zero = self.fresh_tmp(CType::Int);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::Equal,
+                    left: sign_bit,
+                    right: TackyVal::Constant(0),
+                    dst: sign_is_zero.clone(),
+                });
+                let mask = self.fresh_tmp(arg_type);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::ShiftRight,
+                    left: sign_mask,
+                    right: TackyVal::Constant(1),
+                    dst: mask.clone(),
+                });
+                let loop_label = self.fresh_label("builtin_clrsb_loop");
+                let end_label = self.fresh_label("builtin_clrsb_end");
+                self.emit(TackyInstr::Label(loop_label.clone()));
+                self.emit(TackyInstr::JumpIfZero(mask.clone(), end_label.clone()));
+                let bit = self.fresh_tmp(arg_type);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::BitwiseAnd,
+                    left: value.clone(),
+                    right: mask.clone(),
+                    dst: bit.clone(),
+                });
+                let bit_is_zero = self.fresh_tmp(CType::Int);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::Equal,
+                    left: bit,
+                    right: TackyVal::Constant(0),
+                    dst: bit_is_zero.clone(),
+                });
+                let different = self.fresh_tmp(CType::Int);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::NotEqual,
+                    left: bit_is_zero,
+                    right: sign_is_zero.clone(),
+                    dst: different.clone(),
+                });
+                self.emit(TackyInstr::JumpIfNotZero(different, end_label.clone()));
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::Add,
+                    left: result.clone(),
+                    right: TackyVal::Constant(1),
+                    dst: result.clone(),
+                });
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::ShiftRight,
+                    left: mask.clone(),
+                    right: TackyVal::Constant(1),
+                    dst: mask,
+                });
+                self.emit(TackyInstr::Jump(loop_label));
+                self.emit(TackyInstr::Label(end_label));
+            }
+            BitBuiltinKind::Popcount | BitBuiltinKind::Parity => {
+                let mask = self.fresh_tmp(arg_type);
+                self.emit(TackyInstr::Copy {
+                    src: TackyVal::Constant(1),
+                    dst: mask.clone(),
+                });
+                let index = self.fresh_tmp(CType::Int);
+                self.emit(TackyInstr::Copy {
+                    src: TackyVal::Constant(0),
+                    dst: index.clone(),
+                });
+                let loop_label = self.fresh_label("builtin_popcount_loop");
+                let next_label = self.fresh_label("builtin_popcount_next");
+                let end_label = self.fresh_label("builtin_popcount_end");
+                self.emit(TackyInstr::Label(loop_label.clone()));
+                let exhausted = self.fresh_tmp(CType::Int);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::GreaterEqual,
+                    left: index.clone(),
+                    right: TackyVal::Constant(width),
+                    dst: exhausted.clone(),
+                });
+                self.emit(TackyInstr::JumpIfNotZero(exhausted, end_label.clone()));
+                let bit = self.fresh_tmp(arg_type);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::BitwiseAnd,
+                    left: value.clone(),
+                    right: mask.clone(),
+                    dst: bit.clone(),
+                });
+                self.emit(TackyInstr::JumpIfZero(bit, next_label.clone()));
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::Add,
+                    left: result.clone(),
+                    right: TackyVal::Constant(1),
+                    dst: result.clone(),
+                });
+                self.emit(TackyInstr::Label(next_label));
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::ShiftLeft,
+                    left: mask.clone(),
+                    right: TackyVal::Constant(1),
+                    dst: mask,
+                });
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::Add,
+                    left: index.clone(),
+                    right: TackyVal::Constant(1),
+                    dst: index,
+                });
+                self.emit(TackyInstr::Jump(loop_label));
+                self.emit(TackyInstr::Label(end_label));
+
+                if matches!(kind, BitBuiltinKind::Parity) {
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::BitwiseAnd,
+                        left: result.clone(),
+                        right: TackyVal::Constant(1),
+                        dst: result.clone(),
+                    });
+                }
+            }
+        }
+
+        Ok((result, CType::Int))
+    }
+
     fn emit_function_call(
         &mut self,
         name: String,
@@ -2377,26 +3451,293 @@ impl TackyGen {
             });
             return Ok((dst, CType::Pointer));
         }
-        if name == "__builtin_va_start" && args.len() >= 2 {
-            let Exp::Var(ap_name) = &args[0] else {
-                return Err("__builtin_va_start requires a va_list object".to_string());
+        if name == "__builtin_extract_return_addr" && args.len() == 1 {
+            let (arg, arg_type) = self.emit_exp(args.into_iter().next().unwrap())?;
+            let converted = self.convert_to(arg, arg_type, CType::Pointer);
+            return Ok((converted, CType::Pointer));
+        }
+        if name == "__builtin_frame_address" && args.len() == 1 {
+            let dst = self.fresh_tmp_full(&Self::void_pointer_type());
+            if matches!(args.first(), Some(Exp::Constant(0))) {
+                self.emit(TackyInstr::FrameAddress { dst: dst.clone() });
+            } else {
+                self.emit(TackyInstr::Copy {
+                    src: TackyVal::Constant(0),
+                    dst: dst.clone(),
+                });
+            }
+            return Ok((dst, CType::Pointer));
+        }
+        if args.len() == 1 {
+            if let Some((kind, arg_type, width)) = Self::bit_builtin_signature(&name) {
+                return self.emit_bit_builtin(
+                    kind,
+                    arg_type,
+                    width,
+                    args.into_iter().next().unwrap(),
+                );
+            }
+        }
+        if matches!(
+            name.as_str(),
+            "__builtin_inf"
+                | "__builtin_inff"
+                | "__builtin_infl"
+                | "__builtin_huge_val"
+                | "__builtin_huge_valf"
+                | "__builtin_huge_vall"
+        ) && args.is_empty()
+        {
+            let ret_type = if matches!(name.as_str(), "__builtin_inff" | "__builtin_huge_valf") {
+                CType::Float
+            } else {
+                CType::Double
             };
-            self.emit(TackyInstr::VaStart {
-                dst: TackyVal::Var(ap_name.clone()),
+            let dst = self.fresh_tmp(ret_type);
+            self.emit(TackyInstr::Copy {
+                src: TackyVal::DoubleConstant(f64::INFINITY),
+                dst: dst.clone(),
             });
+            return Ok((dst, ret_type));
+        }
+        if matches!(
+            name.as_str(),
+            "__builtin_isinf" | "__builtin_isinff" | "__builtin_isinfl"
+        ) && args.len() == 1
+        {
+            let arg_type = if name == "__builtin_isinff" {
+                CType::Float
+            } else {
+                CType::Double
+            };
+            let max = if arg_type == CType::Float {
+                f32::MAX as f64
+            } else {
+                f64::MAX
+            };
+            let (arg, from_type) = self.emit_exp(args.into_iter().next().unwrap())?;
+            let value = self.convert_to(arg, from_type, arg_type);
+            let high_limit = self.fresh_tmp(arg_type);
+            self.emit(TackyInstr::Copy {
+                src: TackyVal::DoubleConstant(max),
+                dst: high_limit.clone(),
+            });
+            let high = self.fresh_tmp(CType::Int);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::GreaterThan,
+                left: value.clone(),
+                right: high_limit,
+                dst: high.clone(),
+            });
+            let low_limit = self.fresh_tmp(arg_type);
+            self.emit(TackyInstr::Copy {
+                src: TackyVal::DoubleConstant(-max),
+                dst: low_limit.clone(),
+            });
+            let low = self.fresh_tmp(CType::Int);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::LessThan,
+                left: value,
+                right: low_limit,
+                dst: low.clone(),
+            });
+            let result = self.fresh_tmp(CType::Int);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::BitwiseOr,
+                left: high,
+                right: low,
+                dst: result.clone(),
+            });
+            return Ok((result, CType::Int));
+        }
+        if name == "__builtin_shuffle" && args.len() == 2 {
+            let src_exp = args[0].clone();
+            let mask_exp = args[1].clone();
+            let src_ft = self.typeof_exp(&src_exp);
+            let FullType::Vector { elem, lanes } = src_ft.clone() else {
+                return Err("__builtin_shuffle requires a vector source".to_string());
+            };
+            let elem_type = elem.to_ctype();
+            let elem_size = elem.byte_size_with(&self.struct_defs);
+            let result = self.fresh_tmp_full(&src_ft);
+            let TackyVal::Var(result_name) = result.clone() else {
+                return Err("__builtin_shuffle result must be addressable".to_string());
+            };
+            self.zero_init_local(&result_name, src_ft.byte_size_with(&self.struct_defs));
+            for lane in 0..lanes {
+                let (mask_val, mask_type) =
+                    self.emit_subscript(mask_exp.clone(), Exp::Constant(lane as i64))?;
+                let mut index = self.convert_to(mask_val, mask_type, CType::Long);
+                if lanes.is_power_of_two() {
+                    let masked = self.fresh_tmp(CType::Long);
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::BitwiseAnd,
+                        left: index,
+                        right: TackyVal::Constant((lanes - 1) as i64),
+                        dst: masked.clone(),
+                    });
+                    index = masked;
+                }
+                let index_name = match index {
+                    TackyVal::Var(name) => name,
+                    other => {
+                        let tmp = self.fresh_tmp(CType::Long);
+                        self.emit(TackyInstr::Copy {
+                            src: other,
+                            dst: tmp.clone(),
+                        });
+                        match tmp {
+                            TackyVal::Var(name) => name,
+                            _ => unreachable!(),
+                        }
+                    }
+                };
+                let (src_ptr, _, _) =
+                    self.emit_subscript_addr(src_exp.clone(), Exp::Var(index_name))?;
+                let lane_val = self.fresh_tmp(elem_type);
+                self.emit(TackyInstr::Load {
+                    src_ptr,
+                    dst: lane_val.clone(),
+                });
+                self.emit(TackyInstr::CopyToOffset {
+                    src: lane_val,
+                    dst_name: result_name.clone(),
+                    offset: (lane * elem_size) as i64,
+                });
+            }
+            return Ok((result, src_ft.to_ctype()));
+        }
+        if name == "__builtin_setjmp" && args.len() == 1 {
+            let (buf, buf_ty) = self.emit_exp(args[0].clone())?;
+            let buf = self.convert_to(buf, buf_ty, CType::Pointer);
+            let dst = self.fresh_tmp(CType::Int);
+            let label = self.fresh_label("builtin_setjmp_resume");
+            let end_label = self.fresh_label("builtin_setjmp_end");
+            self.emit(TackyInstr::BuiltinSetjmp {
+                buf,
+                dst: dst.clone(),
+                label,
+                end_label,
+            });
+            return Ok((dst, CType::Int));
+        }
+        if name == "__builtin_longjmp" && args.len() == 2 {
+            let (buf, buf_ty) = self.emit_exp(args[0].clone())?;
+            let buf = self.convert_to(buf, buf_ty, CType::Pointer);
+            let (value, value_ty) = self.emit_exp(args[1].clone())?;
+            let value = self.convert_to(value, value_ty, CType::Int);
+            self.emit(TackyInstr::BuiltinLongjmp { buf, value });
+            return Ok((TackyVal::Constant(0), CType::Void));
+        }
+        if name == "__builtin_va_start" && args.len() >= 2 {
+            match &args[0] {
+                Exp::Var(ap_name) => {
+                    self.emit(TackyInstr::VaStart {
+                        dst: TackyVal::Var(ap_name.clone()),
+                    });
+                }
+                _ => {
+                    let Some((ap_addr, _, _)) = self.scalar_lvalue_address(args[0].clone())? else {
+                        return Err("__builtin_va_start requires a va_list object".to_string());
+                    };
+                    let current = self.fresh_tmp(CType::Pointer);
+                    self.emit(TackyInstr::VaStart {
+                        dst: current.clone(),
+                    });
+                    self.emit(TackyInstr::Store {
+                        src: current,
+                        dst_ptr: ap_addr,
+                    });
+                }
+            }
             return Ok((TackyVal::Constant(0), CType::Int));
+        }
+        if matches!(name.as_str(), "__builtin_va_copy" | "__va_copy") && args.len() == 2 {
+            let (src, _) = self.emit_exp(args[1].clone())?;
+            match &args[0] {
+                Exp::Var(dst_name) => {
+                    self.emit(TackyInstr::Copy {
+                        src,
+                        dst: TackyVal::Var(dst_name.clone()),
+                    });
+                }
+                _ => {
+                    let Some((dst_addr, _, _)) = self.scalar_lvalue_address(args[0].clone())?
+                    else {
+                        return Err("__builtin_va_copy requires a va_list destination".to_string());
+                    };
+                    self.emit(TackyInstr::Store {
+                        src,
+                        dst_ptr: dst_addr,
+                    });
+                }
+            }
+            return Ok((TackyVal::Constant(0), CType::Int));
+        }
+        if name == "__builtin_bswap16" && args.len() == 1 {
+            let (value, value_ty) = self.emit_exp(args[0].clone())?;
+            let value = self.convert_to(value, value_ty, CType::UInt);
+            let low = self.fresh_tmp(CType::UInt);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::BitwiseAnd,
+                left: value.clone(),
+                right: TackyVal::Constant(0xff),
+                dst: low.clone(),
+            });
+            let low_shifted = self.fresh_tmp(CType::UInt);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::ShiftLeft,
+                left: low,
+                right: TackyVal::Constant(8),
+                dst: low_shifted.clone(),
+            });
+            let high = self.fresh_tmp(CType::UInt);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::ShiftRight,
+                left: value,
+                right: TackyVal::Constant(8),
+                dst: high.clone(),
+            });
+            let high_masked = self.fresh_tmp(CType::UInt);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::BitwiseAnd,
+                left: high,
+                right: TackyVal::Constant(0xff),
+                dst: high_masked.clone(),
+            });
+            let result = self.fresh_tmp(CType::UInt);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::BitwiseOr,
+                left: low_shifted,
+                right: high_masked,
+                dst: result.clone(),
+            });
+            return Ok((result, CType::UInt));
         }
         if let Some(tag) = name.strip_prefix("__rnqcc_va_arg_struct_") {
             if args.len() != 1 {
                 return Err("__builtin_va_arg requires one va_list argument".to_string());
             }
-            let Exp::Var(ap_name) = &args[0] else {
-                return Err("__builtin_va_arg requires a va_list object".to_string());
-            };
             let tag = self.resolve_struct_tag_name(tag);
             let ft = FullType::Struct(tag.to_string());
             let struct_size = ft.byte_size_with(&self.struct_defs);
-            let (slot_ptr, _) = self.emit_exp(args[0].clone())?;
+            let (slot_ptr, ap_store) = match &args[0] {
+                Exp::Var(ap_name) => (
+                    self.emit_exp(args[0].clone())?.0,
+                    TackyVal::Var(ap_name.clone()),
+                ),
+                _ => {
+                    let Some((ap_addr, _, _)) = self.scalar_lvalue_address(args[0].clone())? else {
+                        return Err("__builtin_va_arg requires a va_list object".to_string());
+                    };
+                    let current = self.fresh_tmp(CType::Pointer);
+                    self.emit(TackyInstr::Load {
+                        src_ptr: ap_addr.clone(),
+                        dst: current.clone(),
+                    });
+                    (current, ap_addr)
+                }
+            };
             let dst = self.fresh_tmp_full(&ft);
             if let TackyVal::Var(ref dst_name) = dst {
                 self.emit_struct_copy_to(slot_ptr.clone(), dst_name, struct_size);
@@ -2409,10 +3750,16 @@ impl TackyGen {
                 right: TackyVal::Constant(slot_size as i64),
                 dst: next.clone(),
             });
-            self.emit(TackyInstr::Copy {
-                src: next,
-                dst: TackyVal::Var(ap_name.clone()),
-            });
+            match args[0] {
+                Exp::Var(_) => self.emit(TackyInstr::Copy {
+                    src: next,
+                    dst: ap_store,
+                }),
+                _ => self.emit(TackyInstr::Store {
+                    src: next,
+                    dst_ptr: ap_store,
+                }),
+            }
             return Ok((dst, CType::Struct));
         }
         if let Some(arg_type) = name
@@ -2422,26 +3769,47 @@ impl TackyGen {
             if args.len() != 1 {
                 return Err("__builtin_va_arg requires one va_list argument".to_string());
             }
-            let Exp::Var(ap_name) = &args[0] else {
-                return Err("__builtin_va_arg requires a va_list object".to_string());
+            let (slot_ptr, ap_store) = match &args[0] {
+                Exp::Var(ap_name) => (
+                    self.emit_exp(args[0].clone())?.0,
+                    TackyVal::Var(ap_name.clone()),
+                ),
+                _ => {
+                    let Some((ap_addr, _, _)) = self.scalar_lvalue_address(args[0].clone())? else {
+                        return Err("__builtin_va_arg requires a va_list object".to_string());
+                    };
+                    let current = self.fresh_tmp(CType::Pointer);
+                    self.emit(TackyInstr::Load {
+                        src_ptr: ap_addr.clone(),
+                        dst: current.clone(),
+                    });
+                    (current, ap_addr)
+                }
             };
-            let (slot_ptr, _) = self.emit_exp(args[0].clone())?;
             let dst = self.fresh_tmp(arg_type);
             self.emit(TackyInstr::Load {
                 src_ptr: slot_ptr.clone(),
                 dst: dst.clone(),
             });
             let next = self.fresh_tmp(CType::Pointer);
+            let size = arg_type.size();
+            let slot_size = std::cmp::max(8, ((size + 7) / 8) * 8);
             self.emit(TackyInstr::Binary {
                 op: TackyBinaryOp::Add,
                 left: slot_ptr,
-                right: TackyVal::Constant(8),
+                right: TackyVal::Constant(slot_size as i64),
                 dst: next.clone(),
             });
-            self.emit(TackyInstr::Copy {
-                src: next,
-                dst: TackyVal::Var(ap_name.clone()),
-            });
+            match args[0] {
+                Exp::Var(_) => self.emit(TackyInstr::Copy {
+                    src: next,
+                    dst: ap_store,
+                }),
+                _ => self.emit(TackyInstr::Store {
+                    src: next,
+                    dst_ptr: ap_store,
+                }),
+            }
             return Ok((dst, arg_type));
         }
         if name == "__builtin___sprintf_chk" && args.len() >= 4 {
@@ -2461,7 +3829,410 @@ impl TackyGen {
             lowered_args.extend(args.into_iter().skip(4));
             return self.emit_function_call("sprintf".to_string(), lowered_args);
         }
-        let builtin_info = Self::builtin_function_info(&name);
+        if name == "mempcpy" && args.len() == 3 {
+            self.emit_function_call("memcpy".to_string(), args.clone())?;
+            let (dst, dst_ty) = self.emit_exp(args[0].clone())?;
+            let (count, count_ty) = self.emit_exp(args[2].clone())?;
+            let count = self.convert_to(count, count_ty, CType::Long);
+            let dst = self.convert_to(dst, dst_ty, CType::Pointer);
+            let result = self.fresh_tmp(CType::Pointer);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::Add,
+                left: dst,
+                right: count,
+                dst: result.clone(),
+            });
+            return Ok((result, CType::Pointer));
+        }
+        if name == "__builtin_mul_overflow" && args.len() == 3 {
+            let out_ft = self.typeof_exp(&args[2]);
+            let target_type = match out_ft {
+                FullType::Pointer(inner) => inner.to_ctype(),
+                _ => CType::Long,
+            };
+            let (left, left_ty) = self.emit_exp(args[0].clone())?;
+            let (right, right_ty) = self.emit_exp(args[1].clone())?;
+            let (out_ptr, _) = self.emit_exp(args[2].clone())?;
+            if let Some((min, max)) = match target_type {
+                CType::Char | CType::SChar => Some((i8::MIN as i128, i8::MAX as i128)),
+                CType::Short => Some((i16::MIN as i128, i16::MAX as i128)),
+                CType::Int => Some((i32::MIN as i128, i32::MAX as i128)),
+                CType::Long => Some((i64::MIN as i128, i64::MAX as i128)),
+                CType::UChar => Some((0, u8::MAX as i128)),
+                CType::UShort => Some((0, u16::MAX as i128)),
+                CType::UInt => Some((0, u32::MAX as i128)),
+                CType::ULong => Some((0, u64::MAX as i128)),
+                _ => None,
+            } {
+                let left_wide = self.convert_to(left, left_ty, CType::Int128);
+                let right_wide = self.convert_to(right, right_ty, CType::Int128);
+                let product_wide = self.fresh_tmp(CType::Int128);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::Mul,
+                    left: left_wide,
+                    right: right_wide,
+                    dst: product_wide.clone(),
+                });
+                let high = self.fresh_tmp(CType::Int);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::GreaterThan,
+                    left: product_wide.clone(),
+                    right: TackyVal::Int128Constant(max),
+                    dst: high.clone(),
+                });
+                let low = self.fresh_tmp(CType::Int);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::LessThan,
+                    left: product_wide.clone(),
+                    right: TackyVal::Int128Constant(min),
+                    dst: low.clone(),
+                });
+                let overflow = self.fresh_tmp(CType::Int);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::BitwiseOr,
+                    left: high,
+                    right: low,
+                    dst: overflow.clone(),
+                });
+                let product = self.convert_to(product_wide, CType::Int128, target_type);
+                self.emit(TackyInstr::Store {
+                    src: product,
+                    dst_ptr: out_ptr,
+                });
+                return Ok((overflow, CType::Int));
+            }
+            let left = self.convert_to(left, left_ty, target_type);
+            let right = self.convert_to(right, right_ty, target_type);
+            let product = self.fresh_tmp(target_type);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::Mul,
+                left: left.clone(),
+                right: right.clone(),
+                dst: product.clone(),
+            });
+            self.emit(TackyInstr::Store {
+                src: product.clone(),
+                dst_ptr: out_ptr,
+            });
+
+            if matches!(target_type, CType::Int128 | CType::UInt128) {
+                return Ok((TackyVal::Constant(0), CType::Int));
+            }
+
+            let overflow = self.fresh_tmp(CType::Int);
+            self.emit(TackyInstr::Copy {
+                src: TackyVal::Constant(0),
+                dst: overflow.clone(),
+            });
+            let zero = self.fresh_tmp(CType::Int);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::Equal,
+                left: left.clone(),
+                right: TackyVal::Constant(0),
+                dst: zero.clone(),
+            });
+            let end_label = self.fresh_label("builtin_mul_overflow_end");
+            self.emit(TackyInstr::JumpIfNotZero(zero, end_label.clone()));
+            let quotient = self.fresh_tmp(target_type);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::Div,
+                left: product,
+                right: left,
+                dst: quotient.clone(),
+            });
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::NotEqual,
+                left: quotient,
+                right,
+                dst: overflow.clone(),
+            });
+            self.emit(TackyInstr::Label(end_label));
+            return Ok((overflow, CType::Int));
+        }
+        if name == "__builtin_add_overflow" && args.len() == 3 {
+            let out_ft = self.typeof_exp(&args[2]);
+            let target_type = match out_ft {
+                FullType::Pointer(inner) => inner.to_ctype(),
+                _ => CType::Long,
+            };
+            let (left, left_ty) = self.emit_exp(args[0].clone())?;
+            let (right, right_ty) = self.emit_exp(args[1].clone())?;
+            let (out_ptr, _) = self.emit_exp(args[2].clone())?;
+            if let Some((min, max)) = match target_type {
+                CType::Char | CType::SChar => Some((i8::MIN as i128, i8::MAX as i128)),
+                CType::Short => Some((i16::MIN as i128, i16::MAX as i128)),
+                CType::Int => Some((i32::MIN as i128, i32::MAX as i128)),
+                CType::Long => Some((i64::MIN as i128, i64::MAX as i128)),
+                CType::UChar => Some((0, u8::MAX as i128)),
+                CType::UShort => Some((0, u16::MAX as i128)),
+                CType::UInt => Some((0, u32::MAX as i128)),
+                CType::ULong => Some((0, u64::MAX as i128)),
+                _ => None,
+            } {
+                let left_wide = self.convert_to(left, left_ty, CType::Int128);
+                let right_wide = self.convert_to(right, right_ty, CType::Int128);
+                let sum_wide = self.fresh_tmp(CType::Int128);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::Add,
+                    left: left_wide,
+                    right: right_wide,
+                    dst: sum_wide.clone(),
+                });
+                let high = self.fresh_tmp(CType::Int);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::GreaterThan,
+                    left: sum_wide.clone(),
+                    right: TackyVal::Int128Constant(max),
+                    dst: high.clone(),
+                });
+                let low = self.fresh_tmp(CType::Int);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::LessThan,
+                    left: sum_wide.clone(),
+                    right: TackyVal::Int128Constant(min),
+                    dst: low.clone(),
+                });
+                let overflow = self.fresh_tmp(CType::Int);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::BitwiseOr,
+                    left: high,
+                    right: low,
+                    dst: overflow.clone(),
+                });
+                let sum = self.convert_to(sum_wide, CType::Int128, target_type);
+                self.emit(TackyInstr::Store {
+                    src: sum,
+                    dst_ptr: out_ptr,
+                });
+                return Ok((overflow, CType::Int));
+            }
+            let left = self.convert_to(left, left_ty, target_type);
+            let right = self.convert_to(right, right_ty, target_type);
+            let sum = self.fresh_tmp(target_type);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::Add,
+                left: left.clone(),
+                right,
+                dst: sum.clone(),
+            });
+            let overflow = self.fresh_tmp(CType::Int);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::LessThan,
+                left: sum.clone(),
+                right: left,
+                dst: overflow.clone(),
+            });
+            self.emit(TackyInstr::Store {
+                src: sum,
+                dst_ptr: out_ptr,
+            });
+            return Ok((overflow, CType::Int));
+        }
+        if name == "__builtin_sub_overflow" && args.len() == 3 {
+            let out_ft = if let Exp::Unary(UnaryOp::AddrOf, inner) = &args[2] {
+                FullType::Pointer(Box::new(self.typeof_exp(inner)))
+            } else {
+                self.typeof_exp(&args[2])
+            };
+            let target_type = match out_ft {
+                FullType::Pointer(inner) => inner.to_ctype(),
+                _ => CType::Long,
+            };
+            let (left, left_ty) = self.emit_exp(args[0].clone())?;
+            let (right, right_ty) = self.emit_exp(args[1].clone())?;
+            let (out_ptr, _) = self.emit_exp(args[2].clone())?;
+            if let Some((min, max)) = match target_type {
+                CType::Char | CType::SChar => Some((i8::MIN as i128, i8::MAX as i128)),
+                CType::Short => Some((i16::MIN as i128, i16::MAX as i128)),
+                CType::Int => Some((i32::MIN as i128, i32::MAX as i128)),
+                CType::Long => Some((i64::MIN as i128, i64::MAX as i128)),
+                CType::UChar => Some((0, u8::MAX as i128)),
+                CType::UShort => Some((0, u16::MAX as i128)),
+                CType::UInt => Some((0, u32::MAX as i128)),
+                CType::ULong => Some((0, u64::MAX as i128)),
+                _ => None,
+            } {
+                let left_wide = self.convert_to(left, left_ty, CType::Int128);
+                let right_wide = self.convert_to(right, right_ty, CType::Int128);
+                let diff_wide = self.fresh_tmp(CType::Int128);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::Sub,
+                    left: left_wide,
+                    right: right_wide,
+                    dst: diff_wide.clone(),
+                });
+                let high = self.fresh_tmp(CType::Int);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::GreaterThan,
+                    left: diff_wide.clone(),
+                    right: TackyVal::Int128Constant(max),
+                    dst: high.clone(),
+                });
+                let low = self.fresh_tmp(CType::Int);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::LessThan,
+                    left: diff_wide.clone(),
+                    right: TackyVal::Int128Constant(min),
+                    dst: low.clone(),
+                });
+                let overflow = self.fresh_tmp(CType::Int);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::BitwiseOr,
+                    left: high,
+                    right: low,
+                    dst: overflow.clone(),
+                });
+                let diff = self.convert_to(diff_wide, CType::Int128, target_type);
+                self.emit(TackyInstr::Store {
+                    src: diff,
+                    dst_ptr: out_ptr,
+                });
+                return Ok((overflow, CType::Int));
+            }
+            let left = self.convert_to(left, left_ty, target_type);
+            let right = self.convert_to(right, right_ty, target_type);
+            let diff = self.fresh_tmp(target_type);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::Sub,
+                left: left.clone(),
+                right: right.clone(),
+                dst: diff.clone(),
+            });
+            let overflow = self.fresh_tmp(CType::Int);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::LessThan,
+                left: left.clone(),
+                right,
+                dst: overflow.clone(),
+            });
+            self.emit(TackyInstr::Store {
+                src: diff,
+                dst_ptr: out_ptr,
+            });
+            return Ok((overflow, CType::Int));
+        }
+        if name == "__builtin_mul_overflow_p" && args.len() == 3 {
+            let target_type = self.typeof_exp(&args[2]).to_ctype();
+            let Some((min, max)) = Self::integer_range_for_type(target_type) else {
+                return Ok((TackyVal::Constant(0), CType::Int));
+            };
+            let (left, left_ty) = self.emit_exp(args[0].clone())?;
+            let (right, right_ty) = self.emit_exp(args[1].clone())?;
+            let left_wide = self.convert_to(left, left_ty, CType::Int128);
+            let right_wide = self.convert_to(right, right_ty, CType::Int128);
+            let product_wide = self.fresh_tmp(CType::Int128);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::Mul,
+                left: left_wide,
+                right: right_wide,
+                dst: product_wide.clone(),
+            });
+            let high = self.fresh_tmp(CType::Int);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::GreaterThan,
+                left: product_wide.clone(),
+                right: TackyVal::Int128Constant(max),
+                dst: high.clone(),
+            });
+            let low = self.fresh_tmp(CType::Int);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::LessThan,
+                left: product_wide,
+                right: TackyVal::Int128Constant(min),
+                dst: low.clone(),
+            });
+            let dst = self.fresh_tmp(CType::Int);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::BitwiseOr,
+                left: high,
+                right: low,
+                dst: dst.clone(),
+            });
+            return Ok((dst, CType::Int));
+        }
+        if matches!(name.as_str(), "__builtin_ctz" | "__builtin_clz") && args.len() == 1 {
+            let (arg, arg_ty) = self.emit_exp(args[0].clone())?;
+            let value = self.convert_to(arg, arg_ty, CType::UInt);
+            let count = self.fresh_tmp(CType::Int);
+            self.emit(TackyInstr::Copy {
+                src: TackyVal::Constant(0),
+                dst: count.clone(),
+            });
+            if name == "__builtin_ctz" {
+                let current = self.fresh_tmp(CType::UInt);
+                self.emit(TackyInstr::Copy {
+                    src: value,
+                    dst: current.clone(),
+                });
+                let loop_label = self.fresh_label("builtin_ctz_loop");
+                let end_label = self.fresh_label("builtin_ctz_end");
+                self.emit(TackyInstr::Label(loop_label.clone()));
+                let bit = self.fresh_tmp(CType::UInt);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::BitwiseAnd,
+                    left: current.clone(),
+                    right: TackyVal::Constant(1),
+                    dst: bit.clone(),
+                });
+                self.emit(TackyInstr::JumpIfNotZero(bit, end_label.clone()));
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::Add,
+                    left: count.clone(),
+                    right: TackyVal::Constant(1),
+                    dst: count.clone(),
+                });
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::ShiftRight,
+                    left: current.clone(),
+                    right: TackyVal::Constant(1),
+                    dst: current,
+                });
+                self.emit(TackyInstr::Jump(loop_label));
+                self.emit(TackyInstr::Label(end_label));
+            } else {
+                let mask = self.fresh_tmp(CType::UInt);
+                self.emit(TackyInstr::Copy {
+                    src: TackyVal::Constant(1_i64 << 31),
+                    dst: mask.clone(),
+                });
+                let loop_label = self.fresh_label("builtin_clz_loop");
+                let end_label = self.fresh_label("builtin_clz_end");
+                self.emit(TackyInstr::Label(loop_label.clone()));
+                let bit = self.fresh_tmp(CType::UInt);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::BitwiseAnd,
+                    left: value.clone(),
+                    right: mask.clone(),
+                    dst: bit.clone(),
+                });
+                self.emit(TackyInstr::JumpIfNotZero(bit, end_label.clone()));
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::Add,
+                    left: count.clone(),
+                    right: TackyVal::Constant(1),
+                    dst: count.clone(),
+                });
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::ShiftRight,
+                    left: mask.clone(),
+                    right: TackyVal::Constant(1),
+                    dst: mask,
+                });
+                self.emit(TackyInstr::Jump(loop_label));
+                self.emit(TackyInstr::Label(end_label));
+            }
+            return Ok((count, CType::Int));
+        }
+        let pointer_sig = self
+            .full_types
+            .get(&name)
+            .and_then(Self::function_signature_from_full);
+        let user_declares_function = self.func_types.contains_key(&name) || pointer_sig.is_some();
+        let builtin_info = if user_declares_function && !name.starts_with("__builtin_") {
+            None
+        } else {
+            Self::builtin_function_info(&name)
+        };
         let call_name = builtin_info
             .as_ref()
             .map(|(call_name, _, _, _, _)| (*call_name).to_string())
@@ -2472,9 +4243,31 @@ impl TackyGen {
                 &self.struct_defs,
                 &self.full_types,
             )
-            .and_then(|(size, _, _)| usize::try_from(size).ok())
-            .filter(|size| *size > 0)
-            .unwrap_or(4096);
+            .and_then(|(size, _, _)| usize::try_from(size).ok());
+            let Some(size) = size else {
+                let _ = self.emit_exp(args[0].clone())?;
+                let name = format!("__alloca_dynamic.{}", self.current_function);
+                let size = 1024 * 1024;
+                if !self.array_sizes.contains_key(&name) {
+                    let ft = FullType::Array {
+                        elem: Box::new(FullType::Scalar(CType::Char)),
+                        size,
+                    };
+                    self.register_var(&name, ft);
+                    self.array_sizes.insert(name.clone(), size);
+                }
+                let dst = self.fresh_tmp_full(&Self::void_pointer_type());
+                self.emit(TackyInstr::GetAddress {
+                    src: TackyVal::Var(name),
+                    dst: dst.clone(),
+                });
+                return Ok((dst, CType::Pointer));
+            };
+            if size == 0 {
+                let dst = self.fresh_tmp_full(&Self::void_pointer_type());
+                self.emit(TackyInstr::FrameAddress { dst: dst.clone() });
+                return Ok((dst, CType::Pointer));
+            }
             let name = self.fresh_var_name();
             let ft = FullType::Array {
                 elem: Box::new(FullType::Scalar(CType::Char)),
@@ -2490,17 +4283,50 @@ impl TackyGen {
             });
             return Ok((dst, CType::Pointer));
         }
-        let pointer_sig = self
-            .full_types
-            .get(&name)
-            .and_then(Self::function_signature_from_full);
+        if matches!(
+            name.as_str(),
+            "abs" | "__builtin_abs" | "labs" | "__builtin_labs" | "llabs" | "__builtin_llabs"
+        ) && args.len() == 1
+            && (!user_declares_function || name.starts_with("__builtin_"))
+        {
+            let ret_type = match name.as_str() {
+                "abs" | "__builtin_abs" => CType::Int,
+                _ => CType::Long,
+            };
+            let (arg, arg_type) = self.emit_exp(args.into_iter().next().unwrap())?;
+            let arg = self.convert_to(arg, arg_type, ret_type);
+            let dst = self.fresh_tmp(ret_type);
+            self.emit(TackyInstr::Copy {
+                src: arg,
+                dst: dst.clone(),
+            });
+            let is_negative = self.fresh_tmp(CType::Int);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::LessThan,
+                left: dst.clone(),
+                right: TackyVal::Constant(0),
+                dst: is_negative.clone(),
+            });
+            let end_label = self.fresh_label("abs_end");
+            self.emit(TackyInstr::JumpIfZero(is_negative, end_label.clone()));
+            self.emit(TackyInstr::Unary {
+                op: TackyUnaryOp::Negate,
+                src: dst.clone(),
+                dst: dst.clone(),
+            });
+            self.emit(TackyInstr::Label(end_label));
+            return Ok((dst, ret_type));
+        }
         let (ret_type, param_types, ret_pi, variadic) =
             if let Some((_, ret_type, _, param_types, ret_pi)) = builtin_info.as_ref() {
                 (
                     *ret_type,
                     param_types.clone(),
                     *ret_pi,
-                    matches!(name.as_str(), "__builtin_printf" | "__builtin_sprintf"),
+                    matches!(
+                        name.as_str(),
+                        "__builtin_printf" | "__builtin_sprintf" | "__builtin_snprintf"
+                    ),
                 )
             } else {
                 self.func_types
@@ -2562,16 +4388,18 @@ impl TackyGen {
             .unwrap_or_default();
 
         let mut tacky_args = Vec::new();
-        let mut stack_arg_indices = std::collections::HashSet::new();
+        let stack_arg_indices = std::collections::HashSet::new();
+        let mut memory_arg_blocks = Vec::new();
         let mut struct_arg_groups: Vec<(usize, usize, Vec<bool>)> = Vec::new();
         let mut fixed_flat_arg_count = 0usize;
         for (i, arg) in args.into_iter().enumerate() {
             let arg_for_type = arg.clone();
             let (val, val_type) = self.emit_exp(arg)?;
             let val_ft = self.val_full_type(&val);
-            let expected = param_types
+            let expected = param_full_types
                 .get(i)
-                .copied()
+                .map(|ft| self.storage_ctype_for_full(ft))
+                .or_else(|| param_types.get(i).copied())
                 .unwrap_or_else(|| val_type.promote());
             if let Some(expected_ft) = param_full_types.get(i) {
                 let context = format!("function call to {} argument {}", name, i + 1);
@@ -2583,7 +4411,9 @@ impl TackyGen {
                 )?;
             }
 
-            let is_struct_arg = val_ft.is_struct() || val_type == CType::Struct;
+            let source_ft = self.typeof_exp(&arg_for_type);
+            let is_struct_arg =
+                source_ft.is_struct() || val_ft.is_struct() || val_type == CType::Struct;
             if is_struct_arg || expected == CType::Struct {
                 let tag = match &val_ft {
                     FullType::Struct(t) => t.clone(),
@@ -2621,32 +4451,9 @@ impl TackyGen {
                                 dst: struct_addr.clone(),
                             });
                         }
-                        let num_eightbytes = def.size.div_ceil(8);
-                        let start_idx = tacky_args.len();
-                        for eb in 0..num_eightbytes {
-                            let eb_offset = (eb * 8) as i64;
-                            let tmp = self.fresh_tmp(CType::Long);
-                            stack_arg_indices.insert(start_idx + eb);
-                            let ptr = self.fresh_tmp(CType::Pointer);
-                            if eb_offset > 0 {
-                                self.emit(TackyInstr::Binary {
-                                    op: TackyBinaryOp::Add,
-                                    left: struct_addr.clone(),
-                                    right: TackyVal::Constant(eb_offset),
-                                    dst: ptr.clone(),
-                                });
-                            } else {
-                                self.emit(TackyInstr::Copy {
-                                    src: struct_addr.clone(),
-                                    dst: ptr.clone(),
-                                });
-                            }
-                            self.emit(TackyInstr::Load {
-                                src_ptr: ptr,
-                                dst: tmp.clone(),
-                            });
-                            tacky_args.push(tmp);
-                        }
+                        let arg_idx = tacky_args.len();
+                        tacky_args.push(struct_addr);
+                        memory_arg_blocks.push((arg_idx, def.size));
                     } else {
                         let struct_var_name = if val_ft.is_struct() {
                             if let TackyVal::Var(ref n) = val {
@@ -2672,7 +4479,9 @@ impl TackyGen {
                         let group_start = tacky_args.len();
                         let is_sse_vec: Vec<bool> =
                             classes.iter().map(|c| *c == ParamClass::Sse).collect();
-                        struct_arg_groups.push((group_start, classes.len(), is_sse_vec));
+                        if !classes.is_empty() {
+                            struct_arg_groups.push((group_start, classes.len(), is_sse_vec));
+                        }
                         for (eb_idx, class) in classes.iter().enumerate() {
                             let eb_offset = (eb_idx * 8) as i64;
                             match class {
@@ -2740,9 +4549,13 @@ impl TackyGen {
                             }
                         }
                     }
+                } else if param_full_types.get(i).is_some_and(FullType::is_vector) {
+                    tacky_args.push(val);
                 } else {
                     tacky_args.push(self.convert_to(val, val_type, expected));
                 }
+            } else if param_full_types.get(i).is_some_and(FullType::is_vector) {
+                tacky_args.push(val);
             } else {
                 tacky_args.push(self.convert_to(val, val_type, expected));
             }
@@ -2785,6 +4598,10 @@ impl TackyGen {
             });
             tacky_args.insert(0, ret_addr);
             let shifted_stack = stack_arg_indices.iter().map(|&i| i + 1).collect();
+            let shifted_memory_blocks: Vec<(usize, usize)> = memory_arg_blocks
+                .iter()
+                .map(|(index, size)| (index + 1, *size))
+                .collect();
             let shifted_groups: Vec<(usize, usize, Vec<bool>)> = struct_arg_groups
                 .iter()
                 .map(|(start, count, classes)| (start + 1, *count, classes.clone()))
@@ -2794,6 +4611,7 @@ impl TackyGen {
                 args: tacky_args,
                 dst: tmp.clone(),
                 stack_arg_indices: shifted_stack,
+                memory_arg_blocks: shifted_memory_blocks,
                 struct_arg_groups: shifted_groups,
                 variadic,
                 fixed_flat_arg_count: fixed_flat_arg_count + 1,
@@ -2827,6 +4645,7 @@ impl TackyGen {
             args: tacky_args,
             dst: dst.clone(),
             stack_arg_indices,
+            memory_arg_blocks,
             struct_arg_groups,
             variadic,
             fixed_flat_arg_count,
@@ -2888,17 +4707,26 @@ impl TackyGen {
         };
 
         let mut tacky_args = Vec::new();
-        let mut stack_arg_indices = std::collections::HashSet::new();
+        let stack_arg_indices = std::collections::HashSet::new();
+        let mut memory_arg_blocks = Vec::new();
         let mut struct_arg_groups: Vec<(usize, usize, Vec<bool>)> = Vec::new();
         let mut fixed_flat_arg_count = 0usize;
         for (i, arg) in args.into_iter().enumerate() {
             let arg_for_type = arg.clone();
             let (val, val_type) = self.emit_exp(arg)?;
             let val_ft = self.val_full_type(&val);
-            let expected = param_types
-                .get(i)
-                .copied()
-                .unwrap_or_else(|| val_type.promote());
+            let expected = if let Some((_, param_fts, _)) = pointer_sig.as_ref() {
+                param_fts
+                    .get(i)
+                    .map(|ft| self.storage_ctype_for_full(ft))
+                    .or_else(|| param_types.get(i).copied())
+                    .unwrap_or_else(|| val_type.promote())
+            } else {
+                param_types
+                    .get(i)
+                    .copied()
+                    .unwrap_or_else(|| val_type.promote())
+            };
             if let Some((_, param_fts, _)) = pointer_sig.as_ref() {
                 if let Some(expected_ft) = param_fts.get(i) {
                     self.assert_assignable_exp_full_type(
@@ -2910,7 +4738,9 @@ impl TackyGen {
                 }
             }
 
-            let is_struct_arg = val_ft.is_struct() || val_type == CType::Struct;
+            let source_ft = self.typeof_exp(&arg_for_type);
+            let is_struct_arg =
+                source_ft.is_struct() || val_ft.is_struct() || val_type == CType::Struct;
             if is_struct_arg || expected == CType::Struct {
                 let tag = match &val_ft {
                     FullType::Struct(t) => t.clone(),
@@ -2948,32 +4778,9 @@ impl TackyGen {
                                 dst: struct_addr.clone(),
                             });
                         }
-                        let num_eightbytes = def.size.div_ceil(8);
-                        let start_idx = tacky_args.len();
-                        for eb in 0..num_eightbytes {
-                            let eb_offset = (eb * 8) as i64;
-                            let tmp = self.fresh_tmp(CType::Long);
-                            stack_arg_indices.insert(start_idx + eb);
-                            let ptr = self.fresh_tmp(CType::Pointer);
-                            if eb_offset > 0 {
-                                self.emit(TackyInstr::Binary {
-                                    op: TackyBinaryOp::Add,
-                                    left: struct_addr.clone(),
-                                    right: TackyVal::Constant(eb_offset),
-                                    dst: ptr.clone(),
-                                });
-                            } else {
-                                self.emit(TackyInstr::Copy {
-                                    src: struct_addr.clone(),
-                                    dst: ptr.clone(),
-                                });
-                            }
-                            self.emit(TackyInstr::Load {
-                                src_ptr: ptr,
-                                dst: tmp.clone(),
-                            });
-                            tacky_args.push(tmp);
-                        }
+                        let arg_idx = tacky_args.len();
+                        tacky_args.push(struct_addr);
+                        memory_arg_blocks.push((arg_idx, def.size));
                     } else {
                         let struct_var_name = if val_ft.is_struct() {
                             if let TackyVal::Var(ref n) = val {
@@ -2999,7 +4806,9 @@ impl TackyGen {
                         let group_start = tacky_args.len();
                         let is_sse_vec: Vec<bool> =
                             classes.iter().map(|c| *c == ParamClass::Sse).collect();
-                        struct_arg_groups.push((group_start, classes.len(), is_sse_vec));
+                        if !classes.is_empty() {
+                            struct_arg_groups.push((group_start, classes.len(), is_sse_vec));
+                        }
                         for (eb_idx, class) in classes.iter().enumerate() {
                             let eb_offset = (eb_idx * 8) as i64;
                             match class {
@@ -3106,6 +4915,10 @@ impl TackyGen {
             });
             tacky_args.insert(0, ret_addr);
             let shifted_stack = stack_arg_indices.iter().map(|&i| i + 1).collect();
+            let shifted_memory_blocks: Vec<(usize, usize)> = memory_arg_blocks
+                .iter()
+                .map(|(index, size)| (index + 1, *size))
+                .collect();
             let shifted_groups: Vec<(usize, usize, Vec<bool>)> = struct_arg_groups
                 .iter()
                 .map(|(start, count, classes)| (start + 1, *count, classes.clone()))
@@ -3116,6 +4929,7 @@ impl TackyGen {
                 args: tacky_args,
                 dst: dst.clone(),
                 stack_arg_indices: shifted_stack,
+                memory_arg_blocks: shifted_memory_blocks,
                 struct_arg_groups: shifted_groups,
                 variadic,
                 indirect: true,
@@ -3139,6 +4953,7 @@ impl TackyGen {
             args: tacky_args,
             dst: dst.clone(),
             stack_arg_indices,
+            memory_arg_blocks,
             struct_arg_groups,
             variadic,
             indirect: true,
@@ -3182,6 +4997,26 @@ impl TackyGen {
         if let Exp::Subscript(first, second) = inner {
             let (ptr, _elem_type, _elem_ft) = self.emit_subscript_addr(*first, *second)?;
             return Ok((ptr, CType::Pointer));
+        }
+
+        if let Exp::Cast(target_type, Some(ft), boxed) = inner.clone() {
+            if ft.is_scalar() && matches!(boxed.as_ref(), Exp::ArrayInit(_)) {
+                let tmp_name = self.fresh_var_name();
+                self.register_var(&tmp_name, ft.clone());
+                let (value, value_type) =
+                    self.emit_compound_literal_cast(target_type, Some(ft.clone()), *boxed)?;
+                let converted = self.convert_to(value, value_type, target_type);
+                self.emit(TackyInstr::Copy {
+                    src: converted,
+                    dst: TackyVal::Var(tmp_name.clone()),
+                });
+                let dst = self.fresh_tmp_full(&FullType::Pointer(Box::new(ft)));
+                self.emit(TackyInstr::GetAddress {
+                    src: TackyVal::Var(tmp_name),
+                    dst: dst.clone(),
+                });
+                return Ok((dst, CType::Pointer));
+            }
         }
 
         let is_struct_compound_literal = matches!(
@@ -3264,6 +5099,17 @@ impl TackyGen {
                 });
                 return Ok((result, CType::Pointer));
             }
+            if inner_ft.is_vector() {
+                let result = self.fresh_tmp_full(inner_ft);
+                if let TackyVal::Var(ref dst_name) = result {
+                    self.emit_struct_copy_to(
+                        ptr,
+                        dst_name,
+                        inner_ft.byte_size_with(&self.struct_defs),
+                    );
+                }
+                return Ok((result, inner_ft.to_ctype()));
+            }
         }
         let pointee_type = if let TackyVal::Var(ref name) = ptr {
             self.deref_type(name)
@@ -3293,6 +5139,21 @@ impl TackyGen {
     }
 
     fn emit_subscript(&mut self, arr: Exp, idx: Exp) -> TackyResult<(TackyVal, CType)> {
+        if let FullType::Scalar(elem_type) = self.typeof_exp(&arr) {
+            if let Some((index, _, _)) = eval_static_integer_constant_exp_with_context(
+                &idx,
+                &self.struct_defs,
+                &self.full_types,
+            ) {
+                let (arr_val, arr_type) = self.emit_exp(arr)?;
+                if index == 0 {
+                    return Ok((self.convert_to(arr_val, arr_type, elem_type), elem_type));
+                }
+                let zero = self.convert_to(TackyVal::Constant(0), CType::Int, elem_type);
+                return Ok((zero, elem_type));
+            }
+        }
+
         let (ptr, _elem_type, elem_full) = self.emit_subscript_addr(arr, idx)?;
 
         if elem_full.is_array() {
@@ -3313,6 +5174,14 @@ impl TackyGen {
                 dst: result.clone(),
             });
             return Ok((result, CType::Pointer));
+        }
+
+        if elem_full.is_vector() {
+            let result = self.fresh_tmp_full(&elem_full);
+            if let TackyVal::Var(ref name) = result {
+                self.emit_struct_copy_to(ptr, name, elem_full.byte_size_with(&self.struct_defs));
+            }
+            return Ok((result, elem_full.to_ctype()));
         }
 
         let elem_ctype = elem_full.to_ctype();
@@ -3409,6 +5278,39 @@ impl TackyGen {
             return Ok((result, CType::Struct));
         }
 
+        let then_ft = self.val_full_type(&then_val);
+        if then_type == CType::Pointer && matches!(then_ft, FullType::Pointer(_)) {
+            let else_exp_for_type = else_exp.clone();
+            let result = self.fresh_tmp_full(&then_ft);
+            self.emit(TackyInstr::Copy {
+                src: then_val,
+                dst: result.clone(),
+            });
+            self.emit(TackyInstr::Jump(end_label.clone()));
+            self.emit(TackyInstr::Label(else_label));
+            let (else_val, else_type) = self.emit_exp(else_exp)?;
+            if else_type != CType::Pointer {
+                if Self::is_null_pointer_constant(&else_exp_for_type) {
+                    self.emit(TackyInstr::Copy {
+                        src: TackyVal::Constant(0),
+                        dst: result.clone(),
+                    });
+                    self.emit(TackyInstr::Label(end_label));
+                    return Ok((result, CType::Pointer));
+                }
+                return Err(format!(
+                    "conditional pointer arm has incompatible type {:?}",
+                    else_type
+                ));
+            }
+            self.emit(TackyInstr::Copy {
+                src: else_val,
+                dst: result.clone(),
+            });
+            self.emit(TackyInstr::Label(end_label));
+            return Ok((result, CType::Pointer));
+        }
+
         let then_tmp = self.fresh_tmp(then_type);
         self.emit(TackyInstr::Copy {
             src: then_val,
@@ -3462,6 +5364,81 @@ impl TackyGen {
             dst: dst.clone(),
         });
         Ok((dst, promoted))
+    }
+
+    fn emit_unary(&mut self, op: UnaryOp, inner: Exp) -> TackyResult<(TackyVal, CType)> {
+        let (src, src_type) = self.emit_exp(inner)?;
+        let value_ft = self.val_full_type(&src);
+        if !value_ft.is_vector() {
+            if src_type.is_floating() && matches!(op, UnaryOp::Negate) {
+                let dst = self.fresh_tmp(src_type);
+                self.emit(TackyInstr::Unary {
+                    op: TackyUnaryOp::Negate,
+                    src,
+                    dst: dst.clone(),
+                });
+                return Ok((dst, src_type));
+            }
+
+            let promoted = src_type.promote();
+            let src_conv = self.convert_to(src, src_type, promoted);
+            let dst = self.fresh_tmp(promoted);
+            let tacky_op = match op {
+                UnaryOp::Negate => TackyUnaryOp::Negate,
+                UnaryOp::Complement => TackyUnaryOp::Complement,
+                _ => return Err(format!("invalid scalar unary operator: {:?}", op)),
+            };
+            self.emit(TackyInstr::Unary {
+                op: tacky_op,
+                src: src_conv,
+                dst: dst.clone(),
+            });
+            return Ok((dst, promoted));
+        }
+
+        let FullType::Vector { elem, lanes } = value_ft.clone() else {
+            unreachable!();
+        };
+        let elem_type = elem.to_ctype();
+        let calc_type = match elem_type {
+            CType::UChar | CType::UShort => CType::UInt,
+            CType::Char | CType::SChar | CType::Short | CType::Bool => CType::Int,
+            _ => elem_type,
+        };
+        let elem_size = elem.byte_size_with(&self.struct_defs);
+        let result = self.fresh_tmp_full(&value_ft);
+        let TackyVal::Var(result_name) = result.clone() else {
+            return Err("vector unary result must be addressable".to_string());
+        };
+        self.zero_init_local(&result_name, value_ft.byte_size_with(&self.struct_defs));
+        let tacky_op = match op {
+            UnaryOp::Negate => TackyUnaryOp::Negate,
+            UnaryOp::Complement => TackyUnaryOp::Complement,
+            _ => return Err(format!("invalid vector unary operator: {:?}", op)),
+        };
+        for lane in 0..lanes {
+            let lane_value = self.emit_vector_lane_value(
+                src.clone(),
+                value_ft.clone(),
+                elem_type,
+                elem_size,
+                lane,
+            )?;
+            let lane_value = self.convert_to(lane_value, elem_type, calc_type);
+            let dst = self.fresh_tmp(calc_type);
+            self.emit(TackyInstr::Unary {
+                op: tacky_op.clone(),
+                src: lane_value,
+                dst: dst.clone(),
+            });
+            let stored = self.convert_to(dst, calc_type, elem_type);
+            self.emit(TackyInstr::CopyToOffset {
+                src: stored,
+                dst_name: result_name.clone(),
+                offset: (lane * elem_size) as i64,
+            });
+        }
+        Ok((result, value_ft.to_ctype()))
     }
 
     fn lvalue_type(&self, exp: &Exp) -> CType {
@@ -3534,19 +5511,71 @@ impl TackyGen {
             TackyBinaryOp::Sub
         };
 
+        if matches!(inner, Exp::Dot(_, _) | Exp::Arrow(_, _)) {
+            let mem = match &inner {
+                Exp::Dot(base, member) | Exp::Arrow(base, member) => {
+                    let tag = self.dot_inner_tag(base)?;
+                    self.struct_member(&tag, member)?
+                }
+                _ => unreachable!(),
+            };
+            if let Some(width) = mem.bit_width {
+                let ptr = self.emit_dot_address(&inner)?;
+                let unit = self.fresh_tmp(mem.member_type);
+                self.emit(TackyInstr::Load {
+                    src_ptr: ptr.clone(),
+                    dst: unit.clone(),
+                });
+                let current = self.extract_bit_field(unit, &mem)?;
+                let promoted_type = Self::bit_field_promoted_type(&mem, width);
+                let increment = self.convert_to(TackyVal::Constant(1), CType::Int, promoted_type);
+                let result = self.fresh_tmp(promoted_type);
+                self.emit(TackyInstr::Binary {
+                    op: binop,
+                    left: current.clone(),
+                    right: increment,
+                    dst: result.clone(),
+                });
+                let result_for_store =
+                    self.convert_to(result.clone(), promoted_type, mem.member_type);
+                let stored = self.store_bit_field_to_ptr(ptr, &mem, result_for_store)?;
+                let stored = self.convert_to(stored, mem.member_type, promoted_type);
+                if !mem.member_type.is_signed() {
+                    self.mark_bit_precision(&stored, width);
+                }
+                return Ok((if is_pre { stored } else { current }, promoted_type));
+            }
+        }
+
         if let Exp::Subscript(arr, idx) = inner {
-            let (ptr, pt, _pt_ft) = self.emit_subscript_addr(*arr, *idx)?;
-            let current = self.fresh_tmp(pt);
+            let (ptr, pt, pt_ft) = self.emit_subscript_addr(*arr, *idx)?;
+            let current = if pt == CType::Pointer {
+                self.fresh_tmp_full(&pt_ft)
+            } else {
+                self.fresh_tmp(pt)
+            };
             self.emit(TackyInstr::Load {
                 src_ptr: ptr.clone(),
                 dst: current.clone(),
             });
-            let one = self.convert_to(TackyVal::Constant(1), CType::Int, pt);
-            let result = self.fresh_tmp(pt);
+            let increment = if pt == CType::Pointer {
+                let elem_size = match &pt_ft {
+                    FullType::Pointer(inner) => inner.byte_size_with(&self.struct_defs) as i64,
+                    _ => 1,
+                };
+                TackyVal::Constant(elem_size)
+            } else {
+                self.convert_to(TackyVal::Constant(1), CType::Int, pt)
+            };
+            let result = if pt == CType::Pointer {
+                self.fresh_tmp_full(&pt_ft)
+            } else {
+                self.fresh_tmp(pt)
+            };
             self.emit(TackyInstr::Binary {
                 op: binop,
                 left: current.clone(),
-                right: one,
+                right: increment,
                 dst: result.clone(),
             });
             self.emit(TackyInstr::Store {
@@ -3558,22 +5587,38 @@ impl TackyGen {
 
         if let Exp::Unary(UnaryOp::Deref, ptr_exp) = inner {
             let (ptr, _) = self.emit_exp(*ptr_exp)?;
-            let pt = if let TackyVal::Var(ref n) = ptr {
-                self.deref_type(n)
-            } else {
-                CType::Int
+            let elem_ft = match self.val_full_type(&ptr) {
+                FullType::Pointer(inner) => *inner,
+                _ => FullType::Scalar(CType::Int),
             };
-            let current = self.fresh_tmp(pt);
+            let pt = elem_ft.to_ctype();
+            let current = if pt == CType::Pointer {
+                self.fresh_tmp_full(&elem_ft)
+            } else {
+                self.fresh_tmp(pt)
+            };
             self.emit(TackyInstr::Load {
                 src_ptr: ptr.clone(),
                 dst: current.clone(),
             });
-            let one = self.convert_to(TackyVal::Constant(1), CType::Int, pt);
-            let result = self.fresh_tmp(pt);
+            let increment = if pt == CType::Pointer {
+                let elem_size = match &elem_ft {
+                    FullType::Pointer(inner) => inner.byte_size_with(&self.struct_defs) as i64,
+                    _ => 1,
+                };
+                TackyVal::Constant(elem_size)
+            } else {
+                self.convert_to(TackyVal::Constant(1), CType::Int, pt)
+            };
+            let result = if pt == CType::Pointer {
+                self.fresh_tmp_full(&elem_ft)
+            } else {
+                self.fresh_tmp(pt)
+            };
             self.emit(TackyInstr::Binary {
                 op: binop,
                 left: current.clone(),
-                right: one,
+                right: increment,
                 dst: result.clone(),
             });
             self.emit(TackyInstr::Store {
@@ -3913,6 +5958,37 @@ impl TackyGen {
         }
     }
 
+    fn bit_field_promoted_type(mem: &StructMember, width: u8) -> CType {
+        if width < 32 {
+            CType::Int
+        } else if width == 32 {
+            if mem.member_type.is_signed() {
+                CType::Int
+            } else {
+                CType::UInt
+            }
+        } else if mem.member_type.is_signed() {
+            CType::Long
+        } else {
+            CType::ULong
+        }
+    }
+
+    fn mark_bit_precision(&mut self, value: &TackyVal, width: u8) {
+        if let TackyVal::Var(name) = value {
+            if width > 32 && width < 64 {
+                self.bit_precisions.insert(name.clone(), width);
+            }
+        }
+    }
+
+    fn bit_precision(&self, value: &TackyVal) -> Option<u8> {
+        let TackyVal::Var(name) = value else {
+            return None;
+        };
+        self.bit_precisions.get(name).copied()
+    }
+
     fn sign_extend_bit_field_value(
         &mut self,
         value: TackyVal,
@@ -3957,6 +6033,11 @@ impl TackyGen {
             value = shifted;
         }
         if width as i32 == mem.member_type.size() * 8 {
+            let promoted_type = Self::bit_field_promoted_type(mem, width);
+            let value = self.convert_to(value, mem.member_type, promoted_type);
+            if !mem.member_type.is_signed() {
+                self.mark_bit_precision(&value, width);
+            }
             return Ok(value);
         }
         let masked = self.fresh_tmp(mem.member_type);
@@ -3966,7 +6047,13 @@ impl TackyGen {
             right: TackyVal::Constant(Self::bit_mask(width)),
             dst: masked.clone(),
         });
-        Ok(self.sign_extend_bit_field_value(masked, mem, width))
+        let value = self.sign_extend_bit_field_value(masked, mem, width);
+        let promoted_type = Self::bit_field_promoted_type(mem, width);
+        let value = self.convert_to(value, mem.member_type, promoted_type);
+        if !mem.member_type.is_signed() {
+            self.mark_bit_precision(&value, width);
+        }
+        Ok(value)
     }
 
     fn store_bit_field_to_offset(
@@ -3975,13 +6062,23 @@ impl TackyGen {
         mem: &StructMember,
         rhs: TackyVal,
     ) -> TackyResult<TackyVal> {
+        self.store_bit_field_to_absolute_offset(dst_name, mem, mem.offset as i64, rhs)
+    }
+
+    fn store_bit_field_to_absolute_offset(
+        &mut self,
+        dst_name: String,
+        mem: &StructMember,
+        offset: i64,
+        rhs: TackyVal,
+    ) -> TackyResult<TackyVal> {
         let Some(width) = mem.bit_width else {
             return Err("store_bit_field_to_offset called for non-bit-field".to_string());
         };
         let unit = self.fresh_tmp(mem.member_type);
         self.emit(TackyInstr::CopyFromOffset {
             src_name: dst_name.clone(),
-            offset: mem.offset as i64,
+            offset,
             dst: unit.clone(),
         });
         let rhs_masked = self.fresh_tmp(mem.member_type);
@@ -4021,7 +6118,7 @@ impl TackyGen {
         self.emit(TackyInstr::CopyToOffset {
             src: new_unit,
             dst_name,
-            offset: mem.offset as i64,
+            offset,
         });
         Ok(self.sign_extend_bit_field_value(rhs_masked, mem, width))
     }
@@ -4130,13 +6227,21 @@ impl TackyGen {
             Ok((result, CType::Pointer))
         } else {
             // Scalar member: load the value
-            let result = self.fresh_tmp_full(&mem_ft);
+            let result = if mem.bit_width.is_some() {
+                self.fresh_tmp(mem.member_type)
+            } else {
+                self.fresh_tmp_full(&mem_ft)
+            };
             self.emit(TackyInstr::Load {
                 src_ptr: mem_ptr,
                 dst: result.clone(),
             });
             let result = self.extract_bit_field(result, &mem)?;
-            Ok((result, mem_type))
+            let result_type = mem
+                .bit_width
+                .map(|width| Self::bit_field_promoted_type(&mem, width))
+                .unwrap_or(mem_type);
+            Ok((result, result_type))
         }
     }
 
@@ -4314,6 +6419,24 @@ impl TackyGen {
 
         // Normalize: pointer first, index second
         let first_full = self.val_full_type(&first_val);
+        if let FullType::Vector { elem, .. } = first_full.clone() {
+            let elem_full = elem.as_ref().clone();
+            let elem_type = elem_full.to_ctype();
+            let idx_long = self.convert_to(second_val, second_type, CType::Long);
+            let base_ptr = self.fresh_tmp_full(&FullType::Pointer(Box::new(elem_full.clone())));
+            self.emit(TackyInstr::GetAddress {
+                src: first_val,
+                dst: base_ptr.clone(),
+            });
+            let ptr = self.fresh_tmp_full(&FullType::Pointer(Box::new(elem_full.clone())));
+            self.emit(TackyInstr::AddPtr {
+                ptr: base_ptr,
+                index: idx_long,
+                scale: elem_full.byte_size_with(&self.struct_defs) as i64,
+                dst: ptr.clone(),
+            });
+            return Ok((ptr, elem_type, elem_full));
+        }
         let (arr_val, idx_val, idx_type, arr_full) =
             if first_full.is_pointer() || first_type == CType::Pointer {
                 (first_val, second_val, second_type, first_full)
@@ -4339,6 +6462,35 @@ impl TackyGen {
         let elem_type = elem_full.to_ctype();
 
         let idx_long = self.convert_to(idx_val, idx_type, CType::Long);
+        if let TackyVal::Var(ref arr_name) = arr_val {
+            if let Some(scale_exp) = self.vla_param_bounds.get(arr_name).cloned() {
+                let (scale_val, scale_type) = self.emit_exp(scale_exp)?;
+                let scale_long = self.convert_to(scale_val, scale_type, CType::Long);
+                let byte_offset = self.fresh_tmp(CType::Long);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::Mul,
+                    left: idx_long,
+                    right: scale_long,
+                    dst: byte_offset.clone(),
+                });
+                let result_ptr_type = FullType::Pointer(Box::new(elem_full.clone()));
+                let ptr = self.fresh_tmp_full(&result_ptr_type);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::Add,
+                    left: arr_val.clone(),
+                    right: byte_offset,
+                    dst: ptr.clone(),
+                });
+                if let TackyVal::Var(ref pname) = ptr {
+                    if let Some(info) = self.deref_info(arr_name) {
+                        self.ptr_info.insert(pname.clone(), info);
+                    } else {
+                        self.ptr_info.insert(pname.clone(), (elem_type, 1));
+                    }
+                }
+                return Ok((ptr, elem_type, elem_full));
+            }
+        }
         let result_ptr_type = FullType::Pointer(Box::new(elem_full.clone()));
         let ptr = self.fresh_tmp_full(&result_ptr_type);
         self.emit(TackyInstr::AddPtr {
@@ -4362,14 +6514,172 @@ impl TackyGen {
         Ok((ptr, elem_type, elem_full))
     }
 
+    fn emit_vector_lane_value(
+        &mut self,
+        value: TackyVal,
+        value_ft: FullType,
+        elem_type: CType,
+        elem_size: usize,
+        lane: usize,
+    ) -> TackyResult<TackyVal> {
+        if value_ft.is_vector() {
+            let addr = self.fresh_tmp(CType::Pointer);
+            self.emit(TackyInstr::GetAddress {
+                src: value,
+                dst: addr.clone(),
+            });
+            let ptr = self.fresh_tmp(CType::Pointer);
+            self.emit(TackyInstr::AddPtr {
+                ptr: addr,
+                index: TackyVal::Constant(lane as i64),
+                scale: elem_size as i64,
+                dst: ptr.clone(),
+            });
+            let lane_value = self.fresh_tmp(elem_type);
+            self.emit(TackyInstr::Load {
+                src_ptr: ptr,
+                dst: lane_value.clone(),
+            });
+            Ok(lane_value)
+        } else {
+            Ok(self.convert_to(value, value_ft.to_ctype(), elem_type))
+        }
+    }
+
     fn emit_binary(
         &mut self,
         op: BinaryOp,
         left: Exp,
         right: Exp,
     ) -> TackyResult<(TackyVal, CType)> {
+        let vector_comparison_elem = if is_comparison_op(&op) {
+            match (self.typeof_exp(&left), self.typeof_exp(&right)) {
+                (FullType::Vector { elem, .. }, _) | (_, FullType::Vector { elem, .. }) => {
+                    Some(elem.to_ctype())
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
         let (l, l_type) = self.emit_exp(left)?;
         let (r, r_type) = self.emit_exp(right)?;
+        let bit_precision = self.bit_precision(&l).max(self.bit_precision(&r));
+        let l_full = self.val_full_type(&l);
+        let r_full = self.val_full_type(&r);
+
+        if is_comparison_op(&op) && (l_full.is_vector() || r_full.is_vector()) {
+            let vector_ft = if l_full.is_vector() {
+                l_full.clone()
+            } else {
+                r_full.clone()
+            };
+            let FullType::Vector { elem, lanes } = vector_ft.clone() else {
+                unreachable!();
+            };
+            let elem_type = elem.to_ctype();
+            let elem_size = elem.byte_size_with(&self.struct_defs);
+            let result = self.fresh_tmp_full(&vector_ft);
+            let TackyVal::Var(result_name) = result.clone() else {
+                return Err("vector comparison result must be addressable".to_string());
+            };
+            self.zero_init_local(&result_name, vector_ft.byte_size_with(&self.struct_defs));
+            let tacky_op = Self::convert_binop(op)?;
+            for lane in 0..lanes {
+                let left_lane = self.emit_vector_lane_value(
+                    l.clone(),
+                    l_full.clone(),
+                    elem_type,
+                    elem_size,
+                    lane,
+                )?;
+                let right_lane = self.emit_vector_lane_value(
+                    r.clone(),
+                    r_full.clone(),
+                    elem_type,
+                    elem_size,
+                    lane,
+                )?;
+                let cmp = self.fresh_tmp(CType::Int);
+                self.emit(TackyInstr::Binary {
+                    op: tacky_op.clone(),
+                    left: left_lane,
+                    right: right_lane,
+                    dst: cmp.clone(),
+                });
+                let bool_as_elem = self.convert_to(cmp, CType::Int, elem_type);
+                let lane_mask = self.fresh_tmp(elem_type);
+                let zero = self.convert_to(TackyVal::Constant(0), CType::Int, elem_type);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::Sub,
+                    left: zero,
+                    right: bool_as_elem,
+                    dst: lane_mask.clone(),
+                });
+                self.emit(TackyInstr::CopyToOffset {
+                    src: lane_mask,
+                    dst_name: result_name.clone(),
+                    offset: (lane * elem_size) as i64,
+                });
+            }
+            return Ok((result, vector_ft.to_ctype()));
+        }
+
+        if !is_comparison_op(&op) && (l_full.is_vector() || r_full.is_vector()) {
+            let vector_ft = if l_full.is_vector() {
+                l_full.clone()
+            } else {
+                r_full.clone()
+            };
+            let FullType::Vector { elem, lanes } = vector_ft.clone() else {
+                unreachable!();
+            };
+            let elem_type = elem.to_ctype();
+            let calc_type = match elem_type {
+                CType::UChar | CType::UShort => CType::UInt,
+                CType::Char | CType::SChar | CType::Short | CType::Bool => CType::Int,
+                _ => elem_type,
+            };
+            let elem_size = elem.byte_size_with(&self.struct_defs);
+            let result = self.fresh_tmp_full(&vector_ft);
+            let TackyVal::Var(result_name) = result.clone() else {
+                return Err("vector binary result must be addressable".to_string());
+            };
+            self.zero_init_local(&result_name, vector_ft.byte_size_with(&self.struct_defs));
+            let tacky_op = Self::convert_binop(op)?;
+            for lane in 0..lanes {
+                let left_lane = self.emit_vector_lane_value(
+                    l.clone(),
+                    l_full.clone(),
+                    elem_type,
+                    elem_size,
+                    lane,
+                )?;
+                let right_lane = self.emit_vector_lane_value(
+                    r.clone(),
+                    r_full.clone(),
+                    elem_type,
+                    elem_size,
+                    lane,
+                )?;
+                let left_lane = self.convert_to(left_lane, elem_type, calc_type);
+                let right_lane = self.convert_to(right_lane, elem_type, calc_type);
+                let dst = self.fresh_tmp(calc_type);
+                self.emit(TackyInstr::Binary {
+                    op: tacky_op.clone(),
+                    left: left_lane,
+                    right: right_lane,
+                    dst: dst.clone(),
+                });
+                let stored = self.convert_to(dst, calc_type, elem_type);
+                self.emit(TackyInstr::CopyToOffset {
+                    src: stored,
+                    dst_name: result_name.clone(),
+                    offset: (lane * elem_size) as i64,
+                });
+            }
+            return Ok((result, vector_ft.to_ctype()));
+        }
 
         if matches!(op, BinaryOp::Add | BinaryOp::Sub) {
             let (is_ptr_arith, ptr_val, int_val, elem_size, int_type) =
@@ -4480,6 +6790,15 @@ impl TackyGen {
                 right: r,
                 dst: dst.clone(),
             });
+            if let Some(width) = bit_precision {
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::BitwiseAnd,
+                    left: dst.clone(),
+                    right: TackyVal::Constant(Self::bit_mask(width)),
+                    dst: dst.clone(),
+                });
+                self.mark_bit_precision(&dst, width);
+            }
             return Ok((dst, promoted));
         }
 
@@ -4492,6 +6811,7 @@ impl TackyGen {
             common
         };
         let dst = self.fresh_tmp(result_type);
+        let is_comparison = is_comparison_op(&op);
         let tacky_op = Self::convert_binop(op)?;
         self.emit(TackyInstr::Binary {
             op: tacky_op,
@@ -4499,6 +6819,26 @@ impl TackyGen {
             right: r_conv,
             dst: dst.clone(),
         });
+        if let Some(elem_type) = vector_comparison_elem {
+            let bool_as_elem = self.convert_to(dst, CType::Int, elem_type);
+            let result = self.fresh_tmp(elem_type);
+            let zero = self.convert_to(TackyVal::Constant(0), CType::Int, elem_type);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::Sub,
+                left: zero,
+                right: bool_as_elem,
+                dst: result.clone(),
+            });
+            return Ok((result, elem_type));
+        }
+        if let Some(width) = bit_precision.filter(|_| !is_comparison) {
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::BitwiseAnd,
+                left: dst.clone(),
+                right: TackyVal::Constant(Self::bit_mask(width)),
+                dst: dst.clone(),
+            });
+        }
         Ok((dst, result_type))
     }
 
@@ -4591,6 +6931,8 @@ impl TackyGen {
                     } else if let Some(ref ret_ptr) = self.hidden_ret_ptr.clone() {
                         // Large struct return via hidden pointer
                         let ret_ptr_val = TackyVal::Var(ret_ptr.clone());
+                        let ret_ft = self.func_full_types.get(&self.current_function).cloned();
+                        let val_ft = self.val_full_type(&val);
                         let src_addr = if val_type == CType::Struct {
                             if let TackyVal::Var(ref name) = val {
                                 if self.array_sizes.contains_key(name) {
@@ -4606,6 +6948,12 @@ impl TackyGen {
                             } else {
                                 val
                             }
+                        } else if matches!(
+                            (&ret_ft, &val_ft),
+                            (Some(FullType::Struct(ret_tag)), FullType::Pointer(pointee))
+                                if matches!(pointee.as_ref(), FullType::Struct(src_tag) if src_tag == ret_tag)
+                        ) {
+                            val
                         } else {
                             let a = self.fresh_tmp(CType::Pointer);
                             self.emit(TackyInstr::GetAddress {
@@ -4615,7 +6963,6 @@ impl TackyGen {
                             a
                         };
                         // Copy struct to hidden return pointer location
-                        let ret_ft = self.func_full_types.get(&self.current_function).cloned();
                         let struct_size = if let Some(FullType::Struct(ref tag)) = ret_ft {
                             self.struct_defs.get(tag).map(|d| d.size).unwrap_or(0)
                         } else {
@@ -4634,6 +6981,24 @@ impl TackyGen {
                             .cloned()
                             .unwrap_or(FullType::Scalar(ret_type));
                         let val_ft = self.val_full_type(&val);
+                        if let (FullType::Struct(ref ret_tag), FullType::Pointer(ref pointee)) =
+                            (&ret_ft, &val_ft)
+                        {
+                            if matches!(pointee.as_ref(), FullType::Struct(tag) if tag == ret_tag) {
+                                let struct_size = self
+                                    .struct_defs
+                                    .get(ret_tag)
+                                    .map(|def| def.size)
+                                    .unwrap_or(0);
+                                let result = self.fresh_tmp_full(&ret_ft);
+                                if let TackyVal::Var(ref result_name) = result {
+                                    self.array_sizes.insert(result_name.clone(), struct_size);
+                                    self.emit_struct_copy_to(val, result_name, struct_size);
+                                }
+                                self.emit(TackyInstr::Return(result));
+                                return Ok(());
+                            }
+                        }
                         self.assert_assignable_exp_full_type(
                             &ret_ft,
                             &val_ft,
@@ -4651,17 +7016,39 @@ impl TackyGen {
                 self.emit_exp(exp)?;
             }
             Statement::If(cond, then_stmt, else_stmt) => {
-                if let Some((value, _, _)) = eval_static_integer_constant_exp_with_context(
+                let branch_has_label = Self::statement_contains_label(then_stmt.as_ref())
+                    || else_stmt
+                        .as_deref()
+                        .is_some_and(Self::statement_contains_label);
+                if !branch_has_label {
+                    if let Some((value, _, _)) = eval_static_integer_constant_exp_with_context(
+                        &cond,
+                        &self.struct_defs,
+                        &self.full_types,
+                    ) {
+                        if value != 0 {
+                            self.emit_statement(*then_stmt)?;
+                        } else if let Some(else_s) = else_stmt {
+                            self.emit_statement(*else_s)?;
+                        }
+                        return Ok(());
+                    }
+                } else if let Some((value, _, _)) = eval_static_integer_constant_exp_with_context(
                     &cond,
                     &self.struct_defs,
                     &self.full_types,
                 ) {
-                    if value != 0 {
-                        self.emit_statement(*then_stmt)?;
-                    } else if let Some(else_s) = else_stmt {
-                        self.emit_statement(*else_s)?;
+                    if value == 0 && else_stmt.is_none() {
+                        let end_label = self.fresh_label("if_end");
+                        self.emit(TackyInstr::Jump(end_label.clone()));
+                        if let Some(pruned_then) =
+                            Self::prune_unreachable_prefix_to_label(then_stmt.as_ref().clone())
+                        {
+                            self.emit_statement(pruned_then)?;
+                        }
+                        self.emit(TackyInstr::Label(end_label));
+                        return Ok(());
                     }
-                    return Ok(());
                 }
                 let (cond_val, _) = self.emit_exp(cond)?;
                 match else_stmt {
@@ -4755,10 +7142,27 @@ impl TackyGen {
                 self.emit(TackyInstr::Jump(format!("continue_{}", label)));
             }
             Statement::Goto(label) => {
-                self.emit(TackyInstr::Jump(format!(
-                    "label.{}.{}",
-                    self.current_function, label
-                )));
+                let local = self
+                    .local_label_stack
+                    .last()
+                    .is_none_or(|labels| labels.contains(&label));
+                let target_function = if local {
+                    self.current_function.clone()
+                } else if let Some(parent) = self.label_address_function.as_ref() {
+                    parent.clone()
+                } else {
+                    self.current_function.clone()
+                };
+                let target = format!("label.{}.{}", target_function, label);
+                if local || target_function == self.current_function {
+                    self.emit(TackyInstr::Jump(target));
+                } else {
+                    self.emit(TackyInstr::NonlocalJump(target));
+                }
+            }
+            Statement::IndirectGoto(exp) => {
+                let (target, _) = self.emit_exp(exp)?;
+                self.emit(TackyInstr::JumpIndirect(target));
             }
             Statement::Label(name, body) => {
                 self.emit(TackyInstr::Label(format!(
@@ -4781,12 +7185,35 @@ impl TackyGen {
                 for case in &cases {
                     if let Some(val) = case.value {
                         let cmp_value = self.fresh_tmp(CType::Int);
-                        self.emit(TackyInstr::Binary {
-                            op: TackyBinaryOp::Equal,
-                            left: control_val.clone(),
-                            right: TackyVal::Constant(val),
-                            dst: cmp_value.clone(),
-                        });
+                        if let Some(end_val) = case.end_value {
+                            let ge_low = self.fresh_tmp(CType::Int);
+                            let le_high = self.fresh_tmp(CType::Int);
+                            self.emit(TackyInstr::Binary {
+                                op: TackyBinaryOp::GreaterEqual,
+                                left: control_val.clone(),
+                                right: TackyVal::Constant(val),
+                                dst: ge_low.clone(),
+                            });
+                            self.emit(TackyInstr::Binary {
+                                op: TackyBinaryOp::LessEqual,
+                                left: control_val.clone(),
+                                right: TackyVal::Constant(end_val),
+                                dst: le_high.clone(),
+                            });
+                            self.emit(TackyInstr::Binary {
+                                op: TackyBinaryOp::BitwiseAnd,
+                                left: ge_low,
+                                right: le_high,
+                                dst: cmp_value.clone(),
+                            });
+                        } else {
+                            self.emit(TackyInstr::Binary {
+                                op: TackyBinaryOp::Equal,
+                                left: control_val.clone(),
+                                right: TackyVal::Constant(val),
+                                dst: cmp_value.clone(),
+                            });
+                        }
                         self.emit(TackyInstr::JumpIfNotZero(cmp_value, case.label.clone()));
                     }
                 }
@@ -4818,6 +7245,143 @@ impl TackyGen {
     /// `base_offset` is the byte offset from the start of the array.
     /// `elem_sizes`: byte size of each sub-array level.
     /// For `int[4][2][6]`: elem_sizes = [48, 24, 4] (size of [2][6], [6], int)
+    fn emit_initializer_list_at(
+        &mut self,
+        arr_name: &str,
+        target_ft: &FullType,
+        elems: &[Exp],
+        index: &mut usize,
+        base_offset: i64,
+    ) -> TackyResult<()> {
+        if *index >= elems.len() {
+            return Ok(());
+        }
+
+        match target_ft {
+            FullType::Array { elem, size } => {
+                if *index < elems.len()
+                    && matches!(elems[*index], Exp::StringLiteral(_))
+                    && Self::is_one_dimensional_char_array(target_ft)
+                {
+                    self.emit_initializer_value_at(
+                        arr_name,
+                        target_ft,
+                        &elems[*index],
+                        base_offset,
+                    )?;
+                    *index += 1;
+                    return Ok(());
+                }
+                while *index < elems.len() && matches!(elems[*index], Exp::DesignatedInit(_, _)) {
+                    self.emit_initializer_value_at(
+                        arr_name,
+                        target_ft,
+                        &elems[*index],
+                        base_offset,
+                    )?;
+                    *index += 1;
+                }
+                if *index >= elems.len() {
+                    return Ok(());
+                }
+                let elem_size = elem.byte_size_with(&self.struct_defs) as i64;
+                let array_len = if *size == 0 {
+                    elems.len().saturating_sub(*index)
+                } else {
+                    *size
+                };
+                for i in 0..array_len {
+                    if *index >= elems.len() {
+                        break;
+                    }
+                    let elem_init = &elems[*index];
+                    if (Self::static_aggregate_initializer(elem_init).is_some()
+                        || matches!(elem_init, Exp::StringLiteral(_)))
+                        && (elem.is_array() || elem.is_struct())
+                    {
+                        self.emit_initializer_value_at(
+                            arr_name,
+                            elem,
+                            elem_init,
+                            base_offset + i as i64 * elem_size,
+                        )?;
+                        *index += 1;
+                    } else {
+                        self.emit_initializer_list_at(
+                            arr_name,
+                            elem,
+                            elems,
+                            index,
+                            base_offset + i as i64 * elem_size,
+                        )?;
+                    }
+                }
+            }
+            FullType::Struct(tag) => {
+                let def = self
+                    .struct_defs
+                    .get(tag)
+                    .cloned()
+                    .ok_or_else(|| format!("Undefined struct: {}", tag))?;
+                let max_members = if def.is_union { 1 } else { def.members.len() };
+                for mem in def.members.iter().take(max_members) {
+                    if *index >= elems.len() {
+                        break;
+                    }
+                    let elem_init = &elems[*index];
+                    if mem.bit_width.is_some() {
+                        let (val, val_type) = self.emit_exp(elem_init.clone())?;
+                        let val_conv = self.convert_to(val, val_type, mem.member_type);
+                        self.store_bit_field_to_absolute_offset(
+                            arr_name.to_string(),
+                            mem,
+                            base_offset + mem.offset as i64,
+                            val_conv,
+                        )?;
+                        *index += 1;
+                        continue;
+                    }
+                    if (Self::static_aggregate_initializer(elem_init).is_some()
+                        || matches!(elem_init, Exp::StringLiteral(_)))
+                        && (mem.member_full_type.is_array() || mem.member_full_type.is_struct())
+                    {
+                        self.emit_initializer_value_at(
+                            arr_name,
+                            &mem.member_full_type,
+                            elem_init,
+                            base_offset + mem.offset as i64,
+                        )?;
+                        *index += 1;
+                    } else if mem.member_full_type.is_struct() {
+                        self.emit_initializer_value_at(
+                            arr_name,
+                            &mem.member_full_type,
+                            elem_init,
+                            base_offset + mem.offset as i64,
+                        )?;
+                        *index += 1;
+                    } else {
+                        self.emit_initializer_list_at(
+                            arr_name,
+                            &mem.member_full_type,
+                            elems,
+                            index,
+                            base_offset + mem.offset as i64,
+                        )?;
+                    }
+                }
+            }
+            FullType::Scalar(_) | FullType::Pointer(_) | FullType::Vector { .. } => {
+                self.emit_initializer_value_at(arr_name, target_ft, &elems[*index], base_offset)?;
+                *index += 1;
+            }
+            FullType::Function { .. } => {
+                return Err("function type is not an initializer target".to_string());
+            }
+        }
+        Ok(())
+    }
+
     fn emit_struct_init_at(
         &mut self,
         arr_name: &str,
@@ -4834,6 +7398,16 @@ impl TackyGen {
             let has_designators = elems
                 .iter()
                 .any(|elem| matches!(elem, Exp::DesignatedInit(_, _)));
+            if !has_designators {
+                let mut index = 0usize;
+                return self.emit_initializer_list_at(
+                    arr_name,
+                    &FullType::Struct(tag.to_string()),
+                    elems,
+                    &mut index,
+                    base_offset,
+                );
+            }
             // For unions, the compound init initializes the first member only.
             // If the first member is an array/struct, treat the whole init as its initializer.
             if def.is_union && !def.members.is_empty() && !has_designators {
@@ -5046,41 +7620,8 @@ impl TackyGen {
                         {
                             // Compound initializer for struct/union element in array
                             // Find the struct tag for the array element type
-                            let arr_ft = self.get_full_type(arr_name);
-                            let struct_tag = {
-                                let mut t = &arr_ft;
-                                // Peel arrays AND drill into struct first members if the
-                                // outermost type is a struct/union (happens for nested unions)
-                                while let FullType::Array { elem: e, .. } = t {
-                                    t = e;
-                                }
-                                if let FullType::Struct(tag) = t {
-                                    // Check if this is a union whose first member is an array of structs
-                                    if let Some(def) = self.struct_defs.get(tag) {
-                                        if def.is_union {
-                                            if let Some(mem) = def.members.first() {
-                                                let mut mt = &mem.member_full_type;
-                                                while let FullType::Array { elem: e, .. } = mt {
-                                                    mt = e;
-                                                }
-                                                if let FullType::Struct(inner_tag) = mt {
-                                                    inner_tag.clone()
-                                                } else {
-                                                    tag.clone()
-                                                }
-                                            } else {
-                                                tag.clone()
-                                            }
-                                        } else {
-                                            tag.clone()
-                                        }
-                                    } else {
-                                        tag.clone()
-                                    }
-                                } else {
-                                    return Err("Expected struct in array".to_string());
-                                }
-                            };
+                            let struct_tag =
+                                self.array_struct_element_tag_at_offset(arr_name, base_offset)?;
                             self.emit_struct_init_at(arr_name, elem, &struct_tag, elem_offset)?;
                         }
                         _ if inner_sizes.is_empty()
@@ -5219,6 +7760,144 @@ impl TackyGen {
         Ok(())
     }
 
+    fn direct_array_struct_elem(ft: &FullType) -> Option<(&str, usize)> {
+        match ft {
+            FullType::Array { elem, size } => match elem.as_ref() {
+                FullType::Struct(tag) => Some((tag.as_str(), *size)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn emit_struct_member_initializer(
+        &mut self,
+        arr_name: &str,
+        mem: &StructMember,
+        value: &Exp,
+        offset: i64,
+    ) -> TackyResult<()> {
+        if mem.bit_width.is_some() {
+            let (val, val_type) = self.emit_exp(value.clone())?;
+            let val_conv = self.convert_to(val, val_type, mem.member_type);
+            self.store_bit_field_to_absolute_offset(arr_name.to_string(), mem, offset, val_conv)?;
+            return Ok(());
+        }
+
+        self.emit_initializer_value_at(arr_name, &mem.member_full_type, value, offset)
+    }
+
+    fn emit_struct_array_init_flat(
+        &mut self,
+        arr_name: &str,
+        init: &Exp,
+        tag: &str,
+        array_len: usize,
+        base_offset: i64,
+    ) -> TackyResult<()> {
+        let Exp::ArrayInit(elems) = init else {
+            return self.emit_initializer_value_at(
+                arr_name,
+                &FullType::Array {
+                    elem: Box::new(FullType::Struct(tag.to_string())),
+                    size: array_len,
+                },
+                init,
+                base_offset,
+            );
+        };
+
+        let def = self
+            .struct_defs
+            .get(tag)
+            .cloned()
+            .ok_or_else(|| format!("Undefined struct: {}", tag))?;
+        let struct_size = def.size as i64;
+        let max_members = if def.is_union { 1 } else { def.members.len() };
+        let mut elem_index = 0usize;
+        let mut member_index = 0usize;
+
+        for elem in elems {
+            if elem_index >= array_len {
+                break;
+            }
+            let elem_offset = base_offset + elem_index as i64 * struct_size;
+            match elem {
+                Exp::DesignatedInit(designators, value) => {
+                    self.emit_designated_init_at(
+                        arr_name,
+                        &FullType::Array {
+                            elem: Box::new(FullType::Struct(tag.to_string())),
+                            size: array_len,
+                        },
+                        designators,
+                        value,
+                        base_offset,
+                    )?;
+                }
+                Exp::ArrayInit(_) => {
+                    self.emit_struct_init_at(arr_name, elem, tag, elem_offset)?;
+                    elem_index += 1;
+                    member_index = 0;
+                }
+                _ => {
+                    if member_index >= max_members {
+                        elem_index += 1;
+                        member_index = 0;
+                    }
+                    if elem_index >= array_len || member_index >= max_members {
+                        break;
+                    }
+                    let elem_offset = base_offset + elem_index as i64 * struct_size;
+                    let mem = &def.members[member_index];
+                    self.emit_struct_member_initializer(
+                        arr_name,
+                        mem,
+                        elem,
+                        elem_offset + mem.offset as i64,
+                    )?;
+                    member_index += 1;
+                    if member_index >= max_members {
+                        elem_index += 1;
+                        member_index = 0;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn array_struct_element_tag_at_offset(
+        &self,
+        arr_name: &str,
+        base_offset: i64,
+    ) -> TackyResult<String> {
+        let arr_ft = self.get_full_type(arr_name);
+        let mut t = &arr_ft;
+        while let FullType::Array { elem: e, .. } = t {
+            t = e;
+        }
+        if let FullType::Struct(tag) = t {
+            if let Some(def) = self.struct_defs.get(tag) {
+                for mem in &def.members {
+                    let start = mem.offset as i64;
+                    let end = start + mem.member_full_type.byte_size_with(&self.struct_defs) as i64;
+                    if base_offset >= start && base_offset < end {
+                        let mut mt = &mem.member_full_type;
+                        while let FullType::Array { elem, .. } = mt {
+                            mt = elem;
+                        }
+                        if let FullType::Struct(member_tag) = mt {
+                            return Ok(member_tag.clone());
+                        }
+                    }
+                }
+            }
+            return Ok(tag.clone());
+        }
+        Err("Expected struct in array".to_string())
+    }
+
     /// Compute element sizes for each array dimension.
     /// For `int[4][2][6]`: returns [48, 24, 4] (sizes of [2][6], [6], int)
     fn compute_elem_sizes(ft: &FullType, struct_defs: &HashMap<String, StructDef>) -> Vec<i64> {
@@ -5277,6 +7956,112 @@ impl TackyGen {
         }
     }
 
+    fn static_designated_initializer_target(
+        &self,
+        base_ft: &FullType,
+        designators: &[Designator],
+        value: &Exp,
+        base_offset: usize,
+    ) -> TackyResult<(FullType, usize, Exp)> {
+        let Some((designator, rest)) = designators.split_first() else {
+            return Ok((base_ft.clone(), base_offset, value.clone()));
+        };
+
+        match (designator, base_ft) {
+            (Designator::Index(index), FullType::Array { elem, size }) => {
+                let index = Self::eval_designator_index(index)
+                    .ok_or_else(|| "array designator index must be constant".to_string())?;
+                if index < 0 || index as usize >= *size {
+                    return Err(format!("array designator index {} out of bounds", index));
+                }
+                self.static_designated_initializer_target(
+                    elem,
+                    rest,
+                    value,
+                    base_offset + index as usize * elem.byte_size_with(&self.struct_defs),
+                )
+            }
+            (Designator::IndexRange(_, _), FullType::Array { .. }) => {
+                Err("array range designator is only valid inside initializer lists".to_string())
+            }
+            (Designator::Field(name), FullType::Struct(tag)) => {
+                let def = self
+                    .struct_defs
+                    .get(tag)
+                    .ok_or_else(|| format!("Undefined struct: {}", tag))?;
+                let mem = def
+                    .find_member(name)
+                    .ok_or_else(|| format!("struct '{}' has no member '{}'", tag, name))?;
+                self.static_designated_initializer_target(
+                    &mem.member_full_type,
+                    rest,
+                    value,
+                    base_offset + mem.offset,
+                )
+            }
+            _ => Err(format!(
+                "invalid initializer designator for type {:?}",
+                base_ft
+            )),
+        }
+    }
+
+    fn statement_contains_label(stmt: &Statement) -> bool {
+        match stmt {
+            Statement::Label(_, _) | Statement::Case { .. } | Statement::Default { .. } => true,
+            Statement::Block(block) => block.iter().any(|item| {
+                matches!(item, BlockItem::Statement(stmt) if Self::statement_contains_label(stmt))
+            }),
+            Statement::If(_, then_stmt, else_stmt) => {
+                Self::statement_contains_label(then_stmt)
+                    || else_stmt
+                        .as_deref()
+                        .is_some_and(Self::statement_contains_label)
+            }
+            Statement::While { body, .. }
+            | Statement::DoWhile { body, .. }
+            | Statement::For { body, .. }
+            | Statement::Switch { body, .. } => Self::statement_contains_label(body),
+            _ => false,
+        }
+    }
+
+    fn prune_unreachable_prefix_to_label(stmt: Statement) -> Option<Statement> {
+        match stmt {
+            Statement::Label(_, _) | Statement::Case { .. } | Statement::Default { .. } => {
+                Some(stmt)
+            }
+            Statement::Block(block) => {
+                let mut out = Vec::new();
+                let mut found = false;
+                for item in block {
+                    if found {
+                        out.push(item);
+                        continue;
+                    }
+                    if let BlockItem::Statement(stmt) = item {
+                        if let Some(pruned) = Self::prune_unreachable_prefix_to_label(stmt) {
+                            out.push(BlockItem::Statement(pruned));
+                            found = true;
+                        }
+                    }
+                }
+                found.then_some(Statement::Block(out))
+            }
+            Statement::If(_, then_stmt, else_stmt) => {
+                Self::prune_unreachable_prefix_to_label(*then_stmt).or_else(|| {
+                    else_stmt
+                        .and_then(|else_stmt| Self::prune_unreachable_prefix_to_label(*else_stmt))
+                })
+            }
+            Statement::While { body, .. }
+            | Statement::DoWhile { body, .. }
+            | Statement::For { body, .. }
+            | Statement::Switch { body, .. } => Self::prune_unreachable_prefix_to_label(*body),
+            _ => None,
+        }
+    }
+
     fn array_scalar_type(ft: &FullType) -> CType {
         let mut t = ft;
         while let FullType::Array { elem, .. } = t {
@@ -5293,7 +8078,14 @@ impl TackyGen {
         offset: i64,
     ) -> TackyResult<()> {
         match (target_ft, value) {
-            (FullType::Array { .. }, Exp::ArrayInit(_) | Exp::StringLiteral(_)) => {
+            (_, Exp::DesignatedInit(designators, inner)) => {
+                self.emit_designated_init_at(arr_name, target_ft, designators, inner, offset)?;
+            }
+            (FullType::Array { .. }, Exp::ArrayInit(elems)) => {
+                let mut index = 0usize;
+                self.emit_initializer_list_at(arr_name, target_ft, elems, &mut index, offset)?;
+            }
+            (FullType::Array { .. }, Exp::StringLiteral(_)) => {
                 let elem_sizes = Self::compute_elem_sizes(target_ft, &self.struct_defs);
                 self.emit_array_init_flat(
                     arr_name,
@@ -5306,7 +8098,21 @@ impl TackyGen {
             (FullType::Struct(tag), Exp::ArrayInit(_)) => {
                 self.emit_struct_init_at(arr_name, value, tag, offset)?;
             }
-            (FullType::Struct(_), _) => {
+            (FullType::Struct(tag), _) => {
+                if let Some(first_member) = self
+                    .struct_defs
+                    .get(tag)
+                    .filter(|def| def.is_union)
+                    .and_then(|def| def.members.first())
+                    .cloned()
+                {
+                    return self.emit_struct_member_initializer(
+                        arr_name,
+                        &first_member,
+                        value,
+                        offset + first_member.offset as i64,
+                    );
+                }
                 let struct_size = target_ft.byte_size_with(&self.struct_defs);
                 let (val, val_type) = self.emit_exp(value.clone())?;
                 let src_addr = if val_type == CType::Pointer {
@@ -5377,6 +8183,28 @@ impl TackyGen {
                     base_offset + index * elem_size,
                 )?;
             }
+            (Designator::IndexRange(start, end), FullType::Array { elem, size }) => {
+                let start = Self::eval_designator_index(start)
+                    .ok_or_else(|| "array designator range start must be constant".to_string())?;
+                let end = Self::eval_designator_index(end)
+                    .ok_or_else(|| "array designator range end must be constant".to_string())?;
+                if start < 0 || end < start || end as usize >= *size {
+                    return Err(format!(
+                        "array designator range {}...{} out of bounds",
+                        start, end
+                    ));
+                }
+                let elem_size = elem.byte_size_with(&self.struct_defs) as i64;
+                for index in start..=end {
+                    self.emit_designated_init_at(
+                        arr_name,
+                        elem,
+                        &designators[1..],
+                        value,
+                        base_offset + index * elem_size,
+                    )?;
+                }
+            }
             (Designator::Field(name), FullType::Struct(tag)) => {
                 let def = self
                     .struct_defs
@@ -5386,13 +8214,18 @@ impl TackyGen {
                     .find_member(name)
                     .ok_or_else(|| format!("struct '{}' has no member '{}'", tag, name))?
                     .clone();
-                self.emit_designated_init_at(
-                    arr_name,
-                    &mem.member_full_type,
-                    &designators[1..],
-                    value,
-                    base_offset + mem.offset as i64,
-                )?;
+                let member_offset = base_offset + mem.offset as i64;
+                if designators.len() == 1 {
+                    self.emit_struct_member_initializer(arr_name, &mem, value, member_offset)?;
+                } else {
+                    self.emit_designated_init_at(
+                        arr_name,
+                        &mem.member_full_type,
+                        &designators[1..],
+                        value,
+                        member_offset,
+                    )?;
+                }
             }
             _ => {
                 return Err(format!(
@@ -5411,9 +8244,69 @@ impl TackyGen {
         init: &Exp,
         base_offset: usize,
     ) -> TackyResult<()> {
+        if let Exp::DesignatedInit(designators, value) = init {
+            if let (FullType::Struct(tag), [Designator::Field(name)]) =
+                (base_ft, designators.as_slice())
+            {
+                let def = self
+                    .struct_defs
+                    .get(tag)
+                    .ok_or_else(|| format!("Undefined struct: {}", tag))?;
+                let mem = def
+                    .find_member(name)
+                    .ok_or_else(|| format!("struct '{}' has no member '{}'", tag, name))?;
+                if let Some(width) = mem.bit_width {
+                    let (raw, is_dbl, is_uns) =
+                        self.eval_static_constant_init(&Some(value.as_ref().clone()))?;
+                    let converted = convert_init_value(raw, mem.member_type, is_dbl, is_uns);
+                    builder.put_bit_field(
+                        base_offset + mem.offset,
+                        mem.member_type,
+                        converted,
+                        mem.bit_offset,
+                        width,
+                    )?;
+                    return Ok(());
+                }
+            }
+            if let (
+                Some((Designator::IndexRange(start, end), rest)),
+                FullType::Array { elem, size },
+            ) = (designators.split_first(), base_ft)
+            {
+                let start = Self::eval_designator_index(start)
+                    .ok_or_else(|| "array designator range start must be constant".to_string())?;
+                let end = Self::eval_designator_index(end)
+                    .ok_or_else(|| "array designator range end must be constant".to_string())?;
+                if start < 0 || end < start || end as usize >= *size {
+                    return Err(format!(
+                        "array designator range {}...{} out of bounds",
+                        start, end
+                    ));
+                }
+                let value = if rest.is_empty() {
+                    value.as_ref().clone()
+                } else {
+                    Exp::DesignatedInit(rest.to_vec(), value.clone())
+                };
+                let elem_size = elem.byte_size_with(&self.struct_defs);
+                for index in start as usize..=end as usize {
+                    self.put_static_initializer(
+                        builder,
+                        elem,
+                        &value,
+                        base_offset + index * elem_size,
+                    )?;
+                }
+                return Ok(());
+            }
+            let (target_ft, target_offset, target_value) = self
+                .static_designated_initializer_target(base_ft, designators, value, base_offset)?;
+            return self.put_static_initializer(builder, &target_ft, &target_value, target_offset);
+        }
         if let Exp::Cast(_, _, inner) = init {
             if let Exp::ArrayInit(elems) = inner.as_ref() {
-                if base_ft.is_array() || base_ft.is_struct() {
+                if base_ft.is_array() || base_ft.is_struct() || base_ft.is_vector() {
                     return self.put_static_initializer(builder, base_ft, inner, base_offset);
                 }
                 if let [value] = elems.as_slice() {
@@ -5435,41 +8328,111 @@ impl TackyGen {
                     base_offset,
                 )?;
             }
+            (FullType::Array { size: 0, .. }, Exp::StringLiteral(s))
+                if Self::is_one_dimensional_char_array(base_ft) =>
+            {
+                builder.put(base_offset, StaticInit::StringInit(s.clone(), false))?;
+            }
             (FullType::Array { elem, size }, Exp::ArrayInit(elems)) => {
+                if !elems
+                    .iter()
+                    .any(|elem| matches!(elem, Exp::DesignatedInit(_, _)))
+                {
+                    let mut index = 0usize;
+                    self.put_static_initializer_list(
+                        builder,
+                        base_ft,
+                        elems,
+                        &mut index,
+                        base_offset,
+                    )?;
+                    return Ok(());
+                }
                 let elem_size = elem.byte_size_with(&self.struct_defs);
                 let mut positional_index = 0usize;
                 for elem_init in elems {
-                    let (index, value) = if let Exp::DesignatedInit(designators, value) = elem_init
-                    {
-                        let (Designator::Index(index), rest) = designators
+                    if let Exp::DesignatedInit(designators, value) = elem_init {
+                        let (designator, rest) = designators
                             .split_first()
-                            .ok_or_else(|| "empty initializer designator".to_string())?
-                        else {
-                            return Err("invalid array initializer designator".to_string());
-                        };
-                        let index = Self::eval_designator_index(index)
-                            .ok_or_else(|| "array designator index must be constant".to_string())?;
-                        if index < 0 || index as usize >= *size {
-                            return Err(format!("array designator index {} out of bounds", index));
-                        }
+                            .ok_or_else(|| "empty initializer designator".to_string())?;
                         let value = if rest.is_empty() {
                             value.as_ref().clone()
                         } else {
                             Exp::DesignatedInit(rest.to_vec(), value.clone())
                         };
-                        (index as usize, value)
+                        match designator {
+                            Designator::Index(index) => {
+                                let index =
+                                    Self::eval_designator_index(index).ok_or_else(|| {
+                                        "array designator index must be constant".to_string()
+                                    })?;
+                                if index < 0 || index as usize >= *size {
+                                    return Err(format!(
+                                        "array designator index {} out of bounds",
+                                        index
+                                    ));
+                                }
+                                let index = index as usize;
+                                self.put_static_initializer(
+                                    builder,
+                                    elem,
+                                    &value,
+                                    base_offset + index * elem_size,
+                                )?;
+                                positional_index = index + 1;
+                            }
+                            Designator::IndexRange(start, end) => {
+                                let start =
+                                    Self::eval_designator_index(start).ok_or_else(|| {
+                                        "array designator range start must be constant".to_string()
+                                    })?;
+                                let end = Self::eval_designator_index(end).ok_or_else(|| {
+                                    "array designator range end must be constant".to_string()
+                                })?;
+                                if start < 0 || end < start || end as usize >= *size {
+                                    return Err(format!(
+                                        "array designator range {}...{} out of bounds",
+                                        start, end
+                                    ));
+                                }
+                                for index in start as usize..=end as usize {
+                                    self.put_static_initializer(
+                                        builder,
+                                        elem,
+                                        &value,
+                                        base_offset + index * elem_size,
+                                    )?;
+                                }
+                                positional_index = end as usize + 1;
+                            }
+                            Designator::Field(_) => {
+                                return Err("invalid array initializer designator".to_string());
+                            }
+                        }
                     } else {
                         let index = positional_index;
                         positional_index += 1;
                         if index >= *size {
                             break;
                         }
-                        (index, elem_init.clone())
-                    };
+                        self.put_static_initializer(
+                            builder,
+                            elem,
+                            elem_init,
+                            base_offset + index * elem_size,
+                        )?;
+                    }
+                }
+            }
+            (FullType::Array { elem, size }, Exp::WideStringLiteral(s))
+                if !elem.to_ctype().is_char() =>
+            {
+                let elem_size = elem.byte_size_with(&self.struct_defs);
+                for (index, ch) in s.chars().take(*size).enumerate() {
                     self.put_static_initializer(
                         builder,
                         elem,
-                        &value,
+                        &Exp::Constant(ch as i64),
                         base_offset + index * elem_size,
                     )?;
                 }
@@ -5494,6 +8457,39 @@ impl TackyGen {
                     .get(tag)
                     .cloned()
                     .ok_or_else(|| format!("Undefined struct: {}", tag))?;
+                if def.is_union && elems.len() == 1 && matches!(elems[0], Exp::ArrayInit(_)) {
+                    let Exp::ArrayInit(inner_elems) = &elems[0] else {
+                        unreachable!();
+                    };
+                    let mut index = 0usize;
+                    for mem in &def.members {
+                        if index >= inner_elems.len() {
+                            break;
+                        }
+                        self.put_static_initializer_list(
+                            builder,
+                            &mem.member_full_type,
+                            inner_elems,
+                            &mut index,
+                            base_offset + mem.offset,
+                        )?;
+                    }
+                    return Ok(());
+                }
+                if !elems
+                    .iter()
+                    .any(|elem| matches!(elem, Exp::DesignatedInit(_, _)))
+                {
+                    let mut index = 0usize;
+                    self.put_static_initializer_list(
+                        builder,
+                        base_ft,
+                        elems,
+                        &mut index,
+                        base_offset,
+                    )?;
+                    return Ok(());
+                }
                 let max_members = if def.is_union { 1 } else { def.members.len() };
                 let mut positional_index = 0usize;
                 for elem_init in elems {
@@ -5523,6 +8519,19 @@ impl TackyGen {
                         positional_index += 1;
                         (member, elem_init.clone())
                     };
+                    if let Some(width) = member.bit_width {
+                        let (raw, is_dbl, is_uns) =
+                            self.eval_static_constant_init(&Some(value.clone()))?;
+                        let converted = convert_init_value(raw, member.member_type, is_dbl, is_uns);
+                        builder.put_bit_field(
+                            base_offset + member.offset,
+                            member.member_type,
+                            converted,
+                            member.bit_offset,
+                            width,
+                        )?;
+                        continue;
+                    }
                     self.put_static_initializer(
                         builder,
                         &member.member_full_type,
@@ -5535,6 +8544,17 @@ impl TackyGen {
                 let label = self.make_string_constant(s);
                 builder.put(base_offset, StaticInit::PointerInit(label))?;
             }
+            (FullType::Vector { elem, lanes }, Exp::ArrayInit(elems)) => {
+                let elem_size = elem.byte_size_with(&self.struct_defs);
+                for (index, elem_init) in elems.iter().take(*lanes).enumerate() {
+                    self.put_static_initializer(
+                        builder,
+                        elem,
+                        elem_init,
+                        base_offset + index * elem_size,
+                    )?;
+                }
+            }
             (FullType::Pointer(_), _) => {
                 if let Some(ptr_init) = self.static_pointer_initializer(init) {
                     builder.put(base_offset, ptr_init)?;
@@ -5546,6 +8566,10 @@ impl TackyGen {
                 }
             }
             (FullType::Scalar(ctype), _) => {
+                if let Some(label_diff) = self.static_label_diff_initializer(init, *ctype) {
+                    builder.put(base_offset, label_diff)?;
+                    return Ok(());
+                }
                 let (v, is_dbl, is_uns) = self.eval_static_constant_init(&Some(init.clone()))?;
                 let cv = convert_init_value(v, *ctype, is_dbl, is_uns);
                 builder.put(base_offset, make_static_init(cv, *ctype))?;
@@ -5565,9 +8589,11 @@ impl TackyGen {
         ft: &FullType,
         init: &Exp,
     ) -> TackyResult<Vec<StaticInit>> {
-        let total_bytes = ft.byte_size_with(&self.struct_defs);
         let mut builder = StaticInitBuilder::new();
         self.put_static_initializer(&mut builder, ft, init, 0)?;
+        let total_bytes = ft
+            .byte_size_with(&self.struct_defs)
+            .max(builder.required_bytes());
         builder.finish(total_bytes)
     }
 
@@ -5578,6 +8604,152 @@ impl TackyGen {
         } else {
             Ok((0, false, false))
         }
+    }
+
+    fn put_static_initializer_list(
+        &mut self,
+        builder: &mut StaticInitBuilder,
+        base_ft: &FullType,
+        elems: &[Exp],
+        index: &mut usize,
+        base_offset: usize,
+    ) -> TackyResult<()> {
+        if *index >= elems.len() {
+            return Ok(());
+        }
+
+        match base_ft {
+            FullType::Array { elem, size } => {
+                if *index < elems.len()
+                    && matches!(elems[*index], Exp::StringLiteral(_))
+                    && Self::is_one_dimensional_char_array(base_ft)
+                {
+                    self.put_static_initializer(builder, base_ft, &elems[*index], base_offset)?;
+                    *index += 1;
+                    return Ok(());
+                }
+                if *index < elems.len() && matches!(elems[*index], Exp::DesignatedInit(_, _)) {
+                    self.put_static_initializer(builder, base_ft, &elems[*index], base_offset)?;
+                    *index += 1;
+                    return Ok(());
+                }
+                let elem_size = elem.byte_size_with(&self.struct_defs);
+                if *size == 0 {
+                    if *index >= elems.len() {
+                        return Ok(());
+                    }
+                    if let Exp::ArrayInit(inner_elems) = &elems[*index] {
+                        let mut inner_index = 0usize;
+                        let mut elem_index = 0usize;
+                        while inner_index < inner_elems.len() {
+                            self.put_static_initializer_list(
+                                builder,
+                                elem,
+                                inner_elems,
+                                &mut inner_index,
+                                base_offset + elem_index * elem_size,
+                            )?;
+                            elem_index += 1;
+                        }
+                        *index += 1;
+                    } else {
+                        let mut elem_index = 0usize;
+                        while *index < elems.len() {
+                            self.put_static_initializer_list(
+                                builder,
+                                elem,
+                                elems,
+                                index,
+                                base_offset + elem_index * elem_size,
+                            )?;
+                            elem_index += 1;
+                        }
+                    }
+                    return Ok(());
+                }
+                for i in 0..*size {
+                    if *index >= elems.len() {
+                        break;
+                    }
+                    let elem_init = &elems[*index];
+                    if (Self::static_aggregate_initializer(elem_init).is_some()
+                        || matches!(elem_init, Exp::StringLiteral(_)))
+                        && (elem.is_array() || elem.is_struct())
+                    {
+                        self.put_static_initializer(
+                            builder,
+                            elem,
+                            elem_init,
+                            base_offset + i * elem_size,
+                        )?;
+                        *index += 1;
+                    } else {
+                        self.put_static_initializer_list(
+                            builder,
+                            elem,
+                            elems,
+                            index,
+                            base_offset + i * elem_size,
+                        )?;
+                    }
+                }
+            }
+            FullType::Struct(tag) => {
+                let def = self
+                    .struct_defs
+                    .get(tag)
+                    .cloned()
+                    .ok_or_else(|| format!("Undefined struct: {}", tag))?;
+                let max_members = if def.is_union { 1 } else { def.members.len() };
+                for mem in def.members.iter().take(max_members) {
+                    if *index >= elems.len() {
+                        break;
+                    }
+                    let elem_init = &elems[*index];
+                    if let Some(width) = mem.bit_width {
+                        let (value, _, _) =
+                            self.eval_static_constant_init(&Some(elem_init.clone()))?;
+                        builder.put_bit_field(
+                            base_offset + mem.offset,
+                            mem.member_type,
+                            value,
+                            mem.bit_offset,
+                            width,
+                        )?;
+                        *index += 1;
+                        continue;
+                    }
+                    if (Self::static_aggregate_initializer(elem_init).is_some()
+                        || matches!(elem_init, Exp::StringLiteral(_)))
+                        && (mem.member_full_type.is_array() || mem.member_full_type.is_struct())
+                    {
+                        self.put_static_initializer(
+                            builder,
+                            &mem.member_full_type,
+                            elem_init,
+                            base_offset + mem.offset,
+                        )?;
+                        *index += 1;
+                    } else {
+                        self.put_static_initializer_list(
+                            builder,
+                            &mem.member_full_type,
+                            elems,
+                            index,
+                            base_offset + mem.offset,
+                        )?;
+                    }
+                }
+            }
+            FullType::Pointer(_) | FullType::Scalar(_) | FullType::Vector { .. } => {
+                self.put_static_initializer(builder, base_ft, &elems[*index], base_offset)?;
+                *index += 1;
+            }
+            FullType::Function { .. } => {
+                return Err("function type is not a static initializer target".to_string());
+            }
+        }
+        Ok(())
     }
 
     /// Handle a variable declaration (arrays, scalars, static, etc.)
@@ -5655,8 +8827,8 @@ impl TackyGen {
                 }
                 t.to_ctype()
             };
-            // Zero-fill using long-sized chunks
-            {
+            // Aggregate initializers zero-fill omitted elements; uninitialized automatic arrays do not.
+            if vd.init.is_some() {
                 let mut off = 0usize;
                 while off + 8 <= total_bytes {
                     let z = self.fresh_tmp(CType::Long);
@@ -5726,6 +8898,16 @@ impl TackyGen {
                 }
                 // Null terminator if there's room (already zero-filled above)
             } else if let Some(init) = vd.init {
+                if let Exp::ArrayInit(elems) = &init {
+                    let mut index = 0usize;
+                    self.emit_initializer_list_at(&vd.name, &full_type, elems, &mut index, 0)?;
+                    return Ok(());
+                }
+                if let Some((tag, array_len)) = Self::direct_array_struct_elem(&full_type) {
+                    let tag = tag.to_string();
+                    self.emit_struct_array_init_flat(&vd.name, &init, &tag, array_len, 0)?;
+                    return Ok(());
+                }
                 let elem_sizes = Self::compute_elem_sizes(&full_type, &self.struct_defs);
                 self.emit_array_init_flat(&vd.name, &init, scalar_type, 0, &elem_sizes)?;
             }
@@ -5779,8 +8961,8 @@ impl TackyGen {
             }
             self.register_var(&vd.name, ft);
             self.array_sizes.insert(vd.name.clone(), struct_size);
-            // Zero-fill using long-sized chunks
-            {
+            // Aggregate initializers zero-fill omitted members; uninitialized automatic structs do not.
+            if vd.init.is_some() {
                 let mut off = 0usize;
                 while off + 8 <= struct_size {
                     let z = self.fresh_tmp(CType::Long);
@@ -5833,6 +9015,9 @@ impl TackyGen {
                 }
                 // For unions, if first member is array/struct, delegate the whole init
                 if def.is_union && !def.members.is_empty() {
+                    if elems.is_empty() {
+                        return Ok(());
+                    }
                     // For unions, the whole compound init {x, y, ...} initializes
                     // the FIRST MEMBER only. All elements go to the first member.
                     let mem = &def.members[0];
@@ -5933,6 +9118,26 @@ impl TackyGen {
                     }
                 } else {
                     let max_members = def.members.len();
+                    if max_members == 1 && def.members[0].member_full_type.is_array() {
+                        let member = &def.members[0];
+                        let elem_sizes =
+                            Self::compute_elem_sizes(&member.member_full_type, &self.struct_defs);
+                        let scalar_t = {
+                            let mut t = &member.member_full_type;
+                            while let FullType::Array { elem: e, .. } = t {
+                                t = e;
+                            }
+                            t.to_ctype()
+                        };
+                        self.emit_array_init_flat(
+                            &vd.name,
+                            init_ref,
+                            scalar_t,
+                            member.offset as i64,
+                            &elem_sizes,
+                        )?;
+                        return Ok(());
+                    }
                     for (i, elem) in elems.iter().enumerate() {
                         if i >= max_members {
                             break;
@@ -6127,30 +9332,38 @@ impl TackyGen {
             return Ok(());
         }
 
-        // Regular scalar/pointer variable
-        self.var_types.insert(vd.name.clone(), vd.var_type);
-        self.symbol_types.insert(vd.name.clone(), vd.var_type);
-        if let Some(pi) = vd.ptr_info {
-            self.ptr_info.insert(vd.name.clone(), pi);
-        }
         // Use decl_full_type if available (preserves pointer-to-array info)
         let ft = if let Some(ref dft) = vd.decl_full_type {
             dft.clone()
         } else {
             FullType::from_decl(vd.var_type, vd.ptr_info, &None)
         };
+        // Regular scalar/pointer variable. Vectors keep their full type for
+        // lane operations, but use a storage-width scalar for backend moves.
+        let storage_type = self.storage_ctype_for_full(&ft);
+        self.var_types.insert(vd.name.clone(), storage_type);
+        self.symbol_types.insert(vd.name.clone(), storage_type);
+        if let Some(pi) = vd.ptr_info {
+            self.ptr_info.insert(vd.name.clone(), pi);
+        }
         self.full_types.insert(vd.name.clone(), ft.clone());
+        if ft.is_vector() {
+            self.array_sizes
+                .insert(vd.name.clone(), ft.byte_size_with(&self.struct_defs));
+        }
+        let init = match vd.init {
+            Some(Exp::ArrayInit(mut elems)) if elems.len() == 1 => Some(elems.remove(0)),
+            Some(Exp::ArrayInit(elems)) if elems.is_empty() => Some(Exp::Constant(0)),
+            other => other,
+        };
 
         if vd
             .storage_class
             .as_ref()
             .is_some_and(StorageClass::is_static)
         {
-            if let Some(Exp::ArrayInit(_)) = vd.init {
-                return Ok(());
-            }
             // Static pointer initialized with string literal: static char *p = "hello";
-            if let Some(Exp::StringLiteral(ref s)) = vd.init {
+            if let Some(Exp::StringLiteral(ref s)) = init {
                 let str_label = self.make_string_constant(s);
                 let align = std::cmp::max(vd.var_type.size() as usize, 1);
                 let align = vd.alignment.map_or(align, |a| a.get().max(align));
@@ -6165,8 +9378,7 @@ impl TackyGen {
             }
             if let Some(ptr_init) = (vd.var_type == CType::Pointer)
                 .then(|| {
-                    vd.init
-                        .as_ref()
+                    init.as_ref()
                         .and_then(|init| self.static_pointer_initializer(init))
                 })
                 .flatten()
@@ -6182,7 +9394,7 @@ impl TackyGen {
                 });
                 return Ok(());
             }
-            let (raw_val, is_dbl, is_uns) = self.eval_static_constant_init(&vd.init)?;
+            let (raw_val, is_dbl, is_uns) = self.eval_static_constant_init(&init)?;
             let init_val = convert_init_value(raw_val, vd.var_type, is_dbl, is_uns);
             let align = if vd.var_type == CType::Double {
                 16
@@ -6204,12 +9416,80 @@ impl TackyGen {
             .is_some_and(StorageClass::is_extern)
         {
             self.extern_vars.push(vd.name);
-        } else if let Some(init) = vd.init {
+        } else if let Some(init) = init {
             let vd_name = vd.name.clone();
             let init_for_type = init.clone();
+            if ft.is_vector() {
+                let size = ft.byte_size_with(&self.struct_defs);
+                self.zero_init_local(&vd_name, size);
+                if let Exp::ArrayInit(elems) = init {
+                    let (elem_ft, elem_type, elem_size) = match &ft {
+                        FullType::Vector { elem, .. } => (
+                            elem.as_ref().clone(),
+                            elem.to_ctype(),
+                            elem.byte_size_with(&self.struct_defs),
+                        ),
+                        _ => (
+                            FullType::Scalar(vd.var_type),
+                            vd.var_type,
+                            vd.var_type.size() as usize,
+                        ),
+                    };
+                    for (index, elem_init) in elems.into_iter().enumerate() {
+                        let (val, val_type) = self.emit_exp(elem_init.clone())?;
+                        let val_ft = self.val_full_type(&val);
+                        self.assert_assignable_exp_full_type(
+                            &elem_ft,
+                            &val_ft,
+                            &elem_init,
+                            "initializer",
+                        )?;
+                        let converted = self.convert_to(val, val_type, elem_type);
+                        self.emit(TackyInstr::CopyToOffset {
+                            src: converted,
+                            dst_name: vd_name.clone(),
+                            offset: (index * elem_size) as i64,
+                        });
+                    }
+                    return Ok(());
+                }
+            }
             let (val, val_type) = self.emit_exp(init)?;
             let val_ft = self.val_full_type(&val);
             self.assert_assignable_exp_full_type(&ft, &val_ft, &init_for_type, "initializer")?;
+            if ft.is_vector() {
+                let size = ft.byte_size_with(&self.struct_defs);
+                let src_addr = if let TackyVal::Var(ref src_name) = val {
+                    if self.array_sizes.contains_key(src_name) {
+                        let addr = self.fresh_tmp(CType::Pointer);
+                        self.emit(TackyInstr::GetAddress {
+                            src: val,
+                            dst: addr.clone(),
+                        });
+                        addr
+                    } else {
+                        self.zero_init_local(&vd_name, size);
+                        let converted = self.convert_to(val, val_type, ft.to_ctype());
+                        self.emit(TackyInstr::CopyToOffset {
+                            src: converted,
+                            dst_name: vd_name.clone(),
+                            offset: 0,
+                        });
+                        return Ok(());
+                    }
+                } else {
+                    self.zero_init_local(&vd_name, size);
+                    let converted = self.convert_to(val, val_type, ft.to_ctype());
+                    self.emit(TackyInstr::CopyToOffset {
+                        src: converted,
+                        dst_name: vd_name.clone(),
+                        offset: 0,
+                    });
+                    return Ok(());
+                };
+                self.emit_struct_copy_to(src_addr, &vd_name, size);
+                return Ok(());
+            }
             let val_conv = self.convert_to(val, val_type, vd.var_type);
             if vd.var_type == CType::Pointer {
                 if let TackyVal::Var(ref src_name) = val_conv {
@@ -6299,13 +9579,18 @@ impl TackyGen {
 
         let saved_instructions = std::mem::take(&mut self.instructions);
         let saved_current = std::mem::take(&mut self.current_function);
+        let saved_label_function = self.label_address_function.take();
         let saved_hidden_ret = self.hidden_ret_ptr.take();
+        if !saved_current.is_empty() {
+            self.label_address_function = Some(saved_current.clone());
+        }
         if let Some(mut nested) = self.emit_function(fd)? {
             nested.global = false;
             self.nested_functions.push(nested);
         }
         self.instructions = saved_instructions;
         self.current_function = saved_current;
+        self.label_address_function = saved_label_function;
         self.hidden_ret_ptr = saved_hidden_ret;
         Ok(())
     }
@@ -6414,6 +9699,12 @@ impl TackyGen {
                 Self::collect_used_vars_exp(b, used);
                 Self::collect_used_vars_exp(c, used);
             }
+            Exp::BuiltinExpect(value, hints) => {
+                Self::collect_used_vars_exp(value, used);
+                for hint in hints {
+                    Self::collect_used_vars_exp(hint, used);
+                }
+            }
             Exp::FunctionCall(name, args) => {
                 Self::push_used_var(name, used);
                 for arg in args {
@@ -6433,8 +9724,13 @@ impl TackyGen {
             }
             Exp::DesignatedInit(designators, value) => {
                 for designator in designators {
-                    if let Designator::Index(index) = designator {
-                        Self::collect_used_vars_exp(index, used);
+                    match designator {
+                        Designator::Index(index) => Self::collect_used_vars_exp(index, used),
+                        Designator::IndexRange(start, end) => {
+                            Self::collect_used_vars_exp(start, used);
+                            Self::collect_used_vars_exp(end, used);
+                        }
+                        Designator::Field(_) => {}
                     }
                 }
                 Self::collect_used_vars_exp(value, used);
@@ -6474,7 +9770,9 @@ impl TackyGen {
 
     fn collect_used_vars_stmt(stmt: &Statement, used: &mut Vec<String>) {
         match stmt {
-            Statement::Return(Some(exp)) | Statement::Expression(exp) => {
+            Statement::Return(Some(exp))
+            | Statement::Expression(exp)
+            | Statement::IndirectGoto(exp) => {
                 Self::collect_used_vars_exp(exp, used);
             }
             Statement::If(cond, then_stmt, else_stmt) => {
@@ -6582,6 +9880,13 @@ impl TackyGen {
                 Box::new(Self::rewrite_capture_exp(*b, capture_map)),
                 Box::new(Self::rewrite_capture_exp(*c, capture_map)),
             ),
+            Exp::BuiltinExpect(value, hints) => Exp::BuiltinExpect(
+                Box::new(Self::rewrite_capture_exp(*value, capture_map)),
+                hints
+                    .into_iter()
+                    .map(|arg| Self::rewrite_capture_exp(arg, capture_map))
+                    .collect(),
+            ),
             Exp::FunctionCall(name, args) => Exp::FunctionCall(
                 name,
                 args.into_iter()
@@ -6605,6 +9910,10 @@ impl TackyGen {
                         Designator::Index(index) => Designator::Index(Box::new(
                             Self::rewrite_capture_exp(*index, capture_map),
                         )),
+                        Designator::IndexRange(start, end) => Designator::IndexRange(
+                            Box::new(Self::rewrite_capture_exp(*start, capture_map)),
+                            Box::new(Self::rewrite_capture_exp(*end, capture_map)),
+                        ),
                         other => other,
                     })
                     .collect(),
@@ -6644,6 +9953,9 @@ impl TackyGen {
             }
             Statement::Expression(exp) => {
                 Statement::Expression(Self::rewrite_capture_exp(exp, capture_map))
+            }
+            Statement::IndirectGoto(exp) => {
+                Statement::IndirectGoto(Self::rewrite_capture_exp(exp, capture_map))
             }
             Statement::If(cond, then_stmt, else_stmt) => Statement::If(
                 Self::rewrite_capture_exp(cond, capture_map),
@@ -6709,8 +10021,15 @@ impl TackyGen {
                 label,
                 cases,
             },
-            Statement::Case { value, body, label } => Statement::Case {
+            Statement::Case {
+                value,
+                end_value,
+                body,
+                label,
+            } => Statement::Case {
                 value: Self::rewrite_capture_exp(value, capture_map),
+                end_value: end_value
+                    .map(|end_value| Self::rewrite_capture_exp(end_value, capture_map)),
                 body: Box::new(Self::rewrite_capture_stmt(*body, capture_map)),
                 label,
             },
@@ -6722,6 +10041,43 @@ impl TackyGen {
         }
     }
 
+    fn collect_statement_labels(stmt: &Statement, labels: &mut HashSet<String>) {
+        match stmt {
+            Statement::Label(name, body) => {
+                labels.insert(name.clone());
+                Self::collect_statement_labels(body, labels);
+            }
+            Statement::Block(block) => Self::collect_block_labels(block, labels),
+            Statement::If(_, then_stmt, else_stmt) => {
+                Self::collect_statement_labels(then_stmt, labels);
+                if let Some(else_stmt) = else_stmt {
+                    Self::collect_statement_labels(else_stmt, labels);
+                }
+            }
+            Statement::While { body, .. }
+            | Statement::DoWhile { body, .. }
+            | Statement::For { body, .. }
+            | Statement::Switch { body, .. }
+            | Statement::Case { body, .. }
+            | Statement::Default { body, .. } => Self::collect_statement_labels(body, labels),
+            Statement::Return(_)
+            | Statement::Expression(_)
+            | Statement::Break(_)
+            | Statement::Continue(_)
+            | Statement::Goto(_)
+            | Statement::IndirectGoto(_)
+            | Statement::Null => {}
+        }
+    }
+
+    fn collect_block_labels(block: &Block, labels: &mut HashSet<String>) {
+        for item in block {
+            if let BlockItem::Statement(stmt) = item {
+                Self::collect_statement_labels(stmt, labels);
+            }
+        }
+    }
+
     fn emit_function(&mut self, func: FunctionDeclaration) -> TackyResult<Option<TackyFunction>> {
         let Some(body) = func.body else {
             return Ok(None);
@@ -6729,6 +10085,9 @@ impl TackyGen {
 
         self.current_function = func.name.clone();
         self.instructions.clear();
+        let mut local_labels = HashSet::new();
+        Self::collect_block_labels(&body, &mut local_labels);
+        self.local_label_stack.push(local_labels);
 
         // Check if return type requires hidden pointer
         let ret_needs_hidden_ptr = if let Some(FullType::Struct(ref tag)) = func.return_full_type {
@@ -6752,31 +10111,50 @@ impl TackyGen {
         // Register params — decompose struct params into eightbytes
         let mut tacky_params = Vec::new();
         let mut stack_params = std::collections::HashSet::new();
+        let mut memory_param_blocks = Vec::new();
         let mut struct_param_groups: Vec<(usize, usize, Vec<bool>)> = Vec::new();
         if let Some(ref ret_ptr) = hidden_ret_ptr_name {
             tacky_params.push(ret_ptr.clone());
         }
         let mut struct_param_fixups: Vec<(String, String, StructDef)> = Vec::new(); // (original_name, tag, def)
+        let mut param_vla_bounds = func.param_vla_bounds.iter();
         for (i, (name, ptype, pi)) in func.params.iter().enumerate() {
             let ft = if i < func.param_full_types.len() {
                 func.param_full_types[i].clone()
             } else {
                 FullType::from_decl(*ptype, *pi, &None)
             };
+            if let FullType::Pointer(pointee) = &ft {
+                if let FullType::Array { elem, size } = pointee.as_ref() {
+                    if *size == VLA_STATIC_SCALE_FALLBACK {
+                        if let Some(bound) = param_vla_bounds.next() {
+                            self.vla_param_bounds.insert(
+                                name.clone(),
+                                Exp::Binary(
+                                    BinaryOp::Mul,
+                                    Box::new(bound.clone()),
+                                    Box::new(Exp::SizeOfType(
+                                        elem.to_ctype(),
+                                        elem.as_ref().clone(),
+                                    )),
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
 
             if let FullType::Struct(ref tag) = ft {
                 if let Some(def) = self.struct_defs.get(tag).cloned() {
                     let classes = def.classify_with(&self.struct_defs);
                     if classes.len() == 1 && classes[0] == ParamClass::Memory {
-                        // Large struct: decompose into 8-byte eightbyte params (all on stack)
-                        let num_eightbytes = def.size.div_ceil(8);
-                        for eb_idx in 0..num_eightbytes {
-                            let param_name = format!("{}_eb{}", name, eb_idx);
-                            self.var_types.insert(param_name.clone(), CType::Long);
-                            self.symbol_types.insert(param_name.clone(), CType::Long);
-                            tacky_params.push(param_name.clone());
-                            stack_params.insert(param_name);
-                        }
+                        let param_name = format!("{}_mem", name);
+                        let param_idx = tacky_params.len();
+                        self.var_types.insert(param_name.clone(), CType::Pointer);
+                        self.symbol_types.insert(param_name.clone(), CType::Pointer);
+                        tacky_params.push(param_name.clone());
+                        stack_params.insert(param_name);
+                        memory_param_blocks.push((param_idx, name.clone(), def.size));
                     } else {
                         // Decompose into eightbyte params
                         let group_start = tacky_params.len();
@@ -6792,7 +10170,9 @@ impl TackyGen {
                             self.symbol_types.insert(param_name.clone(), param_type);
                             tacky_params.push(param_name);
                         }
-                        struct_param_groups.push((group_start, classes.len(), is_sse_vec));
+                        if !classes.is_empty() {
+                            struct_param_groups.push((group_start, classes.len(), is_sse_vec));
+                        }
                     }
                     // Register the original struct var — allocate enough for eightbyte storage
                     let classes = def.classify_with(&self.struct_defs);
@@ -6804,10 +10184,15 @@ impl TackyGen {
                 }
             }
 
-            self.var_types.insert(name.clone(), *ptype);
-            self.symbol_types.insert(name.clone(), *ptype);
+            let storage_type = self.storage_ctype_for_full(&ft);
+            self.var_types.insert(name.clone(), storage_type);
+            self.symbol_types.insert(name.clone(), storage_type);
             if let Some(info) = pi {
                 self.ptr_info.insert(name.clone(), *info);
+            }
+            if ft.is_vector() {
+                self.array_sizes
+                    .insert(name.clone(), ft.byte_size_with(&self.struct_defs));
             }
             self.full_types.insert(name.clone(), ft);
             tacky_params.push(name.clone());
@@ -6816,6 +10201,9 @@ impl TackyGen {
         // Reassemble struct params from eightbytes
         for (name, _tag, def) in &struct_param_fixups {
             let classes = def.classify_with(&self.struct_defs);
+            if classes.len() == 1 && classes[0] == ParamClass::Memory {
+                continue;
+            }
             let num_ebs = if classes.len() == 1 && classes[0] == ParamClass::Memory {
                 def.size.div_ceil(8)
             } else {
@@ -6832,8 +10220,11 @@ impl TackyGen {
             }
         }
 
-        self.emit_block(body)?;
+        let emit_result = self.emit_block(body);
+        self.local_label_stack.pop();
+        emit_result?;
         self.emit(TackyInstr::Return(TackyVal::Constant(0)));
+        self.apply_function_instrumentation(func.no_instrument_function);
 
         Ok(Some(TackyFunction {
             name: func.name,
@@ -6841,6 +10232,7 @@ impl TackyGen {
             global: true, // overridden by linkage map in generate()
             body: std::mem::take(&mut self.instructions),
             stack_params,
+            memory_param_blocks,
             struct_param_groups,
         }))
     }
@@ -6910,6 +10302,7 @@ fn convert_init_value(
         CType::Int => val as i32 as i64,
         CType::UInt => val as u32 as i64,
         CType::Long | CType::ULong | CType::Double | CType::Pointer => val,
+        CType::Int128 | CType::UInt128 => val,
         CType::Float => (val as f32).to_bits() as i64,
         CType::Void | CType::Struct => val,
     }
@@ -6929,6 +10322,8 @@ fn make_static_init(val: i64, t: CType) -> StaticInit {
             CType::UInt => StaticInit::UIntInit(val as u32),
             CType::Long | CType::Pointer => StaticInit::LongInit(val),
             CType::ULong => StaticInit::ULongInit(val as u64),
+            CType::Int128 => StaticInit::Int128Init(val as i128),
+            CType::UInt128 => StaticInit::UInt128Init(val as u64 as u128),
             CType::Float => StaticInit::FloatInit(f32::from_bits(val as u32)),
             CType::Double => StaticInit::DoubleInit(f64::from_bits(val as u64)),
             CType::Void | CType::Struct => StaticInit::ZeroInit(0),
@@ -6945,6 +10340,10 @@ fn eval_static_expr_full_type(
         Exp::StringLiteral(s) => Some(FullType::Array {
             elem: Box::new(FullType::Scalar(CType::Char)),
             size: c_string_byte_len(s) + 1,
+        }),
+        Exp::WideStringLiteral(s) => Some(FullType::Array {
+            elem: Box::new(FullType::Scalar(CType::Int)),
+            size: s.chars().count() + 1,
         }),
         Exp::Cast(_, Some(ft), _) => Some(ft.clone()),
         Exp::Cast(_, None, inner) => eval_static_expr_full_type(inner, full_types),
@@ -6972,6 +10371,8 @@ fn eval_static_integer_constant_exp_with_context(
     match exp {
         Exp::Constant(c) | Exp::LongConstant(c) => Some((*c, false, false)),
         Exp::UIntConstant(c) | Exp::ULongConstant(c) => Some((*c, false, true)),
+        Exp::Int128Constant(c) => Some((*c as i64, false, false)),
+        Exp::UInt128Constant(c) => Some((*c as i64, false, true)),
         Exp::DoubleConstant(d) => Some((d.to_bits() as i64, true, false)),
         Exp::SizeOf(inner) => {
             let ft = eval_static_expr_full_type(inner, full_types)?;
@@ -6979,14 +10380,62 @@ fn eval_static_integer_constant_exp_with_context(
         }
         Exp::SizeOfType(_, ft) => Some((ft.byte_size_with(struct_defs) as i64, false, true)),
         Exp::AlignOfType(ft) => Some((ft.alignment_with(struct_defs) as i64, false, true)),
-        Exp::Cast(_, _, inner) => {
+        Exp::Cast(target, _, inner) => {
             if let Exp::ArrayInit(elems) = inner.as_ref() {
                 let [value] = elems.as_slice() else {
                     return None;
                 };
                 eval_static_integer_constant_exp_with_context(value, struct_defs, full_types)
             } else {
-                eval_static_integer_constant_exp_with_context(inner, struct_defs, full_types)
+                let (value, is_double, is_unsigned) =
+                    eval_static_integer_constant_exp_with_context(inner, struct_defs, full_types)?;
+                if target.is_floating() {
+                    let value = if is_double {
+                        f64::from_bits(value as u64)
+                    } else if is_unsigned {
+                        value as u64 as f64
+                    } else {
+                        value as f64
+                    };
+                    let value = if *target == CType::Float {
+                        value as f32 as f64
+                    } else {
+                        value
+                    };
+                    Some((value.to_bits() as i64, true, *target == CType::Float))
+                } else if is_double {
+                    let value = f64::from_bits(value as u64);
+                    let target_unsigned = matches!(
+                        target,
+                        CType::Bool
+                            | CType::UChar
+                            | CType::UShort
+                            | CType::UInt
+                            | CType::ULong
+                            | CType::UInt128
+                    );
+                    let raw = if target_unsigned {
+                        value as u64 as i64
+                    } else {
+                        value as i64
+                    };
+                    Some((raw, false, target_unsigned))
+                } else {
+                    let target_unsigned = matches!(
+                        target,
+                        CType::Bool
+                            | CType::UChar
+                            | CType::UShort
+                            | CType::UInt
+                            | CType::ULong
+                            | CType::UInt128
+                    );
+                    Some((
+                        convert_init_value(value, *target, false, is_unsigned),
+                        false,
+                        target_unsigned,
+                    ))
+                }
             }
         }
         Exp::Unary(op, inner) => {
@@ -6997,7 +10446,7 @@ fn eval_static_integer_constant_exp_with_context(
                     let d = -f64::from_bits(value as u64);
                     Some((d.to_bits() as i64, true, false))
                 }
-                UnaryOp::Negate => Some((-value, false, is_unsigned)),
+                UnaryOp::Negate => Some((value.wrapping_neg(), false, is_unsigned)),
                 UnaryOp::Complement if !is_double => Some((!value, false, is_unsigned)),
                 UnaryOp::LogicalNot if !is_double => Some(((value == 0) as i64, false, false)),
                 _ => None,
@@ -7009,9 +10458,119 @@ fn eval_static_integer_constant_exp_with_context(
             let (right, right_double, right_unsigned) =
                 eval_static_integer_constant_exp_with_context(right, struct_defs, full_types)?;
             if left_double || right_double {
-                return None;
+                let use_float = (left_double && left_unsigned || right_double && right_unsigned)
+                    && !(left_double && !left_unsigned || right_double && !right_unsigned);
+                let left = if left_double {
+                    f64::from_bits(left as u64)
+                } else if use_float {
+                    left as f32 as f64
+                } else {
+                    left as f64
+                };
+                let right = if right_double {
+                    f64::from_bits(right as u64)
+                } else if use_float {
+                    right as f32 as f64
+                } else {
+                    right as f64
+                };
+                return match op {
+                    BinaryOp::Add => {
+                        let value = if use_float {
+                            (left + right) as f32 as f64
+                        } else {
+                            left + right
+                        };
+                        Some((value.to_bits() as i64, true, use_float))
+                    }
+                    BinaryOp::Sub => {
+                        let value = if use_float {
+                            (left - right) as f32 as f64
+                        } else {
+                            left - right
+                        };
+                        Some((value.to_bits() as i64, true, use_float))
+                    }
+                    BinaryOp::Mul => {
+                        let value = if use_float {
+                            (left * right) as f32 as f64
+                        } else {
+                            left * right
+                        };
+                        Some((value.to_bits() as i64, true, use_float))
+                    }
+                    BinaryOp::Div => {
+                        let value = if use_float {
+                            (left / right) as f32 as f64
+                        } else {
+                            left / right
+                        };
+                        Some((value.to_bits() as i64, true, use_float))
+                    }
+                    BinaryOp::LogicalAnd => {
+                        Some(((left != 0.0 && right != 0.0) as i64, false, false))
+                    }
+                    BinaryOp::LogicalOr => {
+                        Some(((left != 0.0 || right != 0.0) as i64, false, false))
+                    }
+                    BinaryOp::Equal => Some(((left == right) as i64, false, false)),
+                    BinaryOp::NotEqual => Some(((left != right) as i64, false, false)),
+                    BinaryOp::LessThan => Some(((left < right) as i64, false, false)),
+                    BinaryOp::GreaterThan => Some(((left > right) as i64, false, false)),
+                    BinaryOp::LessEqual => Some(((left <= right) as i64, false, false)),
+                    BinaryOp::GreaterEqual => Some(((left >= right) as i64, false, false)),
+                    _ => None,
+                };
             }
             let is_unsigned = left_unsigned || right_unsigned;
+            if is_unsigned {
+                let left_u = left as u64;
+                let right_u = right as u64;
+                let value = match op {
+                    BinaryOp::BitwiseAnd => (left_u & right_u) as i64,
+                    BinaryOp::BitwiseNand => (!(left_u & right_u)) as i64,
+                    BinaryOp::BitwiseOr => (left_u | right_u) as i64,
+                    BinaryOp::BitwiseXor => (left_u ^ right_u) as i64,
+                    BinaryOp::Equal => (left_u == right_u) as i64,
+                    BinaryOp::NotEqual => (left_u != right_u) as i64,
+                    BinaryOp::LessThan => (left_u < right_u) as i64,
+                    BinaryOp::GreaterThan => (left_u > right_u) as i64,
+                    BinaryOp::LessEqual => (left_u <= right_u) as i64,
+                    BinaryOp::GreaterEqual => (left_u >= right_u) as i64,
+                    _ => {
+                        let value = match op {
+                            BinaryOp::Add => left_u.wrapping_add(right_u),
+                            BinaryOp::Sub => left_u.wrapping_sub(right_u),
+                            BinaryOp::Mul => left_u.wrapping_mul(right_u),
+                            BinaryOp::Div => {
+                                if right_u == 0 {
+                                    return None;
+                                }
+                                left_u / right_u
+                            }
+                            BinaryOp::Mod => {
+                                if right_u == 0 {
+                                    return None;
+                                }
+                                left_u % right_u
+                            }
+                            BinaryOp::ShiftLeft => {
+                                let amount = u32::try_from(right).ok()?;
+                                left_u.checked_shl(amount)?
+                            }
+                            BinaryOp::ShiftRight => {
+                                let amount = u32::try_from(right).ok()?;
+                                left_u.checked_shr(amount)?
+                            }
+                            BinaryOp::LogicalAnd => (left_u != 0 && right_u != 0) as u64,
+                            BinaryOp::LogicalOr => (left_u != 0 || right_u != 0) as u64,
+                            _ => return None,
+                        };
+                        value as i64
+                    }
+                };
+                return Some((value, false, true));
+            }
             let value = match op {
                 BinaryOp::Add => left.wrapping_add(right),
                 BinaryOp::Sub => left.wrapping_sub(right),
@@ -7071,8 +10630,26 @@ fn eval_static_integer_constant_exp(exp: &Exp) -> Option<(i64, bool, bool)> {
     eval_static_integer_constant_exp_with_context(exp, &HashMap::new(), &HashMap::new())
 }
 
+fn wide_string_bytes(s: &str) -> String {
+    let mut out = String::new();
+    for ch in s.chars() {
+        for byte in (ch as u32).to_le_bytes() {
+            out.push(char::from(byte));
+        }
+    }
+    out
+}
+
 pub fn generate(program: Program) -> TackyResult<TackyProgram> {
+    generate_with_options(program, false)
+}
+
+pub fn generate_with_options(
+    program: Program,
+    instrument_functions: bool,
+) -> TackyResult<TackyProgram> {
     let mut gen = TackyGen::new();
+    gen.instrument_functions = instrument_functions;
     let mut top_level = Vec::new();
     let mut global_vars = std::collections::HashSet::new();
     let mut thread_local_vars = std::collections::HashSet::new();
@@ -7096,6 +10673,9 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
     for decl in &program.declarations {
         match decl {
             Declaration::FunDecl(fd) => {
+                if fd.no_instrument_function {
+                    gen.no_instrument_functions.insert(fd.name.clone());
+                }
                 let param_types: Vec<CType> = fd.params.iter().map(|(_, t, _)| *t).collect();
                 gen.func_types.insert(
                     fd.name.clone(),
@@ -7108,8 +10688,13 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
                 }
             }
             Declaration::VarDecl(vd) => {
-                gen.var_types.insert(vd.name.clone(), vd.var_type);
-                gen.symbol_types.insert(vd.name.clone(), vd.var_type);
+                let decl_ft = vd
+                    .decl_full_type
+                    .clone()
+                    .unwrap_or_else(|| FullType::from_decl(vd.var_type, vd.ptr_info, &None));
+                let storage_type = gen.storage_ctype_for_full(&decl_ft);
+                gen.var_types.insert(vd.name.clone(), storage_type);
+                gen.symbol_types.insert(vd.name.clone(), storage_type);
                 if vd
                     .storage_class
                     .as_ref()
@@ -7127,7 +10712,7 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
                 // Register FullType (including for extern arrays)
                 if let Some(ref dft) = vd.decl_full_type {
                     gen.full_types.insert(vd.name.clone(), dft.clone());
-                    if dft.is_array() {
+                    if dft.is_array() || dft.is_vector() {
                         gen.array_sizes
                             .insert(vd.name.clone(), dft.byte_size_with(&gen.struct_defs));
                     }
@@ -7155,6 +10740,13 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
     for decl in &program.declarations {
         if let Declaration::VarDecl(vd) = decl {
             global_vars.insert(vd.name.clone());
+            if let Some(target) = &vd.alias {
+                top_level.push(TackyTopLevel::Alias {
+                    name: vd.name.clone(),
+                    target: target.clone(),
+                });
+                continue;
+            }
             let is_thread_local = vd
                 .storage_class
                 .as_ref()
@@ -7170,12 +10762,15 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
             let init_val: Option<(i64, bool, bool)> = match &vd.init {
                 Some(exp)
                     if (vd.array_dims.is_some()
-                        || matches!(vd.decl_full_type, Some(FullType::Struct(_))))
+                        || matches!(
+                            vd.decl_full_type,
+                            Some(FullType::Struct(_)) | Some(FullType::Vector { .. })
+                        ))
                         && TackyGen::static_aggregate_initializer(exp).is_some() =>
                 {
                     None // Aggregate init handled separately
                 }
-                Some(Exp::StringLiteral(_)) => None, // String init handled separately
+                Some(Exp::StringLiteral(_) | Exp::WideStringLiteral(_)) => None, // String init handled separately
                 Some(exp)
                     if vd.var_type == CType::Pointer
                         && gen.static_pointer_initializer(exp).is_some() =>
@@ -7216,6 +10811,9 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
         std::collections::HashSet::new();
     for decl in &program.declarations {
         if let Declaration::VarDecl(vd) = decl {
+            if vd.alias.is_some() {
+                continue;
+            }
             // Handle global struct variables
             if let Some(FullType::Struct(ref tag)) = vd.decl_full_type {
                 if !vd
@@ -7253,6 +10851,43 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
                             init_values,
                         }));
                     }
+                    continue;
+                }
+            }
+            if let Some(FullType::Vector { .. }) = vd.decl_full_type {
+                if !vd
+                    .storage_class
+                    .as_ref()
+                    .is_some_and(StorageClass::is_extern)
+                    && !global_array_names.contains(&vd.name)
+                {
+                    let ft = vd.decl_full_type.clone().unwrap();
+                    let total_bytes = ft.byte_size_with(&gen.struct_defs);
+                    let align = if total_bytes >= 16 {
+                        16
+                    } else {
+                        std::cmp::max(vd.var_type.size() as usize, 1)
+                    };
+                    let align = vd.alignment.map_or(align, |a| a.get().max(align));
+                    let is_global = *linkage.get(&vd.name).unwrap_or(&true);
+                    gen.register_var(&vd.name, ft.clone());
+                    global_array_names.insert(vd.name.clone());
+                    file_scope_vars.remove(&vd.name);
+                    let init_values = if let Some(init_exp) = vd.init.as_ref() {
+                        gen.build_static_initializer(&ft, init_exp)?
+                    } else {
+                        vec![StaticInit::ZeroInit(total_bytes)]
+                    };
+                    top_level.push(TackyTopLevel::StaticVar(TackyStaticVar {
+                        name: vd.name.clone(),
+                        global: is_global,
+                        thread_local: vd
+                            .storage_class
+                            .as_ref()
+                            .is_some_and(StorageClass::is_thread_local),
+                        alignment: align,
+                        init_values,
+                    }));
                     continue;
                 }
             }
@@ -7308,6 +10943,50 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
                     .and_then(TackyGen::string_array_initializer),
             ) {
                 let base_type = vd.var_type;
+                if !matches!(base_type, CType::Char | CType::SChar | CType::UChar) {
+                    let requested_elems: usize = dims.iter().product();
+                    let total_elems = if requested_elems == 0 {
+                        s.chars().count() + 1
+                    } else {
+                        requested_elems
+                    };
+                    let total_bytes = total_elems * base_type.size() as usize;
+                    let align = vd.alignment.map_or(base_type.size() as usize, |a| {
+                        a.get().max(base_type.size() as usize)
+                    });
+                    let mut init_values = Vec::new();
+                    for ch in s.chars().take(total_elems) {
+                        init_values.push(make_static_init(ch as i64, base_type));
+                    }
+                    if init_values.len() < total_elems {
+                        init_values.push(make_static_init(0, base_type));
+                    }
+                    while init_values.len() < total_elems {
+                        init_values.push(make_static_init(0, base_type));
+                    }
+                    let is_global = *linkage.get(&vd.name).unwrap_or(&true);
+                    gen.register_var(
+                        &vd.name,
+                        FullType::Array {
+                            elem: Box::new(FullType::Scalar(base_type)),
+                            size: total_elems,
+                        },
+                    );
+                    global_array_names.insert(vd.name.clone());
+                    file_scope_vars.remove(&vd.name);
+                    top_level.push(TackyTopLevel::StaticVar(TackyStaticVar {
+                        name: vd.name.clone(),
+                        global: is_global,
+                        thread_local: vd
+                            .storage_class
+                            .as_ref()
+                            .is_some_and(StorageClass::is_thread_local),
+                        alignment: align,
+                        init_values,
+                    }));
+                    gen.array_sizes.insert(vd.name.clone(), total_bytes);
+                    continue;
+                }
                 let total_elems: usize = dims.iter().product();
                 let total_bytes = total_elems * base_type.size() as usize;
                 let align = if total_bytes >= 16 {
@@ -7318,9 +10997,6 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
                 let align = vd.alignment.map_or(align, |a| a.get().max(align));
                 let is_global = *linkage.get(&vd.name).unwrap_or(&true);
                 let ft = FullType::from_decl(base_type, vd.ptr_info, &vd.array_dims);
-                if !TackyGen::is_one_dimensional_char_array(&ft) {
-                    return Err("string initializer requires one-dimensional char array".into());
-                }
                 gen.register_var(&vd.name, ft);
                 global_array_names.insert(vd.name.clone());
                 file_scope_vars.remove(&vd.name);
@@ -7480,6 +11156,15 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
         }
     }
 
+    for sv in gen.static_vars.drain(..) {
+        global_vars.insert(sv.name.clone());
+        top_level.push(TackyTopLevel::StaticVar(sv));
+    }
+    for sc in gen.static_constants.drain(..) {
+        global_vars.insert(sc.name.clone());
+        top_level.push(TackyTopLevel::StaticConstant(sc));
+    }
+
     for name in file_scope_order {
         let Some((is_global, thread_local, init_val, var_type)) = file_scope_vars.remove(&name)
         else {
@@ -7516,6 +11201,9 @@ pub fn generate(program: Program) -> TackyResult<TackyProgram> {
             }
             TackyTopLevel::StaticConstant(sc) => {
                 global_vars.insert(sc.name.clone());
+            }
+            TackyTopLevel::Alias { name, .. } => {
+                global_vars.insert(name.clone());
             }
             _ => {}
         }
@@ -7618,6 +11306,108 @@ mod tests {
         )?;
 
         assert_eq!(err, "overlapping static initializer designators");
+        Ok(())
+    }
+
+    #[test]
+    fn static_bitfield_initializer_uses_only_occupied_bytes() -> Result<(), String> {
+        let program = lower(
+            "struct packed { signed a:6; signed b:7; signed c:6; signed d:5; unsigned char e; };\n\
+             static struct packed p = { 8, 9, 2, 4, 0x10 };\n",
+        )?;
+        let static_var = require_some(
+            program.top_level.iter().find_map(|item| match item {
+                TackyTopLevel::StaticVar(var) if var.name == "p" => Some(var),
+                _ => None,
+            }),
+            "expected static variable",
+        )?;
+
+        assert!(matches!(
+            static_var.init_values[0],
+            StaticInit::UCharInit(72)
+        ));
+        assert!(matches!(
+            static_var.init_values[1],
+            StaticInit::UCharInit(66)
+        ));
+        assert!(matches!(
+            static_var.init_values[2],
+            StaticInit::UCharInit(32)
+        ));
+        assert!(matches!(
+            static_var.init_values[3],
+            StaticInit::UCharInit(0x10)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn global_pointer_initializer_accepts_nested_array_subscript_address() -> Result<(), String> {
+        let program = lower("int a[6][9] = {}; int *c = &a[3][5];\n")?;
+        let static_var = require_some(
+            program.top_level.iter().find_map(|item| match item {
+                TackyTopLevel::StaticVar(var) if var.name == "c" => Some(var),
+                _ => None,
+            }),
+            "expected static pointer variable",
+        )?;
+
+        assert!(matches!(
+            &static_var.init_values[0],
+            StaticInit::PointerInitOffset(label, 128) if label == "a"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn static_initializer_accepts_local_label_difference() -> Result<(), String> {
+        let program = lower(
+            "void f(void) {\n\
+                 static int offsets[] = { &&lab1 - &&lab0 };\n\
+             lab1:\n\
+             lab0:\n\
+                 ;\n\
+             }\n",
+        )?;
+        let debug = format!("{program:#?}");
+        assert!(debug.contains("LabelDiffInit"));
+        assert!(debug.contains("label.f.lab1"));
+        assert!(debug.contains("label.f.lab0"));
+        Ok(())
+    }
+
+    #[test]
+    fn local_scalar_initializer_accepts_single_brace_layer() -> Result<(), String> {
+        let program = lower("long f(void) { long v = { (long) f }; return v == (long) f; }\n")?;
+        let debug = format!("{program:#?}");
+        assert!(debug.contains("name: \"f\""));
+        assert!(debug.contains("Return"));
+        Ok(())
+    }
+
+    #[test]
+    fn return_struct_array_element_materializes_value() -> Result<(), String> {
+        let program = lower(
+            "struct A { int b; };\n\
+             struct A foo(void) { struct A h[2] = { {1}, {2} }; return h[1]; }\n",
+        )?;
+        let returned_name = require_some(
+            program.top_level.iter().find_map(|item| match item {
+                TackyTopLevel::Function(fun) if fun.name == "foo" => {
+                    fun.body.iter().find_map(|instr| match instr {
+                        TackyInstr::Return(TackyVal::Var(name)) if name.starts_with("tmp.") => {
+                            Some(name.clone())
+                        }
+                        _ => None,
+                    })
+                }
+                _ => None,
+            }),
+            "expected returned temporary",
+        )?;
+
+        assert_eq!(program.array_sizes.get(&returned_name), Some(&4));
         Ok(())
     }
 
@@ -7778,6 +11568,7 @@ mod tests {
                 )])),
                 storage_class: None,
                 alignment: None,
+                alias: None,
             }),
             "bad struct member initializer should fail",
         )?;
@@ -9420,7 +13211,7 @@ mod tests {
             Box::new(Exp::Var("src".to_string())),
         ))?;
 
-        assert_eq!(ty, CType::Pointer);
+        assert_eq!(ty, CType::Struct);
         assert!(matches!(val, TackyVal::Var(_)));
         assert!(gen
             .instructions

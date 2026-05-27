@@ -121,7 +121,11 @@ fn build_asm_cfg(instrs: &[AsmInstr]) -> Vec<AsmBlock> {
             AsmInstr::Label(_) if !leaders.contains(&i) => {
                 leaders.push(i);
             }
-            AsmInstr::Jmp(_) | AsmInstr::JmpCC(_, _) | AsmInstr::Ret | AsmInstr::Unreachable
+            AsmInstr::Jmp(_)
+            | AsmInstr::NonlocalJmp(_)
+            | AsmInstr::JmpCC(_, _)
+            | AsmInstr::Ret
+            | AsmInstr::Unreachable
                 if i + 1 < instrs.len() && !leaders.contains(&(i + 1)) =>
             {
                 leaders.push(i + 1);
@@ -165,7 +169,7 @@ fn build_asm_cfg(instrs: &[AsmInstr]) -> Vec<AsmBlock> {
         let last_idx = blocks[bi].end - 1;
         let last = &instrs[last_idx];
         match last {
-            AsmInstr::Ret | AsmInstr::Unreachable => {
+            AsmInstr::Ret | AsmInstr::Unreachable | AsmInstr::NonlocalJmp(_) => {
                 blocks[bi].reaches_exit = true;
             }
             AsmInstr::Jmp(label) => {
@@ -274,6 +278,8 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
             (used, updated)
         }
         AsmInstr::X86SetVarargsXmmCount(_) => (vec![], vec![RegId::Gp(Reg::AX)]),
+        AsmInstr::JmpIndirect(target) => (operand_reads(target), vec![]),
+        AsmInstr::LoadLabelAddress(_, dst) => (vec![], operand_writes(dst)),
         AsmInstr::Cvtsi2sd(_, src, dst)
         | AsmInstr::Cvtsi2ss(_, src, dst)
         | AsmInstr::Cvttsd2si(_, src, dst)
@@ -300,6 +306,23 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
         AsmInstr::StoreIndirect(_, src, reg) => {
             let mut used = operand_reads(src);
             used.push(RegId::Gp(*reg));
+            (used, vec![])
+        }
+        AsmInstr::CopyToStackArg { src_ptr, .. } => {
+            let used = operand_reads(src_ptr);
+            (
+                used,
+                vec![RegId::Gp(Reg::SI), RegId::Gp(Reg::DI), RegId::Gp(Reg::CX)],
+            )
+        }
+        AsmInstr::CopyFromStackArg { .. } => (
+            vec![],
+            vec![RegId::Gp(Reg::SI), RegId::Gp(Reg::DI), RegId::Gp(Reg::CX)],
+        ),
+        AsmInstr::BuiltinSetjmp { buf, dst, .. } => (operand_reads(buf), operand_writes(dst)),
+        AsmInstr::BuiltinLongjmp { buf, value } => {
+            let mut used = operand_reads(buf);
+            used.extend(operand_reads(value));
             (used, vec![])
         }
         AsmInstr::AtomicRmw(_, _, return_old, dst) => {
@@ -343,6 +366,7 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
         AsmInstr::Ret
         | AsmInstr::Unreachable
         | AsmInstr::Jmp(_)
+        | AsmInstr::NonlocalJmp(_)
         | AsmInstr::JmpCC(_, _)
         | AsmInstr::Label(_)
         | AsmInstr::AllocateStack(_)
@@ -917,6 +941,14 @@ fn rewrite_coalesced(instrs: &mut Vec<AsmInstr>, uf: &UnionFind) {
             AsmInstr::StoreIndirect(_, src, _) => {
                 rewrite_op(src, uf);
             }
+            AsmInstr::BuiltinSetjmp { buf, dst, .. } => {
+                rewrite_op(buf, uf);
+                rewrite_op(dst, uf);
+            }
+            AsmInstr::BuiltinLongjmp { buf, value } => {
+                rewrite_op(buf, uf);
+                rewrite_op(value, uf);
+            }
             AsmInstr::AtomicRmw(_, _, _, dst)
             | AsmInstr::AtomicExchange(_, dst)
             | AsmInstr::AtomicCompareExchange(_, dst)
@@ -1029,6 +1061,14 @@ fn apply_register_map(instrs: &mut Vec<AsmInstr>, map: &HashMap<String, RegId>) 
             }
             AsmInstr::StoreIndirect(_, src, _) => {
                 replace_op(src, map);
+            }
+            AsmInstr::BuiltinSetjmp { buf, dst, .. } => {
+                replace_op(buf, map);
+                replace_op(dst, map);
+            }
+            AsmInstr::BuiltinLongjmp { buf, value } => {
+                replace_op(buf, map);
+                replace_op(value, map);
             }
             AsmInstr::AtomicRmw(_, _, _, dst)
             | AsmInstr::AtomicExchange(_, dst)
@@ -1213,6 +1253,14 @@ fn visit_operands<F: FnMut(&AsmOperand)>(instr: &AsmInstr, mut f: F) {
         }
         AsmInstr::StoreIndirect(_, src, _) => {
             f(src);
+        }
+        AsmInstr::BuiltinSetjmp { buf, dst, .. } => {
+            f(buf);
+            f(dst);
+        }
+        AsmInstr::BuiltinLongjmp { buf, value } => {
+            f(buf);
+            f(value);
         }
         AsmInstr::AtomicRmw(_, _, _, dst)
         | AsmInstr::AtomicExchange(_, dst)

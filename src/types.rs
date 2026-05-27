@@ -170,8 +170,10 @@ pub enum CType {
     UShort,
     Int,
     Long,
+    Int128,
     UInt,
     ULong,
+    UInt128,
     Float,
     Double,
     Bool,
@@ -227,6 +229,7 @@ impl CType {
             CType::Short | CType::UShort => 2,
             CType::Int | CType::UInt | CType::Float => 4,
             CType::Long | CType::ULong | CType::Double | CType::Pointer => 8,
+            CType::Int128 | CType::UInt128 => 16,
             CType::Void => 0,
             CType::Struct => 0, // size tracked via FullType/StructDef
         }
@@ -235,7 +238,7 @@ impl CType {
     pub fn is_signed(self) -> bool {
         matches!(
             self,
-            CType::Char | CType::SChar | CType::Short | CType::Int | CType::Long
+            CType::Char | CType::SChar | CType::Short | CType::Int | CType::Long | CType::Int128
         )
     }
 
@@ -339,6 +342,10 @@ pub enum FullType {
         elem: Box<FullType>,
         size: usize,
     },
+    Vector {
+        elem: Box<FullType>,
+        lanes: usize,
+    },
     Struct(String), // struct tag name (resolved to unique identifier)
 }
 
@@ -350,6 +357,7 @@ impl FullType {
             FullType::Pointer(_) => CType::Pointer,
             FullType::Function { .. } => CType::Pointer,
             FullType::Array { .. } => CType::Pointer, // arrays decay to pointers in most contexts
+            FullType::Vector { elem, .. } => elem.to_ctype(),
             FullType::Struct(_) => CType::Struct,
         }
     }
@@ -361,6 +369,7 @@ impl FullType {
             FullType::Pointer(_) => 8,
             FullType::Function { .. } => 8,
             FullType::Array { elem, size } => elem.byte_size() * size,
+            FullType::Vector { elem, lanes } => elem.byte_size() * lanes,
             FullType::Struct(_) => 0, // need struct_defs to compute; caller should use byte_size_with
         }
     }
@@ -373,6 +382,7 @@ impl FullType {
         match self {
             FullType::Struct(tag) => struct_defs.get(tag).map(|d| d.size).unwrap_or(0),
             FullType::Array { elem, size } => elem.byte_size_with(struct_defs) * size,
+            FullType::Vector { elem, lanes } => elem.byte_size_with(struct_defs) * lanes,
             _ => self.byte_size(),
         }
     }
@@ -391,6 +401,7 @@ impl FullType {
                     ea
                 }
             }
+            FullType::Vector { elem, .. } => elem.alignment(),
             FullType::Struct(_) => 1, // need struct_defs; caller should use alignment_with
         }
     }
@@ -403,6 +414,7 @@ impl FullType {
         match self {
             FullType::Struct(tag) => struct_defs.get(tag).map(|d| d.alignment).unwrap_or(1),
             FullType::Array { elem, .. } => elem.alignment_with(struct_defs),
+            FullType::Vector { elem, .. } => elem.alignment_with(struct_defs),
             _ => self.alignment(),
         }
     }
@@ -413,6 +425,7 @@ impl FullType {
             FullType::Array { elem, .. } => Some(elem),
             FullType::Pointer(inner) => Some(inner),
             FullType::Function { return_type, .. } => Some(return_type),
+            FullType::Vector { elem, .. } => Some(elem),
             _ => None,
         }
     }
@@ -427,6 +440,10 @@ impl FullType {
 
     pub fn is_array(&self) -> bool {
         matches!(self, FullType::Array { .. })
+    }
+
+    pub fn is_vector(&self) -> bool {
+        matches!(self, FullType::Vector { .. })
     }
 
     pub fn is_pointer(&self) -> bool {
@@ -833,6 +850,8 @@ impl StructDef {
                             | CType::UInt
                             | CType::Long
                             | CType::ULong
+                            | CType::Int128
+                            | CType::UInt128
                     )
                 ) {
                     return Err(format!("bit-field '{}' must have integer type", m.name));
@@ -845,7 +864,7 @@ impl StructDef {
                     ));
                 }
                 let (storage_size, storage_align, storage_type) = if member_packed {
-                    (usize::from(width).div_ceil(8).max(1), 1, m.member_type)
+                    (m_size, 1, m.member_type)
                 } else if m_size > 4 && width <= 32 {
                     (
                         4,
@@ -891,7 +910,12 @@ impl StructDef {
                             bit_offset: 0,
                         });
                     }
-                    max_size = max_size.max(storage_size);
+                    let occupied_size = if member_packed {
+                        usize::from(width).div_ceil(8).max(1)
+                    } else {
+                        storage_size
+                    };
+                    max_size = max_size.max(occupied_size);
                     max_align = max_align.max(storage_align);
                     continue;
                 }
@@ -1044,6 +1068,10 @@ fn member_size_align(
             // Inside structs, array alignment is just the element alignment
             Ok((total, elem_align))
         }
+        FullType::Vector { elem, lanes } => {
+            let (elem_size, elem_align) = member_size_align(elem, struct_defs)?;
+            Ok((elem_size * lanes, elem_align))
+        }
         FullType::Struct(tag) => {
             if let Some(def) = struct_defs.get(tag) {
                 Ok((def.size, def.alignment))
@@ -1063,18 +1091,21 @@ fn member_size_align(
 pub enum StaticInit {
     IntInit(i32),
     LongInit(i64),
+    Int128Init(i128),
     UIntInit(u32),
     ULongInit(u64),
+    UInt128Init(u128),
     ShortInit(i16),
     UShortInit(u16),
     CharInit(i8),
     UCharInit(u8),
     DoubleInit(f64),
     FloatInit(f32),
-    ZeroInit(usize),                // zero-fill N bytes
-    StringInit(String, bool),       // (string_content, null_terminated) → .asciz or .ascii
-    PointerInit(String),            // label name → .quad label_name
-    PointerInitOffset(String, i64), // label + addend → .quad label_name+addend
+    ZeroInit(usize),                      // zero-fill N bytes
+    StringInit(String, bool),             // (string_content, null_terminated) → .asciz or .ascii
+    PointerInit(String),                  // label name → .quad label_name
+    PointerInitOffset(String, i64),       // label + addend → .quad label_name+addend
+    LabelDiffInit(String, String, usize), // left - right → .long/.quad label difference
 }
 
 // ============================================================
@@ -1087,11 +1118,14 @@ pub enum Token {
     Identifier(String),
     IntLiteral(i64),
     LongLiteral(i64),
+    Int128Literal(i128),
     UIntLiteral(i64),
     ULongLiteral(i64),
+    UInt128Literal(u128),
     DoubleLiteral(f64),
     CharLiteral(i64),
     StringLiteral(String),
+    WideStringLiteral(String),
     // Keywords
     KWChar,
     KWSizeOf,
@@ -1143,6 +1177,10 @@ pub enum Token {
     AttributePackedAligned(String),
     AttributePackedAlignedNoreturn(String),
     AttributeNoreturn,
+    AttributeNoInstrumentFunction,
+    AttributeAlias(String),
+    AttributeMode(String),
+    AttributeVectorSize(String),
     Skip,
     Ellipsis, // ...
 
@@ -1243,23 +1281,29 @@ pub enum BinaryOp {
 pub enum Designator {
     Field(String),
     Index(Box<Exp>),
+    IndexRange(Box<Exp>, Box<Exp>),
 }
 
 #[derive(Debug, Clone)]
 pub enum Exp {
     Constant(i64),
     LongConstant(i64),
+    Int128Constant(i128),
     UIntConstant(i64),
     ULongConstant(i64),
+    UInt128Constant(u128),
     DoubleConstant(f64),
     StringLiteral(String),
+    WideStringLiteral(String),
     Var(String),
+    LabelAddress(String),
     Cast(CType, Option<FullType>, Box<Exp>),
     Unary(UnaryOp, Box<Exp>),
     Binary(BinaryOp, Box<Exp>, Box<Exp>),
     Assign(Box<Exp>, Box<Exp>),
     CompoundAssign(BinaryOp, Box<Exp>, Box<Exp>),
     Conditional(Box<Exp>, Box<Exp>, Box<Exp>),
+    BuiltinExpect(Box<Exp>, Vec<Exp>),
     FunctionCall(String, Vec<Exp>),
     Subscript(Box<Exp>, Box<Exp>), // arr[index]
     ArrayInit(Vec<Exp>),           // {1, 2, 3} or {{1,2}, {3,4}}
@@ -1329,6 +1373,7 @@ pub enum Statement {
     Break(String),
     Continue(String),
     Goto(String),
+    IndirectGoto(Exp),
     Label(String, Box<Statement>),
     Switch {
         control: Exp,
@@ -1338,6 +1383,7 @@ pub enum Statement {
     },
     Case {
         value: Exp,
+        end_value: Option<Exp>,
         body: Box<Statement>,
         label: String,
     },
@@ -1351,6 +1397,7 @@ pub enum Statement {
 #[derive(Debug, Clone)]
 pub struct SwitchCase {
     pub value: Option<i64>, // None = default
+    pub end_value: Option<i64>,
     pub label: String,
 }
 
@@ -1428,6 +1475,7 @@ pub struct VarDeclaration {
     pub init: Option<Exp>,
     pub storage_class: Option<StorageClass>,
     pub alignment: Option<std::num::NonZeroUsize>,
+    pub alias: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1440,10 +1488,14 @@ pub struct FunctionDeclaration {
     pub params: Vec<ParamDecl>,
     /// Full types for each parameter (for proper multi-dim array tracking)
     pub param_full_types: Vec<FullType>,
+    /// Runtime VLA bounds captured while parsing parameter declarators.
+    pub param_vla_bounds: Vec<Exp>,
     /// True if the prototype ends in `...`.
     pub variadic: bool,
     /// True if the declaration used a noreturn spelling.
     pub noreturn: bool,
+    /// True if function instrumentation hooks must not be emitted.
+    pub no_instrument_function: bool,
     pub body: Option<Block>,
     pub storage_class: Option<StorageClass>,
 }
@@ -1454,6 +1506,7 @@ pub struct MemberDeclaration {
     pub member_type: CType,
     pub member_full_type: FullType,
     pub bit_width: Option<u8>,
+    pub flexible_array: bool,
     pub alignment: Option<std::num::NonZeroUsize>,
     pub packed: bool,
 }
@@ -1488,6 +1541,8 @@ pub struct Program {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TackyVal {
     Constant(i64),
+    Int128Constant(i128),
+    UInt128Constant(u128),
     DoubleConstant(f64),
     Var(String),
 }
@@ -1540,9 +1595,25 @@ pub enum TackyInstr {
         dst: TackyVal,
     },
     Jump(String),
+    NonlocalJump(String),
+    JumpIndirect(TackyVal),
     JumpIfZero(TackyVal, String),
     JumpIfNotZero(TackyVal, String),
     Label(String),
+    LoadLabelAddress(String, TackyVal),
+    FrameAddress {
+        dst: TackyVal,
+    },
+    BuiltinSetjmp {
+        buf: TackyVal,
+        dst: TackyVal,
+        label: String,
+        end_label: String,
+    },
+    BuiltinLongjmp {
+        buf: TackyVal,
+        value: TackyVal,
+    },
     Unreachable,
     FunCall {
         name: String,
@@ -1550,6 +1621,8 @@ pub enum TackyInstr {
         dst: TackyVal,
         /// Indices of args that must be passed on the stack (MEMORY-class struct eightbytes)
         stack_arg_indices: std::collections::HashSet<usize>,
+        /// Stack-passed aggregate blocks: (flattened arg index containing source address, byte size).
+        memory_arg_blocks: Vec<(usize, usize)>,
         /// Groups of consecutive args that form struct eightbytes (start_idx, count, is_sse_vec)
         struct_arg_groups: Vec<(usize, usize, Vec<bool>)>,
         /// True if the direct call target has a `...` prototype.
@@ -1686,6 +1759,8 @@ pub struct TackyFunction {
     pub body: Vec<TackyInstr>,
     /// Params that must be passed on the stack (MEMORY-class struct eightbytes)
     pub stack_params: std::collections::HashSet<String>,
+    /// Stack-passed aggregate blocks: (flattened param index, original aggregate name, byte size).
+    pub memory_param_blocks: Vec<(usize, String, usize)>,
     /// Groups of consecutive params that form struct eightbytes.
     /// Each (start_idx, count, is_sse_vec) means params[start..start+count]
     /// must ALL fit in registers or ALL go on the stack.
@@ -1714,6 +1789,7 @@ pub enum TackyTopLevel {
     Function(TackyFunction),
     StaticVar(TackyStaticVar),
     StaticConstant(TackyStaticConstant),
+    Alias { name: String, target: String },
 }
 
 #[derive(Debug)]
@@ -1741,6 +1817,7 @@ pub enum AsmType {
     Word,     // 16-bit short
     Longword, // 32-bit int
     Quadword, // 64-bit long
+    Octword,  // 128-bit integer
     Float,    // 32-bit float (XMM)
     Double,   // 64-bit float (XMM)
 }
@@ -1752,6 +1829,7 @@ impl From<CType> for AsmType {
             CType::Short | CType::UShort => AsmType::Word,
             CType::Int | CType::UInt => AsmType::Longword,
             CType::Long | CType::ULong | CType::Pointer => AsmType::Quadword,
+            CType::Int128 | CType::UInt128 => AsmType::Octword,
             CType::Float => AsmType::Float,
             CType::Double => AsmType::Double,
             CType::Void => AsmType::Longword,
@@ -1809,6 +1887,7 @@ pub enum AsmOperand {
     /// Aggregate object at byte offset (for arrays/structs)
     PseudoMem(String, i32),
     Stack(i32),
+    StackArg(i32),
     Data(String),
     TlsData(String, i32),
     /// Indexed addressing: base_reg + index_reg * scale
@@ -1824,7 +1903,11 @@ pub enum AsmUnaryOp {
 #[derive(Debug, Clone)]
 pub enum AsmBinaryOp {
     Add,
+    AddSetFlags,
+    Adc,
     Sub,
+    SubSetFlags,
+    Sbb,
     Mul,
     SDiv,
     UDiv,
@@ -1865,9 +1948,22 @@ pub enum AsmInstr {
     Cdq(AsmType),             // Longword=cdq, Quadword=cqo
     Cmp(AsmType, AsmOperand, AsmOperand),
     Jmp(String),
+    NonlocalJmp(String),
+    JmpIndirect(AsmOperand),
     JmpCC(CondCode, String),
     SetCC(CondCode, AsmOperand),
     Label(String),
+    LoadLabelAddress(String, AsmOperand),
+    BuiltinSetjmp {
+        buf: AsmOperand,
+        dst: AsmOperand,
+        label: String,
+        end_label: String,
+    },
+    BuiltinLongjmp {
+        buf: AsmOperand,
+        value: AsmOperand,
+    },
     Push(AsmOperand),
     Call(String, usize, usize, bool), // name, int_reg_args, sse_reg_args, indirect
     Pop(Reg),
@@ -1901,6 +1997,18 @@ pub enum AsmInstr {
     LoadIndirect(AsmType, Reg, AsmOperand),
     /// Store to memory pointed to by a register: mov src, (reg)
     StoreIndirect(AsmType, AsmOperand, Reg),
+    /// Copy `size` bytes from pointer operand to outgoing call stack at `%rsp + dst_offset`.
+    CopyToStackArg {
+        src_ptr: AsmOperand,
+        dst_offset: i32,
+        size: usize,
+    },
+    /// Copy `size` bytes from incoming call stack at `%rbp + src_offset` to aggregate storage.
+    CopyFromStackArg {
+        src_offset: i32,
+        dst: AsmOperand,
+        size: usize,
+    },
     /// AArch64-only pointer addition: dst = ptr + index * scale.
     AArch64AddPtr(AsmOperand, AsmOperand, i64, AsmOperand), // ptr, index, scale, dst
     /// AArch64-only load after temporary stack allocation rebases local stack operands.
@@ -1946,6 +2054,7 @@ pub enum AsmTopLevel {
     Function(AsmFunction),
     StaticVar(AsmStaticVar),
     StaticConstant(AsmStaticConstant),
+    Alias { name: String, target: String },
 }
 
 #[derive(Debug)]
@@ -1998,6 +2107,7 @@ mod tests {
                 member_type: CType::Double,
                 member_full_type: FullType::Scalar(CType::Double),
                 bit_width: None,
+                flexible_array: false,
                 alignment: None,
                 packed: false,
             },
@@ -2006,6 +2116,7 @@ mod tests {
                 member_type: CType::Long,
                 member_full_type: FullType::Scalar(CType::Long),
                 bit_width: None,
+                flexible_array: false,
                 alignment: None,
                 packed: false,
             },

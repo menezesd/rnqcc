@@ -1,4 +1,5 @@
 use crate::types::Token;
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceLocation {
@@ -30,24 +31,44 @@ pub struct SourceLineMapping {
 pub struct Lexer {
     chars: Vec<char>,
     pos: usize,
+    line_starts: Vec<usize>,
     line_map: Option<Vec<SourceLineMapping>>,
+    pending_tokens: VecDeque<Token>,
 }
 
 impl Lexer {
     pub fn new(input: &str) -> Self {
+        let chars: Vec<char> = input.chars().collect();
+        let line_starts = Self::line_starts_for(&chars);
         Lexer {
-            chars: input.chars().collect(),
+            chars,
             pos: 0,
+            line_starts,
             line_map: None,
+            pending_tokens: VecDeque::new(),
         }
     }
 
     pub fn with_line_map(input: &str, line_map: Vec<SourceLineMapping>) -> Self {
+        let chars: Vec<char> = input.chars().collect();
+        let line_starts = Self::line_starts_for(&chars);
         Lexer {
-            chars: input.chars().collect(),
+            chars,
             pos: 0,
+            line_starts,
             line_map: Some(line_map),
+            pending_tokens: VecDeque::new(),
         }
+    }
+
+    fn line_starts_for(chars: &[char]) -> Vec<usize> {
+        let mut starts = vec![0];
+        for (idx, ch) in chars.iter().enumerate() {
+            if *ch == '\n' {
+                starts.push(idx + 1);
+            }
+        }
+        starts
     }
 
     fn peek(&self) -> Option<char> {
@@ -121,7 +142,10 @@ impl Lexer {
                     pos += 1;
                 }
                 let name: String = chars[start..pos].iter().collect();
-                if name != "aligned" && name != "align" {
+                if !matches!(
+                    name.as_str(),
+                    "aligned" | "__aligned__" | "align" | "__align__"
+                ) {
                     continue;
                 }
                 while pos < chars.len() && chars[pos].is_whitespace() {
@@ -161,8 +185,147 @@ impl Lexer {
         None
     }
 
+    fn parse_alias_attribute(text: &str) -> Option<String> {
+        let chars: Vec<char> = text.chars().collect();
+        let mut pos = 0;
+        while pos < chars.len() {
+            if chars[pos].is_ascii_alphabetic() || chars[pos] == '_' {
+                let start = pos;
+                pos += 1;
+                while pos < chars.len() && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_')
+                {
+                    pos += 1;
+                }
+                let name: String = chars[start..pos].iter().collect();
+                if !matches!(name.as_str(), "alias" | "__alias__") {
+                    continue;
+                }
+                while pos < chars.len() && chars[pos].is_whitespace() {
+                    pos += 1;
+                }
+                if chars.get(pos) != Some(&'(') {
+                    continue;
+                }
+                pos += 1;
+                while pos < chars.len() && chars[pos].is_whitespace() {
+                    pos += 1;
+                }
+                if chars.get(pos) != Some(&'"') {
+                    continue;
+                }
+                pos += 1;
+                let alias_start = pos;
+                while pos < chars.len() && chars[pos] != '"' {
+                    pos += 1;
+                }
+                if pos < chars.len() {
+                    return Some(chars[alias_start..pos].iter().collect());
+                }
+            } else {
+                pos += 1;
+            }
+        }
+        None
+    }
+
+    fn parse_mode_attribute(text: &str) -> Option<String> {
+        let chars: Vec<char> = text.chars().collect();
+        let mut pos = 0;
+        while pos < chars.len() {
+            if chars[pos].is_ascii_alphabetic() || chars[pos] == '_' {
+                let start = pos;
+                pos += 1;
+                while pos < chars.len() && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_')
+                {
+                    pos += 1;
+                }
+                let name: String = chars[start..pos].iter().collect();
+                if !matches!(name.as_str(), "mode" | "__mode__") {
+                    continue;
+                }
+                while pos < chars.len() && chars[pos].is_whitespace() {
+                    pos += 1;
+                }
+                if chars.get(pos) != Some(&'(') {
+                    continue;
+                }
+                pos += 1;
+                while pos < chars.len() && chars[pos].is_whitespace() {
+                    pos += 1;
+                }
+                let mode_start = pos;
+                while pos < chars.len() && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_')
+                {
+                    pos += 1;
+                }
+                let mode: String = chars[mode_start..pos].iter().collect();
+                while pos < chars.len() && chars[pos].is_whitespace() {
+                    pos += 1;
+                }
+                if !mode.is_empty() && chars.get(pos) == Some(&')') {
+                    return Some(mode);
+                }
+            } else {
+                pos += 1;
+            }
+        }
+        None
+    }
+
+    fn parse_vector_size_attribute(text: &str) -> Option<String> {
+        let chars: Vec<char> = text.chars().collect();
+        let mut pos = 0;
+        while pos < chars.len() {
+            if chars[pos].is_ascii_alphabetic() || chars[pos] == '_' {
+                let start = pos;
+                pos += 1;
+                while pos < chars.len() && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_')
+                {
+                    pos += 1;
+                }
+                let name: String = chars[start..pos].iter().collect();
+                if !matches!(name.as_str(), "vector_size" | "__vector_size__") {
+                    continue;
+                }
+                while pos < chars.len() && chars[pos].is_whitespace() {
+                    pos += 1;
+                }
+                if chars.get(pos) != Some(&'(') {
+                    continue;
+                }
+                pos += 1;
+                let expr_start = pos;
+                let mut depth = 1;
+                while pos < chars.len() {
+                    match chars[pos] {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                let expr: String = chars[expr_start..pos].iter().collect();
+                                return Some(expr.trim().to_string());
+                            }
+                        }
+                        _ => {}
+                    }
+                    pos += 1;
+                }
+            } else {
+                pos += 1;
+            }
+        }
+        None
+    }
+
     fn contains_noreturn_attribute(text: &str) -> bool {
         Self::contains_named_attribute(text, &["noreturn", "__noreturn__"])
+    }
+
+    fn contains_no_instrument_function_attribute(text: &str) -> bool {
+        Self::contains_named_attribute(
+            text,
+            &["no_instrument_function", "__no_instrument_function__"],
+        )
     }
 
     fn contains_packed_attribute(text: &str) -> bool {
@@ -189,6 +352,27 @@ impl Lexer {
             }
         }
         false
+    }
+
+    fn consume_float_suffixes(&mut self) {
+        let mut saw_float_suffix = false;
+        let mut saw_imaginary_suffix = false;
+        loop {
+            match self.peek() {
+                Some('f' | 'F' | 'l' | 'L' | 'd' | 'D') if !saw_float_suffix => {
+                    saw_float_suffix = true;
+                    let first = self.advance();
+                    if matches!(first, Some('d' | 'D')) && matches!(self.peek(), Some('d' | 'D')) {
+                        self.advance();
+                    }
+                }
+                Some('i' | 'I' | 'j' | 'J') if !saw_imaginary_suffix => {
+                    saw_imaginary_suffix = true;
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
     }
 
     fn read_number(&mut self) -> Result<Token, String> {
@@ -222,9 +406,7 @@ impl Lexer {
             let value = num_str
                 .parse::<f64>()
                 .map_err(|_| format!("invalid float literal: {}", num_str))?;
-            if matches!(self.peek(), Some('f' | 'F' | 'l' | 'L')) {
-                self.advance();
-            }
+            self.consume_float_suffixes();
             return Ok(Token::DoubleLiteral(value));
         }
 
@@ -300,9 +482,7 @@ impl Lexer {
                 ));
             }
             if is_hex_float {
-                if matches!(self.peek(), Some('f' | 'F' | 'l' | 'L')) {
-                    self.advance();
-                }
+                self.consume_float_suffixes();
                 if let Some(c) = self.peek() {
                     if c.is_ascii_alphabetic() || c == '_' {
                         return Err(format!(
@@ -395,10 +575,8 @@ impl Lexer {
             let value = num_str
                 .parse::<f64>()
                 .map_err(|_| format!("invalid float literal: {}", num_str))?;
-            // Consume optional f/F/l/L suffix (all treated as double)
-            if matches!(self.peek(), Some('f' | 'F' | 'l' | 'L')) {
-                self.advance();
-            }
+            // Consume optional floating and GNU imaginary suffixes (all treated as double).
+            self.consume_float_suffixes();
             if let Some(c) = self.peek() {
                 if c.is_ascii_alphabetic() || c == '_' {
                     return Err(format!(
@@ -438,6 +616,12 @@ impl Lexer {
                 _ => break,
             }
         }
+        let has_imaginary_suffix = if matches!(self.peek(), Some('i' | 'I' | 'j' | 'J')) {
+            self.advance();
+            true
+        } else {
+            false
+        };
 
         // Check that the number is not immediately followed by an identifier char
         if let Some(c) = self.peek() {
@@ -449,27 +633,65 @@ impl Lexer {
             }
         }
         let num_str: String = self.chars[start..num_end].iter().collect();
-        // Parse as u64 first to handle large unsigned constants, then transmute to i64
+        // Parse as u128 first so GNU __int128-sized constants survive lexing.
         let digits = if radix == 16 || radix == 2 {
             &num_str[2..]
         } else {
             num_str.as_str()
         };
-        // Parse as u64 first to handle large unsigned constants, then transmute to i64.
-        let value = if is_unsigned {
-            u64::from_str_radix(digits, radix)
-                .map_err(|_| format!("invalid integer literal: {}", num_str))? as i64
+        let unsigned_value = u128::from_str_radix(digits, radix)
+            .map_err(|_| format!("invalid integer literal: {}", num_str))?;
+        if has_imaginary_suffix && unsigned_value <= i64::MAX as u128 {
+            return Ok(Token::IntLiteral(unsigned_value as i64));
+        }
+        let value64 = unsigned_value as u64 as i64;
+        if is_unsigned {
+            if unsigned_value <= u32::MAX as u128 && !is_long {
+                return Ok(Token::UIntLiteral(value64));
+            }
+            if unsigned_value <= u64::MAX as u128 {
+                return Ok(Token::ULongLiteral(value64));
+            }
+            return Ok(Token::UInt128Literal(unsigned_value));
+        }
+
+        let is_decimal = radix == 10;
+        if is_long {
+            if unsigned_value <= i64::MAX as u128 {
+                return Ok(Token::LongLiteral(value64));
+            }
+            if !is_decimal && unsigned_value <= u64::MAX as u128 {
+                return Ok(Token::ULongLiteral(value64));
+            }
+            if unsigned_value <= i128::MAX as u128 {
+                return Ok(Token::Int128Literal(unsigned_value as i128));
+            }
+            return Ok(Token::UInt128Literal(unsigned_value));
+        }
+
+        if is_decimal {
+            if unsigned_value <= i64::MAX as u128 {
+                return Ok(Token::IntLiteral(value64));
+            }
+            if unsigned_value <= i128::MAX as u128 {
+                return Ok(Token::Int128Literal(unsigned_value as i128));
+            }
+            return Ok(Token::UInt128Literal(unsigned_value));
+        }
+
+        if unsigned_value <= i32::MAX as u128 {
+            Ok(Token::IntLiteral(value64))
+        } else if unsigned_value <= u32::MAX as u128 {
+            Ok(Token::UIntLiteral(value64))
+        } else if unsigned_value <= i64::MAX as u128 {
+            Ok(Token::LongLiteral(value64))
+        } else if unsigned_value <= u64::MAX as u128 {
+            Ok(Token::ULongLiteral(value64))
+        } else if unsigned_value <= i128::MAX as u128 {
+            Ok(Token::Int128Literal(unsigned_value as i128))
         } else {
-            i64::from_str_radix(digits, radix)
-                .or_else(|_| u64::from_str_radix(digits, radix).map(|v| v as i64))
-                .map_err(|_| format!("invalid integer literal: {}", num_str))?
-        };
-        Ok(match (is_unsigned, is_long) {
-            (true, true) => Token::ULongLiteral(value),
-            (true, false) => Token::UIntLiteral(value),
-            (false, true) => Token::LongLiteral(value),
-            (false, false) => Token::IntLiteral(value),
-        })
+            Ok(Token::UInt128Literal(unsigned_value))
+        }
     }
 
     fn unescape_char(&mut self) -> Result<char, String> {
@@ -489,7 +711,7 @@ impl Lexer {
                     if digits == 0 {
                         return Err("expected hexadecimal digits after \\x escape".to_string());
                     }
-                    char::from_u32(value & 0xff)
+                    char::from_u32(value)
                         .ok_or_else(|| "invalid hexadecimal escape value".to_string())
                 }
                 Some(c @ '0'..='7') => {
@@ -503,8 +725,7 @@ impl Lexer {
                             _ => break,
                         }
                     }
-                    char::from_u32(value & 0xff)
-                        .ok_or_else(|| "invalid octal escape value".to_string())
+                    char::from_u32(value).ok_or_else(|| "invalid octal escape value".to_string())
                 }
                 Some('n') => Ok('\n'),
                 Some('t') => Ok('\t'),
@@ -525,14 +746,45 @@ impl Lexer {
         }
     }
 
-    fn read_char_constant(&mut self) -> Result<Token, String> {
-        // Opening ' already consumed
-        let c = self.unescape_char()?;
-        match self.advance() {
-            Some('\'') => {}
-            _ => return Err("expected closing single quote".to_string()),
+    fn decode_utf8_byte_chars(chars: &[u32]) -> Option<String> {
+        if chars.iter().all(|ch| *ch <= u8::MAX as u32) {
+            let bytes: Vec<u8> = chars.iter().map(|ch| *ch as u8).collect();
+            String::from_utf8(bytes).ok()
+        } else {
+            None
         }
-        Ok(Token::CharLiteral(c as i64))
+    }
+
+    fn read_char_constant(&mut self, wide: bool) -> Result<Token, String> {
+        // Opening ' already consumed
+        let mut value = 0i64;
+        let mut chars = Vec::new();
+        let mut saw_char = false;
+        loop {
+            if self.peek() == Some('\'') {
+                self.advance();
+                break;
+            }
+            if self.peek().is_none() {
+                return Err("expected closing single quote".to_string());
+            }
+            let c = self.unescape_char()?;
+            let ch = c as u32;
+            chars.push(ch);
+            value = (value << 8) | i64::from(ch);
+            saw_char = true;
+        }
+        if !saw_char {
+            return Err("empty character constant".to_string());
+        }
+        if wide && chars.len() > 1 {
+            if let Some(decoded) = Self::decode_utf8_byte_chars(&chars) {
+                if decoded.chars().count() == 1 {
+                    value = decoded.chars().next().unwrap() as i64;
+                }
+            }
+        }
+        Ok(Token::CharLiteral(value))
     }
 
     fn read_string_literal(&mut self) -> Result<Token, String> {
@@ -630,6 +882,7 @@ impl Lexer {
                 }
                 if self.peek() == Some('(') {
                     let mut depth = 0;
+                    let asm_start = self.pos + 1;
                     loop {
                         match self.advance() {
                             Some('(') => depth += 1,
@@ -642,6 +895,20 @@ impl Lexer {
                             None => break,
                             _ => {}
                         }
+                    }
+                    let asm_end = self.pos.saturating_sub(1);
+                    let text: String = self.chars[asm_start..asm_end].iter().collect();
+                    if let Some(tokens) = Self::asm_tied_zero_assignment_tokens(&text) {
+                        let mut tokens = VecDeque::from(tokens);
+                        let first = tokens.pop_front().unwrap_or(Token::Skip);
+                        self.pending_tokens.extend(tokens);
+                        return Ok(first);
+                    }
+                    if let Some(tokens) = Self::asm_simple_operand_side_effect_tokens(&text) {
+                        let mut tokens = VecDeque::from(tokens);
+                        let first = tokens.pop_front().unwrap_or(Token::Skip);
+                        self.pending_tokens.extend(tokens);
+                        return Ok(first);
                     }
                 }
                 Token::Skip
@@ -667,8 +934,18 @@ impl Lexer {
                     }
                 }
                 let text: String = self.chars[attr_start..self.pos].iter().collect();
+                if let Some(alias) = Self::parse_alias_attribute(&text) {
+                    return Ok(Token::AttributeAlias(alias));
+                }
+                if let Some(mode) = Self::parse_mode_attribute(&text) {
+                    return Ok(Token::AttributeMode(mode));
+                }
+                if let Some(vector_size) = Self::parse_vector_size_attribute(&text) {
+                    return Ok(Token::AttributeVectorSize(vector_size));
+                }
                 let alignment = Self::parse_aligned_attribute(&text);
                 let noreturn = Self::contains_noreturn_attribute(&text);
+                let no_instrument_function = Self::contains_no_instrument_function_attribute(&text);
                 let packed = Self::contains_packed_attribute(&text);
                 if let Some(alignment) = alignment {
                     return Ok(if packed && noreturn {
@@ -687,6 +964,9 @@ impl Lexer {
                 if noreturn {
                     return Ok(Token::AttributeNoreturn);
                 }
+                if no_instrument_function {
+                    return Ok(Token::AttributeNoInstrumentFunction);
+                }
                 // Return dummy token that lex_all will filter out
                 Token::Skip // harmless no-op token
             }
@@ -703,6 +983,115 @@ impl Lexer {
         Ok(token)
     }
 
+    fn asm_tied_zero_assignment_tokens(text: &str) -> Option<Vec<Token>> {
+        let mut parts = text.split(':');
+        let template = parts.next()?.trim();
+        if !matches!(template, "\"\"" | "__extension__ \"\"") {
+            return None;
+        }
+        let outputs = parts.next()?.trim();
+        let inputs = parts.next()?.trim();
+        let output_name = Self::first_parenthesized_identifier(outputs)?;
+        if !inputs.contains("\"0\"") && !inputs.contains("'0'") {
+            return None;
+        }
+        let value_text = Self::first_parenthesized_text(inputs)?;
+        let value = value_text.trim();
+        let value_token = if let Some(token) = Self::simple_asm_value_token(value) {
+            token
+        } else {
+            return None;
+        };
+        Some(vec![
+            Token::Identifier(output_name),
+            Token::Assign,
+            value_token,
+        ])
+    }
+
+    fn simple_asm_value_token(value: &str) -> Option<Token> {
+        let integer = value
+            .trim_end_matches(['l', 'L', 'u', 'U'])
+            .trim()
+            .parse::<i64>();
+        if let Ok(value) = integer {
+            return Some(Token::IntLiteral(value));
+        }
+        let mut chars = value.chars();
+        let first = chars.next()?;
+        if !(first.is_ascii_alphabetic() || first == '_') {
+            return None;
+        }
+        if chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+            Some(Token::Identifier(value.to_string()))
+        } else {
+            None
+        }
+    }
+
+    fn asm_simple_operand_side_effect_tokens(text: &str) -> Option<Vec<Token>> {
+        let mut parts = text.split(':');
+        let template = parts.next()?.trim();
+        if !matches!(template, "\"\"" | "__extension__ \"\"") {
+            return None;
+        }
+        let outputs = parts.next()?.trim();
+        let output = Self::last_parenthesized_text(outputs)?.trim();
+        let call = output.strip_prefix('*').unwrap_or(output).trim();
+        let name = call.strip_suffix("()")?.trim();
+        let mut chars = name.chars();
+        let first = chars.next()?;
+        if !(first.is_ascii_alphabetic() || first == '_') {
+            return None;
+        }
+        if !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+            return None;
+        }
+        Some(vec![
+            Token::Identifier(name.to_string()),
+            Token::OpenParen,
+            Token::CloseParen,
+        ])
+    }
+
+    fn first_parenthesized_identifier(text: &str) -> Option<String> {
+        let inner = Self::first_parenthesized_text(text)?.trim().to_string();
+        let mut chars = inner.chars();
+        let first = chars.next()?;
+        if !(first.is_ascii_alphabetic() || first == '_') {
+            return None;
+        }
+        if chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+            Some(inner)
+        } else {
+            None
+        }
+    }
+
+    fn first_parenthesized_text(text: &str) -> Option<&str> {
+        let start = text.find('(')? + 1;
+        let end = text[start..].find(')')? + start;
+        Some(&text[start..end])
+    }
+
+    fn last_parenthesized_text(text: &str) -> Option<&str> {
+        let end = text.rfind(')')?;
+        let mut depth = 0usize;
+        for (idx, ch) in text[..=end].char_indices().rev() {
+            match ch {
+                ')' => depth += 1,
+                '(' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return Some(&text[idx + 1..end]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Try to match a second character; if it matches, consume it and return `yes`,
     /// otherwise return `no`.
     fn two_char(&mut self, expected: char, yes: Token, no: Token) -> Token {
@@ -715,16 +1104,10 @@ impl Lexer {
     }
 
     fn location_for_offset(&self, offset: usize) -> SourceLocation {
-        let mut line = 1usize;
-        let mut column = 1usize;
-        for ch in self.chars.iter().take(offset) {
-            if *ch == '\n' {
-                line += 1;
-                column = 1;
-            } else {
-                column += 1;
-            }
-        }
+        let line_index = self.line_starts.partition_point(|start| *start <= offset);
+        let line_index = line_index.saturating_sub(1);
+        let line = line_index + 1;
+        let column = offset.saturating_sub(self.line_starts[line_index]) + 1;
         if let Some(mapped) = self
             .line_map
             .as_ref()
@@ -758,6 +1141,13 @@ impl Lexer {
         loop {
             self.skip_whitespace_and_comments()?;
             let start = self.pos;
+            if let Some(tok) = self.pending_tokens.pop_front() {
+                tokens.push(SpannedToken {
+                    token: tok,
+                    span: self.span_for_offsets(start, start),
+                });
+                continue;
+            }
             let c = match self.advance() {
                 Some(c) => c,
                 None => break,
@@ -894,16 +1284,34 @@ impl Lexer {
 
                 '=' => self.two_char('=', Token::EqualEqual, Token::Assign),
                 '!' => self.two_char('=', Token::NotEqual, Token::Bang),
+                '#' => {
+                    while let Some(next) = self.peek() {
+                        if next == '\n' {
+                            break;
+                        }
+                        self.advance();
+                    }
+                    Token::Skip
+                }
 
-                '\'' => self.read_char_constant()?,
+                '\'' => self.read_char_constant(false)?,
                 '"' => self.read_string_literal()?,
                 'L' | 'u' | 'U' if self.peek() == Some('\'') => {
+                    let wide = c == 'L';
                     self.advance();
-                    self.read_char_constant()?
+                    self.read_char_constant(wide)?
                 }
                 'L' | 'u' | 'U' if self.peek() == Some('"') => {
+                    let wide = c == 'L';
                     self.advance();
-                    self.read_string_literal()?
+                    match self.read_string_literal()? {
+                        Token::StringLiteral(s) if wide => {
+                            let chars: Vec<u32> = s.chars().map(|ch| ch as u32).collect();
+                            let s = Self::decode_utf8_byte_chars(&chars).unwrap_or(s);
+                            Token::WideStringLiteral(s)
+                        }
+                        tok => tok,
+                    }
                 }
                 'u' if self.peek() == Some('8') && self.peek_ahead(1) == Some('"') => {
                     self.advance();
@@ -1034,6 +1442,13 @@ mod tests {
                 .count(),
             2
         );
+        Ok(())
+    }
+
+    #[test]
+    fn lexes_large_unsuffixed_hex_literals_as_unsigned_long() -> Result<(), String> {
+        let tokens = lex("unsigned long x = 0xffffffff00000000;")?;
+        assert!(tokens.contains(&Token::ULongLiteral(0xffffffff00000000u64 as i64)));
         Ok(())
     }
 

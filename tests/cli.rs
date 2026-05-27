@@ -2433,6 +2433,134 @@ fn emits_aarch64_assembly_for_integer_remainder() {
 }
 
 #[test]
+fn emits_aarch64_assembly_for_int128_division_helpers() {
+    let src = temp_file("aarch64-int128-div", "i");
+    let out = temp_file("aarch64-int128-div", "s");
+    std::fs::write(
+        &src,
+        "unsigned __int128 f(unsigned __int128 a, unsigned __int128 b) { return a / b; }\n\
+         __int128 g(__int128 a, __int128 b) { return a % b; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
+    assert!(asm.contains("bl __udivti3"));
+    assert!(asm.contains("bl __modti3"));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn emits_aarch64_assembly_for_variable_int128_shifts() {
+    let src = temp_file("aarch64-int128-variable-shift", "i");
+    let out = temp_file("aarch64-int128-variable-shift", "s");
+    std::fs::write(
+        &src,
+        "unsigned __int128 f(unsigned __int128 x, int y) { return x << (y & 5); }\n\
+         __int128 g(__int128 x, int y) { return x >> (y & 5); }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
+    assert!(asm.contains(".Li128_shift_loop."));
+    assert!(asm.contains("lsl x9, x9, x10"));
+    assert!(asm.contains("asr x11, x11, x10"));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn compiles_aarch64_constant_int128_shifts_across_word_halves() {
+    let src = temp_file("aarch64-int128-constant-cross-half-shift", "c");
+    let exe = temp_file("aarch64-int128-constant-cross-half-shift", "bin");
+    std::fs::write(
+        &src,
+        r#"
+unsigned long f(unsigned __int128 in1, unsigned long in2) {
+    __int128 mask = (__int128)0xffff << 56;
+    return ((in1 & mask) >> 56) | in2;
+}
+
+int main(void) {
+    unsigned __int128 in = 1;
+    in <<= 64;
+    return f(in, 2) == 0x102 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn emits_aarch64_assembly_for_vector_cast_through_128bit_storage() {
+    let src = temp_file("aarch64-vector-cast-i128-storage", "c");
+    let out = temp_file("aarch64-vector-cast-i128-storage", "s");
+    std::fs::write(
+        &src,
+        r#"
+typedef unsigned char V8 __attribute__((vector_size(32)));
+typedef unsigned int V32 __attribute__((vector_size(32)));
+typedef unsigned long long V64 __attribute__((vector_size(32)));
+
+static V32 foo(V64 x) {
+    V64 y = (V64)(V8){((V8)(V64){65535, x[0]})[1]};
+    return (V32){y[0], 255};
+}
+
+int main(void) {
+    V32 x = foo((V64){});
+    return x[1] == 255 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-macos", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn emits_aarch64_movz_movk_for_large_immediates() {
     let src = temp_file("aarch64-large-immediate", "i");
     let out = temp_file("aarch64-large-immediate", "s");
@@ -3250,7 +3378,7 @@ fn emits_aarch64_assembly_for_preprocessed_math_header_fixture() {
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains(".globl double_isnan"));
-    assert!(asm.contains("bl __builtin_fabs"));
+    assert!(asm.contains("bl fabs"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -4159,7 +4287,8 @@ fn emits_aarch64_assembly_for_float_operations() {
     std::fs::write(
         &src,
         "float addf(float a, float b) { return a + b; }\n\
-         int main(void) { float f = 1.5f; return (int)addf(f, 2.25f); }\n",
+         float negf(float a) { return -a; }\n\
+         int main(void) { float f = 1.5f; return (int)addf(negf(-f), 2.25f); }\n",
     )
     .expect("failed to write source");
 
@@ -4173,6 +4302,7 @@ fn emits_aarch64_assembly_for_float_operations() {
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
     assert!(asm.contains("fadd s"), "{asm}");
+    assert!(asm.contains("fneg s"), "{asm}");
     assert!(asm.contains("fcvtzs w"), "{asm}");
 
     let _ = std::fs::remove_file(src);
@@ -4358,6 +4488,54 @@ fn compiles_case_labels_with_integer_constant_expressions() {
     assert!(output.status.success(), "{}", stderr(output));
     let run = Command::new(&exe).status().expect("failed to run output");
     assert_eq!(run.code(), Some(0));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn drops_unreachable_code_before_case_label_in_constant_false_if() {
+    let src = temp_file("case-in-constant-false-if", "c");
+    let exe = temp_file("case-in-constant-false-if", "bin");
+    std::fs::write(
+        &src,
+        r#"
+extern void link_error(void);
+static int ok;
+
+void hit(void) {
+    ok = 1;
+}
+
+void run(int x) {
+    switch (x) {
+    case 0:
+        if (0) {
+            link_error();
+    case 1:
+            hit();
+        }
+    }
+}
+
+int main(void) {
+    run(1);
+    return ok ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(exe);
@@ -8767,6 +8945,46 @@ fn compound_assign_updates_only_bit_field_bits() {
 }
 
 #[test]
+fn compound_literal_designated_bit_field_initializers_preserve_neighbor_bits() {
+    let src = temp_file("compound-literal-bit-field-designators", "c");
+    let exe = temp_file("compound-literal-bit-field-designators", "bin");
+    std::fs::write(
+        &src,
+        r#"
+struct S {
+    int a:3;
+    unsigned b:1;
+    unsigned c:28;
+};
+
+struct S x = {1, 1, 1};
+
+int main(void) {
+    x = (struct S) { b:0, a:0, c:({ struct S o = x; o.a == 1 ? 10 : 20; }) };
+    return x.a == 0 && x.b == 0 && x.c == 10 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn bit_field_layout_matches_host_for_mixed_storage_units() {
     let src = temp_file("mixed-bit-field-layout", "c");
     let rnqcc_exe = temp_file("mixed-bit-field-layout-rnqcc", "bin");
@@ -8999,14 +9217,15 @@ fn accepts_common_gnu_builtin_expression_compatibility() {
            int array_different = __builtin_types_compatible_p(int[4], long[4]);\n\
            int chosen = __builtin_choose_expr(1, 40, 0);\n\
            int false_chosen = __builtin_choose_expr(0, 0, 2);\n\
-           int expected = __builtin_expect(1, 0);\n\
+           int hint = 0;\n\
+           int expected = __builtin_expect(1, hint++);\n\
            unsigned long off = __builtin_offsetof(struct pair, b);\n\
            unsigned long nested = __builtin_offsetof(struct pair, items[1].value);\n\
            if (0) __builtin_unreachable();\n\
            if (0) __builtin_trap();\n\
            return same + typedef_same + array_same + function_same + struct_function_same +\n\
                   !struct_function_different + !array_different + chosen + false_chosen +\n\
-                  expected + (off == 4) + (nested == 20);\n\
+                  expected + (hint == 1) + (off == 4) + (nested == 20);\n\
          }\n",
     )
     .expect("failed to write source");
@@ -9022,7 +9241,7 @@ fn accepts_common_gnu_builtin_expression_compatibility() {
     let status = Command::new(&exe)
         .status()
         .expect("failed to run executable");
-    assert_eq!(status.code(), Some(52));
+    assert_eq!(status.code(), Some(53));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(exe);
@@ -9055,6 +9274,45 @@ fn rejects_non_constant_builtin_choose_expr_condition() {
     );
 
     let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn compound_assignment_reads_lvalue_after_rhs_side_effects() {
+    let src = temp_file("compound-assign-rhs-side-effect-order", "c");
+    let exe = temp_file("compound-assign-rhs-side-effect-order", "bin");
+    std::fs::write(
+        &src,
+        r#"
+unsigned int x[1] = { 2 };
+
+unsigned int foo(void) {
+    x[0] |= 128;
+    return 1;
+}
+
+int main(void) {
+    x[0] |= foo();
+    return x[0] == 131 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
 }
 
 #[test]
@@ -9442,6 +9700,39 @@ fn skips_simple_inline_asm_statements() {
     std::fs::write(
         &src,
         "int main(void) { asm volatile (\"\" ::: \"memory\"); __asm__(\"\"); return 42; }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn supports_empty_inline_asm_tied_zero_output_compatibility() {
+    let src = temp_file("inline-asm-tied-zero-output", "c");
+    let exe = temp_file("inline-asm-tied-zero-output", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    int a;
+    asm ("" : "=r" (a) : "0" (0));
+    return a == 0 ? 42 : 1;
+}
+"#,
     )
     .expect("failed to write source");
 
@@ -12275,6 +12566,1972 @@ int main(void) {
 }
 
 #[test]
+fn supports_gnu_range_designators_and_integer_mode_typedefs() {
+    let src = temp_file("gnu-range-designator-mode", "c");
+    let exe = temp_file("gnu-range-designator-mode", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef unsigned int __attribute__((mode(QI))) u8;
+typedef unsigned int __attribute__((mode(HI))) u16;
+typedef unsigned int __attribute__((mode(DI))) u64;
+
+static union {
+    u8 bytes[8];
+    u64 word;
+} filled = {{ [0 ... 7] = 0xaa }};
+
+int main(void) {
+    static union {
+        u8 bytes[8];
+        struct __attribute__((packed)) {
+            u8 pad[1];
+            u16 value;
+        } view;
+    } local = {{ [0 ... 7] = 0xaa }};
+
+    local.view.value = 0x1234;
+    return sizeof(u8) == 1
+        && sizeof(u16) == 2
+        && sizeof(u64) == 8
+        && filled.bytes[0] == 0xaa
+        && filled.bytes[7] == 0xaa
+        && local.bytes[0] == 0xaa
+        && local.bytes[1] == 0x34
+        && local.bytes[2] == 0x12
+        && local.bytes[3] == 0xaa
+        ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn supports_static_pointer_initializer_to_member_after_array_pointer_arithmetic() {
+    let src = temp_file("static-member-pointer-init", "c");
+    let exe = temp_file("static-member-pointer-init", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef struct item {
+    int id;
+    char *name;
+} Item;
+
+Item items[] = {
+    { 1, "one" },
+    { 2, "two" },
+};
+
+int *second_id = (int *)&((items + 1)->id);
+int *first_id = (int *)&(items->id);
+
+int main(void) {
+    return *first_id == 1 && *second_id == 2 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn supports_builtin_frame_address_as_pointer_value() {
+    let src = temp_file("builtin-frame-address", "c");
+    let exe = temp_file("builtin-frame-address", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int check(const char *caller_local) {
+    const char callee_local = 0;
+    const char *frame = __builtin_frame_address(0);
+    if (caller_local >= &callee_local) {
+        return caller_local >= frame && frame >= &callee_local;
+    }
+    return caller_local <= frame && frame <= &callee_local;
+}
+
+int wrapper(void) {
+    const char caller_local = 0;
+    return check(&caller_local);
+}
+
+int main(void) {
+    return wrapper() ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn supports_common_sub_overflow_builtin() {
+    let src = temp_file("sub-overflow-builtin", "c");
+    let exe = temp_file("sub-overflow-builtin", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    unsigned x = 99;
+    int ok1 = __builtin_sub_overflow(10u, 6u, &x);
+    int ok2 = x == 4u;
+    int ov = __builtin_sub_overflow(0u, 6u, &x);
+    return !ok1 && ok2 && ov && x == (unsigned)-6 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn supports_add_overflow_when_output_aliases_input() {
+    let src = temp_file("add-overflow-alias-input", "c");
+    let exe = temp_file("add-overflow-alias-input", "bin");
+    std::fs::write(
+        &src,
+        r#"
+unsigned long f(unsigned long a, unsigned long b) {
+    unsigned long overflow = __builtin_add_overflow(a, b, &a);
+    return a + overflow;
+}
+
+int main(void) {
+    return f(16UL, -16UL) == 1UL && f(16UL, -18UL) == -2UL ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn supports_signed_long_mul_overflow_without_overcounting() {
+    let src = temp_file("signed-long-mul-overflow-count", "c");
+    let exe = temp_file("signed-long-mul-overflow-count", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int overflows;
+
+long test(long *x, int y) {
+    long s = 1;
+    for (int i = 0; i < y; i++) {
+        if (__builtin_mul_overflow(s, x[i], &s)) {
+            overflows++;
+        }
+    }
+    return s;
+}
+
+int main(void) {
+    long d[7] = { 975, 975, 975, 975, 975, 975, 975 };
+    test(d, 7);
+    return overflows == 1 ? 42 : overflows;
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn mul_overflow_p_checks_destination_type_range() {
+    let src = temp_file("mul-overflow-p-destination-range", "c");
+    let exe = temp_file("mul-overflow-p-destination-range", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    int hi = __builtin_mul_overflow_p(__INT_MAX__ / 35 + 1, 35, 0);
+    int ok = __builtin_mul_overflow_p(__INT_MAX__ / 35, 35, 0);
+    int lo = __builtin_mul_overflow_p((-__INT_MAX__ - 1) / -39 + 1, -39, 0);
+    int wide = __builtin_mul_overflow_p(__LONG_MAX__ / 42 + 1, 42L, 0L);
+    return hi == 1 && ok == 0 && lo == 1 && wide == 1 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn mul_overflow_p_matches_signed_boundary_cases() {
+    let src = temp_file("mul-overflow-p-signed-boundaries", "c");
+    let exe = temp_file("mul-overflow-p-signed-boundaries", "bin");
+    std::fs::write(
+        &src,
+        r#"
+__attribute__((noinline)) int foo(int x) { return __builtin_mul_overflow_p(x, 35, 0); }
+__attribute__((noinline)) int bar(long x) { return __builtin_mul_overflow_p(x, 35L, 0L); }
+__attribute__((noinline)) int baz(int x) { return __builtin_mul_overflow_p(42, x, 0); }
+__attribute__((noinline)) int qux(long x) { return __builtin_mul_overflow_p(42, x, 0L); }
+__attribute__((noinline)) int corge(int x) { return __builtin_mul_overflow_p(x, -39, 0); }
+__attribute__((noinline)) int garply(long x) { return __builtin_mul_overflow_p(x, -39L, 0L); }
+__attribute__((noinline)) int grault(int x) { return __builtin_mul_overflow_p(-46, x, 0); }
+__attribute__((noinline)) int waldo(long x) { return __builtin_mul_overflow_p(-46, x, 0L); }
+
+int main(void) {
+    int failures = 0;
+    failures += foo(0) != 0;
+    failures += foo(__INT_MAX__ / 35) != 0;
+    failures += foo(__INT_MAX__ / 35 + 1) != 1;
+    failures += foo(__INT_MAX__) != 1;
+    failures += foo((-__INT_MAX__ - 1) / 35) != 0;
+    failures += foo((-__INT_MAX__ - 1) / 35 - 1) != 1;
+    failures += foo(-__INT_MAX__ - 1) != 1;
+    failures += bar(__LONG_MAX__ / 35) != 0;
+    failures += bar(__LONG_MAX__ / 35 + 1) != 1;
+    failures += bar(__LONG_MAX__) != 1;
+    failures += bar((-__LONG_MAX__ - 1) / 35) != 0;
+    failures += bar((-__LONG_MAX__ - 1) / 35 - 1) != 1;
+    failures += bar(-__LONG_MAX__ - 1) != 1;
+    failures += baz(__INT_MAX__ / 42) != 0;
+    failures += baz(__INT_MAX__ / 42 + 1) != 1;
+    failures += baz(__INT_MAX__) != 1;
+    failures += baz((-__INT_MAX__ - 1) / 42) != 0;
+    failures += baz((-__INT_MAX__ - 1) / 42 - 1) != 1;
+    failures += baz(-__INT_MAX__ - 1) != 1;
+    failures += qux(__LONG_MAX__ / 42) != 0;
+    failures += qux(__LONG_MAX__ / 42 + 1) != 1;
+    failures += qux(__LONG_MAX__) != 1;
+    failures += qux((-__LONG_MAX__ - 1) / 42) != 0;
+    failures += qux((-__LONG_MAX__ - 1) / 42 - 1) != 1;
+    failures += qux(-__LONG_MAX__ - 1) != 1;
+    failures += corge(__INT_MAX__ / -39) != 0;
+    failures += corge(__INT_MAX__ / -39 - 1) != 1;
+    failures += corge(__INT_MAX__) != 1;
+    failures += corge((-__INT_MAX__ - 1) / -39) != 0;
+    failures += corge((-__INT_MAX__ - 1) / -39 + 1) != 1;
+    failures += corge(-__INT_MAX__ - 1) != 1;
+    failures += garply(__LONG_MAX__ / -39) != 0;
+    failures += garply(__LONG_MAX__ / -39 - 1) != 1;
+    failures += garply(__LONG_MAX__) != 1;
+    failures += garply((-__LONG_MAX__ - 1) / -39) != 0;
+    failures += garply((-__LONG_MAX__ - 1) / -39 + 1) != 1;
+    failures += garply(-__LONG_MAX__ - 1) != 1;
+    failures += grault(__INT_MAX__ / -46) != 0;
+    failures += grault(__INT_MAX__ / -46 - 1) != 1;
+    failures += grault(__INT_MAX__) != 1;
+    failures += grault((-__INT_MAX__ - 1) / -46) != 0;
+    failures += grault((-__INT_MAX__ - 1) / -46 + 1) != 1;
+    failures += grault(-__INT_MAX__ - 1) != 1;
+    failures += waldo(__LONG_MAX__ / -46) != 0;
+    failures += waldo(__LONG_MAX__ / -46 - 1) != 1;
+    failures += waldo(__LONG_MAX__) != 1;
+    failures += waldo((-__LONG_MAX__ - 1) / -46) != 0;
+    failures += waldo((-__LONG_MAX__ - 1) / -46 + 1) != 1;
+    failures += waldo(-__LONG_MAX__ - 1) != 1;
+    return failures == 0 ? 42 : failures;
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn wide_string_literal_subscript_uses_wide_element_type() {
+    let src = temp_file("wide-string-literal-subscript", "c");
+    let exe = temp_file("wide-string-literal-subscript", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    return L"a" "b"[1] == L'b' ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn scalar_vector_compat_subscript_reads_constant_lanes() {
+    let src = temp_file("scalar-vector-compat-subscript", "c");
+    let exe = temp_file("scalar-vector-compat-subscript", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef unsigned __attribute__((__vector_size__ (8))) V;
+
+int main(void) {
+    V x = 0;
+    if (x[0] || x[1]) {
+        return 1;
+    }
+    x = 42;
+    return x[0] == 42 && x[1] == 0 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn supports_two_argument_builtin_shuffle_for_vectors() {
+    let src = temp_file("vector-builtin-shuffle", "c");
+    let exe = temp_file("vector-builtin-shuffle", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef double V __attribute__((__vector_size__ (16)));
+typedef long long W __attribute__((__vector_size__ (16)));
+
+int main(void) {
+    V y = { 1.0, 2.0 };
+    W mask = { 10000000001LL, 0LL };
+    V r = __builtin_shuffle(y, mask);
+    return r[0] == 2.0 && r[1] == 1.0 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn supports_static_vector_array_initializers() {
+    let src = temp_file("static-vector-array-init", "c");
+    let exe = temp_file("static-vector-array-init", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef unsigned int V __attribute__((__vector_size__ (16)));
+V values[] = { (V){ 1U, 2U, 3U, 4U }, (V){ 9U, 8U, 7U, 6U } };
+
+int main(void) {
+    return values[0][2] == 3U && values[1][3] == 6U ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn supports_gnu_vector_typedef_function_return_and_argument_storage() {
+    let src = temp_file("gnu-vector-typedef-call-storage", "c");
+    let exe = temp_file("gnu-vector-typedef-call-storage", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef unsigned char v4qi __attribute__((vector_size(4)));
+
+v4qi half(v4qi v) {
+    return v / 2;
+}
+
+int main(void) {
+    v4qi x = { 5, 5, 5, 5 };
+    v4qi y = half(x);
+    return y[0] == 2 && y[1] == 2 && y[2] == 2 && y[3] == 2 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn supports_file_scope_gnu_vectors_larger_than_scalar_storage() {
+    let src = temp_file("file-scope-large-gnu-vector", "c");
+    let exe = temp_file("file-scope-large-gnu-vector", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef int V __attribute__((vector_size(8 * sizeof(int))));
+V a, b, d, expected;
+
+void fill(void) {
+    d = a ^ b;
+}
+
+int main(void) {
+    a = (V){ 1, 2, 3, 4, 5, 6, 7, 8 };
+    b = (V){ 0x40, 0x80, 0x40, 0x80, 0x40, 0x80, 0x40, 0x80 };
+    expected = (V){ 0x41, 0x82, 0x43, 0x84, 0x45, 0x86, 0x47, 0x88 };
+    fill();
+    return __builtin_memcmp(&d, &expected, sizeof(V)) == 0 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn supports_aligned_nested_struct_array_member_stride() {
+    let src = temp_file("aligned-nested-struct-array-member", "c");
+    let exe = temp_file("aligned-nested-struct-array-member", "bin");
+    std::fs::write(
+        &src,
+        r#"
+void foo(int size) {
+    struct S {
+        __attribute__((aligned(16))) struct T { short c; } a[size];
+        int b[size];
+    } s;
+
+    for (int i = 0; i < size; i++) {
+        s.a[i].c = 0x1234;
+    }
+    for (int i = 0; i < size; i++) {
+        s.b[i] = 0;
+    }
+    for (int i = 0; i < size; i++) {
+        if (s.a[i].c != 0x1234 || s.b[i] != 0) {
+            __builtin_abort();
+        }
+    }
+}
+
+int main(void) {
+    foo(15);
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn supports_gcc_builtin_setjmp_longjmp_buffer() {
+    let src = temp_file("builtin-setjmp-longjmp-buffer", "c");
+    let exe = temp_file("builtin-setjmp-longjmp-buffer", "bin");
+    std::fs::write(
+        &src,
+        r#"
+void escape(void *p) {
+    __builtin_longjmp(p, 1);
+}
+
+int main(void) {
+    void *buf[5];
+    int x = 7;
+    if (!__builtin_setjmp(buf)) {
+        x = 42;
+        escape(buf);
+    }
+    return x == 42 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn supports_copied_builtin_setjmp_buffer_with_zero_size_alloca() {
+    let src = temp_file("copied-setjmp-zero-alloca", "c");
+    let exe = temp_file("copied-setjmp-zero-alloca", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int x;
+char *p;
+char *q;
+
+void escape(void *src) {
+    void *buf[32];
+    __builtin_memcpy(buf, src, 5 * sizeof(void *));
+    __builtin_longjmp(buf, 1);
+}
+
+int main(void) {
+    void *buf[5];
+    p = __builtin_alloca(x);
+    q = __builtin_alloca(x);
+    if (!__builtin_setjmp(buf)) {
+        escape(buf);
+    }
+    p = q + (q - p);
+    return p == __builtin_alloca(x) ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn gnu_vector_comparisons_produce_all_bits_set_lanes() {
+    let src = temp_file("gnu-vector-comparison-mask", "c");
+    let exe = temp_file("gnu-vector-comparison-mask", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef unsigned long __attribute__((__vector_size__ (8))) V;
+
+int main(void) {
+    V v = ~((V) { } <= 0);
+    if (v[0]) {
+        return 1;
+    }
+    v = ((V) { 5 } != 0);
+    return v[0] == ~0ul ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn uninitialized_automatic_arrays_do_not_emit_zero_fill() {
+    let src = temp_file("uninit-auto-array-no-zero-fill", "c");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    char buf[4096];
+    buf[0] = 42;
+    return buf[0];
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--stage")
+        .arg("tacky")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let tacky = stdout(output);
+    let zero_fills = tacky.matches("CopyToOffset").count();
+    assert!(zero_fills <= 2, "{zero_fills} unexpected zero-fill stores");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn finstrument_functions_emits_profile_hooks_and_honors_no_instrument_function() {
+    let src = temp_file("instrument-functions", "c");
+    let exe = temp_file("instrument-functions", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int enter_count;
+int exit_count;
+void *last_entered;
+void *last_exited;
+
+void __cyg_profile_func_enter(void *fn, void *parent) __attribute__((no_instrument_function));
+void __cyg_profile_func_exit(void *fn, void *parent) __attribute__((no_instrument_function));
+int main(void) __attribute__((no_instrument_function));
+
+void target(void) {
+    if (last_entered != target) {
+        __builtin_abort();
+    }
+}
+
+int main(void) {
+    target();
+    return enter_count == 1 && exit_count == 1 && last_exited == target ? 42 : 1;
+}
+
+void __cyg_profile_func_enter(void *fn, void *parent) {
+    enter_count++;
+    last_entered = fn;
+}
+
+void __cyg_profile_func_exit(void *fn, void *parent) {
+    exit_count++;
+    last_exited = fn;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-finstrument-functions")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn main_falling_off_end_returns_zero_without_missing_return_warning() {
+    let src = temp_file("main-fallthrough-zero", "c");
+    let exe = temp_file("main-fallthrough-zero", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    int value = 42;
+    value = value + 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    let success = output.status.success();
+    let err = stderr(output);
+    assert!(success, "{err}");
+    assert!(!err.contains("may exit without returning a value"), "{err}");
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(0));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn supports_brace_elided_local_struct_array_member_initializers() {
+    let src = temp_file("brace-elided-struct-array-member-init", "c");
+    let exe = temp_file("brace-elided-struct-array-member-init", "bin");
+    std::fs::write(
+        &src,
+        r#"
+struct S { unsigned u[4]; };
+
+int main(void) {
+    struct S a[] = {
+        { 1U, 2U, 3U, 4U },
+        { 5U, 6U, 7U, 8U }
+    };
+    return a[0].u[0] == 1U && a[0].u[3] == 4U
+        && a[1].u[0] == 5U && a[1].u[3] == 8U ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn same_size_gnu_vector_casts_reinterpret_bits() {
+    let src = temp_file("gnu-vector-bitcast", "c");
+    let exe = temp_file("gnu-vector-bitcast", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef long long I __attribute__((vector_size(16)));
+typedef double D __attribute__((vector_size(16)));
+
+int main(void) {
+    double out[2];
+    I bits = (I)(D){ 2.0, 3.0 };
+    *(I *)out = bits;
+    return out[0] == 2.0 && out[1] == 3.0 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn supports_int128_va_arg_values() {
+    let src = temp_file("int128-va-arg", "c");
+    let exe = temp_file("int128-va-arg", "bin");
+    std::fs::write(
+        &src,
+        r#"
+#include <stdarg.h>
+
+__int128 take(int skip, ...) {
+    va_list ap;
+    va_start(ap, skip);
+    while (skip--) {
+        va_arg(ap, int);
+    }
+    __int128 value = va_arg(ap, __int128);
+    va_end(ap);
+    return value;
+}
+
+int main(void) {
+    __int128 value = ((__int128)0x1122334455667788LL << 64) | 0x0102030405060708LL;
+    return take(1, 0, value) == value ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn dynamic_alloca_does_not_alias_frame_address() {
+    let src = temp_file("dynamic-alloca-frame-safe", "c");
+    let exe = temp_file("dynamic-alloca-frame-safe", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    for (int n = 1; n < 5000; n++) {
+        int *x = __builtin_alloca((n % 64 + 1) * sizeof(int));
+        x[0] = 1;
+        x[n % 64] = 2;
+    }
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn array_arrow_member_type_decays_for_nested_subscript_arrow() {
+    let src = temp_file("array-arrow-subscript-arrow", "c");
+    let exe = temp_file("array-arrow-subscript-arrow", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef struct A {
+    int a, b;
+} A;
+
+typedef struct B {
+    A **a;
+    int b;
+} B;
+
+A *slot;
+B d[1];
+
+int main(void) {
+    A value = { 1, 2 };
+    slot = &value;
+    d->a = &slot;
+    d->b = 0;
+    d->a[d->b]->a++;
+    return value.a == 2 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn bitfield_precision_does_not_overconstrain_followup_arithmetic() {
+    let src = temp_file("bitfield-precision-followup-arithmetic", "c");
+    let exe = temp_file("bitfield-precision-followup-arithmetic", "bin");
+    std::fs::write(
+        &src,
+        r#"
+struct S {
+    unsigned long long a:2;
+    unsigned long long b:40;
+    unsigned long long c:22;
+};
+
+int main(void) {
+    struct S s = {1, 2, 3};
+    unsigned long long value = ((unsigned long long)(s.b - 8)) + 8;
+    return value == 0x10000000002ULL ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn empty_inline_asm_evaluates_simple_output_operand_side_effects() {
+    let src = temp_file("empty-asm-output-side-effect", "c");
+    let exe = temp_file("empty-asm-output-side-effect", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int count;
+int dummy;
+
+int *bar(void) {
+    count++;
+    return &dummy;
+}
+
+int main(void) {
+    asm("" : "+r"(*bar()));
+    return count == 1 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn empty_inline_asm_tied_input_copies_simple_value_to_output() {
+    let src = temp_file("empty-asm-tied-input-copy", "c");
+    let exe = temp_file("empty-asm-tied-input-copy", "bin");
+    std::fs::write(
+        &src,
+        r#"
+void copy_low_int(long long x, volatile int *p) {
+    int i;
+    asm("" : "=r"(i) : "0"(x));
+    *p = i;
+}
+
+int main(void) {
+    volatile int i = 0;
+    copy_low_int(-2147483647LL, &i);
+    return i == -2147483647 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn vector_comparison_produces_full_width_mask_for_uint128_lane() {
+    let src = temp_file("vector-uint128-comparison-mask", "c");
+    let exe = temp_file("vector-uint128-comparison-mask", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef unsigned __int128 V __attribute__((vector_size(16)));
+
+int main(void) {
+    V r = (V){5} != 0;
+    return r[0] == ~(unsigned __int128)0 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn sub_overflow_writes_vector_lane_destination() {
+    let src = temp_file("sub-overflow-vector-lane", "c");
+    let exe = temp_file("sub-overflow-vector-lane", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef unsigned V __attribute__((vector_size(64)));
+
+int main(void) {
+    V x = {0};
+    __builtin_sub_overflow(0, 6, &x[5]);
+    return x[5] == (unsigned)-6 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn same_size_vector_scalar_casts_bitcast_storage() {
+    let src = temp_file("vector-scalar-bitcast", "c");
+    let exe = temp_file("vector-scalar-bitcast", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef int V2SI __attribute__((vector_size(8)));
+typedef unsigned int V2USI __attribute__((vector_size(8)));
+
+long long to_scalar(V2SI x) {
+    return (long long)x;
+}
+
+V2USI to_vector(V2SI x) {
+    return (V2USI)(V2SI)(long long)x;
+}
+
+int main(void) {
+    union { V2SI v; V2USI u; long long l; int i[2]; } x;
+    x.v = (V2SI){ -3, -3 };
+    x.l = to_scalar(x.v);
+    if (x.i[0] != -3 || x.i[1] != -3) return 1;
+    x.u = to_vector(x.v);
+    return x.i[0] == -3 && x.i[1] == -3 ? 42 : 2;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn vector_compound_assignment_updates_union_member_lane_wise() {
+    let src = temp_file("vector-compound-union-member", "c");
+    let exe = temp_file("vector-compound-union-member", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef unsigned short V4HI __attribute__((vector_size(8)));
+
+union U {
+    V4HI v;
+    short s[4];
+} u;
+
+int main(void) {
+    u.v += (V4HI){ 12, 32768 };
+    u.v += (V4HI){ 12, 32768 };
+    return u.s[0] == 24 && u.s[1] == 0 && u.s[2] == 0 && u.s[3] == 0 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn brace_elided_nested_local_array_initializer_fills_inner_array() {
+    let src = temp_file("brace-elided-nested-local-array", "c");
+    let exe = temp_file("brace-elided-nested-local-array", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    int a[1][4] = { 11, 12, 13, 14 };
+    int (*p)[4] = a;
+    int sum = 0;
+    for (int i = 0; i < 1; i++) {
+        for (int j = 0; j < 4; j++) {
+            sum += *(*(p + i) + j);
+        }
+    }
+    return sum == 50 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn sizeof_vla_typedef_uses_runtime_bound_expression() {
+    let src = temp_file("sizeof-vla-typedef-runtime-bound", "c");
+    let exe = temp_file("sizeof-vla-typedef-runtime-bound", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int array_size(int n) {
+    typedef int T[n + 2];
+    return sizeof(T);
+}
+
+int struct_size(int n) {
+    typedef struct { int c[n + 2]; } T;
+    return sizeof(T);
+}
+
+int direct_struct_size(int n) {
+    struct S { char b[n]; } __attribute__((packed));
+    n++;
+    return sizeof(struct S);
+}
+
+int main(void) {
+    return array_size(20) == 22 * sizeof(int)
+        && struct_size(20) == 22 * sizeof(int)
+        && direct_struct_size(123) == 123 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn sizeof_local_vla_uses_captured_runtime_bound() {
+    let src = temp_file("sizeof-local-vla-runtime-bound", "c");
+    let exe = temp_file("sizeof-local-vla-runtime-bound", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    int n = 1;
+    int a[2][n];
+    n++;
+    int b[2][n];
+    return sizeof(a) == 2 * 1 * sizeof(int)
+        && sizeof(b) == 2 * 2 * sizeof(int)
+        && n == 2 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn struct_compound_literal_member_can_copy_struct_expression() {
+    let src = temp_file("struct-compound-member-copy", "c");
+    let exe = temp_file("struct-compound-member-copy", "bin");
+    std::fs::write(
+        &src,
+        r#"
+struct T { int t; int r[2]; };
+struct S { int a; int b; int c[2]; struct T d; };
+
+void foo(struct S *s) {
+    *s = (struct S){ s->b, s->a, { 0, 0 }, s->d };
+}
+
+int main(void) {
+    struct S s = { 6, 12, { 1, 2 }, { 7, { 8, 9 } } };
+    foo(&s);
+    return s.a == 12 && s.b == 6 && s.c[0] == 0 && s.c[1] == 0
+        && s.d.t == 7 && s.d.r[0] == 8 && s.d.r[1] == 9 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn struct_assignment_expression_yields_assigned_struct_value() {
+    let src = temp_file("struct-assignment-expression-value", "c");
+    let exe = temp_file("struct-assignment-expression-value", "bin");
+    std::fs::write(
+        &src,
+        r#"
+struct S { char w[8]; };
+
+struct S f(struct S *p) {
+    struct S a;
+    a = ({ struct S b; b = p[1]; p[2] = b; });
+    return a;
+}
+
+int main(void) {
+    struct S p[3] = { "abcdefg", "zyxwvut", "ABCDEFG" };
+    struct S a = f(p);
+    return a.w[0] == 'z' && p[2].w[0] == 'z' ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn enum_typedef_bitfield_preserves_nonnegative_enumerator_values() {
+    let src = temp_file("enum-typedef-bitfield-nonnegative", "c");
+    let exe = temp_file("enum-typedef-bitfield-nonnegative", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef enum { ZERO, ONE, TWO, THREE } E;
+
+struct S {
+    E value : 2;
+};
+
+int main(void) {
+    struct S s;
+    s.value = THREE;
+    return s.value == THREE ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn unsigned_long_long_bitfield_shift_keeps_declared_precision() {
+    let src = temp_file("bitfield-shift-precision", "c");
+    let exe = temp_file("bitfield-shift-precision", "bin");
+    std::fs::write(
+        &src,
+        r#"
+struct S {
+    unsigned long long b : 40;
+} x;
+
+int main(void) {
+    x.b = 0x0100ULL;
+    if ((x.b << 32) != 0) return 1;
+    x.b = 0x0100000001ULL;
+    return ((x.b << 8) + (x.b >> 32)) == 0x0000000101ULL ? 42 : 2;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn builtin_isinf_detects_overflowed_float_and_double_values() {
+    let src = temp_file("builtin-isinf-overflow", "c");
+    let exe = temp_file("builtin-isinf-overflow", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    float f = 1.01f * __FLT_MAX__;
+    double d = 1.01 * __DBL_MAX__;
+    return __builtin_isinff(f) && __builtin_isinf(d) ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn builtin_signbit_detects_negative_zero() {
+    let src = temp_file("builtin-signbit-negative-zero", "c");
+    let exe = temp_file("builtin-signbit-negative-zero", "bin");
+    std::fs::write(
+        &src,
+        r#"
+double not_fabs(double x) {
+    return x >= 0.0 ? x : -x;
+}
+
+int main(void) {
+    double x = -0.0;
+    double y = not_fabs(x);
+    return __builtin_signbit(y) ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn unsigned_small_integer_return_values_are_abi_extended_by_caller() {
+    let src = temp_file("unsigned-small-return-abi", "c");
+    let exe = temp_file("unsigned-small-return-abi", "bin");
+    std::fs::write(
+        &src,
+        r#"
+static int i(int x) { return x; }
+__attribute__((noinline)) unsigned int ui(int x) { return i(x + 6); }
+
+static signed char sc(int x) { return x; }
+__attribute__((noinline)) unsigned char uc(int x) { return sc(x + 6); }
+
+int main(void) {
+    if ((unsigned long)ui(-10) != 0xfffffffcUL) {
+        return 1;
+    }
+    if ((unsigned long)uc(-10) != 0xfcUL) {
+        return 2;
+    }
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn static_unsigned_cast_initializer_truncates_before_widening() {
+    let src = temp_file("static-unsigned-cast-widen", "c");
+    let exe = temp_file("static-unsigned-cast-widen", "bin");
+    std::fs::write(
+        &src,
+        r#"
+volatile unsigned long from_uint = (unsigned int)-4;
+volatile unsigned long from_uchar = (unsigned char)-4;
+
+int main(void) {
+    if (from_uint != 0xfffffffcUL) {
+        return 1;
+    }
+    if (from_uchar != 0xfcUL) {
+        return 2;
+    }
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn static_designated_bitfield_initializer_preserves_bit_offset() {
+    let src = temp_file("static-designated-bitfield-offset", "c");
+    let exe = temp_file("static-designated-bitfield-offset", "bin");
+    std::fs::write(
+        &src,
+        r#"
+static struct {
+    unsigned int : 1;
+    unsigned int s : 1;
+} value = { .s = 1 };
+
+int main(void) {
+    return value.s == 1 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn folded_unsigned_bitwise_comparison_uses_unsigned_ordering() {
+    let src = temp_file("folded-unsigned-bitwise-comparison", "c");
+    let exe = temp_file("folded-unsigned-bitwise-comparison", "bin");
+    std::fs::write(
+        &src,
+        r#"
+static int y = 0x8000;
+
+int main(void) {
+    unsigned int x = (short)y;
+    if (0LL > (0U ^ (short)-0x8000)) {
+        return 1;
+    }
+    if (0LL > (0U ^ x)) {
+        return 2;
+    }
+    if ((0U ^ (short)y) < 0LL) {
+        return 3;
+    }
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn scalar_initializer_for_union_member_initializes_first_union_field() {
+    let src = temp_file("scalar-union-member-initializer", "c");
+    let exe = temp_file("scalar-union-member-initializer", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef union {
+    int lock;
+} mutex_t;
+
+int main(void) {
+    struct { int c; mutex_t m; } r = { .m = 0 };
+    return r.c == 0 && r.m.lock == 0 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn large_struct_return_from_deref_copies_pointee_value() {
+    let src = temp_file("large-struct-return-deref-copy", "c");
+    let exe = temp_file("large-struct-return-deref-copy", "bin");
+    std::fs::write(
+        &src,
+        r#"
+struct s {
+    unsigned char a[256];
+};
+
+static struct s source;
+static struct s *p = &source;
+
+static struct s ret(void) {
+    return *p;
+}
+
+int main(void) {
+    source.a[7] = 99;
+    struct s copy = ret();
+    return copy.a[7] == 99 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn builtin_offsetof_accepts_vla_member_index_expressions() {
+    let src = temp_file("offsetof-vla-member-index-expression", "c");
+    let exe = temp_file("offsetof-vla-member-index-expression", "bin");
+    std::fs::write(
+        &src,
+        r#"
+long foo(int n, int i, int j) {
+    typedef int T[n];
+    struct S { int a; T b[n]; };
+    return __builtin_offsetof(struct S, b[i][j]);
+}
+
+int main(void) {
+    typedef int T[5];
+    struct S { int a; T b[5]; };
+    long expected = __builtin_offsetof(struct S, b) + (5 * 2 + 3) * sizeof(int);
+    return foo(5, 2, 3) == expected ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn sizeof_vla_parameter_subscript_uses_captured_entry_bound() {
+    let src = temp_file("sizeof-vla-param-subscript-bound", "c");
+    let exe = temp_file("sizeof-vla-param-subscript-bound", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    int n = 1;
+    int first = 0;
+    int second = 0;
+    int foo(char a[2][++n]) {
+        n += 4;
+        return sizeof(a[0]);
+    }
+    first = foo(0);
+    second = foo(0);
+    return first == 2 && second == 7 && n == 11 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn driver_accepts_fsyntax_only_without_writing_output() {
     let src = temp_file("syntax-only", "c");
     let out = temp_file("syntax-only", "s");
@@ -12290,4 +14547,84 @@ fn driver_accepts_fsyntax_only_without_writing_output() {
     assert!(!out.exists());
 
     let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn supports_nested_function_local_label_addresses() {
+    let src = temp_file("nested-local-label-address", "c");
+    let exe = temp_file("nested-local-label-address", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    void *label = &&out;
+    int i = 0;
+    void test(void) {
+        label = &&out2;
+        goto *label;
+out2:
+        i++;
+    }
+    goto *label;
+out:
+    i += 2;
+    test();
+    return i == 3 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn supports_nested_function_nonlocal_goto_to_parent_label() {
+    let src = temp_file("nested-nonlocal-goto", "c");
+    let exe = temp_file("nested-nonlocal-goto", "bin");
+    std::fs::write(
+        &src,
+        r#"
+void *ptr;
+
+int main(void) {
+    __label__ nonlocal_lab;
+    void bar(void *func) {
+        ptr = func;
+        goto nonlocal_lab;
+    }
+    bar(&&nonlocal_lab);
+    return 1;
+nonlocal_lab:
+    return ptr == &&nonlocal_lab ? 42 : 2;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
 }

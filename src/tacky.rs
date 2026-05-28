@@ -2189,13 +2189,12 @@ impl TackyGen {
                 } else {
                     let left_exp = Exp::Dot(inner, member);
                     let mem_ft = self.typeof_exp(&left_exp);
-                    let mem = {
-                        if let Exp::Dot(ref inner, ref member) = left_exp {
+                    let mem = match left_exp {
+                        Exp::Dot(ref inner, ref member) => {
                             let tag = self.dot_inner_tag(inner)?;
                             self.struct_member(&tag, member)?
-                        } else {
-                            unreachable!()
                         }
+                        _ => return Err("internal error: expected dot expression".to_string()),
                     };
                     if mem.bit_width.is_some() {
                         let member_addr = self.emit_dot_address(&left_exp)?;
@@ -2554,7 +2553,7 @@ impl TackyGen {
                         let tag = self.dot_inner_tag(inner)?;
                         self.struct_member(&tag, member)?
                     }
-                    _ => unreachable!(),
+                    _ => return Err("internal error: expected dot or arrow expression".to_string()),
                 };
                 if mem.bit_width.is_some() {
                     let ptr = self.emit_dot_address(&left)?;
@@ -2898,7 +2897,7 @@ impl TackyGen {
                 let src_ft = self.val_full_type(&src);
                 if src_ft.is_complex() {
                     let FullType::Vector { elem, .. } = src_ft.clone() else {
-                        unreachable!();
+                        return Err("internal error: expected complex vector type".to_string());
                     };
                     let elem_type = elem.to_ctype();
                     let elem_size = elem.byte_size_with(&self.struct_defs);
@@ -3027,7 +3026,7 @@ impl TackyGen {
         if let Some(ft) = cast_ft.as_ref() {
             if ft.is_complex() {
                 let FullType::Vector { elem, .. } = ft.clone() else {
-                    unreachable!();
+                    return Err("internal error: expected complex vector type".to_string());
                 };
                 let elem_type = elem.to_ctype();
                 let elem_size = elem.byte_size_with(&self.struct_defs);
@@ -3580,7 +3579,10 @@ impl TackyGen {
             return Ok((dst, CType::Pointer));
         }
         if name == "__builtin_extract_return_addr" && args.len() == 1 {
-            let (arg, arg_type) = self.emit_exp(args.into_iter().next().unwrap())?;
+            let Some(arg_exp) = args.into_iter().next() else {
+                return Err("__builtin_extract_return_addr requires an argument".to_string());
+            };
+            let (arg, arg_type) = self.emit_exp(arg_exp)?;
             let converted = self.convert_to(arg, arg_type, CType::Pointer);
             return Ok((converted, CType::Pointer));
         }
@@ -3598,12 +3600,10 @@ impl TackyGen {
         }
         if args.len() == 1 {
             if let Some((kind, arg_type, width)) = Self::bit_builtin_signature(&name) {
-                return self.emit_bit_builtin(
-                    kind,
-                    arg_type,
-                    width,
-                    args.into_iter().next().unwrap(),
-                );
+                let Some(arg_exp) = args.into_iter().next() else {
+                    return Err(format!("{} requires an argument", name));
+                };
+                return self.emit_bit_builtin(kind, arg_type, width, arg_exp);
             }
         }
         if matches!(
@@ -3643,7 +3643,10 @@ impl TackyGen {
             } else {
                 f64::MAX
             };
-            let (arg, from_type) = self.emit_exp(args.into_iter().next().unwrap())?;
+            let Some(arg_exp) = args.into_iter().next() else {
+                return Err(format!("{} requires an argument", name));
+            };
+            let (arg, from_type) = self.emit_exp(arg_exp)?;
             let value = self.convert_to(arg, from_type, arg_type);
             let high_limit = self.fresh_tmp(arg_type);
             self.emit(TackyInstr::Copy {
@@ -3716,7 +3719,11 @@ impl TackyGen {
                         });
                         match tmp {
                             TackyVal::Var(name) => name,
-                            _ => unreachable!(),
+                            _ => {
+                                return Err(
+                                    "internal error: expected temporary variable".to_string()
+                                )
+                            }
                         }
                     }
                 };
@@ -4421,7 +4428,10 @@ impl TackyGen {
                 "abs" | "__builtin_abs" => CType::Int,
                 _ => CType::Long,
             };
-            let (arg, arg_type) = self.emit_exp(args.into_iter().next().unwrap())?;
+            let Some(arg_exp) = args.into_iter().next() else {
+                return Err(format!("{} requires an argument", name));
+            };
+            let (arg, arg_type) = self.emit_exp(arg_exp)?;
             let arg = self.convert_to(arg, arg_type, ret_type);
             let dst = self.fresh_tmp(ret_type);
             self.emit(TackyInstr::Copy {
@@ -4556,7 +4566,7 @@ impl TackyGen {
                         }
                     });
                 let FullType::Vector { elem, .. } = complex_ft.clone() else {
-                    unreachable!();
+                    return Err("internal error: expected complex vector type".to_string());
                 };
                 let elem_type = elem.to_ctype();
                 let elem_size = elem.byte_size_with(&self.struct_defs);
@@ -4932,7 +4942,7 @@ impl TackyGen {
                         }
                     });
                 let FullType::Vector { elem, .. } = complex_ft.clone() else {
-                    unreachable!();
+                    return Err("internal error: expected complex vector type".to_string());
                 };
                 let elem_type = elem.to_ctype();
                 let elem_size = elem.byte_size_with(&self.struct_defs);
@@ -5255,7 +5265,7 @@ impl TackyGen {
         );
         if is_struct_compound_literal {
             let Exp::Cast(target_type, Some(ft @ FullType::Struct(_)), boxed) = inner else {
-                unreachable!();
+                return Err("internal error: expected struct compound literal".to_string());
             };
             let pointee_ft = ft.clone();
             let (var, _) = self.emit_compound_literal_cast(target_type, Some(ft), *boxed)?;
@@ -5601,7 +5611,7 @@ impl TackyGen {
         let value_ft = self.val_full_type(&src);
         if value_ft.is_complex() {
             let FullType::Vector { elem, .. } = value_ft.clone() else {
-                unreachable!();
+                return Err("internal error: expected complex vector type".to_string());
             };
             let elem_type = elem.to_ctype();
             let elem_size = elem.byte_size_with(&self.struct_defs);
@@ -5656,7 +5666,7 @@ impl TackyGen {
                 UnaryOp::Complement => {
                     return Err("invalid complex unary operator".to_string());
                 }
-                _ => unreachable!(),
+                _ => return Err("invalid complex unary operator".to_string()),
             }
         }
         if !value_ft.is_vector() {
@@ -5687,7 +5697,7 @@ impl TackyGen {
         }
 
         let FullType::Vector { elem, lanes, .. } = value_ft.clone() else {
-            unreachable!();
+            return Err("internal error: expected vector type".to_string());
         };
         let elem_type = elem.to_ctype();
         let calc_type = match elem_type {
@@ -5807,7 +5817,7 @@ impl TackyGen {
                     let tag = self.dot_inner_tag(base)?;
                     self.struct_member(&tag, member)?
                 }
-                _ => unreachable!(),
+                _ => return Err("internal error: expected dot or arrow expression".to_string()),
             };
             if let Some(width) = mem.bit_width {
                 let ptr = self.emit_dot_address(&inner)?;
@@ -6891,7 +6901,7 @@ impl TackyGen {
                 r_full.clone()
             };
             let FullType::Vector { elem, .. } = complex_ft.clone() else {
-                unreachable!();
+                return Err("internal error: expected complex vector type".to_string());
             };
             let elem_type = elem.to_ctype();
             let elem_size = elem.byte_size_with(&self.struct_defs);
@@ -7148,7 +7158,7 @@ impl TackyGen {
                 r_full.clone()
             };
             let FullType::Vector { elem, lanes, .. } = vector_ft.clone() else {
-                unreachable!();
+                return Err("internal error: expected vector type".to_string());
             };
             let elem_type = elem.to_ctype();
             let elem_size = elem.byte_size_with(&self.struct_defs);
@@ -7205,7 +7215,7 @@ impl TackyGen {
                 r_full.clone()
             };
             let FullType::Vector { elem, lanes, .. } = vector_ft.clone() else {
-                unreachable!();
+                return Err("internal error: expected vector type".to_string());
             };
             let elem_type = elem.to_ctype();
             let calc_type = match elem_type {
@@ -7513,14 +7523,18 @@ impl TackyGen {
                                 } else {
                                     let tmp = self.fresh_tmp_full(ret_ft);
                                     let TackyVal::Var(ref tmp_name) = tmp else {
-                                        unreachable!();
+                                        return Err(
+                                            "internal error: hidden return value must be addressable"
+                                                .to_string(),
+                                        );
                                     };
                                     self.zero_init_local(
                                         tmp_name,
                                         ret_ft.byte_size_with(&self.struct_defs),
                                     );
                                     let FullType::Vector { elem, .. } = ret_ft.clone() else {
-                                        unreachable!();
+                                        return Err("internal error: expected complex return type"
+                                            .to_string());
                                     };
                                     let elem_type = elem.to_ctype();
                                     let real = self.convert_to(val, val_type, elem_type);
@@ -9137,7 +9151,7 @@ impl TackyGen {
                     .ok_or_else(|| format!("Undefined struct: {}", tag))?;
                 if def.is_union && elems.len() == 1 && matches!(elems[0], Exp::ArrayInit(_)) {
                     let Exp::ArrayInit(inner_elems) = &elems[0] else {
-                        unreachable!();
+                        return Err("internal error: expected nested array initializer".to_string());
                     };
                     let mut index = 0usize;
                     for mem in &def.members {
@@ -10823,16 +10837,15 @@ impl TackyGen {
 
         // Check if return type requires hidden pointer
         let ret_needs_hidden_ptr = if let Some(ref ret_ft) = func.return_full_type {
-            matches!(ret_ft, FullType::Struct(_))
-                && self
-                    .struct_defs
-                    .get(match ret_ft {
-                        FullType::Struct(tag) => tag,
-                        _ => unreachable!(),
-                    })
+            let needs_large_struct_ptr = if let FullType::Struct(tag) = ret_ft {
+                self.struct_defs
+                    .get(tag)
                     .map(|d| d.size > 16)
                     .unwrap_or(false)
-                || ret_ft.is_complex()
+            } else {
+                false
+            };
+            needs_large_struct_ptr || ret_ft.is_complex()
         } else {
             false
         };
@@ -10924,7 +10937,7 @@ impl TackyGen {
             }
             if ft.is_complex() {
                 let FullType::Vector { elem, .. } = &ft else {
-                    unreachable!();
+                    return Err("internal error: expected complex vector type".to_string());
                 };
                 let elem_type = elem.to_ctype();
                 let elem_size = elem.byte_size_with(&self.struct_defs);
@@ -11632,7 +11645,9 @@ pub fn generate_with_options(
                     .is_some_and(StorageClass::is_extern)
                     && !global_array_names.contains(&vd.name)
                 {
-                    let ft = vd.decl_full_type.clone().unwrap();
+                    let ft = vd.decl_full_type.clone().ok_or_else(|| {
+                        format!("internal error: missing full type for {}", vd.name)
+                    })?;
                     let total_bytes = ft.byte_size_with(&gen.struct_defs);
                     let align = if total_bytes >= 16 {
                         16

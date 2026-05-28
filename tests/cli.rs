@@ -10151,6 +10151,11 @@ fn internal_cpp_rejects_macro_expansion_errors() {
             "#define MISSING_PAREN(x\nint value = MISSING_PAREN(1);\n",
             "missing ')' in function-like macro MISSING_PAREN",
         ),
+        (
+            "internal-cpp-missing-invocation-paren",
+            "#define ADD(x, y) x + y\nint value = ADD(1, 2;\n",
+            "missing ')' in function-like macro invocation",
+        ),
     ] {
         let src = temp_file(name, "c");
         std::fs::write(&src, source).expect("failed to write source");
@@ -11363,6 +11368,52 @@ fn internal_cpp_handles_include_next() {
     let output = Command::new(rnqcc())
         .arg("--internal-cpp")
         .arg("-I")
+        .arg(&first_dir)
+        .arg("-I")
+        .arg(&second_dir)
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(
+        stdout.contains("int main(void) { return 40 + 2 + 1; }"),
+        "{stdout}"
+    );
+
+    let _ = std::fs::remove_file(first_header);
+    let _ = std::fs::remove_file(next);
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_dir(first_dir);
+    let _ = std::fs::remove_dir(second_dir);
+}
+
+#[test]
+fn internal_cpp_handles_quoted_include_next() {
+    let first_dir = temp_file("internal-cpp-quoted-include-next-first", "d");
+    let second_dir = temp_file("internal-cpp-quoted-include-next-second", "d");
+    let src = temp_file("internal-cpp-quoted-include-next", "c");
+    std::fs::create_dir(&first_dir).expect("failed to create first include dir");
+    std::fs::create_dir(&second_dir).expect("failed to create second include dir");
+    let first_header = first_dir.join("rnqcc_quoted_next.h");
+    let next = second_dir.join("rnqcc_quoted_next.h");
+    std::fs::write(
+        &first_header,
+        "#if __has_include_next(\"rnqcc_quoted_next.h\")\n#define HAS_NEXT_CHECK 1\n#else\n#define HAS_NEXT_CHECK 0\n#endif\n#include_next \"rnqcc_quoted_next.h\"\n#define WRAPPED 2\n",
+    )
+    .expect("failed to write first header");
+    std::fs::write(&next, "#define NEXT_VALUE 40\n").expect("failed to write next header");
+    std::fs::write(
+        &src,
+        "#include \"rnqcc_quoted_next.h\"\nint main(void) { return NEXT_VALUE + WRAPPED + HAS_NEXT_CHECK; }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-iquote")
         .arg(&first_dir)
         .arg("-I")
         .arg(&second_dir)

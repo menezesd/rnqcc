@@ -1739,7 +1739,9 @@ fn convert_binary(
                             TackyBinaryOp::BitwiseAnd => AsmBinaryOp::And,
                             TackyBinaryOp::BitwiseOr => AsmBinaryOp::Or,
                             TackyBinaryOp::BitwiseXor => AsmBinaryOp::Xor,
-                            _ => unreachable!(),
+                            _ => {
+                                return Err("internal error: expected bitwise binary op".to_string())
+                            }
                         };
                         out.push(AsmInstr::Binary(
                             AsmType::Quadword,

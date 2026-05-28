@@ -5053,7 +5053,9 @@ impl Parser {
                             wide = true;
                             s.push_str(&part);
                         }
-                        _ => unreachable!(),
+                        _ => {
+                            return Err(self.format_error("unexpected string literal state"));
+                        }
                     }
                 }
                 if wide {
@@ -5520,6 +5522,94 @@ mod tests {
             "abstract declarator should fail",
         )?;
         assert!(err.contains("expected CloseParen"), "{err}");
+        Ok(())
+    }
+
+    #[test]
+    fn parse_alignment_specifier_reports_bad_values() -> Result<(), String> {
+        let mut zero = parser_source("alignas(0)")?;
+        let err = require_err(zero.parse_alignment_specifier(), "alignment should fail")?;
+        assert!(err.contains("alignment must be positive"), "{err}");
+
+        let mut non_power_two = parser_source("alignas(3)")?;
+        let err = require_err(
+            non_power_two.parse_alignment_specifier(),
+            "alignment should fail",
+        )?;
+        assert!(err.contains("alignment must be a power of two"), "{err}");
+        Ok(())
+    }
+
+    #[test]
+    fn parse_attribute_alignment_reports_trailing_tokens() -> Result<(), String> {
+        let parser = parser_source("4 extra")?;
+        let err = require_err(
+            parser.parse_attribute_alignment("4 extra"),
+            "attribute alignment should fail",
+        )?;
+        assert!(
+            err.contains("unexpected tokens in alignment attribute"),
+            "{err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_attribute_vector_size_reports_bad_values() -> Result<(), String> {
+        let parser = parser_source("0")?;
+        let err = require_err(
+            parser.parse_attribute_vector_size("0"),
+            "vector_size should fail",
+        )?;
+        assert!(err.contains("vector_size must be positive"), "{err}");
+
+        let parser = parser_source("4 extra")?;
+        let err = require_err(
+            parser.parse_attribute_vector_size("4 extra"),
+            "vector_size should fail",
+        )?;
+        assert!(
+            err.contains("unexpected tokens in vector_size attribute"),
+            "{err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_expression_reports_missing_builtin_argument() -> Result<(), String> {
+        for (source, expected) in [
+            (
+                "__builtin_constant_p()",
+                "__builtin_constant_p requires an argument",
+            ),
+            (
+                "__builtin_bswap64()",
+                "__builtin_bswap64 requires an argument",
+            ),
+        ] {
+            let mut parser = parser_source(source)?;
+            let err = require_err(parser.parse_expression(), "expression should fail")?;
+            assert!(err.contains(expected), "{source}: {err}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parse_expression_reports_more_missing_builtin_arguments() -> Result<(), String> {
+        for (source, expected) in [
+            (
+                "__builtin_classify_type()",
+                "__builtin_classify_type requires an argument",
+            ),
+            (
+                "__builtin_signbit()",
+                "__builtin_signbit requires an argument",
+            ),
+        ] {
+            let mut parser = parser_source(source)?;
+            let err = require_err(parser.parse_expression(), "expression should fail")?;
+            assert!(err.contains(expected), "{source}: {err}");
+        }
         Ok(())
     }
 

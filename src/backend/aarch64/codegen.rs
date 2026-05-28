@@ -413,7 +413,7 @@ fn emit_i128_variable_shift(
                 AsmOperand::Reg(Reg::R10),
             ));
         }
-        _ => unreachable!(),
+        _ => return Err("internal error: expected i128 shift op".to_string()),
     }
 
     instructions.push(AsmInstr::Binary(
@@ -2549,7 +2549,10 @@ fn convert_function(
                                     TackyBinaryOp::BitwiseAnd => AsmBinaryOp::And,
                                     TackyBinaryOp::BitwiseOr => AsmBinaryOp::Or,
                                     TackyBinaryOp::BitwiseXor => AsmBinaryOp::Xor,
-                                    _ => unreachable!(),
+                                    _ => {
+                                        return Err("internal error: expected bitwise binary op"
+                                            .to_string())
+                                    }
                                 };
                                 instructions.push(AsmInstr::Binary(
                                     AsmType::Quadword,
@@ -2593,7 +2596,11 @@ fn convert_function(
                                 (TackyBinaryOp::Div, false) => "__divti3",
                                 (TackyBinaryOp::Mod, true) => "__umodti3",
                                 (TackyBinaryOp::Mod, false) => "__modti3",
-                                _ => unreachable!(),
+                                _ => {
+                                    return Err(
+                                        "internal error: expected div/mod operation".to_string()
+                                    )
+                                }
                             };
                             let (left_low, left_high) =
                                 i128_part_operands(left, &stack_slots, global_vars)?;

@@ -943,17 +943,15 @@ impl IncludePaths {
     }
 
     fn include_next_dirs(&self, base_dir: &Path) -> Vec<PathBuf> {
-        let dirs: Vec<PathBuf> = self
-            .quote
-            .iter()
-            .cloned()
+        let dirs: Vec<PathBuf> = std::iter::once(base_dir.to_path_buf())
+            .chain(self.quote.iter().cloned())
             .chain(self.user.iter().cloned())
             .chain(self.system.iter().cloned())
             .chain(self.after.iter().cloned())
             .collect();
         let start = dirs
             .iter()
-            .position(|dir| same_include_dir(dir, base_dir))
+            .rposition(|dir| same_include_dir(dir, base_dir))
             .map(|index| index + 1)
             .unwrap_or(0);
         dirs[start..].to_vec()
@@ -1385,7 +1383,7 @@ fn resolve_include_path(
     match spec {
         IncludeSpec::Quoted(name) | IncludeSpec::Angled(name) => {
             let direct = PathBuf::from(name);
-            if direct.exists() {
+            if !include_next && direct.exists() {
                 return Some(direct);
             }
             dirs.into_iter()
@@ -6814,10 +6812,9 @@ mod tests {
         let canonical = PathBuf::from("/tmp/pragma-test.h");
         let mut macros = HashMap::new();
         macros.insert("X".to_string(), MacroDef::Object("1".to_string()));
-        handle_internal_pragma(r#"push_macro("X")"#, &canonical, &mut macros, &mut context)
-            .unwrap();
+        handle_internal_pragma(r#"push_macro("X")"#, &canonical, &mut macros, &mut context)?;
         macros.insert("X".to_string(), MacroDef::Object("2".to_string()));
-        handle_internal_pragma(r#"pop_macro("X")"#, &canonical, &mut macros, &mut context).unwrap();
+        handle_internal_pragma(r#"pop_macro("X")"#, &canonical, &mut macros, &mut context)?;
         assert!(matches!(macros.get("X"), Some(MacroDef::Object(body)) if body == "1"));
         Ok(())
     }
@@ -6869,7 +6866,7 @@ mod tests {
     }
 
     #[test]
-    fn marks_pragma_once_headers_by_canonical_path() {
+    fn marks_pragma_once_headers_by_canonical_path() -> Result<(), String> {
         let mut include_stack = Vec::new();
         let mut once_files = HashSet::new();
         let mut system_header_files = HashSet::new();
@@ -6897,8 +6894,9 @@ mod tests {
         };
         let canonical = PathBuf::from("/tmp/pragma-once-test.h");
         let mut macros = HashMap::new();
-        handle_internal_pragma("once", &canonical, &mut macros, &mut context).unwrap();
+        handle_internal_pragma("once", &canonical, &mut macros, &mut context)?;
         assert!(context.once_files.contains(&canonical));
+        Ok(())
     }
 
     #[test]

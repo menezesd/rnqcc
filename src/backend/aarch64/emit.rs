@@ -1035,7 +1035,9 @@ fn emit_mov_zero_extend(
                     writeln!(w, "\tmov x9, {}", src_reg)?;
                 }
             }
-            AsmType::Octword => unreachable!(),
+            AsmType::Octword => {
+                return invalid_input("AArch64 emitter does not support 128-bit zero extension")
+            }
             AsmType::Float | AsmType::Double => {
                 return invalid_input("AArch64 backend does not support float zero extension")
             }
@@ -1074,7 +1076,9 @@ fn emit_mov_zero_extend(
     let store_reg = match dst_ty {
         AsmType::Byte | AsmType::Word | AsmType::Longword => reg_name(Reg::R10, AsmType::Longword)?,
         AsmType::Quadword => reg_name(Reg::R10, AsmType::Quadword)?,
-        AsmType::Octword => unreachable!(),
+        AsmType::Octword => {
+            return invalid_input("AArch64 emitter does not support 128-bit zero extension")
+        }
         AsmType::Float | AsmType::Double => {
             return invalid_input("AArch64 backend does not support double zero extension")
         }

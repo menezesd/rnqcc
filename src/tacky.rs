@@ -6548,8 +6548,8 @@ impl TackyGen {
     /// Get the address of a struct value, handling deref temps correctly
     fn get_struct_addr(&mut self, val: TackyVal) -> TackyVal {
         if let TackyVal::Var(ref n) = val {
-            if self.array_sizes.contains_key(n) {
-                // Proper struct variable — take its address
+            if self.array_sizes.contains_key(n) || self.get_full_type(n).is_vector() {
+                // Proper aggregate/vector variable — take its address
                 let a = self.fresh_tmp(CType::Pointer);
                 self.emit(TackyInstr::GetAddress {
                     src: val,

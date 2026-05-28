@@ -1225,7 +1225,7 @@ fn convert_instruction(
                 struct_arg_groups,
                 *indirect,
                 &mut ctx,
-            );
+            )?;
         }
     };
     Ok(())
@@ -1250,7 +1250,7 @@ fn convert_funcall(
     struct_arg_groups: &[(usize, usize, Vec<bool>)],
     indirect: bool,
     ctx: &mut FuncallContext<'_>,
-) {
+) -> Result<(), String> {
     let types = ctx.types;
     let out = &mut *ctx.out;
     let static_doubles = &mut *ctx.static_doubles;
@@ -1308,11 +1308,13 @@ fn convert_funcall(
 
         enum StackArg<'a> {
             Scalar(&'a TackyVal),
+            WideScalar(&'a TackyVal),
             MemoryBlock { src_ptr: &'a TackyVal, size: usize },
         }
 
         // Classify args into int regs, xmm regs, and stack
         let mut int_reg_args = Vec::new();
+        let mut wide_int_reg_args = Vec::new();
         let mut xmm_reg_args = Vec::new();
         let mut stack_args_list = Vec::new();
         let mut int_idx = 0usize;
@@ -1335,6 +1337,13 @@ fn convert_funcall(
                 } else {
                     stack_args_list.push(StackArg::Scalar(arg));
                 }
+            } else if t == AsmType::Octword {
+                if int_idx + 1 < 6 {
+                    wide_int_reg_args.push((int_idx, arg));
+                    int_idx += 2;
+                } else {
+                    stack_args_list.push(StackArg::WideScalar(arg));
+                }
             } else {
                 if int_idx < 6 {
                     int_reg_args.push((int_idx, arg));
@@ -1349,6 +1358,7 @@ fn convert_funcall(
             .iter()
             .map(|item| match item {
                 StackArg::Scalar(_) => 8,
+                StackArg::WideScalar(_) => 16,
                 StackArg::MemoryBlock { size, .. } => size.next_multiple_of(8),
             })
             .sum();
@@ -1377,6 +1387,20 @@ fn convert_funcall(
                         }
                         stack_offset += 8;
                     }
+                    StackArg::WideScalar(arg) => {
+                        let (low, high) = i128_part_operands(arg)?;
+                        out.push(AsmInstr::Mov(
+                            AsmType::Quadword,
+                            low,
+                            AsmOperand::StackArg(stack_offset),
+                        ));
+                        out.push(AsmInstr::Mov(
+                            AsmType::Quadword,
+                            high,
+                            AsmOperand::StackArg(stack_offset + 8),
+                        ));
+                        stack_offset += 16;
+                    }
                     StackArg::MemoryBlock { src_ptr, size } => {
                         out.push(AsmInstr::CopyToStackArg {
                             src_ptr: convert_val(src_ptr),
@@ -1401,6 +1425,19 @@ fn convert_funcall(
                 t,
                 convert_val(arg),
                 AsmOperand::Reg(ARG_REGISTERS[*i]),
+            ));
+        }
+        for (i, arg) in &wide_int_reg_args {
+            let (low, high) = i128_part_operands(arg)?;
+            out.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                low,
+                AsmOperand::Reg(ARG_REGISTERS[*i]),
+            ));
+            out.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                high,
+                AsmOperand::Reg(ARG_REGISTERS[*i + 1]),
             ));
         }
         // Move xmm register args
@@ -1465,7 +1502,7 @@ fn convert_funcall(
                             _ => {}
                         }
                     }
-                    return;
+                    return Ok(());
                 }
             }
         }
@@ -1497,6 +1534,7 @@ fn convert_funcall(
             ));
         }
     }
+    Ok(())
 }
 
 fn convert_binary(
@@ -1632,6 +1670,7 @@ fn convert_binary(
             convert_val(dst),
         ));
         out.push(AsmInstr::SetCC(cc, convert_val(dst)));
+        Ok(())
     } else {
         let t = val_type(dst, types);
         if matches!(t, AsmType::Float | AsmType::Double) {
@@ -1862,8 +1901,8 @@ fn convert_binary(
                 convert_val(dst),
             ));
         }
+        Ok(())
     }
-    Ok(())
 }
 
 const XMM_ARG_REGISTERS: [XmmReg; 8] = [
@@ -1964,12 +2003,26 @@ fn convert_function(
         if force_stack.contains(&i) || func.stack_params.contains(param) {
             let offset = 16 + (stack_arg_idx * 8) as i32;
             let t: AsmType = types.get(param).copied().unwrap_or(CType::Long).into();
-            instructions.push(AsmInstr::Mov(
-                t,
-                AsmOperand::Stack(offset),
-                AsmOperand::Pseudo(param.clone()),
-            ));
-            stack_arg_idx += 1;
+            if t == AsmType::Octword {
+                instructions.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    AsmOperand::Stack(offset),
+                    AsmOperand::PseudoMem(param.clone(), 0),
+                ));
+                instructions.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    AsmOperand::Stack(offset + 8),
+                    AsmOperand::PseudoMem(param.clone(), 8),
+                ));
+                stack_arg_idx += 2;
+            } else {
+                instructions.push(AsmInstr::Mov(
+                    t,
+                    AsmOperand::Stack(offset),
+                    AsmOperand::Pseudo(param.clone()),
+                ));
+                stack_arg_idx += 1;
+            }
             continue;
         }
         let t: AsmType = types.get(param).copied().unwrap_or(CType::Int).into();
@@ -1989,6 +2042,33 @@ fn convert_function(
                     AsmOperand::Pseudo(param.clone()),
                 ));
                 stack_arg_idx += 1;
+            }
+        } else if t == AsmType::Octword {
+            if int_reg_idx + 1 < 6 {
+                instructions.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    AsmOperand::Reg(ARG_REGISTERS[int_reg_idx]),
+                    AsmOperand::PseudoMem(param.clone(), 0),
+                ));
+                instructions.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    AsmOperand::Reg(ARG_REGISTERS[int_reg_idx + 1]),
+                    AsmOperand::PseudoMem(param.clone(), 8),
+                ));
+                int_reg_idx += 2;
+            } else {
+                let offset = 16 + (stack_arg_idx * 8) as i32;
+                instructions.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    AsmOperand::Stack(offset),
+                    AsmOperand::PseudoMem(param.clone(), 0),
+                ));
+                instructions.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    AsmOperand::Stack(offset + 8),
+                    AsmOperand::PseudoMem(param.clone(), 8),
+                ));
+                stack_arg_idx += 2;
             }
         } else {
             if int_reg_idx < 6 {

@@ -562,6 +562,11 @@ fn build_interference_graph(
                 }
             }
         }
+        if let AsmInstr::LoadLabelAddress(_, AsmOperand::Pseudo(name)) = instr {
+            if candidates.contains(name) {
+                *occurrence_count.entry(name.clone()).or_default() += 1000.0;
+            }
+        }
     }
     for name in candidates {
         let cost = occurrence_count.get(name).copied().unwrap_or(0.0);

@@ -153,6 +153,68 @@ fn emit_i128_copy(out: &mut Vec<AsmInstr>, src: &TackyVal, dst: &TackyVal) -> Re
     Ok(())
 }
 
+fn emit_i128_load(
+    out: &mut Vec<AsmInstr>,
+    src_ptr: &TackyVal,
+    dst: &TackyVal,
+) -> Result<(), String> {
+    let dst_op = convert_val(dst);
+    let src_ptr_op = convert_val(src_ptr);
+    out.push(AsmInstr::Mov(
+        AsmType::Quadword,
+        src_ptr_op.clone(),
+        AsmOperand::Reg(Reg::R11),
+    ));
+    out.push(AsmInstr::LoadIndirect(
+        AsmType::Quadword,
+        Reg::R11,
+        low64_operand(dst_op.clone())?,
+    ));
+    out.push(AsmInstr::Binary(
+        AsmType::Quadword,
+        AsmBinaryOp::Add,
+        AsmOperand::Imm(8),
+        AsmOperand::Reg(Reg::R11),
+    ));
+    out.push(AsmInstr::LoadIndirect(
+        AsmType::Quadword,
+        Reg::R11,
+        high64_operand(dst_op)?,
+    ));
+    Ok(())
+}
+
+fn emit_i128_store(
+    out: &mut Vec<AsmInstr>,
+    src: &TackyVal,
+    dst_ptr: &TackyVal,
+) -> Result<(), String> {
+    let (src_low, src_high) = i128_part_operands(src)?;
+    let dst_ptr_op = convert_val(dst_ptr);
+    out.push(AsmInstr::Mov(
+        AsmType::Quadword,
+        dst_ptr_op,
+        AsmOperand::Reg(Reg::R11),
+    ));
+    out.push(AsmInstr::StoreIndirect(
+        AsmType::Quadword,
+        src_low,
+        Reg::R11,
+    ));
+    out.push(AsmInstr::Binary(
+        AsmType::Quadword,
+        AsmBinaryOp::Add,
+        AsmOperand::Imm(8),
+        AsmOperand::Reg(Reg::R11),
+    ));
+    out.push(AsmInstr::StoreIndirect(
+        AsmType::Quadword,
+        src_high,
+        Reg::R11,
+    ));
+    Ok(())
+}
+
 fn get_struct_def<'a>(
     name: &str,
     var_struct_tags: &HashMap<String, String>,
@@ -176,12 +238,14 @@ fn get_struct_classes(
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn convert_instruction(
     instr: &TackyInstr,
     types: &HashMap<String, CType>,
     _arr_sizes: &HashMap<String, usize>,
     out: &mut Vec<AsmInstr>,
     static_doubles: &mut Vec<(String, f64)>,
+    label_counter: &mut usize,
     var_struct_tags: &HashMap<String, String>,
     struct_defs: &HashMap<String, StructDef>,
 ) -> Result<(), String> {
@@ -682,7 +746,16 @@ fn convert_instruction(
             right,
             dst,
         } => {
-            convert_binary(op, left, right, dst, types, out, static_doubles)?;
+            convert_binary(
+                op,
+                left,
+                right,
+                dst,
+                types,
+                out,
+                static_doubles,
+                label_counter,
+            )?;
         }
         TackyInstr::Copy { src, dst } => {
             let t = val_type(dst, types);
@@ -820,8 +893,10 @@ fn convert_instruction(
                 // Algorithm: test if negative (as signed); if not, cvtsi2sdq directly
                 // If so: shift right 1, save LSB, OR LSB into shifted value,
                 // cvtsi2sdq, then addsd result to itself
-                let ok_label = double_const_label(static_doubles);
-                let end_label = double_const_label(static_doubles);
+                let base = *label_counter;
+                *label_counter += 1;
+                let ok_label = format!("uint_to_double_ok.{}", base);
+                let end_label = format!("uint_to_double_end.{}", base);
                 out.push(AsmInstr::Cmp(
                     AsmType::Quadword,
                     AsmOperand::Imm(0),
@@ -924,30 +999,38 @@ fn convert_instruction(
         }
         TackyInstr::Load { src_ptr, dst } => {
             let dst_t = val_type(dst, types);
-            // Load pointer value into R11, then load indirectly
-            out.push(AsmInstr::Mov(
-                AsmType::Quadword,
-                convert_val(src_ptr),
-                AsmOperand::Reg(Reg::R11),
-            ));
-            out.push(AsmInstr::LoadIndirect(dst_t, Reg::R11, convert_val(dst)));
+            if dst_t == AsmType::Octword {
+                emit_i128_load(out, src_ptr, dst)?;
+            } else {
+                // Load pointer value into R11, then load indirectly
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    convert_val(src_ptr),
+                    AsmOperand::Reg(Reg::R11),
+                ));
+                out.push(AsmInstr::LoadIndirect(dst_t, Reg::R11, convert_val(dst)));
+            }
         }
         TackyInstr::Store { src, dst_ptr } => {
             let src_t = val_type(src, types);
-            // Load pointer value into R11, then store indirectly
-            out.push(AsmInstr::Mov(
-                AsmType::Quadword,
-                convert_val(dst_ptr),
-                AsmOperand::Reg(Reg::R11),
-            ));
-            let src_op = if matches!(src_t, AsmType::Float | AsmType::Double)
-                || matches!(src, TackyVal::DoubleConstant(_))
-            {
-                convert_double_val(src, static_doubles)
+            if src_t == AsmType::Octword {
+                emit_i128_store(out, src, dst_ptr)?;
             } else {
-                convert_val(src)
-            };
-            out.push(AsmInstr::StoreIndirect(src_t, src_op, Reg::R11));
+                // Load pointer value into R11, then store indirectly
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    convert_val(dst_ptr),
+                    AsmOperand::Reg(Reg::R11),
+                ));
+                let src_op = if matches!(src_t, AsmType::Float | AsmType::Double)
+                    || matches!(src, TackyVal::DoubleConstant(_))
+                {
+                    convert_double_val(src, static_doubles)
+                } else {
+                    convert_val(src)
+                };
+                out.push(AsmInstr::StoreIndirect(src_t, src_op, Reg::R11));
+            }
         }
         TackyInstr::CopyToOffset {
             src,
@@ -955,7 +1038,19 @@ fn convert_instruction(
             offset,
         } => {
             let src_t = val_type(src, types);
-            if matches!(src_t, AsmType::Float | AsmType::Double) {
+            if src_t == AsmType::Octword {
+                let (low, high) = i128_part_operands(src)?;
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    low,
+                    AsmOperand::PseudoMem(dst_name.clone(), *offset as i32),
+                ));
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    high,
+                    AsmOperand::PseudoMem(dst_name.clone(), (*offset + 8) as i32),
+                ));
+            } else if matches!(src_t, AsmType::Float | AsmType::Double) {
                 let src_op = convert_double_val(src, static_doubles);
                 out.push(AsmInstr::Mov(
                     src_t,
@@ -976,11 +1071,25 @@ fn convert_instruction(
             dst,
         } => {
             let dst_t = val_type(dst, types);
-            out.push(AsmInstr::Mov(
-                dst_t,
-                AsmOperand::PseudoMem(src_name.clone(), *offset as i32),
-                convert_val(dst),
-            ));
+            if dst_t == AsmType::Octword {
+                let dst_op = convert_val(dst);
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    AsmOperand::PseudoMem(src_name.clone(), *offset as i32),
+                    low64_operand(dst_op.clone())?,
+                ));
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    AsmOperand::PseudoMem(src_name.clone(), (*offset + 8) as i32),
+                    high64_operand(dst_op)?,
+                ));
+            } else {
+                out.push(AsmInstr::Mov(
+                    dst_t,
+                    AsmOperand::PseudoMem(src_name.clone(), *offset as i32),
+                    convert_val(dst),
+                ));
+            }
         }
         TackyInstr::AddPtr {
             ptr,
@@ -1537,6 +1646,7 @@ fn convert_funcall(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn convert_binary(
     op: &TackyBinaryOp,
     left: &TackyVal,
@@ -1545,6 +1655,7 @@ fn convert_binary(
     types: &HashMap<String, CType>,
     out: &mut Vec<AsmInstr>,
     static_doubles: &mut Vec<(String, f64)>,
+    label_counter: &mut usize,
 ) -> Result<(), String> {
     let left_ctype = match left {
         TackyVal::Var(n) => types.get(n).copied().unwrap_or(CType::Int),
@@ -1599,7 +1710,8 @@ fn convert_binary(
             let (left_low, left_high) = i128_part_operands(left)?;
             let (right_low, right_high) = i128_part_operands(right)?;
             let dst_op = convert_val(dst);
-            let base = out.len();
+            let base = *label_counter;
+            *label_counter += 1;
             let true_label = format!("i128_cmp_true.{}", base);
             let low_label = format!("i128_cmp_low.{}", base);
             let end_label = format!("i128_cmp_end.{}", base);
@@ -1925,6 +2037,8 @@ fn convert_function(
     struct_defs: &HashMap<String, StructDef>,
 ) -> Result<AsmFunction, String> {
     let mut instructions = Vec::new();
+    static I128_LABEL_BASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let mut label_counter = I128_LABEL_BASE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     // System V ABI: integer args in DI,SI,DX,CX,R8,R9; double args in XMM0-XMM7
     let mut int_reg_idx = 0usize;
@@ -2097,6 +2211,7 @@ fn convert_function(
             arr_sizes,
             &mut instructions,
             static_doubles,
+            &mut label_counter,
             var_struct_tags,
             struct_defs,
         )?;
@@ -2271,6 +2386,9 @@ fn replace_pseudos(
             }
             AsmInstr::Lea(src, dst) => {
                 replace_operand(src, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
+            }
+            AsmInstr::LoadLabelAddress(_, dst) => {
                 replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
             }
             AsmInstr::AtomicRmw(_, _, _, dst)

@@ -935,6 +935,9 @@ fn rewrite_coalesced(instrs: &mut Vec<AsmInstr>, uf: &UnionFind) {
                 rewrite_op(src, uf);
                 rewrite_op(dst, uf);
             }
+            AsmInstr::LoadLabelAddress(_, dst) => {
+                rewrite_op(dst, uf);
+            }
             AsmInstr::LoadIndirect(_, _, dst) => {
                 rewrite_op(dst, uf);
             }
@@ -1054,6 +1057,9 @@ fn apply_register_map(instrs: &mut Vec<AsmInstr>, map: &HashMap<String, RegId>) 
             }
             AsmInstr::Lea(src, dst) => {
                 replace_op(src, map);
+                replace_op(dst, map);
+            }
+            AsmInstr::LoadLabelAddress(_, dst) => {
                 replace_op(dst, map);
             }
             AsmInstr::LoadIndirect(_, _, dst) => {

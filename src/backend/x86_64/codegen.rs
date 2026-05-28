@@ -1557,6 +1557,64 @@ fn convert_binary(
                 }
             }
         };
+        if cmp_type == AsmType::Octword {
+            let (left_low, left_high) = i128_part_operands(left)?;
+            let (right_low, right_high) = i128_part_operands(right)?;
+            let dst_op = convert_val(dst);
+            let base = out.len();
+            let true_label = format!("i128_cmp_true.{}", base);
+            let low_label = format!("i128_cmp_low.{}", base);
+            let end_label = format!("i128_cmp_end.{}", base);
+            let (high_true, high_false, low_true) = match op {
+                TackyBinaryOp::Equal => (CondCode::E, CondCode::NE, CondCode::E),
+                TackyBinaryOp::NotEqual => (CondCode::NE, CondCode::E, CondCode::NE),
+                TackyBinaryOp::LessThan => {
+                    if is_unsigned {
+                        (CondCode::B, CondCode::A, CondCode::B)
+                    } else {
+                        (CondCode::L, CondCode::G, CondCode::B)
+                    }
+                }
+                TackyBinaryOp::LessEqual => {
+                    if is_unsigned {
+                        (CondCode::B, CondCode::A, CondCode::BE)
+                    } else {
+                        (CondCode::L, CondCode::G, CondCode::BE)
+                    }
+                }
+                TackyBinaryOp::GreaterThan => {
+                    if is_unsigned {
+                        (CondCode::A, CondCode::B, CondCode::A)
+                    } else {
+                        (CondCode::G, CondCode::L, CondCode::A)
+                    }
+                }
+                TackyBinaryOp::GreaterEqual => {
+                    if is_unsigned {
+                        (CondCode::A, CondCode::B, CondCode::AE)
+                    } else {
+                        (CondCode::G, CondCode::L, CondCode::AE)
+                    }
+                }
+                _ => return Err(format!("unsupported x86-64 i128 comparison op: {:?}", op)),
+            };
+            out.push(AsmInstr::Mov(
+                AsmType::Longword,
+                AsmOperand::Imm(0),
+                dst_op.clone(),
+            ));
+            out.push(AsmInstr::Cmp(AsmType::Quadword, right_high, left_high));
+            out.push(AsmInstr::JmpCC(high_true, true_label.clone()));
+            out.push(AsmInstr::JmpCC(high_false, end_label.clone()));
+            out.push(AsmInstr::Label(low_label.clone()));
+            out.push(AsmInstr::Cmp(AsmType::Quadword, right_low, left_low));
+            out.push(AsmInstr::JmpCC(low_true, true_label.clone()));
+            out.push(AsmInstr::Jmp(end_label.clone()));
+            out.push(AsmInstr::Label(true_label));
+            out.push(AsmInstr::Mov(AsmType::Longword, AsmOperand::Imm(1), dst_op));
+            out.push(AsmInstr::Label(end_label));
+            return Ok(());
+        }
         if matches!(cmp_type, AsmType::Float | AsmType::Double) {
             let l = convert_double_val(left, static_doubles);
             let r = convert_double_val(right, static_doubles);

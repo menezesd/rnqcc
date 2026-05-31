@@ -1391,7 +1391,7 @@ fn convert_instruction(
             memory_arg_blocks,
             struct_arg_groups,
             variadic,
-            fixed_flat_arg_count: _,
+            fixed_flat_arg_count,
             indirect,
         } => {
             let mut ctx = FuncallContext {
@@ -1401,6 +1401,7 @@ fn convert_instruction(
                 var_struct_tags,
                 struct_defs,
                 variadic: *variadic,
+                fixed_flat_arg_count: *fixed_flat_arg_count,
             };
             convert_funcall(
                 name,
@@ -1424,6 +1425,7 @@ struct FuncallContext<'a> {
     var_struct_tags: &'a HashMap<String, String>,
     struct_defs: &'a HashMap<String, StructDef>,
     variadic: bool,
+    fixed_flat_arg_count: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1507,6 +1509,7 @@ fn convert_funcall(
         let mut xmm_idx = 0usize;
 
         for (arg_idx, arg) in args.iter().enumerate() {
+            let is_variadic_extra = ctx.variadic && arg_idx >= ctx.fixed_flat_arg_count;
             if let Some(size) = memory_blocks.get(&arg_idx).copied() {
                 stack_args_list.push(StackArg::MemoryBlock { src_ptr: arg, size });
                 continue;
@@ -1516,6 +1519,13 @@ fn convert_funcall(
                 continue;
             }
             let t = val_type(arg, types);
+            if is_variadic_extra {
+                if t == AsmType::Octword {
+                    stack_args_list.push(StackArg::WideScalar(arg));
+                } else {
+                    stack_args_list.push(StackArg::Scalar(arg));
+                }
+            }
             if matches!(t, AsmType::Float | AsmType::Double) {
                 if xmm_idx < 8 {
                     xmm_reg_args.push((xmm_idx, arg));
@@ -1793,9 +1803,29 @@ fn convert_binary(
             let true_label = format!("i128_cmp_true.{}.{}", function_name, base);
             let low_label = format!("i128_cmp_low.{}.{}", function_name, base);
             let end_label = format!("i128_cmp_end.{}.{}", function_name, base);
+            out.push(AsmInstr::Mov(
+                AsmType::Longword,
+                AsmOperand::Imm(0),
+                dst_op.clone(),
+            ));
+            if matches!(op, TackyBinaryOp::Equal | TackyBinaryOp::NotEqual) {
+                out.push(AsmInstr::Cmp(AsmType::Quadword, right_high, left_high));
+                if matches!(op, TackyBinaryOp::Equal) {
+                    out.push(AsmInstr::JmpCC(CondCode::NE, end_label.clone()));
+                    out.push(AsmInstr::Cmp(AsmType::Quadword, right_low, left_low));
+                    out.push(AsmInstr::JmpCC(CondCode::NE, end_label.clone()));
+                } else {
+                    out.push(AsmInstr::JmpCC(CondCode::NE, true_label.clone()));
+                    out.push(AsmInstr::Cmp(AsmType::Quadword, right_low, left_low));
+                    out.push(AsmInstr::JmpCC(CondCode::NE, true_label.clone()));
+                    out.push(AsmInstr::Jmp(end_label.clone()));
+                }
+                out.push(AsmInstr::Label(true_label));
+                out.push(AsmInstr::Mov(AsmType::Longword, AsmOperand::Imm(1), dst_op));
+                out.push(AsmInstr::Label(end_label));
+                return Ok(());
+            }
             let (high_true, high_false, low_true) = match op {
-                TackyBinaryOp::Equal => (CondCode::E, CondCode::NE, CondCode::E),
-                TackyBinaryOp::NotEqual => (CondCode::NE, CondCode::E, CondCode::NE),
                 TackyBinaryOp::LessThan => {
                     if is_unsigned {
                         (CondCode::B, CondCode::A, CondCode::B)
@@ -1826,11 +1856,6 @@ fn convert_binary(
                 }
                 _ => return Err(format!("unsupported x86-64 i128 comparison op: {:?}", op)),
             };
-            out.push(AsmInstr::Mov(
-                AsmType::Longword,
-                AsmOperand::Imm(0),
-                dst_op.clone(),
-            ));
             out.push(AsmInstr::Cmp(AsmType::Quadword, right_high, left_high));
             out.push(AsmInstr::JmpCC(high_true, true_label.clone()));
             out.push(AsmInstr::JmpCC(high_false, end_label.clone()));

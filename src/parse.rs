@@ -48,6 +48,7 @@ struct FunctionDeclaratorInfo {
     params: Vec<ParamDecl>,
     param_full_types: Vec<FullType>,
     variadic: bool,
+    old_style: bool,
     param_vla_bounds: Vec<Exp>,
 }
 
@@ -331,6 +332,26 @@ impl Parser {
             name,
             "__const" | "__const__" | "__volatile" | "__volatile__" | "__restrict" | "__restrict__"
         )
+    }
+
+    fn is_declarator_qualifier(&self) -> bool {
+        matches!(
+            self.peek(),
+            Some(Token::KWConst)
+                | Some(Token::KWVolatile)
+                | Some(Token::KWRestrict)
+                | Some(Token::KWAtomic)
+        ) || matches!(
+            self.peek(),
+            Some(Token::Identifier(name)) if Self::is_gnu_qualifier_name(name)
+        )
+    }
+
+    fn consume_declarator_qualifiers(&mut self) -> ParseResult<()> {
+        while self.is_declarator_qualifier() {
+            self.advance()?;
+        }
+        Ok(())
     }
 
     fn make_var_decl(
@@ -2411,6 +2432,7 @@ impl Parser {
                             params: params.clone(),
                             param_full_types: pfts.clone(),
                             variadic: *variadic,
+                            old_style: false,
                             param_vla_bounds: bounds.clone(),
                         }),
                     )
@@ -2453,6 +2475,7 @@ impl Parser {
                             params: params.clone(),
                             param_full_types: pfts.clone(),
                             variadic: *variadic,
+                            old_style: false,
                             param_vla_bounds: bounds.clone(),
                         }),
                     )
@@ -2476,47 +2499,27 @@ impl Parser {
     /// Parse a declarator tree. If `allow_abstract` is true, the name is optional
     /// (for function pointer param lists and abstract declarators).
     fn parse_declarator_tree_inner(&mut self, allow_abstract: bool) -> ParseResult<Declarator> {
-        while matches!(
-            self.peek(),
-            Some(Token::KWConst)
-                | Some(Token::KWVolatile)
-                | Some(Token::KWRestrict)
-                | Some(Token::KWAtomic)
-        ) {
-            self.advance()?;
-        }
+        self.consume_declarator_qualifiers()?;
         // Count leading * (skip const/volatile/restrict after each star)
         let mut stars = 0;
         while self.eat(&Token::Star) {
             stars += 1;
-            while matches!(
-                self.peek(),
-                Some(Token::KWConst)
-                    | Some(Token::KWVolatile)
-                    | Some(Token::KWRestrict)
-                    | Some(Token::KWAtomic)
-            ) {
-                self.advance()?;
-            }
+            self.consume_declarator_qualifiers()?;
         }
 
         // Direct declarator: identifier, (declarator), or abstract (no name)
         let mut decl = if self.eat(&Token::OpenParen) {
             if self.eat(&Token::Caret) {
-                while matches!(
-                    self.peek(),
-                    Some(Token::KWConst)
-                        | Some(Token::KWVolatile)
-                        | Some(Token::KWRestrict)
-                        | Some(Token::KWAtomic)
-                ) || matches!(
-                    self.peek(),
-                    Some(Token::Identifier(name))
-                        if matches!(
-                            name.as_str(),
-                            "_Nonnull" | "_Nullable" | "_Null_unspecified"
-                        )
-                ) {
+                while self.is_declarator_qualifier()
+                    || matches!(
+                        self.peek(),
+                        Some(Token::Identifier(name))
+                            if matches!(
+                                name.as_str(),
+                                "_Nonnull" | "_Nullable" | "_Null_unspecified"
+                            )
+                    )
+                {
                     self.advance()?;
                 }
                 let inner = if self.at(&Token::CloseParen) {
@@ -2536,20 +2539,16 @@ impl Parser {
                 let mut temp_stars = 0;
                 while self.eat(&Token::Star) {
                     temp_stars += 1;
-                    while matches!(
-                        self.peek(),
-                        Some(Token::KWConst)
-                            | Some(Token::KWVolatile)
-                            | Some(Token::KWRestrict)
-                            | Some(Token::KWAtomic)
-                    ) || matches!(
-                        self.peek(),
-                        Some(Token::Identifier(name))
-                            if matches!(
-                                name.as_str(),
-                                "_Nonnull" | "_Nullable" | "_Null_unspecified"
-                            )
-                    ) {
+                    while self.is_declarator_qualifier()
+                        || matches!(
+                            self.peek(),
+                            Some(Token::Identifier(name))
+                                if matches!(
+                                    name.as_str(),
+                                    "_Nonnull" | "_Nullable" | "_Null_unspecified"
+                                )
+                        )
+                    {
                         self.advance()?;
                     }
                 }
@@ -3127,6 +3126,7 @@ impl Parser {
                     params,
                     param_full_types,
                     variadic,
+                    old_style: false,
                     param_vla_bounds,
                 };
                 let func_info = if self.at(&Token::Semicolon) || self.at(&Token::OpenBrace) {
@@ -3162,6 +3162,7 @@ impl Parser {
                     param_full_types: func_info.param_full_types,
                     param_vla_bounds: func_info.param_vla_bounds,
                     variadic: func_info.variadic,
+                    old_style: func_info.old_style,
                     noreturn: false,
                     no_instrument_function: false,
                 }));
@@ -3247,7 +3248,7 @@ impl Parser {
             while self.eat(&Token::Comma) {
                 self.last_typedef_full_type = td_ft.clone();
                 let decl_tree = self.parse_declarator_tree()?;
-                let (name2, full_type2, _) =
+                let (name2, full_type2, _decl_params2) =
                     Self::process_declarator(&decl_tree, base_type, td_ft.as_ref());
                 let full_type2 = self.apply_vector_size_attr(full_type2, post_vector_size);
                 let full_type2 = if base_type == CType::Struct {
@@ -3348,6 +3349,7 @@ impl Parser {
                                 param_full_types: func_info2.param_full_types,
                                 param_vla_bounds: func_info2.param_vla_bounds,
                                 variadic: func_info2.variadic,
+                                old_style: func_info2.old_style,
                                 noreturn: first_noreturn,
                                 no_instrument_function: first_no_instrument,
                             }));
@@ -3389,6 +3391,7 @@ impl Parser {
                 param_full_types: func_info.param_full_types,
                 param_vla_bounds: func_info.param_vla_bounds,
                 variadic: func_info.variadic,
+                old_style: func_info.old_style,
                 noreturn: first_noreturn,
                 no_instrument_function: first_no_instrument,
             }));
@@ -3403,6 +3406,7 @@ impl Parser {
                 params,
                 param_full_types: param_fts,
                 variadic,
+                old_style: false,
                 param_vla_bounds,
             };
             let func_info = if self.at(&Token::Semicolon)
@@ -3463,6 +3467,7 @@ impl Parser {
                                 param_full_types: func_info2.param_full_types,
                                 param_vla_bounds: func_info2.param_vla_bounds,
                                 variadic: func_info2.variadic,
+                                old_style: func_info2.old_style,
                                 noreturn: first_noreturn,
                                 no_instrument_function: first_no_instrument,
                             }));
@@ -3504,6 +3509,7 @@ impl Parser {
                 param_full_types: func_info.param_full_types,
                 param_vla_bounds: func_info.param_vla_bounds,
                 variadic: func_info.variadic,
+                old_style: func_info.old_style,
                 noreturn: first_noreturn,
                 no_instrument_function: first_no_instrument,
             }));
@@ -3516,7 +3522,7 @@ impl Parser {
             let mut extra = Vec::new();
             loop {
                 let decl_tree = self.parse_declarator_tree()?;
-                let (name2, full_type2, _) =
+                let (name2, full_type2, decl_params2) =
                     Self::process_declarator(&decl_tree, base_type, td_ft.as_ref());
                 let post_alignment = self.consume_alignment_specifiers()?;
                 let declarator_alignment = match (decl_alignment, post_alignment) {
@@ -3539,16 +3545,38 @@ impl Parser {
                     FullType::Pointer(inner) => Some(ptr_info_from_full(inner)),
                     _ => None,
                 };
-                let decl = self.make_var_decl(
-                    name2,
-                    &full_type2,
-                    ctype2,
-                    pi2,
-                    sc.clone(),
-                    declarator_alignment,
-                )?;
-                self.add_value_type(decl.name.clone(), full_type2.clone())?;
-                extra.push(Declaration::VarDecl(decl));
+                if let Some(func_info2) = decl_params2 {
+                    self.add_value_type(
+                        name2.clone(),
+                        Self::function_full_type(full_type2.clone(), &func_info2),
+                    )?;
+                    extra.push(Declaration::FunDecl(FunctionDeclaration {
+                        name: name2,
+                        return_type: ctype2,
+                        return_ptr_info: pi2,
+                        return_full_type: Some(full_type2),
+                        params: func_info2.params,
+                        body: None,
+                        storage_class: sc.clone(),
+                        param_full_types: func_info2.param_full_types,
+                        param_vla_bounds: func_info2.param_vla_bounds,
+                        variadic: func_info2.variadic,
+                        old_style: func_info2.old_style,
+                        noreturn: first_noreturn,
+                        no_instrument_function: first_no_instrument,
+                    }));
+                } else {
+                    let decl = self.make_var_decl(
+                        name2,
+                        &full_type2,
+                        ctype2,
+                        pi2,
+                        sc.clone(),
+                        declarator_alignment,
+                    )?;
+                    self.add_value_type(decl.name.clone(), full_type2.clone())?;
+                    extra.push(Declaration::VarDecl(decl));
+                }
                 if !self.eat(&Token::Comma) {
                     break;
                 }
@@ -3740,6 +3768,7 @@ impl Parser {
         &mut self,
         mut info: FunctionDeclaratorInfo,
     ) -> ParseResult<FunctionDeclaratorInfo> {
+        info.old_style = true;
         while !self.at(&Token::OpenBrace) {
             let (_sc, base_type) = self.parse_specifiers()?;
             let td_ft = self.last_typedef_full_type.take();
@@ -4164,6 +4193,7 @@ impl Parser {
                         params,
                         param_full_types,
                         variadic,
+                        old_style: false,
                         param_vla_bounds,
                     }
                 };
@@ -4221,6 +4251,7 @@ impl Parser {
                                         param_full_types: func_info2.param_full_types,
                                         param_vla_bounds: func_info2.param_vla_bounds,
                                         variadic: func_info2.variadic,
+                                        old_style: func_info2.old_style,
                                         noreturn: decl_noreturn,
                                         no_instrument_function: decl_no_instrument,
                                     },
@@ -4261,6 +4292,7 @@ impl Parser {
                         param_full_types: func_info.param_full_types,
                         param_vla_bounds: func_info.param_vla_bounds,
                         variadic: func_info.variadic,
+                        old_style: func_info.old_style,
                         noreturn: decl_noreturn,
                         no_instrument_function: decl_no_instrument,
                     },
@@ -4274,7 +4306,7 @@ impl Parser {
                     let mut extra = Vec::new();
                     loop {
                         let decl_tree = self.parse_declarator_tree()?;
-                        let (name2, full_type2, _) =
+                        let (name2, full_type2, decl_params2) =
                             Self::process_declarator(&decl_tree, base_type, td_ft.as_ref());
                         let full_type2 = if base_type == CType::Struct {
                             if let Some(ref tag) = saved_struct_tag {
@@ -4290,16 +4322,40 @@ impl Parser {
                             FullType::Pointer(inner) => Some(ptr_info_from_full(inner)),
                             _ => None,
                         };
-                        let decl = self.make_var_decl(
-                            name2,
-                            &full_type2,
-                            ctype2,
-                            pi2,
-                            sc.clone(),
-                            decl_alignment,
-                        )?;
-                        self.add_value_type(decl.name.clone(), full_type2.clone())?;
-                        extra.push(BlockItem::Declaration(Declaration::VarDecl(decl)));
+                        if let Some(func_info2) = decl_params2 {
+                            self.add_value_type(
+                                name2.clone(),
+                                Self::function_full_type(full_type2.clone(), &func_info2),
+                            )?;
+                            extra.push(BlockItem::Declaration(Declaration::FunDecl(
+                                FunctionDeclaration {
+                                    name: name2,
+                                    return_type: ctype2,
+                                    return_ptr_info: pi2,
+                                    return_full_type: Some(full_type2),
+                                    params: func_info2.params,
+                                    body: None,
+                                    storage_class: sc.clone(),
+                                    param_full_types: func_info2.param_full_types,
+                                    param_vla_bounds: func_info2.param_vla_bounds,
+                                    variadic: func_info2.variadic,
+                                    old_style: func_info2.old_style,
+                                    noreturn: decl_noreturn,
+                                    no_instrument_function: decl_no_instrument,
+                                },
+                            )));
+                        } else {
+                            let decl = self.make_var_decl(
+                                name2,
+                                &full_type2,
+                                ctype2,
+                                pi2,
+                                sc.clone(),
+                                decl_alignment,
+                            )?;
+                            self.add_value_type(decl.name.clone(), full_type2.clone())?;
+                            extra.push(BlockItem::Declaration(Declaration::VarDecl(decl)));
+                        }
                         if !self.eat(&Token::Comma) {
                             break;
                         }

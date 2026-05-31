@@ -10,6 +10,7 @@ struct FunctionSignature {
     return_full_type: Option<FullType>,
     param_full_types: Vec<FullType>,
     variadic: bool,
+    old_style: bool,
     noreturn: bool,
 }
 
@@ -37,6 +38,7 @@ impl FunctionSignature {
             return_full_type: fd.return_full_type.clone(),
             param_full_types,
             variadic: fd.variadic,
+            old_style: fd.old_style,
             noreturn: fd.noreturn,
         }
     }
@@ -45,10 +47,39 @@ impl FunctionSignature {
         self.variadic && self.param_full_types.is_empty()
     }
 
+    fn default_promoted_params(&self) -> Vec<FullType> {
+        self.param_full_types
+            .iter()
+            .map(|ft| match ft {
+                FullType::Scalar(
+                    CType::Bool
+                    | CType::Char
+                    | CType::SChar
+                    | CType::UChar
+                    | CType::Short
+                    | CType::UShort,
+                ) => FullType::Scalar(CType::Int),
+                FullType::Scalar(CType::Float) => FullType::Scalar(CType::Double),
+                other => other.clone(),
+            })
+            .collect()
+    }
+
+    fn old_style_compatible_with_prototype(&self, other: &Self) -> bool {
+        self.old_style
+            && !other.old_style
+            && self.variadic == other.variadic
+            && self.default_promoted_params() == other.param_full_types
+    }
+
     fn compatible_with(&self, other: &Self) -> bool {
         self.return_type == other.return_type
             && self.return_full_type == other.return_full_type
-            && (self == other || self.is_old_style_empty() || other.is_old_style_empty())
+            && (self == other
+                || self.is_old_style_empty()
+                || other.is_old_style_empty()
+                || self.old_style_compatible_with_prototype(other)
+                || other.old_style_compatible_with_prototype(self))
     }
 }
 
@@ -243,6 +274,7 @@ impl Resolver {
             return_full_type: None,
             param_full_types: Vec::new(),
             variadic: true,
+            old_style: false,
             noreturn: matches!(name, "abort" | "exit" | "_exit"),
         };
         self.functions
@@ -269,6 +301,7 @@ impl Resolver {
                     param_full_types: signature.param_full_types.clone(),
                     param_vla_bounds: Vec::new(),
                     variadic: signature.variadic,
+                    old_style: signature.old_style,
                     noreturn: signature.noreturn,
                     no_instrument_function: false,
                     body: None,
@@ -870,6 +903,7 @@ impl Resolver {
                     param_full_types: resolved_pfts,
                     param_vla_bounds: func.param_vla_bounds,
                     variadic: func.variadic,
+                    old_style: func.old_style,
                     noreturn: func.noreturn,
                     no_instrument_function: func.no_instrument_function,
                 })

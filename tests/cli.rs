@@ -674,6 +674,81 @@ fn direct_function_prototypes_follow_source_order() {
 }
 
 #[test]
+fn compiles_old_style_function_definition_after_promoted_prototype() {
+    let src = temp_file("old-style-promoted-prototype", "c");
+    let out = temp_file("old-style-promoted-prototype", "s");
+    std::fs::write(&src, "void f(int);\nvoid f(x) unsigned char x; {}\n")
+        .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn compiles_gnu_qualified_old_style_parameter_declarations() {
+    let src = temp_file("gnu-qualified-old-style-params", "c");
+    let out = temp_file("gnu-qualified-old-style-params", "s");
+    std::fs::write(
+        &src,
+        "struct rule { int x; };\n\
+         typedef long time_t;\n\
+         static time_t f(janfirst, year, rulep, offset)\n\
+              __const time_t janfirst;\n\
+              __const int year;\n\
+              register __const struct rule * __const rulep;\n\
+              __const long offset;\n\
+         { return janfirst + year + rulep->x + offset; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn compiles_function_declarator_after_object_in_mixed_declaration() {
+    let src = temp_file("mixed-object-function-declarator", "c");
+    let out = temp_file("mixed-object-function-declarator", "s");
+    std::fs::write(
+        &src,
+        "union u { union u *a; double d; };\n\
+         union u *s, g();\n\
+         void f(void) { union u x = g(); s[0] = *x.a; s[1] = g(); }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn reports_tacky_errors_without_rust_panic_output() {
     let src = temp_file("bad-static-init", "i");
     std::fs::write(&src, "int f(void) { return 1; }\nint g = f();\n")

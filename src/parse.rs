@@ -2897,6 +2897,11 @@ impl Parser {
             let type_attrs = self.consume_member_attributes()?;
             let member_attrs = Self::merge_member_attributes(member_attrs, type_attrs);
             let base_was_enum = self.last_type_was_enum;
+            let base_struct_tag = if base_type == CType::Struct {
+                self.last_struct_tag.clone()
+            } else {
+                None
+            };
             let base_typedef_full_type = self.last_typedef_full_type.clone();
             let base_typedef_vla_size = self.last_typedef_vla_size.clone();
             loop {
@@ -2917,7 +2922,7 @@ impl Parser {
                 self.pending_flexible_array_bound = false;
                 // Replace Scalar(Struct) with FullType::Struct(tag)
                 let mut member_full_type = if base_type == CType::Struct {
-                    if let Some(ref tag) = self.last_struct_tag {
+                    if let Some(ref tag) = base_struct_tag {
                         Self::replace_scalar_struct(&full_type, tag)
                     } else {
                         full_type

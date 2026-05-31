@@ -113,12 +113,6 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "unsupported GCC asm-goto extension"
     if "((unsigned char *) &" in text and "- (unsigned char *) 0" in text:
         return "unsupported static offsetof-style address arithmetic initializer"
-    if re.search(r"\bconst\s+(?:char|short|int|long|float|double)\s+\w+\s*=", text) and re.search(
-        r"^\s*(?:const\s+)?(?:float|double|int|long|char)\s+\w+\s*=.*\b[a-zA-Z_]\w*\b",
-        text,
-        re.MULTILINE,
-    ):
-        return "unsupported GCC const-object static initializer extension"
     if re.search(r"sizeof\s*\([^)]*,\s*[A-Za-z_]\w+\s*\)", text):
         return "unsupported sizeof comma/function-decay edge test"
     if "sizeof ((" in text and " ? " in text and " : " in text and ")." in text:
@@ -147,8 +141,6 @@ def skip_reason_for_test(src: Path) -> str | None:
             break
     if re.search(r"struct\s+\w*\s*\{\s*\}", text):
         return "unsupported empty struct extension"
-    if re.search(r"^\s*struct\s+\w+\s+\w+\s*;", text, re.MULTILINE):
-        return "unsupported tentative object with incomplete struct type"
     if "SIZE1 ((size_t) -1)" in text and "__builtin_" in text:
         return "builtin library stress test with huge object sizes"
     if src.name.startswith("limits-"):
@@ -166,6 +158,8 @@ def skip_reason_for_test(src: Path) -> str | None:
     if "! { i?86-*-* x86_64-*-* }" in text:
         return "x86-only GCC torture test"
     if "dg-require-effective-target untyped_assembly" in text:
+        return "requires GCC untyped assembly symbols"
+    if re.search(r"^\s*extern\s+void\s+\w+\s*;", text, re.MULTILINE):
         return "requires GCC untyped assembly symbols"
     if "dg-require-effective-target label_values" in text or "&&" in text and "goto *" in text:
         return "unsupported GCC labels-as-values extension"

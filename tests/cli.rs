@@ -2616,6 +2616,99 @@ fn compiles_static_pointer_address_initializers() {
 }
 
 #[test]
+fn compiles_static_pointer_difference_initializers() {
+    let src = temp_file("static-pointer-difference-initializers", "c");
+    let exe = temp_file("static-pointer-difference-initializers", "bin");
+    std::fs::write(
+        &src,
+        "int x[60];\n\
+         char *y = ((char *)&(x[2 * 8 + 2]) - 8);\n\
+         int z = (&\"Foobar\"[1] - &\"Foobar\"[0]);\n\
+         int main(void) {\n\
+             return z == 1 && y == (char *)&x[16] ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn compiles_static_nested_member_address_initializers() {
+    let src = temp_file("static-nested-member-address-initializers", "c");
+    let exe = temp_file("static-nested-member-address-initializers", "bin");
+    std::fs::write(
+        &src,
+        "struct { struct { int x; int y; } p; } v;\n\
+         int *z = &((&(v.p))->y);\n\
+         int main(void) {\n\
+             v.p.y = 42;\n\
+             return *z;\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn compiles_struct_member_function_pointer_returning_struct_pointer() {
+    let src = temp_file("member-function-pointer-struct-return", "c");
+    let exe = temp_file("member-function-pointer-struct-return", "bin");
+    std::fs::write(
+        &src,
+        "struct chunk { int value; };\n\
+         struct holder { struct chunk *(*make)(long); };\n\
+         struct chunk storage;\n\
+         struct chunk *make_chunk(long value) { storage.value = value; return &storage; }\n\
+         int main(void) {\n\
+             struct holder h;\n\
+             h.make = make_chunk;\n\
+             return h.make(42)->value;\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn compiles_static_pointer_designator_initializers() {
     let src = temp_file("static-pointer-designator-initializers", "c");
     let exe = temp_file("static-pointer-designator-initializers", "bin");

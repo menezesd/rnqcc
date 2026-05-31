@@ -333,6 +333,58 @@ impl TackyGen {
         ))
     }
 
+    fn static_pointer_diff_integer(&mut self, init: &Exp) -> Option<i64> {
+        let Exp::Binary(BinaryOp::Sub, left, right) = init else {
+            return None;
+        };
+        if let Some(diff) = Self::static_same_string_lvalue_diff(left, right) {
+            return Some(diff);
+        }
+        let (left_label, left_offset) = self.static_address_constant(left)?;
+        let (right_label, right_offset) = self.static_address_constant(right)?;
+        if left_label != right_label {
+            return None;
+        }
+        let elem_size = match self.static_exp_full_type(left) {
+            Some(FullType::Pointer(pointee)) => pointee.byte_size_with(&self.struct_defs) as i64,
+            Some(FullType::Array { elem, .. }) => elem.byte_size_with(&self.struct_defs) as i64,
+            _ => 1,
+        };
+        if elem_size == 0 {
+            return None;
+        }
+        let byte_diff = left_offset - right_offset;
+        (byte_diff % elem_size == 0).then_some(byte_diff / elem_size)
+    }
+
+    fn static_same_string_lvalue_diff(left: &Exp, right: &Exp) -> Option<i64> {
+        let (left_value, left_offset, elem_size) = Self::static_string_lvalue_address(left)?;
+        let (right_value, right_offset, right_elem_size) =
+            Self::static_string_lvalue_address(right)?;
+        if left_value != right_value || elem_size != right_elem_size || elem_size == 0 {
+            return None;
+        }
+        let byte_diff = left_offset - right_offset;
+        (byte_diff % elem_size == 0).then_some(byte_diff / elem_size)
+    }
+
+    fn static_string_lvalue_address(exp: &Exp) -> Option<(&str, i64, i64)> {
+        match exp {
+            Exp::Unary(UnaryOp::AddrOf, inner) => Self::static_string_lvalue_address(inner),
+            Exp::Cast(_, _, inner) => Self::static_string_lvalue_address(inner),
+            Exp::Subscript(arr, idx) => {
+                let (value, elem_size) = match arr.as_ref() {
+                    Exp::StringLiteral(s) => (s.as_str(), 1),
+                    Exp::WideStringLiteral(s) => (s.as_str(), CType::Int.size() as i64),
+                    _ => return None,
+                };
+                let (index, _, _) = eval_static_integer_constant_exp(idx)?;
+                Some((value, index * elem_size, elem_size))
+            }
+            _ => None,
+        }
+    }
+
     fn static_address_constant(&mut self, exp: &Exp) -> Option<(Option<String>, i64)> {
         match exp {
             Exp::Var(name) => Some((Some(name.clone()), 0)),
@@ -415,6 +467,13 @@ impl TackyGen {
                     self.static_exp_full_type(right)
                         .filter(|ft| matches!(ft, FullType::Array { .. } | FullType::Pointer(_)))
                 }),
+            Exp::Unary(UnaryOp::AddrOf, inner) => Some(FullType::Pointer(Box::new(
+                self.static_exp_full_type(inner)?,
+            ))),
+            Exp::Unary(UnaryOp::Deref, inner) => match self.static_exp_full_type(inner)? {
+                FullType::Pointer(pointee) => Some(*pointee),
+                _ => None,
+            },
             _ => eval_static_expr_full_type(exp, &self.full_types),
         }
     }
@@ -9339,6 +9398,10 @@ impl TackyGen {
                     builder.put(base_offset, label_diff)?;
                     return Ok(());
                 }
+                if let Some(pointer_diff) = self.static_pointer_diff_integer(init) {
+                    builder.put(base_offset, make_static_init(pointer_diff, *ctype))?;
+                    return Ok(());
+                }
                 let (v, is_dbl, is_uns) = self.eval_static_constant_init(&Some(init.clone()))?;
                 let cv = convert_init_value(v, *ctype, is_dbl, is_uns);
                 builder.put(base_offset, make_static_init(cv, *ctype))?;
@@ -11598,6 +11661,9 @@ pub fn generate_with_options(
                 {
                     None
                 }
+                Some(exp) if gen.static_pointer_diff_integer(exp).is_some() => gen
+                    .static_pointer_diff_integer(exp)
+                    .map(|v| (v, false, false)),
                 Some(exp) => Some(
                     eval_static_integer_constant_exp_with_context(
                         exp,

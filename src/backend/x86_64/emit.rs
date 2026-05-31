@@ -81,6 +81,7 @@ fn reg_name(reg: &Reg, t: AsmType) -> io::Result<&'static str> {
         (Reg::BP, AsmType::Byte) => Ok("%bpl"),
         (Reg::BP, AsmType::Word) => Ok("%bp"),
         (_, AsmType::Octword) => invalid_input("x86-64 emitter needs 128-bit integer lowering"),
+        (_, AsmType::LongDouble) => invalid_input("x86-64 long double uses the x87 stack"),
         (r, AsmType::Float | AsmType::Double) => {
             invalid_input(format!("Cannot use integer register {:?} for float", r))
         }
@@ -456,6 +457,7 @@ fn suffix(t: AsmType) -> &'static str {
         AsmType::Octword => "q",
         AsmType::Float => "ss",
         AsmType::Double => "sd",
+        AsmType::LongDouble => "t",
     }
 }
 
@@ -531,6 +533,37 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                     show_operand(dst, *t, platform)?
                 )
             }
+        }
+        AsmInstr::X87Load(t, src) => {
+            let mnemonic = match t {
+                AsmType::Float => "flds",
+                AsmType::Double => "fldl",
+                AsmType::LongDouble => "fldt",
+                other => {
+                    return invalid_input(format!(
+                        "unsupported x87 load type in x86-64 emitter: {:?}",
+                        other
+                    ))
+                }
+            };
+            writeln!(w, "\t{} {}", mnemonic, show_operand(src, *t, platform)?)
+        }
+        AsmInstr::X87Store(dst) => {
+            writeln!(
+                w,
+                "\tfstpt {}",
+                show_operand(dst, AsmType::LongDouble, platform)?
+            )
+        }
+        AsmInstr::X87UnaryNeg => writeln!(w, "\tfchs"),
+        AsmInstr::X87Binary(op) => {
+            let mnemonic = match op {
+                AsmX87BinaryOp::Add => "faddp",
+                AsmX87BinaryOp::Sub => "fsubrp",
+                AsmX87BinaryOp::Mul => "fmulp",
+                AsmX87BinaryOp::Div => "fdivrp",
+            };
+            writeln!(w, "\t{} %st, %st(1)", mnemonic)
         }
         AsmInstr::AtomicRmw(ty, op, return_old, dst) => {
             emit_atomic_rmw(w, *ty, op, *return_old, dst, platform)

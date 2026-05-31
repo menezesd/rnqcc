@@ -330,7 +330,7 @@ pub fn compile(
     }
 
     // Parse
-    let ast = parse::parse_from_spanned(spanned_tokens.clone())?;
+    let ast = parse::parse_from_spanned_with_target(spanned_tokens.clone(), *target)?;
     if *stage == Stage::Parse {
         println!("{:#?}", ast);
         return Ok(());

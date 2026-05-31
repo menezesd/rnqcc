@@ -292,6 +292,9 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
         | AsmInstr::Cvtsd2ss(src, dst)
         | AsmInstr::AArch64FloatToDouble(src, dst)
         | AsmInstr::AArch64DoubleToFloat(src, dst) => (operand_reads(src), operand_writes(dst)),
+        AsmInstr::X87Load(_, src) => (operand_reads(src), vec![]),
+        AsmInstr::X87Store(dst) => (vec![], operand_writes(dst)),
+        AsmInstr::X87UnaryNeg | AsmInstr::X87Binary(_) => (vec![], vec![]),
         AsmInstr::Lea(src, dst) => {
             // Lea reads address components from src, writes result to dst
             let used = match src {

@@ -11088,7 +11088,7 @@ fn convert_init_value(
         };
         return (d.to_bits()) as i64;
     }
-    if target != CType::Double && source_is_double {
+    if !matches!(target, CType::Double | CType::LongDouble) && source_is_double {
         let d = f64::from_bits(val as u64);
         return match target {
             CType::Char | CType::SChar => d as i8 as i64,
@@ -11112,7 +11112,7 @@ fn convert_init_value(
         CType::Bool => (val != 0) as i64,
         CType::Int => val as i32 as i64,
         CType::UInt => val as u32 as i64,
-        CType::Long | CType::ULong | CType::Double | CType::Pointer => val,
+        CType::Long | CType::ULong | CType::Double | CType::LongDouble | CType::Pointer => val,
         CType::Int128 | CType::UInt128 => val,
         CType::Float => (val as f32).to_bits() as i64,
         CType::Void | CType::Struct => val,
@@ -11137,6 +11137,7 @@ fn make_static_init(val: i64, t: CType) -> StaticInit {
             CType::UInt128 => StaticInit::UInt128Init(val as u64 as u128),
             CType::Float => StaticInit::FloatInit(f32::from_bits(val as u32)),
             CType::Double => StaticInit::DoubleInit(f64::from_bits(val as u64)),
+            CType::LongDouble => StaticInit::ZeroInit(CType::LongDouble.size() as usize),
             CType::Void | CType::Struct => StaticInit::ZeroInit(0),
         }
     }

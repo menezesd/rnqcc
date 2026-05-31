@@ -456,6 +456,7 @@ fn asm_type_for_val(val: &TackyVal, types: &HashMap<String, CType>) -> Result<As
             CType::Int128 | CType::UInt128 => Ok(AsmType::Octword),
             CType::Float => Ok(AsmType::Float),
             CType::Double => Ok(AsmType::Double),
+            CType::LongDouble => Ok(AsmType::LongDouble),
             CType::Void => Ok(AsmType::Longword),
             CType::Struct => Ok(AsmType::Quadword),
         },
@@ -1005,7 +1006,7 @@ fn collect_stack_slots(
                     CType::Int | CType::UInt => 4,
                     CType::Float => 4,
                     CType::Long | CType::ULong | CType::Pointer => 8,
-                    CType::Int128 | CType::UInt128 => 16,
+                    CType::Int128 | CType::UInt128 | CType::LongDouble => 16,
                     CType::Void => 4,
                     CType::Double => 8,
                     CType::Struct => {
@@ -1048,6 +1049,44 @@ fn convert_binary_op(op: &TackyBinaryOp) -> Result<AsmBinaryOp, String> {
             op
         )),
     }
+}
+
+fn long_double_helper(op: &TackyBinaryOp) -> Option<&'static str> {
+    match op {
+        TackyBinaryOp::Add => Some("__addtf3"),
+        TackyBinaryOp::Sub => Some("__subtf3"),
+        TackyBinaryOp::Mul => Some("__multf3"),
+        TackyBinaryOp::Div => Some("__divtf3"),
+        _ => None,
+    }
+}
+
+fn emit_long_double_helper_call(
+    instructions: &mut Vec<AsmInstr>,
+    helper: &str,
+    left: &TackyVal,
+    right: &TackyVal,
+    dst: &TackyVal,
+    stack_slots: &HashMap<String, i32>,
+    global_vars: &HashSet<String>,
+) -> Result<(), String> {
+    instructions.push(AsmInstr::Mov(
+        AsmType::LongDouble,
+        val_operand(left, stack_slots, global_vars)?,
+        AsmOperand::Xmm(XmmReg::XMM0),
+    ));
+    instructions.push(AsmInstr::Mov(
+        AsmType::LongDouble,
+        val_operand(right, stack_slots, global_vars)?,
+        AsmOperand::Xmm(XmmReg::XMM1),
+    ));
+    instructions.push(AsmInstr::Call(helper.to_string(), 0, 2, false));
+    instructions.push(AsmInstr::Mov(
+        AsmType::LongDouble,
+        AsmOperand::Xmm(XmmReg::XMM0),
+        val_operand(dst, stack_slots, global_vars)?,
+    ));
+    Ok(())
 }
 
 fn convert_comparison_op(op: &TackyBinaryOp, is_unsigned: bool) -> Option<CondCode> {
@@ -1108,11 +1147,17 @@ fn convert_function(
     )?;
     let saves_link_register = function.body.iter().any(|instr| match instr {
         TackyInstr::FunCall { .. } => true,
-        TackyInstr::Binary {
-            op: TackyBinaryOp::Div | TackyBinaryOp::Mod | TackyBinaryOp::Mul,
-            dst,
-            ..
-        } => matches!(asm_type_for_val(dst, types), Ok(AsmType::Octword)),
+        TackyInstr::Binary { op, dst, .. } => {
+            matches!(asm_type_for_val(dst, types), Ok(AsmType::LongDouble))
+                && long_double_helper(op).is_some()
+                || matches!(
+                    (op, asm_type_for_val(dst, types)),
+                    (
+                        TackyBinaryOp::Div | TackyBinaryOp::Mod | TackyBinaryOp::Mul,
+                        Ok(AsmType::Octword)
+                    )
+                )
+        }
         _ => false,
     });
     let frame_size = compute_frame_size(stack_size, saves_link_register);
@@ -1227,14 +1272,14 @@ fn convert_function(
             let src = AsmOperand::Stack(stack_arg_offset(frame_size, stack_param_count));
             stack_param_count += 1;
             src
-        } else if matches!(ty, AsmType::Float | AsmType::Double) {
+        } else if matches!(ty, AsmType::Float | AsmType::Double | AsmType::LongDouble) {
             if fp_param_count < FP_ARG_REGS.len() {
                 let src = AsmOperand::Xmm(FP_ARG_REGS[fp_param_count]);
                 fp_param_count += 1;
                 src
             } else {
                 let src = AsmOperand::Stack(stack_arg_offset(frame_size, stack_param_count));
-                stack_param_count += 1;
+                stack_param_count += if ty == AsmType::LongDouble { 2 } else { 1 };
                 src
             }
         } else if gp_param_count < ARG_REGS.len() {
@@ -1242,18 +1287,26 @@ fn convert_function(
             gp_param_count += 1;
             src
         } else {
-            if ty == AsmType::Octword {
+            if matches!(ty, AsmType::Octword | AsmType::LongDouble) {
                 let dst = val_operand(&TackyVal::Var(param.clone()), &stack_slots, global_vars)?;
-                instructions.push(AsmInstr::Mov(
-                    AsmType::Quadword,
-                    AsmOperand::Stack(stack_arg_offset(frame_size, stack_param_count)),
-                    low64_operand(&dst)?,
-                ));
-                instructions.push(AsmInstr::Mov(
-                    AsmType::Quadword,
-                    AsmOperand::Stack(stack_arg_offset(frame_size, stack_param_count + 1)),
-                    high64_operand(&dst)?,
-                ));
+                if ty == AsmType::LongDouble {
+                    instructions.push(AsmInstr::Mov(
+                        AsmType::LongDouble,
+                        AsmOperand::Stack(stack_arg_offset(frame_size, stack_param_count)),
+                        dst,
+                    ));
+                } else {
+                    instructions.push(AsmInstr::Mov(
+                        AsmType::Quadword,
+                        AsmOperand::Stack(stack_arg_offset(frame_size, stack_param_count)),
+                        low64_operand(&dst)?,
+                    ));
+                    instructions.push(AsmInstr::Mov(
+                        AsmType::Quadword,
+                        AsmOperand::Stack(stack_arg_offset(frame_size, stack_param_count + 1)),
+                        high64_operand(&dst)?,
+                    ));
+                }
                 stack_param_count += 2;
                 param_index += 1;
                 continue;
@@ -1429,11 +1482,12 @@ fn convert_function(
                     emit_epilogue(&mut instructions, frame_size, link_register_offset);
                     continue;
                 }
-                let ret_dst = if matches!(ty, AsmType::Float | AsmType::Double) {
-                    AsmOperand::Xmm(XmmReg::XMM0)
-                } else {
-                    AsmOperand::Reg(Reg::AX)
-                };
+                let ret_dst =
+                    if matches!(ty, AsmType::Float | AsmType::Double | AsmType::LongDouble) {
+                        AsmOperand::Xmm(XmmReg::XMM0)
+                    } else {
+                        AsmOperand::Reg(Reg::AX)
+                    };
                 instructions.push(AsmInstr::Mov(
                     ty,
                     val_operand(val, &stack_slots, global_vars)?,
@@ -2086,7 +2140,7 @@ fn convert_function(
                             AsmOperand::Reg(ARG_REGS[gp_arg_count + 1]),
                         ));
                         gp_arg_count += 2;
-                    } else if matches!(ty, AsmType::Float | AsmType::Double) {
+                    } else if matches!(ty, AsmType::Float | AsmType::Double | AsmType::LongDouble) {
                         if fp_arg_count < FP_ARG_REGS.len() {
                             instructions.push(AsmInstr::Mov(
                                 ty,
@@ -2113,7 +2167,7 @@ fn convert_function(
                 let stack_arg_count: usize = stack_args
                     .iter()
                     .map(|arg| match arg {
-                        StackArg::Scalar(AsmType::Octword, _) => 2,
+                        StackArg::Scalar(AsmType::Octword | AsmType::LongDouble, _) => 2,
                         StackArg::Scalar(_, _) => 1,
                         StackArg::MemoryBlock { size, .. } => {
                             size.div_ceil(STACK_SLOT_SIZE as usize)
@@ -2138,6 +2192,15 @@ fn convert_function(
                                     AsmType::Quadword,
                                     high64_operand(&src)?,
                                     stack_arg_offset(0, stack_index + 1),
+                                    outgoing_bytes,
+                                ));
+                                stack_index += 2;
+                            }
+                            StackArg::Scalar(AsmType::LongDouble, val) => {
+                                instructions.push(AsmInstr::AArch64StoreOutgoingArg(
+                                    AsmType::LongDouble,
+                                    val_operand(val, &stack_slots, global_vars)?,
+                                    stack_arg_offset(0, stack_index),
                                     outgoing_bytes,
                                 ));
                                 stack_index += 2;
@@ -2220,7 +2283,10 @@ fn convert_function(
                     ));
                     continue;
                 }
-                let ret_src = if matches!(dst_ty, AsmType::Float | AsmType::Double) {
+                let ret_src = if matches!(
+                    dst_ty,
+                    AsmType::Float | AsmType::Double | AsmType::LongDouble
+                ) {
                     AsmOperand::Xmm(XmmReg::XMM0)
                 } else {
                     AsmOperand::Reg(Reg::AX)
@@ -2239,6 +2305,24 @@ fn convert_function(
             } => {
                 let ty = asm_type_for_val(dst, types)?;
                 let dst_op = val_operand(dst, &stack_slots, global_vars)?;
+                if ty == AsmType::LongDouble {
+                    let Some(helper) = long_double_helper(op) else {
+                        return Err(format!(
+                            "AArch64 backend does not support long double binary op yet: {:?}",
+                            op
+                        ));
+                    };
+                    emit_long_double_helper_call(
+                        &mut instructions,
+                        helper,
+                        left,
+                        right,
+                        dst,
+                        &stack_slots,
+                        global_vars,
+                    )?;
+                    continue;
+                }
                 if matches!(op, TackyBinaryOp::Equal | TackyBinaryOp::NotEqual)
                     && (asm_type_for_val(left, types)? == AsmType::Octword
                         || asm_type_for_val(right, types)? == AsmType::Octword)

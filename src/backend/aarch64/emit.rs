@@ -43,7 +43,7 @@ fn reg_name(reg: Reg, ty: AsmType) -> io::Result<&'static str> {
         (Reg::R10, AsmType::Quadword) => Ok("x9"),
         (Reg::R11, AsmType::Byte | AsmType::Word | AsmType::Longword) => Ok("w10"),
         (Reg::R11, AsmType::Quadword) => Ok("x10"),
-        (_, AsmType::Float | AsmType::Double) => {
+        (_, AsmType::Float | AsmType::Double | AsmType::LongDouble) => {
             invalid_input("AArch64 integer register requested for floating type")
         }
         _ => invalid_input(format!(
@@ -74,9 +74,41 @@ fn fp_name(reg: XmmReg) -> &'static str {
     }
 }
 
+fn fp_vector_name(reg: XmmReg) -> &'static str {
+    match reg {
+        XmmReg::XMM0 => "v0",
+        XmmReg::XMM1 => "v1",
+        XmmReg::XMM2 => "v2",
+        XmmReg::XMM3 => "v3",
+        XmmReg::XMM4 => "v4",
+        XmmReg::XMM5 => "v5",
+        XmmReg::XMM6 => "v6",
+        XmmReg::XMM7 => "v7",
+        XmmReg::XMM8 => "v8",
+        XmmReg::XMM9 => "v9",
+        XmmReg::XMM10 => "v10",
+        XmmReg::XMM11 => "v11",
+        XmmReg::XMM12 => "v12",
+        XmmReg::XMM13 => "v13",
+        XmmReg::XMM14 => "v14",
+        XmmReg::XMM15 => "v15",
+    }
+}
+
+fn q_reg_to_vector_name(reg: &str) -> io::Result<String> {
+    reg.strip_prefix('q')
+        .map(|num| format!("v{}.16b", num))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("AArch64 expected q register for long double, got {}", reg),
+            )
+        })
+}
+
 fn fp_name_typed(reg: XmmReg, ty: AsmType) -> io::Result<&'static str> {
-    if ty == AsmType::Float {
-        Ok(match reg {
+    match ty {
+        AsmType::Float => Ok(match reg {
             XmmReg::XMM0 => "s0",
             XmmReg::XMM1 => "s1",
             XmmReg::XMM2 => "s2",
@@ -93,9 +125,26 @@ fn fp_name_typed(reg: XmmReg, ty: AsmType) -> io::Result<&'static str> {
             XmmReg::XMM13 => "s13",
             XmmReg::XMM14 => "s14",
             XmmReg::XMM15 => "s15",
-        })
-    } else {
-        Ok(fp_name(reg))
+        }),
+        AsmType::LongDouble => Ok(match reg {
+            XmmReg::XMM0 => "q0",
+            XmmReg::XMM1 => "q1",
+            XmmReg::XMM2 => "q2",
+            XmmReg::XMM3 => "q3",
+            XmmReg::XMM4 => "q4",
+            XmmReg::XMM5 => "q5",
+            XmmReg::XMM6 => "q6",
+            XmmReg::XMM7 => "q7",
+            XmmReg::XMM8 => "q8",
+            XmmReg::XMM9 => "q9",
+            XmmReg::XMM10 => "q10",
+            XmmReg::XMM11 => "q11",
+            XmmReg::XMM12 => "q12",
+            XmmReg::XMM13 => "q13",
+            XmmReg::XMM14 => "q14",
+            XmmReg::XMM15 => "q15",
+        }),
+        _ => Ok(fp_name(reg)),
     }
 }
 
@@ -105,6 +154,17 @@ fn fp_scratch_name_typed(reg: Reg, ty: AsmType) -> io::Result<&'static str> {
             Reg::R10 => Ok("s9"),
             Reg::R11 => Ok("s10"),
             Reg::R13 => Ok("s11"),
+            _ => invalid_input(format!(
+                "AArch64 backend does not map {:?} as FP scratch",
+                reg
+            )),
+        };
+    }
+    if ty == AsmType::LongDouble {
+        return match reg {
+            Reg::R10 => Ok("q9"),
+            Reg::R11 => Ok("q10"),
+            Reg::R13 => Ok("q11"),
             _ => invalid_input(format!(
                 "AArch64 backend does not map {:?} as FP scratch",
                 reg
@@ -128,7 +188,7 @@ fn load_mnemonic(ty: AsmType) -> &'static str {
         AsmType::Word => "ldrh",
         AsmType::Longword => "ldr",
         AsmType::Quadword => "ldr",
-        AsmType::Octword => "ldr",
+        AsmType::Octword | AsmType::LongDouble => "ldr",
         AsmType::Float => "ldr",
         AsmType::Double => "ldr",
     }
@@ -140,7 +200,7 @@ fn store_mnemonic(ty: AsmType) -> &'static str {
         AsmType::Word => "strh",
         AsmType::Longword => "str",
         AsmType::Quadword => "str",
-        AsmType::Octword => "str",
+        AsmType::Octword | AsmType::LongDouble => "str",
         AsmType::Float => "str",
         AsmType::Double => "str",
     }
@@ -193,7 +253,7 @@ fn stack_offset_fits_unsigned(ty: AsmType, offset: i32) -> bool {
         AsmType::Word => offset % 2 == 0 && offset / 2 <= 4095,
         AsmType::Longword => offset % 4 == 0 && offset / 4 <= 4095,
         AsmType::Float => offset % 4 == 0 && offset / 4 <= 4095,
-        AsmType::Octword => offset % 16 == 0 && offset / 16 <= 4095,
+        AsmType::Octword | AsmType::LongDouble => offset % 16 == 0 && offset / 16 <= 4095,
         AsmType::Quadword | AsmType::Double => offset % 8 == 0 && offset / 8 <= 4095,
     }
 }
@@ -599,7 +659,9 @@ fn emit_store_tls_data(
             AsmType::Double => "d16",
             AsmType::Byte | AsmType::Word | AsmType::Longword => "w17",
             AsmType::Quadword => "x17",
-            AsmType::Octword => return invalid_input("AArch64 emitter needs 128-bit TLS lowering"),
+            AsmType::Octword | AsmType::LongDouble => {
+                return invalid_input("AArch64 emitter needs 128-bit TLS lowering")
+            }
         };
         writeln!(w, "\t{} {}, [sp]", load_mnemonic(ty), scratch)?;
         writeln!(w, "\t{} {}, [x16]", store_mnemonic(ty), scratch)?;
@@ -735,7 +797,9 @@ fn emit_load_immediate(
     let width = match ty {
         AsmType::Byte | AsmType::Word | AsmType::Longword => 32,
         AsmType::Quadword => 64,
-        AsmType::Octword => return invalid_input("AArch64 emitter needs 128-bit immediates"),
+        AsmType::Octword | AsmType::LongDouble => {
+            return invalid_input("AArch64 emitter needs 128-bit immediates")
+        }
         AsmType::Float => 32,
         AsmType::Double => 64,
     };
@@ -770,7 +834,7 @@ fn load_operand(
     operand: &AsmOperand,
     scratch: Reg,
 ) -> std::io::Result<&'static str> {
-    let reg = if matches!(ty, AsmType::Float | AsmType::Double) {
+    let reg = if matches!(ty, AsmType::Float | AsmType::Double | AsmType::LongDouble) {
         fp_scratch_name_typed(scratch, ty)?
     } else {
         reg_name(scratch, ty)?
@@ -816,6 +880,12 @@ fn store_operand(
 ) -> std::io::Result<()> {
     match dst {
         AsmOperand::Reg(reg) => writeln!(w, "\tmov {}, {}", reg_name(*reg, ty)?, src_reg),
+        AsmOperand::Xmm(reg) if ty == AsmType::LongDouble => writeln!(
+            w,
+            "\tmov {}.16b, {}",
+            fp_vector_name(*reg),
+            q_reg_to_vector_name(src_reg)?
+        ),
         AsmOperand::Xmm(reg) => writeln!(w, "\tfmov {}, {}", fp_name_typed(*reg, ty)?, src_reg),
         AsmOperand::Stack(offset) => emit_store_stack(w, ty, src_reg, *offset),
         AsmOperand::Data(name) => emit_store_data(w, target, ty, src_reg, name),
@@ -860,6 +930,14 @@ fn emit_mov(
         (AsmOperand::Imm(value), AsmOperand::Reg(reg)) => {
             emit_load_immediate(w, ty, reg_name(*reg, ty)?, *value)
         }
+        (AsmOperand::Xmm(src), AsmOperand::Xmm(dst)) if ty == AsmType::LongDouble => {
+            writeln!(
+                w,
+                "\tmov {}.16b, {}.16b",
+                fp_vector_name(*dst),
+                fp_vector_name(*src)
+            )
+        }
         (AsmOperand::Xmm(src), AsmOperand::Xmm(dst))
             if matches!(ty, AsmType::Float | AsmType::Double) =>
         {
@@ -871,32 +949,32 @@ fn emit_mov(
             )
         }
         (AsmOperand::Stack(offset), AsmOperand::Xmm(reg))
-            if matches!(ty, AsmType::Float | AsmType::Double) =>
+            if matches!(ty, AsmType::Float | AsmType::Double | AsmType::LongDouble) =>
         {
             emit_load_stack(w, ty, fp_name_typed(*reg, ty)?, *offset)
         }
         (AsmOperand::Xmm(reg), AsmOperand::Stack(offset))
-            if matches!(ty, AsmType::Float | AsmType::Double) =>
+            if matches!(ty, AsmType::Float | AsmType::Double | AsmType::LongDouble) =>
         {
             emit_store_stack(w, ty, fp_name_typed(*reg, ty)?, *offset)
         }
         (AsmOperand::Data(name), AsmOperand::Xmm(reg))
-            if matches!(ty, AsmType::Float | AsmType::Double) =>
+            if matches!(ty, AsmType::Float | AsmType::Double | AsmType::LongDouble) =>
         {
             emit_load_data(w, target, ty, name, fp_name_typed(*reg, ty)?)
         }
         (AsmOperand::TlsData(name, offset), AsmOperand::Xmm(reg))
-            if matches!(ty, AsmType::Float | AsmType::Double) =>
+            if matches!(ty, AsmType::Float | AsmType::Double | AsmType::LongDouble) =>
         {
             emit_load_tls_data(w, target, ty, name, *offset, fp_name_typed(*reg, ty)?)
         }
         (AsmOperand::Xmm(reg), AsmOperand::Data(name))
-            if matches!(ty, AsmType::Float | AsmType::Double) =>
+            if matches!(ty, AsmType::Float | AsmType::Double | AsmType::LongDouble) =>
         {
             emit_store_data(w, target, ty, fp_name_typed(*reg, ty)?, name)
         }
         (AsmOperand::Xmm(reg), AsmOperand::TlsData(name, offset))
-            if matches!(ty, AsmType::Float | AsmType::Double) =>
+            if matches!(ty, AsmType::Float | AsmType::Double | AsmType::LongDouble) =>
         {
             emit_store_tls_data(w, target, ty, fp_name_typed(*reg, ty)?, name, *offset)
         }
@@ -1004,7 +1082,7 @@ fn emit_mov_zero_extend(
             AsmType::Word => Some(2),
             AsmType::Longword => Some(4),
             AsmType::Quadword => Some(8),
-            AsmType::Octword => Some(16),
+            AsmType::Octword | AsmType::LongDouble => Some(16),
             AsmType::Float | AsmType::Double => None,
         }
     }
@@ -1012,14 +1090,14 @@ fn emit_mov_zero_extend(
     if int_size(src_ty)
         .zip(int_size(dst_ty))
         .is_some_and(|(src, dst)| src >= dst)
-        && dst_ty != AsmType::Octword
+        && !matches!(dst_ty, AsmType::Octword | AsmType::LongDouble)
     {
         return emit_mov(w, target, dst_ty, src, dst);
     }
 
-    if dst_ty == AsmType::Octword {
-        if src_ty == AsmType::Octword {
-            return emit_mov(w, target, AsmType::Octword, src, dst);
+    if matches!(dst_ty, AsmType::Octword | AsmType::LongDouble) {
+        if matches!(src_ty, AsmType::Octword | AsmType::LongDouble) {
+            return emit_mov(w, target, dst_ty, src, dst);
         }
         let src_reg = load_operand(w, target, src_ty, src, Reg::R10)?;
         match src_ty {
@@ -1035,7 +1113,7 @@ fn emit_mov_zero_extend(
                     writeln!(w, "\tmov x9, {}", src_reg)?;
                 }
             }
-            AsmType::Octword => {
+            AsmType::Octword | AsmType::LongDouble => {
                 return invalid_input("AArch64 emitter does not support 128-bit zero extension")
             }
             AsmType::Float | AsmType::Double => {
@@ -1048,7 +1126,7 @@ fn emit_mov_zero_extend(
         writeln!(w, "\tmov x11, #0")?;
         return store_operand(w, target, AsmType::Quadword, "x11", &dst_high);
     }
-    if src_ty == AsmType::Octword {
+    if matches!(src_ty, AsmType::Octword | AsmType::LongDouble) {
         let src_low = offset_operand(src, 0)?;
         return emit_mov(w, target, dst_ty, &src_low, dst);
     }
@@ -1076,7 +1154,7 @@ fn emit_mov_zero_extend(
     let store_reg = match dst_ty {
         AsmType::Byte | AsmType::Word | AsmType::Longword => reg_name(Reg::R10, AsmType::Longword)?,
         AsmType::Quadword => reg_name(Reg::R10, AsmType::Quadword)?,
-        AsmType::Octword => {
+        AsmType::Octword | AsmType::LongDouble => {
             return invalid_input("AArch64 emitter does not support 128-bit zero extension")
         }
         AsmType::Float | AsmType::Double => {
@@ -1352,7 +1430,7 @@ fn load_operand_rebased(
 ) -> std::io::Result<&'static str> {
     match operand {
         AsmOperand::Stack(offset) => {
-            let reg = if matches!(ty, AsmType::Float | AsmType::Double) {
+            let reg = if matches!(ty, AsmType::Float | AsmType::Double | AsmType::LongDouble) {
                 fp_scratch_name_typed(scratch, ty)?
             } else {
                 reg_name(scratch, ty)?

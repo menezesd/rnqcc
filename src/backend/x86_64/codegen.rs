@@ -76,6 +76,41 @@ fn convert_double_val(val: &TackyVal, static_doubles: &mut Vec<(String, f64)>) -
     }
 }
 
+fn x87_load_val(
+    out: &mut Vec<AsmInstr>,
+    val: &TackyVal,
+    types: &HashMap<String, CType>,
+    static_doubles: &mut Vec<(String, f64)>,
+) {
+    let ty = val_type(val, types);
+    match val {
+        TackyVal::DoubleConstant(_) => {
+            out.push(AsmInstr::X87Load(
+                AsmType::Double,
+                convert_double_val(val, static_doubles),
+            ));
+        }
+        _ if matches!(ty, AsmType::Float | AsmType::Double | AsmType::LongDouble) => {
+            out.push(AsmInstr::X87Load(ty, convert_val(val)));
+        }
+        _ => {
+            // Integer-to-long-double conversion is lowered elsewhere before this helper is used.
+            out.push(AsmInstr::X87Load(AsmType::LongDouble, convert_val(val)));
+        }
+    }
+}
+
+fn x87_copy_to_long_double(
+    out: &mut Vec<AsmInstr>,
+    src: &TackyVal,
+    dst: &TackyVal,
+    types: &HashMap<String, CType>,
+    static_doubles: &mut Vec<(String, f64)>,
+) {
+    x87_load_val(out, src, types, static_doubles);
+    out.push(AsmInstr::X87Store(convert_val(dst)));
+}
+
 fn i128_parts_signed(value: i128) -> (i64, i64) {
     (value as i64, (value >> 64) as i64)
 }
@@ -650,7 +685,9 @@ fn convert_instruction(
                     return Ok(());
                 }
             }
-            if matches!(t, AsmType::Float | AsmType::Double) {
+            if t == AsmType::LongDouble {
+                x87_load_val(out, val, types, static_doubles);
+            } else if matches!(t, AsmType::Float | AsmType::Double) {
                 let src = convert_double_val(val, static_doubles);
                 out.push(AsmInstr::Mov(
                     AsmType::Double,
@@ -833,7 +870,13 @@ fn convert_instruction(
         }
         TackyInstr::Unary { op, src, dst } => {
             let t = val_type(dst, types);
-            if matches!(t, AsmType::Float | AsmType::Double) && matches!(op, TackyUnaryOp::Negate) {
+            if t == AsmType::LongDouble && matches!(op, TackyUnaryOp::Negate) {
+                x87_load_val(out, src, types, static_doubles);
+                out.push(AsmInstr::X87UnaryNeg);
+                out.push(AsmInstr::X87Store(convert_val(dst)));
+            } else if matches!(t, AsmType::Float | AsmType::Double)
+                && matches!(op, TackyUnaryOp::Negate)
+            {
                 // Double negation: XOR with sign bit mask (bit 63)
                 // Emit a static constant with just the sign bit set
                 let sign_mask_label = double_const_label(static_doubles);
@@ -894,6 +937,17 @@ fn convert_instruction(
                 out.push(AsmInstr::Mov(t, convert_val(src), convert_val(dst)));
                 out.push(AsmInstr::Unary(t, asm_op, convert_val(dst)));
             }
+        }
+        TackyInstr::Binary {
+            op: TackyBinaryOp::Div,
+            left,
+            right,
+            dst,
+        } if val_type(dst, types) == AsmType::LongDouble => {
+            x87_load_val(out, left, types, static_doubles);
+            x87_load_val(out, right, types, static_doubles);
+            out.push(AsmInstr::X87Binary(AsmX87BinaryOp::Div));
+            out.push(AsmInstr::X87Store(convert_val(dst)));
         }
         TackyInstr::Binary {
             op: TackyBinaryOp::Div,
@@ -1025,6 +1079,10 @@ fn convert_instruction(
         }
         TackyInstr::Copy { src, dst } => {
             let t = val_type(dst, types);
+            if t == AsmType::LongDouble {
+                x87_copy_to_long_double(out, src, dst, types, static_doubles);
+                return Ok(());
+            }
             if t == AsmType::Octword {
                 emit_i128_copy(out, src, dst)?;
                 return Ok(());
@@ -1694,7 +1752,9 @@ fn convert_funcall(
                     continue;
                 }
                 let t = val_type(arg, types);
-                if matches!(t, AsmType::Float | AsmType::Double) {
+                if t == AsmType::LongDouble {
+                    force_stack_args.insert(arg_idx);
+                } else if matches!(t, AsmType::Float | AsmType::Double) {
                     if sim_xmm < 8 {
                         sim_xmm += 1;
                     }
@@ -1709,6 +1769,7 @@ fn convert_funcall(
         enum StackArg<'a> {
             Scalar(&'a TackyVal),
             WideScalar(&'a TackyVal),
+            LongDouble(&'a TackyVal),
             MemoryBlock { src_ptr: &'a TackyVal, size: usize },
         }
 
@@ -1727,7 +1788,11 @@ fn convert_funcall(
                 continue;
             }
             if force_stack_args.contains(&arg_idx) {
-                stack_args_list.push(StackArg::Scalar(arg));
+                if val_type(arg, types) == AsmType::LongDouble {
+                    stack_args_list.push(StackArg::LongDouble(arg));
+                } else {
+                    stack_args_list.push(StackArg::Scalar(arg));
+                }
                 continue;
             }
             let t = val_type(arg, types);
@@ -1741,7 +1806,9 @@ fn convert_funcall(
                 }
                 continue;
             }
-            if matches!(t, AsmType::Float | AsmType::Double) {
+            if t == AsmType::LongDouble {
+                stack_args_list.push(StackArg::LongDouble(arg));
+            } else if matches!(t, AsmType::Float | AsmType::Double) {
                 if xmm_idx < 8 {
                     xmm_reg_args.push((xmm_idx, arg));
                     xmm_idx += 1;
@@ -1770,6 +1837,7 @@ fn convert_funcall(
             .map(|item| match item {
                 StackArg::Scalar(_) => 8,
                 StackArg::WideScalar(_) => 16,
+                StackArg::LongDouble(_) => 16,
                 StackArg::MemoryBlock { size, .. } => size.next_multiple_of(8),
             })
             .sum();
@@ -1807,6 +1875,11 @@ fn convert_funcall(
                             AsmOperand::StackArg(stack_offset),
                             AsmOperand::StackArg(stack_offset + 8),
                         );
+                        stack_offset += 16;
+                    }
+                    StackArg::LongDouble(arg) => {
+                        x87_load_val(out, arg, types, static_doubles);
+                        out.push(AsmInstr::X87Store(AsmOperand::StackArg(stack_offset)));
                         stack_offset += 16;
                     }
                     StackArg::MemoryBlock { src_ptr, size } => {
@@ -1911,7 +1984,9 @@ fn convert_funcall(
                 }
             }
         }
-        if matches!(ret_t, AsmType::Float | AsmType::Double) {
+        if ret_t == AsmType::LongDouble {
+            out.push(AsmInstr::X87Store(convert_val(dst)));
+        } else if matches!(ret_t, AsmType::Float | AsmType::Double) {
             out.push(AsmInstr::Mov(
                 ret_t,
                 AsmOperand::Xmm(XmmReg::XMM0),
@@ -2099,7 +2174,19 @@ fn convert_binary(
         Ok(())
     } else {
         let t = val_type(dst, types);
-        if matches!(t, AsmType::Float | AsmType::Double) {
+        if t == AsmType::LongDouble {
+            let asm_op = match op {
+                TackyBinaryOp::Add => AsmX87BinaryOp::Add,
+                TackyBinaryOp::Sub => AsmX87BinaryOp::Sub,
+                TackyBinaryOp::Mul => AsmX87BinaryOp::Mul,
+                TackyBinaryOp::Div => AsmX87BinaryOp::Div,
+                _ => return Err(format!("Unsupported long double binary op: {:?}", op)),
+            };
+            x87_load_val(out, left, types, static_doubles);
+            x87_load_val(out, right, types, static_doubles);
+            out.push(AsmInstr::X87Binary(asm_op));
+            out.push(AsmInstr::X87Store(convert_val(dst)));
+        } else if matches!(t, AsmType::Float | AsmType::Double) {
             let asm_op = match op {
                 TackyBinaryOp::Add => AsmBinaryOp::Add,
                 TackyBinaryOp::Sub => AsmBinaryOp::Sub,
@@ -2542,7 +2629,9 @@ fn convert_function(
             }
             // Regular param
             let t: AsmType = types.get(param).copied().unwrap_or(CType::Int).into();
-            if matches!(t, AsmType::Float | AsmType::Double) {
+            if t == AsmType::LongDouble {
+                force_stack.insert(i);
+            } else if matches!(t, AsmType::Float | AsmType::Double) {
                 if sim_xmm_idx < 8 {
                     sim_xmm_idx += 1;
                 }
@@ -2569,7 +2658,14 @@ fn convert_function(
         if force_stack.contains(&i) || func.stack_params.contains(param) {
             let offset = 16 + (stack_arg_idx * 8) as i32;
             let t: AsmType = types.get(param).copied().unwrap_or(CType::Long).into();
-            if t == AsmType::Octword {
+            if t == AsmType::LongDouble {
+                instructions.push(AsmInstr::X87Load(
+                    AsmType::LongDouble,
+                    AsmOperand::Stack(offset),
+                ));
+                instructions.push(AsmInstr::X87Store(AsmOperand::Pseudo(param.clone())));
+                stack_arg_idx += 2;
+            } else if t == AsmType::Octword {
                 instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     AsmOperand::Stack(offset),
@@ -2592,7 +2688,15 @@ fn convert_function(
             continue;
         }
         let t: AsmType = types.get(param).copied().unwrap_or(CType::Int).into();
-        if matches!(t, AsmType::Float | AsmType::Double) {
+        if t == AsmType::LongDouble {
+            let offset = 16 + (stack_arg_idx * 8) as i32;
+            instructions.push(AsmInstr::X87Load(
+                AsmType::LongDouble,
+                AsmOperand::Stack(offset),
+            ));
+            instructions.push(AsmInstr::X87Store(AsmOperand::Pseudo(param.clone())));
+            stack_arg_idx += 2;
+        } else if matches!(t, AsmType::Float | AsmType::Double) {
             if xmm_reg_idx < 8 {
                 instructions.push(AsmInstr::Mov(
                     t,
@@ -2861,6 +2965,12 @@ fn replace_pseudos(
             }
             AsmInstr::Cvtss2sd(src, dst) | AsmInstr::Cvtsd2ss(src, dst) => {
                 replace_operand(src, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
+            }
+            AsmInstr::X87Load(_, src) => {
+                replace_operand(src, &mut pseudo_map, &mut stack_offset, &ctx);
+            }
+            AsmInstr::X87Store(dst) => {
                 replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
             }
             AsmInstr::Lea(src, dst) => {
@@ -3384,6 +3494,9 @@ fn verify_final_function(func: &AsmFunction) -> Result<(), String> {
             }
             AsmInstr::CopyFromStackArg { dst, .. } => {
                 assert_no_pseudo_operand(dst, instr)?;
+            }
+            AsmInstr::X87Load(_, src) | AsmInstr::X87Store(src) => {
+                assert_no_pseudo_operand(src, instr)?;
             }
             _ => {}
         }

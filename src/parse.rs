@@ -93,6 +93,7 @@ struct CompatTypeMeta {
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    target: Target,
     last_struct_tag: Option<String>,
     /// Scoped typedef table: each scope maps typedef names to their resolved type info.
     typedef_scopes: Vec<std::collections::HashMap<String, TypedefInfo>>,
@@ -179,6 +180,10 @@ impl Parser {
     }
 
     pub fn new(tokens: Vec<Token>) -> Self {
+        Self::new_with_target(tokens, Target::host())
+    }
+
+    pub fn new_with_target(tokens: Vec<Token>, target: Target) -> Self {
         let mut builtin_typedefs = std::collections::HashMap::new();
         builtin_typedefs.insert(
             "__builtin_va_list".to_string(),
@@ -224,6 +229,7 @@ impl Parser {
         Parser {
             tokens,
             pos: 0,
+            target,
             last_struct_tag: None,
             typedef_scopes: vec![builtin_typedefs],
             pending_struct_decls: Vec::new(),
@@ -253,6 +259,14 @@ impl Parser {
             param_parse_depth: 0,
             pending_flexible_array_bound: false,
             current_function_name: None,
+        }
+    }
+
+    fn long_double_ctype(&self) -> CType {
+        if self.target.long_double_size() > CType::Double.size() as usize {
+            CType::LongDouble
+        } else {
+            CType::Double
         }
     }
 
@@ -2029,6 +2043,8 @@ impl Parser {
             CType::UInt
         } else if has_float {
             CType::Float
+        } else if has_double && has_long {
+            self.long_double_ctype()
         } else if has_double {
             CType::Double
         } else if has_long {
@@ -2329,6 +2345,8 @@ impl Parser {
             CType::ULong
         } else if has_unsigned {
             CType::UInt
+        } else if has_double && has_long {
+            self.long_double_ctype()
         } else if has_double {
             CType::Double
         } else if has_long {
@@ -5217,6 +5235,7 @@ impl Parser {
                                     CType::UChar => "uchar",
                                     CType::Float => "float",
                                     CType::Double => "double",
+                                    CType::LongDouble => "long double",
                                     CType::Int128 => "int128",
                                     CType::UInt128 => "uint128",
                                     _ => "int",
@@ -5456,6 +5475,11 @@ pub fn parse(tokens: Vec<Token>) -> ParseResult<Program> {
     parser.parse_program()
 }
 
+pub fn parse_with_target(tokens: Vec<Token>, target: Target) -> ParseResult<Program> {
+    let mut parser = Parser::new_with_target(tokens, target);
+    parser.parse_program()
+}
+
 fn parse_token_index(message: &str) -> Option<usize> {
     let marker = "Parse error at token ";
     let start = message.find(marker)? + marker.len();
@@ -5467,8 +5491,15 @@ fn parse_token_index(message: &str) -> Option<usize> {
 }
 
 pub fn parse_from_spanned(tokens: Vec<lex::SpannedToken>) -> Result<Program, String> {
+    parse_from_spanned_with_target(tokens, Target::host())
+}
+
+pub fn parse_from_spanned_with_target(
+    tokens: Vec<lex::SpannedToken>,
+    target: Target,
+) -> Result<Program, String> {
     let plain_tokens: Vec<Token> = tokens.iter().map(|spanned| spanned.token.clone()).collect();
-    parse(plain_tokens).map_err(|message| {
+    parse_with_target(plain_tokens, target).map_err(|message| {
         let message = message.trim_start_matches("parse failed: ").to_string();
         let span = parse_token_index(&message)
             .and_then(|index| tokens.get(index).map(|spanned| spanned.span.clone()))
@@ -5491,6 +5522,10 @@ mod tests {
 
     fn parse_source(source: &str) -> ParseResult<Program> {
         parse(lex::lex(source)?)
+    }
+
+    fn parse_source_target(source: &str, target: Target) -> ParseResult<Program> {
+        parse_with_target(lex::lex(source)?, target)
     }
 
     fn parse_source_err(source: &str) -> ParseResult<Program> {
@@ -6096,8 +6131,21 @@ mod tests {
     }
 
     #[test]
-    fn parses_long_double_parameters_as_double() -> Result<(), String> {
-        let program = parse_source("extern long double f(long double x);\n")?;
+    fn parses_long_double_parameters_for_target() -> Result<(), String> {
+        let program = parse_source_target(
+            "extern long double f(long double x);\n",
+            Target::x86_64_linux(),
+        )?;
+        let Declaration::FunDecl(func) = &program.declarations[0] else {
+            return Err("expected function declaration".to_string());
+        };
+        assert_eq!(func.return_type, CType::LongDouble);
+        assert_eq!(func.params[0].1, CType::LongDouble);
+
+        let program = parse_source_target(
+            "extern long double f(long double x);\n",
+            Target::aarch64_macos(),
+        )?;
         let Declaration::FunDecl(func) = &program.declarations[0] else {
             return Err("expected function declaration".to_string());
         };

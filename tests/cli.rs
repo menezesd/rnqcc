@@ -674,6 +674,98 @@ fn direct_function_prototypes_follow_source_order() {
 }
 
 #[test]
+fn x86_64_long_double_uses_x87_stack_abi() {
+    let src = temp_file("x86-ld-x87", "c");
+    let out = temp_file("x86-ld-x87", "s");
+    std::fs::write(
+        &src,
+        "long double id(long double x) { return x; }\n\
+         long double add(long double a, long double b) { return a + b; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("fldt 16(%rbp)"), "{asm}");
+    assert!(asm.contains("fldt 32(%rbp)"), "{asm}");
+    assert!(asm.contains("fstpt"), "{asm}");
+    assert!(asm.contains("faddp %st, %st(1)"), "{asm}");
+    assert!(!asm.contains("%xmm0"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_linux_long_double_uses_binary128_helpers() {
+    let src = temp_file("aarch64-ld-binary128", "c");
+    let out = temp_file("aarch64-ld-binary128", "s");
+    std::fs::write(
+        &src,
+        "long double id(long double x) { return x; }\n\
+         long double add(long double a, long double b) { return a + b; }\n\
+         long double sub(long double a, long double b) { return a - b; }\n\
+         long double mul(long double a, long double b) { return a * b; }\n\
+         long double divv(long double a, long double b) { return a / b; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("str q0, [sp"), "{asm}");
+    assert!(asm.contains("str q1, [sp"), "{asm}");
+    assert!(asm.contains("bl __addtf3"), "{asm}");
+    assert!(asm.contains("bl __subtf3"), "{asm}");
+    assert!(asm.contains("bl __multf3"), "{asm}");
+    assert!(asm.contains("bl __divtf3"), "{asm}");
+    assert!(asm.contains("str x30"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn long_double_size_follows_target() {
+    for (target, expected) in [("x86_64-linux", 16), ("aarch64-macos", 8)] {
+        let src = temp_file("target-long-double-size", "c");
+        let out = temp_file("target-long-double-size", "s");
+        std::fs::write(
+            &src,
+            format!(
+                "int a[sizeof(long double) == {expected} ? 1 : -1];\n\
+                 int b[__SIZEOF_LONG_DOUBLE__ == {expected} ? 1 : -1];\n"
+            ),
+        )
+        .expect("failed to write input");
+
+        let output = Command::new(rnqcc())
+            .args(["--target", target, "-S", "-o"])
+            .arg(&out)
+            .arg(&src)
+            .output()
+            .expect("failed to run rnqcc");
+
+        assert!(output.status.success(), "{}", stderr(output));
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(out);
+    }
+}
+
+#[test]
 fn compiles_old_style_function_definition_after_promoted_prototype() {
     let src = temp_file("old-style-promoted-prototype", "c");
     let out = temp_file("old-style-promoted-prototype", "s");
@@ -12873,7 +12965,12 @@ fn internal_cpp_exposes_feature_test_macros() {
         .expect("failed to run rnqcc");
 
     assert!(output.status.success(), "{}", stderr(output));
-    assert!(stdout(output).contains("int widths = 16 + 4;"));
+    let expected_long_double_size = if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
+        8
+    } else {
+        16
+    };
+    assert!(stdout(output).contains(&format!("int widths = {expected_long_double_size} + 4;")));
 }
 
 #[cfg(unix)]

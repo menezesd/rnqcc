@@ -4894,7 +4894,11 @@ fn seed_internal_predefined_macros(macros: &mut HashMap<String, MacroDef>, targe
     define_builtin_macro(macros, "__SIZEOF_BOOL__", "1");
     define_builtin_macro(macros, "__SIZEOF_FLOAT__", "4");
     define_builtin_macro(macros, "__SIZEOF_DOUBLE__", "8");
-    define_builtin_macro(macros, "__SIZEOF_LONG_DOUBLE__", "16");
+    define_builtin_macro(
+        macros,
+        "__SIZEOF_LONG_DOUBLE__",
+        &target.long_double_size().to_string(),
+    );
     define_builtin_macro(macros, "__SIZEOF_SIZE_T__", "8");
     define_builtin_macro(macros, "__SIZEOF_PTRDIFF_T__", "8");
     define_builtin_macro(macros, "__SIZEOF_WCHAR_T__", "4");
@@ -5732,12 +5736,22 @@ fn preprocess(invocation: PreprocessInvocation<'_>) -> Result<PreprocessedSource
             line_markers: invocation.line_markers,
         })?
     } else {
-        let mut args: Vec<OsString> = invocation
-            .include_paths
-            .quote
-            .iter()
-            .flat_map(|dir| [OsString::from("-iquote"), dir.as_os_str().to_os_string()])
+        let mut args: Vec<OsString> = gcc_arch_args(invocation.target)
+            .into_iter()
+            .map(OsString::from)
             .collect();
+        args.push(OsString::from("-U__SIZEOF_LONG_DOUBLE__"));
+        args.push(OsString::from(format!(
+            "-D__SIZEOF_LONG_DOUBLE__={}",
+            invocation.target.long_double_size()
+        )));
+        args.extend(
+            invocation
+                .include_paths
+                .quote
+                .iter()
+                .flat_map(|dir| [OsString::from("-iquote"), dir.as_os_str().to_os_string()]),
+        );
         args.extend(
             invocation
                 .include_paths

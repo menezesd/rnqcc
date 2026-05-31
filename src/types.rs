@@ -115,6 +115,13 @@ impl Target {
         let host = Self::host();
         *self == host || (self.os == TargetOs::MacOs && host.os == TargetOs::MacOs)
     }
+
+    pub fn long_double_size(&self) -> usize {
+        match (self.arch, self.os) {
+            (Arch::AArch64, TargetOs::MacOs) => 8,
+            _ => 16,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -176,6 +183,7 @@ pub enum CType {
     UInt128,
     Float,
     Double,
+    LongDouble,
     Bool,
     /// Struct type (tag tracked separately via FullType)
     Struct,
@@ -229,7 +237,7 @@ impl CType {
             CType::Short | CType::UShort => 2,
             CType::Int | CType::UInt | CType::Float => 4,
             CType::Long | CType::ULong | CType::Double | CType::Pointer => 8,
-            CType::Int128 | CType::UInt128 => 16,
+            CType::Int128 | CType::UInt128 | CType::LongDouble => 16,
             CType::Void => 0,
             CType::Struct => 0, // size tracked via FullType/StructDef
         }
@@ -258,11 +266,11 @@ impl CType {
     }
 
     pub fn is_double(self) -> bool {
-        self == CType::Double
+        matches!(self, CType::Double | CType::LongDouble)
     }
 
     pub fn is_floating(self) -> bool {
-        matches!(self, CType::Float | CType::Double)
+        matches!(self, CType::Float | CType::Double | CType::LongDouble)
     }
 
     pub fn is_pointer(self) -> bool {
@@ -285,6 +293,9 @@ impl CType {
         let b = b.promote();
         if a == b {
             return a;
+        }
+        if a == CType::LongDouble || b == CType::LongDouble {
+            return CType::LongDouble;
         }
         if a == CType::Double {
             return CType::Double;
@@ -1820,13 +1831,14 @@ pub struct TackyProgram {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AsmType {
-    Byte,     // 1-byte char
-    Word,     // 16-bit short
-    Longword, // 32-bit int
-    Quadword, // 64-bit long
-    Octword,  // 128-bit integer
-    Float,    // 32-bit float (XMM)
-    Double,   // 64-bit float (XMM)
+    Byte,       // 1-byte char
+    Word,       // 16-bit short
+    Longword,   // 32-bit int
+    Quadword,   // 64-bit long
+    Octword,    // 128-bit integer
+    Float,      // 32-bit float (XMM)
+    Double,     // 64-bit float (XMM)
+    LongDouble, // target long double storage: x87 extended or binary128
 }
 
 impl From<CType> for AsmType {
@@ -1839,6 +1851,7 @@ impl From<CType> for AsmType {
             CType::Int128 | CType::UInt128 => AsmType::Octword,
             CType::Float => AsmType::Float,
             CType::Double => AsmType::Double,
+            CType::LongDouble => AsmType::LongDouble,
             CType::Void => AsmType::Longword,
             CType::Struct => AsmType::Longword, // struct size tracked separately
         }
@@ -1929,6 +1942,14 @@ pub enum AsmBinaryOp {
 }
 
 #[derive(Debug, Clone)]
+pub enum AsmX87BinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+#[derive(Debug, Clone)]
 pub enum CondCode {
     E,
     NE,
@@ -1981,6 +2002,10 @@ pub enum AsmInstr {
     Cvttss2si(AsmType, AsmOperand, AsmOperand), // float → int/long (truncate)
     Cvtss2sd(AsmOperand, AsmOperand),          // float → double
     Cvtsd2ss(AsmOperand, AsmOperand),          // double → float
+    X87Load(AsmType, AsmOperand),
+    X87Store(AsmOperand),
+    X87UnaryNeg,
+    X87Binary(AsmX87BinaryOp),
     /// AArch64-only unsigned integer to double conversion.
     AArch64UIntToDouble(AsmType, AsmOperand, AsmOperand), // src_type, src, dst
     /// AArch64-only unsigned integer to float conversion.

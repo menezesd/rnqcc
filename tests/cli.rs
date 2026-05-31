@@ -19,6 +19,25 @@ fn temp_file(name: &str, ext: &str) -> std::path::PathBuf {
     ))
 }
 
+struct TempPath(std::path::PathBuf);
+
+impl TempPath {
+    fn new(name: &str, ext: &str) -> Self {
+        Self(temp_file(name, ext))
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TempPath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn non_host_target() -> &'static str {
     if cfg!(target_os = "macos") {
         "x86_64-linux"
@@ -15025,6 +15044,41 @@ int main(void) {
 "#,
         ),
         (
+            "x86-linux-i128-signed-unsigned-stress",
+            r#"
+int main(void) {
+    __int128 minus_one = -1;
+    unsigned __int128 high = (unsigned __int128)1 << 127;
+    unsigned __int128 shifted = (high >> 64) << 32;
+    __int128 product = ((__int128)-3037000499LL) * 3037000499LL;
+    if (!(minus_one < 0)) return 1;
+    if (!(high > (unsigned __int128)0xffffffffffffffffULL)) return 2;
+    if ((unsigned long)(shifted >> 32) != 0x8000000000000000ULL) return 3;
+    if (!(product < 0)) return 4;
+    if ((__int128)(int)-7 != -7) return 5;
+    if ((unsigned __int128)(unsigned int)0xffffffffU != 0xffffffffU) return 6;
+    return 42;
+}
+"#,
+        ),
+        (
+            "x86-linux-i128-vector-lane-stress",
+            r#"
+typedef unsigned __int128 U1 __attribute__((vector_size(16)));
+typedef __int128 I1 __attribute__((vector_size(16)));
+
+int main(void) {
+    U1 u = (U1){ ((unsigned __int128)1 << 96) | 7 };
+    I1 i = (I1){ -5 };
+    U1 mask = u != 0;
+    if (mask[0] != ~(unsigned __int128)0) return 1;
+    if ((u[0] >> 96) != 1) return 2;
+    if (!(i[0] < 0)) return 3;
+    return 42;
+}
+"#,
+        ),
+        (
             "x86-linux-stack-copy-regalloc",
             r#"
 struct inner { int a; double b; };
@@ -15095,19 +15149,19 @@ int main(void) {
 "#,
         ),
     ] {
-        let src = temp_file(name, "c");
-        let out = temp_file(name, "s");
-        std::fs::write(&src, source).expect("failed to write input");
+        let src = TempPath::new(name, "c");
+        let out = TempPath::new(name, "s");
+        std::fs::write(src.path(), source).expect("failed to write input");
 
         let output = Command::new(rnqcc())
             .args(["--target", "x86_64-linux", "-S", "-o"])
-            .arg(&out)
-            .arg(&src)
+            .arg(out.path())
+            .arg(src.path())
             .output()
             .expect("failed to run rnqcc");
 
         assert!(output.status.success(), "{name}: {}", stderr(output));
-        let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
+        let asm = std::fs::read_to_string(out.path()).expect("failed to read assembly output");
         assert!(!asm.contains("Pseudo-register"), "{name}: {asm}");
         assert!(!asm.contains("Octword"), "{name}: {asm}");
         if name == "x86-linux-int128-va-arg" {
@@ -15139,9 +15193,6 @@ int main(void) {
                 );
             }
         }
-
-        let _ = std::fs::remove_file(src);
-        let _ = std::fs::remove_file(out);
     }
 }
 

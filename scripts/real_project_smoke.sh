@@ -6,13 +6,20 @@ COMPILER="${COMPILER:-$ROOT/target/debug/rnqcc}"
 AR="${AR:-ar}"
 WORKDIR="${WORKDIR:-$(mktemp -d "${TMPDIR:-/tmp}/rnqcc-real-smoke.XXXXXX")}"
 KEEP_WORKDIR="${KEEP_WORKDIR:-0}"
+CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-}"
 REAL_PROJECT_DIR="${REAL_PROJECT_DIR:-}"
 REAL_PROJECT_CFLAGS="${REAL_PROJECT_CFLAGS:-}"
 
 cleanup() {
+    status=$?
+    if [ "$status" -ne 0 ] && [ -n "$CI_ARTIFACT_DIR" ]; then
+        mkdir -p "$CI_ARTIFACT_DIR"
+        cp -R "$WORKDIR" "$CI_ARTIFACT_DIR/real_project_smoke"
+    fi
     if [ "$KEEP_WORKDIR" != "1" ]; then
         rm -rf "$WORKDIR"
     fi
+    exit "$status"
 }
 trap cleanup EXIT
 

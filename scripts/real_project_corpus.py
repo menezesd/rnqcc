@@ -25,6 +25,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "tests" / "fixtures" / "real_project" / "corpus.txt"
 RNQCC = Path(os.environ.get("RNQCC", ROOT / "target" / "debug" / "rnqcc"))
+ARTIFACT_DIR = os.environ.get("CI_ARTIFACT_DIR")
 
 
 class Entry:
@@ -46,6 +47,20 @@ def build_rnqcc() -> None:
         sys.stderr.write(result.stdout)
         sys.stderr.write(result.stderr)
         raise SystemExit(result.returncode)
+
+
+def save_failure_artifact(index: int, entry: Entry, cmd: list[str], text: str) -> None:
+    if not ARTIFACT_DIR:
+        return
+    dest = Path(ARTIFACT_DIR) / "real_project_corpus" / f"{index:03d}"
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "command.txt").write_text(" ".join(shlex.quote(part) for part in cmd) + "\n", encoding="utf-8")
+    (dest / "output.txt").write_text(text, encoding="utf-8")
+    if entry.source.exists():
+        try:
+            (dest / entry.source.name).write_bytes(entry.source.read_bytes())
+        except OSError as err:
+            (dest / "copy-error.txt").write_text(str(err), encoding="utf-8")
 
 
 def resolve_flag(flag: str) -> str:
@@ -105,12 +120,15 @@ def main() -> int:
                 if result.returncode != 0:
                     print(f"{entry.source}: unexpected failure", file=sys.stderr)
                     sys.stderr.write(text)
+                    save_failure_artifact(index, entry, cmd, text)
                     failures += 1
                 elif not output.exists():
                     print(f"{entry.source}: object was not produced", file=sys.stderr)
+                    save_failure_artifact(index, entry, cmd, text)
                     failures += 1
             elif result.returncode == 0:
                 print(f"{entry.source}: expected failure now succeeds", file=sys.stderr)
+                save_failure_artifact(index, entry, cmd, text)
                 failures += 1
             elif entry.expected_failure not in text:
                 print(
@@ -119,6 +137,7 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 sys.stderr.write(text)
+                save_failure_artifact(index, entry, cmd, text)
                 failures += 1
         if failures:
             return 1

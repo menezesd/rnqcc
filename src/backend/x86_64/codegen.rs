@@ -140,17 +140,25 @@ fn i128_part_operands(val: &TackyVal) -> Result<(AsmOperand, AsmOperand), String
 fn emit_i128_copy(out: &mut Vec<AsmInstr>, src: &TackyVal, dst: &TackyVal) -> Result<(), String> {
     let (src_low, src_high) = i128_part_operands(src)?;
     let dst_op = convert_val(dst);
-    out.push(AsmInstr::Mov(
-        AsmType::Quadword,
+    emit_i128_parts_to_operands(
+        out,
         src_low,
-        low64_operand(dst_op.clone())?,
-    ));
-    out.push(AsmInstr::Mov(
-        AsmType::Quadword,
         src_high,
+        low64_operand(dst_op.clone())?,
         high64_operand(dst_op)?,
-    ));
+    );
     Ok(())
+}
+
+fn emit_i128_parts_to_operands(
+    out: &mut Vec<AsmInstr>,
+    low: AsmOperand,
+    high: AsmOperand,
+    dst_low: AsmOperand,
+    dst_high: AsmOperand,
+) {
+    out.push(AsmInstr::Mov(AsmType::Quadword, low, dst_low));
+    out.push(AsmInstr::Mov(AsmType::Quadword, high, dst_high));
 }
 
 fn emit_i128_load(
@@ -1587,16 +1595,13 @@ fn convert_funcall(
                     }
                     StackArg::WideScalar(arg) => {
                         let (low, high) = i128_part_operands(arg)?;
-                        out.push(AsmInstr::Mov(
-                            AsmType::Quadword,
+                        emit_i128_parts_to_operands(
+                            out,
                             low,
-                            AsmOperand::StackArg(stack_offset),
-                        ));
-                        out.push(AsmInstr::Mov(
-                            AsmType::Quadword,
                             high,
+                            AsmOperand::StackArg(stack_offset),
                             AsmOperand::StackArg(stack_offset + 8),
-                        ));
+                        );
                         stack_offset += 16;
                     }
                     StackArg::MemoryBlock { src_ptr, size } => {
@@ -1627,16 +1632,13 @@ fn convert_funcall(
         }
         for (i, arg) in &wide_int_reg_args {
             let (low, high) = i128_part_operands(arg)?;
-            out.push(AsmInstr::Mov(
-                AsmType::Quadword,
+            emit_i128_parts_to_operands(
+                out,
                 low,
-                AsmOperand::Reg(ARG_REGISTERS[*i]),
-            ));
-            out.push(AsmInstr::Mov(
-                AsmType::Quadword,
                 high,
+                AsmOperand::Reg(ARG_REGISTERS[*i]),
                 AsmOperand::Reg(ARG_REGISTERS[*i + 1]),
-            ));
+            );
         }
         // Move xmm register args
         for (i, arg) in &xmm_reg_args {
@@ -1921,10 +1923,32 @@ fn convert_binary(
                             return Err("x86-64 backend only supports constant 128-bit shifts yet"
                                 .to_string());
                         };
+                        if *amount == 0 {
+                            return Ok(());
+                        }
                         if *amount == 64 {
                             out.push(AsmInstr::Mov(
                                 AsmType::Quadword,
                                 low64_operand(dst_op.clone())?,
+                                high64_operand(dst_op.clone())?,
+                            ));
+                            out.push(AsmInstr::Mov(
+                                AsmType::Quadword,
+                                AsmOperand::Imm(0),
+                                low64_operand(dst_op)?,
+                            ));
+                            return Ok(());
+                        }
+                        if (65..128).contains(amount) {
+                            out.push(AsmInstr::Mov(
+                                AsmType::Quadword,
+                                low64_operand(dst_op.clone())?,
+                                high64_operand(dst_op.clone())?,
+                            ));
+                            out.push(AsmInstr::Binary(
+                                AsmType::Quadword,
+                                AsmBinaryOp::Sal,
+                                AsmOperand::Imm(*amount - 64),
                                 high64_operand(dst_op.clone())?,
                             ));
                             out.push(AsmInstr::Mov(
@@ -1985,13 +2009,56 @@ fn convert_binary(
                         } else {
                             AsmBinaryOp::Sar
                         };
+                        if *amount == 0 {
+                            return Ok(());
+                        }
                         if *amount == 64 {
                             out.push(AsmInstr::Mov(AsmType::Quadword, dst_high.clone(), dst_low));
+                            let fill = if is_unsigned {
+                                AsmOperand::Imm(0)
+                            } else {
+                                out.push(AsmInstr::Mov(
+                                    AsmType::Quadword,
+                                    dst_high.clone(),
+                                    AsmOperand::Reg(Reg::R10),
+                                ));
+                                out.push(AsmInstr::Binary(
+                                    AsmType::Quadword,
+                                    AsmBinaryOp::Sar,
+                                    AsmOperand::Imm(63),
+                                    AsmOperand::Reg(Reg::R10),
+                                ));
+                                AsmOperand::Reg(Reg::R10)
+                            };
+                            out.push(AsmInstr::Mov(AsmType::Quadword, fill, dst_high));
+                            return Ok(());
+                        }
+                        if (65..128).contains(amount) {
                             out.push(AsmInstr::Mov(
                                 AsmType::Quadword,
-                                AsmOperand::Imm(0),
-                                dst_high,
+                                dst_high.clone(),
+                                dst_low.clone(),
                             ));
+                            out.push(AsmInstr::Binary(
+                                AsmType::Quadword,
+                                high_shift.clone(),
+                                AsmOperand::Imm(*amount - 64),
+                                dst_low,
+                            ));
+                            if is_unsigned {
+                                out.push(AsmInstr::Mov(
+                                    AsmType::Quadword,
+                                    AsmOperand::Imm(0),
+                                    dst_high,
+                                ));
+                            } else {
+                                out.push(AsmInstr::Binary(
+                                    AsmType::Quadword,
+                                    AsmBinaryOp::Sar,
+                                    AsmOperand::Imm(63),
+                                    dst_high,
+                                ));
+                            }
                             return Ok(());
                         }
                         if (1..64).contains(amount) {

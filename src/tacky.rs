@@ -191,6 +191,7 @@ struct TackyGen {
     func_full_types: HashMap<String, FullType>,
     /// Function parameter full types.
     func_param_full_types: HashMap<String, Vec<FullType>>,
+    old_style_functions: HashSet<String>,
     vla_param_bounds: HashMap<String, Exp>,
     /// Scalar type cache for variables and temporaries.
     var_types: HashMap<String, CType>,
@@ -226,6 +227,7 @@ impl TackyGen {
             function_symbols: HashSet::new(),
             func_full_types: HashMap::new(),
             func_param_full_types: HashMap::new(),
+            old_style_functions: HashSet::new(),
             vla_param_bounds: HashMap::new(),
             var_types: HashMap::new(),
             symbol_alignments: HashMap::new(),
@@ -4548,8 +4550,17 @@ impl TackyGen {
                     })
                     .unwrap_or((CType::Int, Vec::new(), None, false))
             };
-        let has_prototype =
-            builtin_info.is_some() || self.func_types.contains_key(&name) || pointer_sig.is_some();
+        let direct_old_style_call = self.old_style_functions.contains(&name)
+            && builtin_info.is_none()
+            && pointer_sig.is_none();
+        let param_types = if direct_old_style_call {
+            Vec::new()
+        } else {
+            param_types
+        };
+        let has_prototype = builtin_info.is_some()
+            || pointer_sig.is_some()
+            || (self.func_types.contains_key(&name) && !direct_old_style_call);
         if has_prototype && !variadic && args.len() != param_types.len() {
             return Err(format!(
                 "function '{}' called with {} argument(s), but prototype expects {}",
@@ -4576,16 +4587,19 @@ impl TackyGen {
                     .cloned()
                     .or_else(|| pointer_sig.as_ref().map(|(ret_ft, _, _)| ret_ft.clone()))
             });
-        let param_full_types: Vec<FullType> = self
-            .func_param_full_types
-            .get(&name)
-            .cloned()
-            .or_else(|| {
-                pointer_sig
-                    .as_ref()
-                    .map(|(_, param_fts, _)| param_fts.clone())
-            })
-            .unwrap_or_default();
+        let param_full_types: Vec<FullType> = if direct_old_style_call {
+            Vec::new()
+        } else {
+            self.func_param_full_types
+                .get(&name)
+                .cloned()
+                .or_else(|| {
+                    pointer_sig
+                        .as_ref()
+                        .map(|(_, param_fts, _)| param_fts.clone())
+                })
+                .unwrap_or_default()
+        };
 
         let mut tacky_args = Vec::new();
         let stack_arg_indices = std::collections::HashSet::new();
@@ -10257,6 +10271,11 @@ impl TackyGen {
                         fd.name.clone(),
                         (fd.return_type, param_types, fd.return_ptr_info, fd.variadic),
                     );
+                    if fd.old_style {
+                        self.old_style_functions.insert(fd.name.clone());
+                    } else {
+                        self.old_style_functions.remove(&fd.name);
+                    }
                     self.func_param_full_types
                         .insert(fd.name.clone(), fd.param_full_types.clone());
                     if let Some(ref rft) = fd.return_full_type {
@@ -10826,6 +10845,11 @@ impl TackyGen {
                 func.variadic,
             ),
         );
+        if func.old_style {
+            self.old_style_functions.insert(func.name.clone());
+        } else {
+            self.old_style_functions.remove(&func.name);
+        }
         self.func_param_full_types
             .insert(func.name.clone(), func.param_full_types.clone());
         if let Some(ref rft) = func.return_full_type {
@@ -11472,6 +11496,11 @@ pub fn generate_with_options(
                     fd.name.clone(),
                     (fd.return_type, param_types, fd.return_ptr_info, fd.variadic),
                 );
+                if fd.old_style {
+                    gen.old_style_functions.insert(fd.name.clone());
+                } else {
+                    gen.old_style_functions.remove(&fd.name);
+                }
                 gen.func_param_full_types
                     .insert(fd.name.clone(), fd.param_full_types.clone());
                 if let Some(ref rft) = fd.return_full_type {

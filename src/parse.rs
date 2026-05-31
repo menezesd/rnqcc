@@ -4205,6 +4205,14 @@ impl Parser {
                         param_vla_bounds,
                     }
                 };
+                let func_info = if self.at(&Token::Semicolon)
+                    || self.at(&Token::OpenBrace)
+                    || self.at(&Token::Comma)
+                {
+                    func_info
+                } else {
+                    self.parse_old_style_param_declarations(func_info)?
+                };
 
                 self.add_value_type(
                     name.clone(),
@@ -5871,6 +5879,29 @@ mod tests {
                 ..
             }))
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_block_item_accepts_old_style_nested_function_definition() -> Result<(), String> {
+        let program = parse_source(
+            "int outer(int x, ...) { __builtin_va_list a; __builtin_va_start(a, x); int bar(c) int c[1][__builtin_va_arg(a, int)]; { return sizeof c[0]; } return 0; }",
+        )?;
+        let Declaration::FunDecl(func) = &program.declarations[0] else {
+            return Err("expected outer function".to_string());
+        };
+        let Some(body) = func.body.as_ref() else {
+            return Err("expected outer function body".to_string());
+        };
+        assert!(body.iter().any(|item| matches!(
+            item,
+            BlockItem::Declaration(Declaration::FunDecl(FunctionDeclaration {
+                name,
+                old_style: true,
+                body: Some(_),
+                ..
+            })) if name == "bar"
+        )));
         Ok(())
     }
 

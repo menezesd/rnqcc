@@ -724,6 +724,40 @@ fn compiles_gnu_qualified_old_style_parameter_declarations() {
 }
 
 #[test]
+fn compiles_old_style_nested_function_with_vla_parameter() {
+    let src = temp_file("old-style-nested-vla-param", "c");
+    let out = temp_file("old-style-nested-vla-param", "s");
+    std::fs::write(
+        &src,
+        "#include <stdarg.h>\n\
+         int foo(int x, ...) {\n\
+           va_list a;\n\
+           va_start(a, x);\n\
+           int b[6] = {};\n\
+           int bar(c)\n\
+             int c[1][va_arg(a, int)];\n\
+           { return sizeof c[0]; }\n\
+           int r = bar(b);\n\
+           va_end(a);\n\
+           return r;\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn compiles_function_declarator_after_object_in_mixed_declaration() {
     let src = temp_file("mixed-object-function-declarator", "c");
     let out = temp_file("mixed-object-function-declarator", "s");

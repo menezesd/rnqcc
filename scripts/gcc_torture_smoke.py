@@ -322,6 +322,7 @@ def main() -> int:
         f"(start={args.start}, limit={args.limit}, skipped={len(skipped)})"
     )
     if args.failure_log:
+        args.failure_log.parent.mkdir(parents=True, exist_ok=True)
         args.failure_log.write_text(
             "".join(
                 f"{src.relative_to(suite)}\t{reason}\n" for src, reason in failures

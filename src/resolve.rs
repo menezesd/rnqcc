@@ -483,10 +483,8 @@ impl Resolver {
                         Ok(resolved_name) => {
                             if self.functions.contains_key(&resolved_name) {
                                 Exp::FunctionCall(resolved_name, resolved_args)
-                            } else if self.functions.contains_key(&name) {
-                                Exp::FunctionCall(name, resolved_args)
                             } else {
-                                Exp::FunctionCall(resolved_name, resolved_args)
+                                Exp::IndirectCall(Box::new(Exp::Var(resolved_name)), resolved_args)
                             }
                         }
                         Err(err)

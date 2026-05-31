@@ -113,14 +113,6 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "unsupported C23 fixed underlying enum type"
     if re.search(r"\basm\s+goto\b|\b__asm__\s+goto\b", text):
         return "unsupported GCC asm-goto extension"
-    if any(
-        "=" in line
-        and "&" in line
-        and ("-" in line or "+" in line)
-        and not line.lstrip().startswith("#")
-        for line in text.splitlines()
-    ):
-        return "unsupported static address arithmetic initializer"
     if "((unsigned char *) &" in text and "- (unsigned char *) 0" in text:
         return "unsupported static offsetof-style address arithmetic initializer"
     if re.search(r"\bconst\s+(?:char|short|int|long|float|double)\s+\w+\s*=", text) and re.search(

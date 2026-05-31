@@ -2718,6 +2718,34 @@ fn indirect_function_pointer_uses_declared_return_type() {
 }
 
 #[test]
+fn function_pointer_parameter_call_shadows_global_function() {
+    let src = temp_file("function-pointer-param-shadow", "i");
+    let exe = temp_file("function-pointer-param-shadow", "bin");
+    std::fs::write(
+        &src,
+        "int target(int x) { return x + 41; }\n\
+         int fp(int x) { return x; }\n\
+         int call(int (*fp)(int)) { return fp(1); }\n\
+         int main(void) { return call(target); }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn emits_aarch64_assembly_for_integer_division_and_shifts() {
     let src = temp_file("aarch64-div-shift", "i");
     let out = temp_file("aarch64-div-shift", "s");

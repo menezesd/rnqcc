@@ -4525,6 +4525,47 @@ fn x86_variadic_libc_call_uses_only_abi_stack_arguments() {
 }
 
 #[test]
+fn x86_local_variadic_shadow_arguments_are_not_duplicated() {
+    let src = temp_file("x86-local-variadic-shadow", "c");
+    let out = temp_file("x86-local-variadic-shadow", "s");
+    std::fs::write(
+        &src,
+        "#include <stdarg.h>\n\
+         int take(int a, double b, int c, ...) {\n\
+             va_list ap;\n\
+             va_start(ap, c);\n\
+             int x = va_arg(ap, int);\n\
+             va_end(ap);\n\
+             return a + c + x + (int)b;\n\
+         }\n\
+         int main(void) {\n\
+             return take(1, 1.0, 2, 3,4,5,6,7,8,9,10,11,12,13,14,15);\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("call take@PLT"), "{asm}");
+    assert!(
+        asm.contains("movl $3, 0(%rsp)") || asm.contains("movl $3, (%rsp)"),
+        "{asm}"
+    );
+    assert!(asm.contains("movl $15, 96(%rsp)"), "{asm}");
+    assert!(!asm.contains("movl $7, 40(%rsp)"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn x86_va_arg_struct_temporary_gets_real_stack_storage() {
     let src = temp_file("x86-va-arg-struct-storage", "c");
     let out = temp_file("x86-va-arg-struct-storage", "s");

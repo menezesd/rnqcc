@@ -1732,13 +1732,14 @@ fn convert_funcall(
             }
             let t = val_type(arg, types);
             if is_variadic_extra {
-                // Keep ABI register passing intact while also materializing an
-                // ordered shadow overflow area for compiler-generated va_arg reads.
+                // rnqcc-defined variadic callees read unnamed arguments from
+                // this ordered shadow area instead of the platform va_list ABI.
                 if t == AsmType::Octword {
                     stack_args_list.push(StackArg::WideScalar(arg));
                 } else {
                     stack_args_list.push(StackArg::Scalar(arg));
                 }
+                continue;
             }
             if matches!(t, AsmType::Float | AsmType::Double) {
                 if xmm_idx < 8 {

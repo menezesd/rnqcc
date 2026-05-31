@@ -1520,6 +1520,8 @@ fn convert_funcall(
             }
             let t = val_type(arg, types);
             if is_variadic_extra {
+                // Keep ABI register passing intact while also materializing an
+                // ordered shadow overflow area for compiler-generated va_arg reads.
                 if t == AsmType::Octword {
                     stack_args_list.push(StackArg::WideScalar(arg));
                 } else {
@@ -1809,6 +1811,8 @@ fn convert_binary(
                 dst_op.clone(),
             ));
             if matches!(op, TackyBinaryOp::Equal | TackyBinaryOp::NotEqual) {
+                // Equality depends on both halves; ordering comparisons can decide
+                // from the high half before falling through to the low half.
                 out.push(AsmInstr::Cmp(AsmType::Quadword, right_high, left_high));
                 if matches!(op, TackyBinaryOp::Equal) {
                     out.push(AsmInstr::JmpCC(CondCode::NE, end_label.clone()));

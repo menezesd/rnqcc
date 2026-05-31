@@ -15015,6 +15015,36 @@ int main(void) {
 "#,
         ),
         (
+            "x86-linux-i128-eq-low-half",
+            r#"
+int main(void) {
+    unsigned __int128 a = ((unsigned __int128)1 << 64) | 5;
+    unsigned __int128 b = ((unsigned __int128)1 << 64) | 6;
+    return a != b ? 42 : 1;
+}
+"#,
+        ),
+        (
+            "x86-linux-stack-copy-regalloc",
+            r#"
+struct inner { int a; double b; };
+union choice { struct inner i; long raw[2]; };
+struct outer { union choice c; int tail; };
+
+int use(struct outer o) {
+    return o.c.i.a + (int)o.c.i.b + o.tail;
+}
+
+int main(void) {
+    struct outer o;
+    o.c.i.a = 10;
+    o.c.i.b = 20.0;
+    o.tail = 12;
+    return use(o);
+}
+"#,
+        ),
+        (
             "x86-linux-nested-local-label",
             r#"
 int main(void) {
@@ -15080,6 +15110,25 @@ int main(void) {
         let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
         assert!(!asm.contains("Pseudo-register"), "{name}: {asm}");
         assert!(!asm.contains("Octword"), "{name}: {asm}");
+        if name == "x86-linux-int128-va-arg" {
+            assert!(asm.contains("subq $32, %rsp"), "{name}: {asm}");
+            assert!(asm.contains("8(%rsp)"), "{name}: {asm}");
+            assert!(asm.contains("16(%rsp)"), "{name}: {asm}");
+            assert!(asm.contains("addq $32, %rsp"), "{name}: {asm}");
+        }
+        if name == "x86-linux-vector-uint128-mask" || name == "x86-linux-i128-eq-low-half" {
+            assert!(
+                !asm.contains("\tje .Li128_cmp_end") || !asm.contains(".Li128_cmp_low"),
+                "{name}: equality compare skipped low-half comparison: {asm}"
+            );
+        }
+        if name == "x86-linux-stack-copy-regalloc" {
+            assert!(asm.contains("rep movsb"), "{name}: {asm}");
+            assert!(
+                !asm.contains("movq -88(%rbp), %rsi"),
+                "{name}: stack copy used stale spill slot instead of computed source pointer: {asm}"
+            );
+        }
         let mut labels = std::collections::HashSet::new();
         for line in asm.lines() {
             let trimmed = line.trim();

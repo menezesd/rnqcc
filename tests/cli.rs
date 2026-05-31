@@ -14128,6 +14128,36 @@ int main(void) {
 }
 
 #[test]
+fn large_initialized_automatic_arrays_use_memset_zero_fill() {
+    let src = temp_file("large-auto-array-memset-zero-fill", "c");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    int grid[100][100] = { {}, {4} };
+    return grid[1][0];
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--stage")
+        .arg("tacky")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let tacky = stdout(output);
+    assert!(tacky.contains("FunCall"));
+    assert!(tacky.contains("\"memset\""));
+    assert!(tacky.contains("40000"));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn finstrument_functions_emits_profile_hooks_and_honors_no_instrument_function() {
     let src = temp_file("instrument-functions", "c");
     let exe = temp_file("instrument-functions", "bin");

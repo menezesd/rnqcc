@@ -14,6 +14,7 @@ type BuiltinFunctionInfo = (
 pub type TackyResult<T> = Result<T, String>;
 
 const VLA_STATIC_SCALE_FALLBACK: usize = 16;
+const INLINE_ZERO_INIT_LIMIT: usize = 128;
 
 #[derive(Copy, Clone)]
 enum BitBuiltinKind {
@@ -533,6 +534,32 @@ impl TackyGen {
     }
 
     fn zero_init_local(&mut self, name: &str, total_bytes: usize) {
+        if total_bytes > INLINE_ZERO_INIT_LIMIT {
+            let addr = self.fresh_tmp(CType::Pointer);
+            self.emit(TackyInstr::GetAddress {
+                src: TackyVal::Var(name.to_string()),
+                dst: addr.clone(),
+            });
+            let size = self.fresh_tmp(CType::ULong);
+            self.emit(TackyInstr::Copy {
+                src: TackyVal::Constant(total_bytes as i64),
+                dst: size.clone(),
+            });
+            let dst = self.fresh_tmp(CType::Pointer);
+            self.emit(TackyInstr::FunCall {
+                name: "memset".to_string(),
+                args: vec![addr, TackyVal::Constant(0), size],
+                dst,
+                stack_arg_indices: std::collections::HashSet::new(),
+                memory_arg_blocks: Vec::new(),
+                struct_arg_groups: Vec::new(),
+                variadic: false,
+                fixed_flat_arg_count: 3,
+                indirect: false,
+            });
+            return;
+        }
+
         let mut off = 0usize;
         while off + 8 <= total_bytes {
             let z = self.fresh_tmp(CType::Long);
@@ -9557,46 +9584,7 @@ impl TackyGen {
             };
             // Aggregate initializers zero-fill omitted elements; uninitialized automatic arrays do not.
             if vd.init.is_some() {
-                let mut off = 0usize;
-                while off + 8 <= total_bytes {
-                    let z = self.fresh_tmp(CType::Long);
-                    self.emit(TackyInstr::Copy {
-                        src: TackyVal::Constant(0),
-                        dst: z.clone(),
-                    });
-                    self.emit(TackyInstr::CopyToOffset {
-                        src: z,
-                        dst_name: vd.name.clone(),
-                        offset: off as i64,
-                    });
-                    off += 8;
-                }
-                while off + 4 <= total_bytes {
-                    let z = self.fresh_tmp(CType::Int);
-                    self.emit(TackyInstr::Copy {
-                        src: TackyVal::Constant(0),
-                        dst: z.clone(),
-                    });
-                    self.emit(TackyInstr::CopyToOffset {
-                        src: z,
-                        dst_name: vd.name.clone(),
-                        offset: off as i64,
-                    });
-                    off += 4;
-                }
-                while off < total_bytes {
-                    let z = self.fresh_tmp(CType::Char);
-                    self.emit(TackyInstr::Copy {
-                        src: TackyVal::Constant(0),
-                        dst: z.clone(),
-                    });
-                    self.emit(TackyInstr::CopyToOffset {
-                        src: z,
-                        dst_name: vd.name.clone(),
-                        offset: off as i64,
-                    });
-                    off += 1;
-                }
+                self.zero_init_local(&vd.name, total_bytes);
             }
             if let Some(s) = vd
                 .init
@@ -9691,46 +9679,7 @@ impl TackyGen {
             self.array_sizes.insert(vd.name.clone(), struct_size);
             // Aggregate initializers zero-fill omitted members; uninitialized automatic structs do not.
             if vd.init.is_some() {
-                let mut off = 0usize;
-                while off + 8 <= struct_size {
-                    let z = self.fresh_tmp(CType::Long);
-                    self.emit(TackyInstr::Copy {
-                        src: TackyVal::Constant(0),
-                        dst: z.clone(),
-                    });
-                    self.emit(TackyInstr::CopyToOffset {
-                        src: z,
-                        dst_name: vd.name.clone(),
-                        offset: off as i64,
-                    });
-                    off += 8;
-                }
-                while off + 4 <= struct_size {
-                    let z = self.fresh_tmp(CType::Int);
-                    self.emit(TackyInstr::Copy {
-                        src: TackyVal::Constant(0),
-                        dst: z.clone(),
-                    });
-                    self.emit(TackyInstr::CopyToOffset {
-                        src: z,
-                        dst_name: vd.name.clone(),
-                        offset: off as i64,
-                    });
-                    off += 4;
-                }
-                while off < struct_size {
-                    let z = self.fresh_tmp(CType::Char);
-                    self.emit(TackyInstr::Copy {
-                        src: TackyVal::Constant(0),
-                        dst: z.clone(),
-                    });
-                    self.emit(TackyInstr::CopyToOffset {
-                        src: z,
-                        dst_name: vd.name.clone(),
-                        offset: off as i64,
-                    });
-                    off += 1;
-                }
+                self.zero_init_local(&vd.name, struct_size);
             }
             // Handle compound initializer
             if let Some(init_ref @ Exp::ArrayInit(elems)) = vd.init.as_ref() {

@@ -9,6 +9,7 @@ and, for execute tests, checking that generated programs exit successfully.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shlex
 import subprocess
@@ -109,12 +110,6 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "unsupported GNU variably modified struct member"
     if re.search(r"\benum\s+\w*\s*:", text):
         return "unsupported C23 fixed underlying enum type"
-    if (
-        "dg-require-effective-target label_values" in text
-        or "goto *" in text
-        or re.search(r"&&\s*[A-Za-z_]", text)
-    ):
-        return "unsupported GCC labels-as-values/computed-goto extension"
     if re.search(r"\basm\s+goto\b|\b__asm__\s+goto\b", text):
         return "unsupported GCC asm-goto extension"
     if any(
@@ -159,14 +154,6 @@ def skip_reason_for_test(src: Path) -> str | None:
             break
         if old_style_def:
             break
-    if old_style_def:
-        return "unsupported legacy K&R function definition compatibility test"
-    if re.search(r"^\s*[A-Za-z_]\w*\s*\([^;{}]*\)\s*\{", text, re.MULTILINE):
-        return "unsupported implicit-int function definition compatibility test"
-    if re.search(r"\)\s*[A-Za-z_][^;{}]*;\s*\{", text):
-        return "unsupported compact K&R parameter declaration compatibility test"
-    if re.search(r"^\s*(?:typedef\s+)?[A-Za-z_]\w*\s*;", text, re.MULTILINE):
-        return "unsupported implicit-int declaration compatibility test"
     if "__attribute__" in text or "__attribute" in text:
         return "unsupported GCC attribute placement/semantics test"
     if re.search(r"struct\s+\w*\s*\{\s*\}", text):
@@ -210,6 +197,37 @@ def short_failure(result: subprocess.CompletedProcess[str]) -> str:
     return first[:240]
 
 
+def save_failure_artifact(
+    artifact_dir: Path | None,
+    suite: Path,
+    index: int,
+    src: Path,
+    cmd: list[str],
+    result: subprocess.CompletedProcess[str],
+) -> None:
+    if artifact_dir is None:
+        return
+    dest = artifact_dir / "gcc_torture" / f"{index:04d}-{src.stem}"
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "command.txt").write_text(
+        " ".join(shlex.quote(part) for part in cmd) + "\n",
+        encoding="utf-8",
+    )
+    (dest / "output.txt").write_text(
+        (result.stdout or "") + (result.stderr or ""),
+        encoding="utf-8",
+    )
+    try:
+        rel = src.relative_to(suite)
+    except ValueError:
+        rel = Path(src.name)
+    (dest / "source-path.txt").write_text(str(rel) + "\n", encoding="utf-8")
+    try:
+        (dest / src.name).write_bytes(src.read_bytes())
+    except OSError as err:
+        (dest / "copy-error.txt").write_text(str(err), encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run a bounded rnqcc smoke pass over GCC C torture tests."
@@ -235,6 +253,12 @@ def main() -> int:
         "--failure-log",
         type=Path,
         help="write all failures to this file",
+    )
+    parser.add_argument(
+        "--artifact-dir",
+        type=Path,
+        default=Path(os.environ["CI_ARTIFACT_DIR"]) if "CI_ARTIFACT_DIR" in os.environ else None,
+        help="copy failing test sources and command output under this directory",
     )
     parser.add_argument(
         "--internal-cpp",
@@ -271,20 +295,27 @@ def main() -> int:
 
             if args.mode == "execute":
                 exe = tmpdir / stem
-                result = run([*common, str(src), "-o", str(exe)], timeout)
+                compile_cmd = [*common, str(src), "-o", str(exe)]
+                result = run(compile_cmd, timeout)
+                cmd = compile_cmd
                 if result.returncode == 0:
-                    result = run([str(exe)], timeout)
+                    run_cmd = [str(exe)]
+                    result = run(run_cmd, timeout)
+                    cmd = run_cmd
                 if result.returncode == 0:
                     passed += 1
                 else:
                     failures.append((src, short_failure(result)))
+                    save_failure_artifact(args.artifact_dir, suite, idx, src, cmd, result)
             else:
                 obj = tmpdir / f"{stem}.o"
-                result = run([*common, "-c", str(src), "-o", str(obj)], timeout)
+                cmd = [*common, "-c", str(src), "-o", str(obj)]
+                result = run(cmd, timeout)
                 if result.returncode == 0:
                     passed += 1
                 else:
                     failures.append((src, short_failure(result)))
+                    save_failure_artifact(args.artifact_dir, suite, idx, src, cmd, result)
 
     print(
         f"gcc torture {args.mode}: {passed}/{len(selected) - len(skipped)} passed "

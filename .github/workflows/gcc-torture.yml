@@ -1,0 +1,67 @@
+name: GCC Torture Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: gcc.c-torture subdirectory
+        required: true
+        default: execute
+        type: choice
+        options:
+          - execute
+          - compile
+      start:
+        description: First sorted test index
+        required: true
+        default: "0"
+      limit:
+        description: Number of sorted tests to try
+        required: true
+        default: "75"
+  schedule:
+    - cron: "23 8 * * *"
+
+jobs:
+  smoke:
+    name: GCC torture ${{ inputs.mode || 'execute' }} smoke
+    runs-on: ubuntu-latest
+    env:
+      GCC_TORTURE_ROOT: /tmp/rnqcc-gcc-torture/gcc
+      GCC_TORTURE_SUITE: /tmp/rnqcc-gcc-torture/gcc/gcc/testsuite/gcc.c-torture
+      CI_ARTIFACT_DIR: target/ci-artifacts
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build rnqcc
+        run: cargo build
+
+      - name: Fetch GCC torture corpus
+        run: |
+          git clone --depth=1 --filter=blob:none --sparse https://github.com/gcc-mirror/gcc.git "$GCC_TORTURE_ROOT"
+          git -C "$GCC_TORTURE_ROOT" sparse-checkout set gcc/testsuite/gcc.c-torture
+
+      - name: Run GCC torture smoke
+        run: |
+          python3 scripts/gcc_torture_smoke.py \
+            --suite "$GCC_TORTURE_SUITE" \
+            --mode "${{ inputs.mode || 'execute' }}" \
+            --start "${{ inputs.start || '0' }}" \
+            --limit "${{ inputs.limit || '75' }}" \
+            --failure-log "$CI_ARTIFACT_DIR/gcc-torture-failures.txt" \
+            --artifact-dir "$CI_ARTIFACT_DIR"
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rnqcc-gcc-torture-failure-artifacts
+          path: target/ci-artifacts
+          if-no-files-found: ignore

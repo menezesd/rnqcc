@@ -161,6 +161,152 @@ fn emit_i128_parts_to_operands(
     out.push(AsmInstr::Mov(AsmType::Quadword, high, dst_high));
 }
 
+fn is_unsigned_val(val: &TackyVal, types: &HashMap<String, CType>) -> bool {
+    match val {
+        TackyVal::UInt128Constant(_) => true,
+        TackyVal::Int128Constant(_) | TackyVal::Constant(_) | TackyVal::DoubleConstant(_) => false,
+        TackyVal::Var(name) => types
+            .get(name)
+            .is_some_and(|ctype| ctype != &CType::Double && !ctype.is_signed()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_i128_variable_shift(
+    out: &mut Vec<AsmInstr>,
+    function_name: &str,
+    label_counter: &mut usize,
+    op: &TackyBinaryOp,
+    left: &TackyVal,
+    right: &TackyVal,
+    dst: &TackyVal,
+    types: &HashMap<String, CType>,
+) -> Result<(), String> {
+    let (left_low, left_high) = i128_part_operands(left)?;
+    let dst_op = convert_val(dst);
+    let right_ty = val_type(right, types);
+    let amount_src = if right_ty == AsmType::Octword {
+        low64_operand(convert_val(right))?
+    } else {
+        convert_val(right)
+    };
+    let id = *label_counter;
+    *label_counter += 1;
+    let loop_label = format!("i128_shift_loop.{}.{}", function_name, id);
+    let end_label = format!("i128_shift_end.{}.{}", function_name, id);
+
+    out.push(AsmInstr::Mov(
+        AsmType::Quadword,
+        left_low,
+        AsmOperand::Reg(Reg::R10),
+    ));
+    out.push(AsmInstr::Mov(
+        AsmType::Quadword,
+        left_high,
+        AsmOperand::Reg(Reg::R11),
+    ));
+    out.push(AsmInstr::Mov(
+        AsmType::Longword,
+        amount_src,
+        AsmOperand::Reg(Reg::CX),
+    ));
+    out.push(AsmInstr::Label(loop_label.clone()));
+    out.push(AsmInstr::Cmp(
+        AsmType::Quadword,
+        AsmOperand::Imm(0),
+        AsmOperand::Reg(Reg::CX),
+    ));
+    out.push(AsmInstr::JmpCC(CondCode::E, end_label.clone()));
+
+    match op {
+        TackyBinaryOp::ShiftLeft => {
+            out.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Reg(Reg::R10),
+                AsmOperand::Reg(Reg::R9),
+            ));
+            out.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Shr,
+                AsmOperand::Imm(63),
+                AsmOperand::Reg(Reg::R9),
+            ));
+            out.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Sal,
+                AsmOperand::Imm(1),
+                AsmOperand::Reg(Reg::R10),
+            ));
+            out.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Sal,
+                AsmOperand::Imm(1),
+                AsmOperand::Reg(Reg::R11),
+            ));
+            out.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Or,
+                AsmOperand::Reg(Reg::R9),
+                AsmOperand::Reg(Reg::R11),
+            ));
+        }
+        TackyBinaryOp::ShiftRight => {
+            let high_shift = if is_unsigned_val(left, types) {
+                AsmBinaryOp::Shr
+            } else {
+                AsmBinaryOp::Sar
+            };
+            out.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Reg(Reg::R11),
+                AsmOperand::Reg(Reg::R9),
+            ));
+            out.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Sal,
+                AsmOperand::Imm(63),
+                AsmOperand::Reg(Reg::R9),
+            ));
+            out.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Shr,
+                AsmOperand::Imm(1),
+                AsmOperand::Reg(Reg::R10),
+            ));
+            out.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                high_shift,
+                AsmOperand::Imm(1),
+                AsmOperand::Reg(Reg::R11),
+            ));
+            out.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Or,
+                AsmOperand::Reg(Reg::R9),
+                AsmOperand::Reg(Reg::R10),
+            ));
+        }
+        _ => return Err("internal error: expected i128 shift op".to_string()),
+    }
+
+    out.push(AsmInstr::Binary(
+        AsmType::Quadword,
+        AsmBinaryOp::Sub,
+        AsmOperand::Imm(1),
+        AsmOperand::Reg(Reg::CX),
+    ));
+    out.push(AsmInstr::Jmp(loop_label));
+    out.push(AsmInstr::Label(end_label));
+    emit_i128_parts_to_operands(
+        out,
+        AsmOperand::Reg(Reg::R10),
+        AsmOperand::Reg(Reg::R11),
+        low64_operand(dst_op.clone())?,
+        high64_operand(dst_op)?,
+    );
+    Ok(())
+}
+
 fn emit_i128_load(
     out: &mut Vec<AsmInstr>,
     src_ptr: &TackyVal,
@@ -1920,8 +2066,17 @@ fn convert_binary(
                     let dst_op = convert_val(dst);
                     if matches!(op, TackyBinaryOp::ShiftLeft) {
                         let TackyVal::Constant(amount) = right else {
-                            return Err("x86-64 backend only supports constant 128-bit shifts yet"
-                                .to_string());
+                            emit_i128_variable_shift(
+                                out,
+                                function_name,
+                                label_counter,
+                                op,
+                                left,
+                                right,
+                                dst,
+                                types,
+                            )?;
+                            return Ok(());
                         };
                         if *amount == 0 {
                             return Ok(());
@@ -1999,8 +2154,17 @@ fn convert_binary(
                     }
                     if matches!(op, TackyBinaryOp::ShiftRight) {
                         let TackyVal::Constant(amount) = right else {
-                            return Err("x86-64 backend only supports constant 128-bit shifts yet"
-                                .to_string());
+                            emit_i128_variable_shift(
+                                out,
+                                function_name,
+                                label_counter,
+                                op,
+                                left,
+                                right,
+                                dst,
+                                types,
+                            )?;
+                            return Ok(());
                         };
                         let dst_low = low64_operand(dst_op.clone())?;
                         let dst_high = high64_operand(dst_op.clone())?;

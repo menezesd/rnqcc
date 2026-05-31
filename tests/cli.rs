@@ -2507,6 +2507,31 @@ fn emits_aarch64_assembly_for_variable_int128_shifts() {
 }
 
 #[test]
+fn emits_x86_64_assembly_for_variable_int128_shifts() {
+    let src = TempPath::new("x86-int128-variable-shift", "i");
+    let out = TempPath::new("x86-int128-variable-shift", "s");
+    std::fs::write(
+        src.path(),
+        "unsigned __int128 f(unsigned __int128 x, int y) { return x << (y & 5); }\n\
+         __int128 g(__int128 x, int y) { return x >> (y & 5); }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(out.path())
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(out.path()).expect("failed to read assembly output");
+    assert!(asm.contains(".Li128_shift_loop."), "{asm}");
+    assert!(asm.contains("shrq $1"), "{asm}");
+    assert!(asm.contains("sarq $1"), "{asm}");
+}
+
+#[test]
 fn compiles_aarch64_constant_int128_shifts_across_word_halves() {
     let src = temp_file("aarch64-int128-constant-cross-half-shift", "c");
     let exe = temp_file("aarch64-int128-constant-cross-half-shift", "bin");
@@ -14131,6 +14156,76 @@ int main(void) {
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn supports_int128_arithmetic_matrix() {
+    let src = TempPath::new("int128-arithmetic-matrix", "c");
+    let exe = TempPath::new("int128-arithmetic-matrix", "bin");
+    std::fs::write(
+        src.path(),
+        r#"
+typedef unsigned __int128 u128;
+typedef __int128 i128;
+
+static unsigned long lo(u128 value) { return (unsigned long)value; }
+static unsigned long hi(u128 value) { return (unsigned long)(value >> 64); }
+static u128 shl(u128 value, unsigned int amount) { return value << amount; }
+static u128 shr(u128 value, unsigned int amount) { return value >> amount; }
+static i128 sar(i128 value, unsigned int amount) { return value >> amount; }
+
+int main(void) {
+    volatile unsigned int one = 1;
+    volatile unsigned int sixty_three = 63;
+    volatile unsigned int sixty_five = 65;
+    volatile unsigned int ninety_six = 96;
+
+    u128 base = ((u128)0x123456789abcdef0UL << 64) | 0xfedcba9876543210UL;
+    if (lo(base + 5) != 0xfedcba9876543215UL) return 1;
+    if (lo(base - 0x10) != 0xfedcba9876543200UL) return 2;
+    if (lo((u128)0xffffffffffffffffUL + 1) != 0) return 3;
+    if (hi((u128)0xffffffffffffffffUL + 1) != 1) return 4;
+    if (lo(((u128)1 << 64) - 1) != 0xffffffffffffffffUL) return 5;
+    if (hi(((u128)1 << 64) - 1) != 0) return 6;
+    if (lo(((u128)3 << 64) * 7) != 0) return 7;
+    if (hi(((u128)3 << 64) * 7) != 21) return 8;
+    if (((base ^ (u128)0xff) & (u128)0xff) != 0xef) return 9;
+    if (!(base > (u128)0xffffffffffffffffUL)) return 10;
+    if (!(base != (base + 1))) return 11;
+
+    u128 shifted = shl((u128)1, sixty_five);
+    if (lo(shifted) != 0 || hi(shifted) != 2) return 12;
+    shifted = shl((u128)3, sixty_three);
+    if (lo(shifted) != 0x8000000000000000UL || hi(shifted) != 1) return 13;
+    shifted = shr(((u128)1 << 127) | 7, sixty_five);
+    if (lo(shifted) != 0x4000000000000000UL || hi(shifted) != 0) return 14;
+    shifted = shr(((u128)1 << 127) | ((u128)1 << 96), ninety_six);
+    if (lo(shifted) != 0x80000001UL || hi(shifted) != 0) return 15;
+
+    i128 neg = -((i128)1 << 100);
+    i128 ar = sar(neg, sixty_five);
+    if (ar != -((i128)1 << 35)) return 16;
+    if (sar((i128)-2, one) != -1) return 17;
+    if ((i128)(int)-7 != -7) return 18;
+    if ((u128)(unsigned int)0xffffffffU != 0xffffffffU) return 19;
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(exe.path())
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(exe.path())
+        .status()
+        .expect("failed to run exe");
+    assert_eq!(status.code(), Some(42));
 }
 
 #[test]

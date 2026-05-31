@@ -941,6 +941,20 @@ impl TackyGen {
                 vec![CType::Double, CType::Double],
                 None,
             )),
+            "__builtin_pow" => Some((
+                "pow",
+                CType::Double,
+                FullType::Scalar(CType::Double),
+                vec![CType::Double, CType::Double],
+                None,
+            )),
+            "__builtin_powf" => Some((
+                "powf",
+                CType::Float,
+                FullType::Scalar(CType::Float),
+                vec![CType::Float, CType::Float],
+                None,
+            )),
             "__builtin_conjf" => Some((
                 "conjf",
                 CType::Float,
@@ -4423,10 +4437,27 @@ impl TackyGen {
             });
             return Ok((dst, CType::Pointer));
         }
+        let uses_standard_abs_builtin = builtin_info.is_some()
+            || self
+                .func_types
+                .get(&name)
+                .is_some_and(|(ret, params, _, _)| {
+                    params.len() == 1
+                        && match name.as_str() {
+                            "abs" | "__builtin_abs" => {
+                                *ret == CType::Int && params[0] == CType::Int
+                            }
+                            "labs" | "__builtin_labs" | "llabs" | "__builtin_llabs" => {
+                                *ret == CType::Long && params[0] == CType::Long
+                            }
+                            _ => false,
+                        }
+                });
         if matches!(
             name.as_str(),
             "abs" | "__builtin_abs" | "labs" | "__builtin_labs" | "llabs" | "__builtin_llabs"
-        ) && args.len() == 1
+        ) && uses_standard_abs_builtin
+            && args.len() == 1
         {
             let ret_type = match name.as_str() {
                 "abs" | "__builtin_abs" => CType::Int,

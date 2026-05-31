@@ -3273,14 +3273,14 @@ fn fixup_instructions(func: &mut AsmFunction, stack_size: i32, callee_saved: &[R
             }
             // LoadIndirect with memory dst
             AsmInstr::LoadIndirect(t, ref reg, ref dst) if is_memory(dst) => {
-                if t == AsmType::Double {
+                if matches!(t, AsmType::Float | AsmType::Double) {
                     new_instructions.push(AsmInstr::LoadIndirect(
                         t,
                         *reg,
                         AsmOperand::Xmm(XmmReg::XMM14),
                     ));
                     new_instructions.push(AsmInstr::Mov(
-                        AsmType::Double,
+                        t,
                         AsmOperand::Xmm(XmmReg::XMM14),
                         dst.clone(),
                     ));
@@ -3295,9 +3295,9 @@ fn fixup_instructions(func: &mut AsmFunction, stack_size: i32, callee_saved: &[R
             }
             // StoreIndirect with memory src
             AsmInstr::StoreIndirect(t, ref src, ref reg) if is_memory(src) => {
-                if t == AsmType::Double {
+                if matches!(t, AsmType::Float | AsmType::Double) {
                     new_instructions.push(AsmInstr::Mov(
-                        AsmType::Double,
+                        t,
                         src.clone(),
                         AsmOperand::Xmm(XmmReg::XMM14),
                     ));

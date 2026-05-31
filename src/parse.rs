@@ -3234,6 +3234,10 @@ impl Parser {
 
         // Handle typedef declarations
         if sc.as_ref().is_some_and(StorageClass::is_typedef) {
+            let full_type = decl_params
+                .as_ref()
+                .map(|info| Self::function_full_type(full_type.clone(), info))
+                .unwrap_or(full_type);
             let vla_size = self.typedef_vla_size_expr(&full_type);
             self.add_typedef(
                 name,
@@ -3248,7 +3252,7 @@ impl Parser {
             while self.eat(&Token::Comma) {
                 self.last_typedef_full_type = td_ft.clone();
                 let decl_tree = self.parse_declarator_tree()?;
-                let (name2, full_type2, _decl_params2) =
+                let (name2, full_type2, decl_params2) =
                     Self::process_declarator(&decl_tree, base_type, td_ft.as_ref());
                 let full_type2 = self.apply_vector_size_attr(full_type2, post_vector_size);
                 let full_type2 = if base_type == CType::Struct {
@@ -3260,6 +3264,10 @@ impl Parser {
                 } else {
                     full_type2
                 };
+                let full_type2 = decl_params2
+                    .as_ref()
+                    .map(|info| Self::function_full_type(full_type2.clone(), info))
+                    .unwrap_or(full_type2);
                 let vla_size = self.typedef_vla_size_expr(&full_type2);
                 self.add_typedef(
                     name2,

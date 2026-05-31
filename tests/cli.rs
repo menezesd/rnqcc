@@ -749,6 +749,85 @@ fn compiles_function_declarator_after_object_in_mixed_declaration() {
 }
 
 #[test]
+fn compiles_function_typedef_object_declaration_as_function() {
+    let src = temp_file("function-typedef-object-declaration", "c");
+    let out = temp_file("function-typedef-object-declaration", "s");
+    std::fs::write(
+        &src,
+        "typedef void visitor();\n\
+         visitor callback;\n\
+         void run(void *arg) { callback(arg); }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn user_declared_abs_can_return_struct() {
+    let src = temp_file("user-declared-abs-struct-return", "c");
+    let out = temp_file("user-declared-abs-struct-return", "s");
+    std::fs::write(
+        &src,
+        "struct S { int a; };\n\
+         struct S abs(int);\n\
+         struct S bar(int j) { return abs(j); }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn x86_float_indirect_load_to_stack_uses_xmm_scratch() {
+    let src = temp_file("x86-float-indirect-stack-load", "c");
+    let out = temp_file("x86-float-indirect-stack-load", "s");
+    std::fs::write(
+        &src,
+        "void f(float *a, float *b, float *c) {\n\
+             float t[2];\n\
+             t[0] = b[0] - (float)__builtin_pow(c[0], 2);\n\
+             t[1] = b[1] - (float)__builtin_pow(c[1], 2);\n\
+             a[0] = t[0];\n\
+             a[1] = t[1];\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn reports_tacky_errors_without_rust_panic_output() {
     let src = temp_file("bad-static-init", "i");
     std::fs::write(&src, "int f(void) { return 1; }\nint g = f();\n")

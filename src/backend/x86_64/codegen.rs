@@ -161,6 +161,40 @@ fn emit_i128_parts_to_operands(
     out.push(AsmInstr::Mov(AsmType::Quadword, high, dst_high));
 }
 
+fn clamp_floating_to_signed_int_overflow(
+    out: &mut Vec<AsmInstr>,
+    src_ty: AsmType,
+    src: &TackyVal,
+    dst: &TackyVal,
+    static_doubles: &mut Vec<(String, f64)>,
+    label_counter: &mut usize,
+) {
+    let base = *label_counter;
+    *label_counter += 1;
+    let end_label = format!("float_to_int_ok.{}", base);
+    let src_op = if src_ty == AsmType::Float {
+        let tmp = AsmOperand::Xmm(XmmReg::XMM14);
+        out.push(AsmInstr::Cvtss2sd(convert_val(src), tmp.clone()));
+        tmp
+    } else {
+        convert_double_val(src, static_doubles)
+    };
+    let max_label = double_const_label(static_doubles);
+    static_doubles.push((max_label.clone(), 2147483648.0));
+    out.push(AsmInstr::Cmp(
+        AsmType::Double,
+        AsmOperand::Data(max_label),
+        src_op,
+    ));
+    out.push(AsmInstr::JmpCC(CondCode::B, end_label.clone()));
+    out.push(AsmInstr::Mov(
+        AsmType::Longword,
+        AsmOperand::Imm(i32::MAX as i64),
+        convert_val(dst),
+    ));
+    out.push(AsmInstr::Label(end_label));
+}
+
 fn is_unsigned_val(val: &TackyVal, types: &HashMap<String, CType>) -> bool {
     match val {
         TackyVal::UInt128Constant(_) => true,
@@ -1068,6 +1102,16 @@ fn convert_instruction(
                     convert_val(src),
                     convert_val(dst),
                 ));
+                if dst_t == AsmType::Longword {
+                    clamp_floating_to_signed_int_overflow(
+                        out,
+                        AsmType::Double,
+                        src,
+                        dst,
+                        static_doubles,
+                        label_counter,
+                    );
+                }
             }
         }
         TackyInstr::FloatToInt { src, dst } => {
@@ -1089,6 +1133,16 @@ fn convert_instruction(
                     convert_val(src),
                     convert_val(dst),
                 ));
+                if dst_t == AsmType::Longword {
+                    clamp_floating_to_signed_int_overflow(
+                        out,
+                        AsmType::Float,
+                        src,
+                        dst,
+                        static_doubles,
+                        label_counter,
+                    );
+                }
             }
         }
         TackyInstr::UIntToDouble { src, dst } => {

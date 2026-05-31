@@ -4457,6 +4457,39 @@ fn emits_x86_64_assembly_for_float_operations() {
 }
 
 #[test]
+fn x86_float_to_int_overflow_saturates_to_int_max() {
+    let src = temp_file("x86-float-to-int-overflow", "c");
+    let exe = temp_file("x86-float-to-int-overflow", "bin");
+    std::fs::write(
+        &src,
+        "#include <limits.h>\n\
+         int f1(void) { return (int)2147483648.0f; }\n\
+         int f2(void) { return (int)(float)(2147483647); }\n\
+         int main(void) {\n\
+             if (INT_MAX != 2147483647) return 0;\n\
+             if (f1() != INT_MAX) return 1;\n\
+             if (f2() != INT_MAX) return 2;\n\
+             return 42;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn emits_real_fences_for_atomic_fence_builtins() {
     let src = temp_file("atomic-fence-builtins", "c");
     let x86_out = temp_file("atomic-fence-builtins-x86", "s");

@@ -437,6 +437,7 @@ fn convert_instruction(
     label_counter: &mut usize,
     var_struct_tags: &HashMap<String, String>,
     struct_defs: &HashMap<String, StructDef>,
+    local_function_names: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
     match instr {
         TackyInstr::Nop => { /* skip */ }
@@ -1608,6 +1609,7 @@ fn convert_instruction(
                 static_doubles,
                 var_struct_tags,
                 struct_defs,
+                local_function_names,
                 variadic: *variadic,
                 fixed_flat_arg_count: *fixed_flat_arg_count,
             };
@@ -1632,6 +1634,7 @@ struct FuncallContext<'a> {
     static_doubles: &'a mut Vec<(String, f64)>,
     var_struct_tags: &'a HashMap<String, String>,
     struct_defs: &'a HashMap<String, StructDef>,
+    local_function_names: &'a std::collections::HashSet<String>,
     variadic: bool,
     fixed_flat_arg_count: usize,
 }
@@ -1652,6 +1655,7 @@ fn convert_funcall(
     let static_doubles = &mut *ctx.static_doubles;
     let var_struct_tags = ctx.var_struct_tags;
     let struct_defs = ctx.struct_defs;
+    let use_shadow_varargs = ctx.variadic && !indirect && ctx.local_function_names.contains(name);
     let memory_blocks: std::collections::HashMap<usize, usize> =
         memory_arg_blocks.iter().copied().collect();
 
@@ -1717,7 +1721,7 @@ fn convert_funcall(
         let mut xmm_idx = 0usize;
 
         for (arg_idx, arg) in args.iter().enumerate() {
-            let is_variadic_extra = ctx.variadic && arg_idx >= ctx.fixed_flat_arg_count;
+            let is_variadic_extra = use_shadow_varargs && arg_idx >= ctx.fixed_flat_arg_count;
             if let Some(size) = memory_blocks.get(&arg_idx).copied() {
                 stack_args_list.push(StackArg::MemoryBlock { src_ptr: arg, size });
                 continue;
@@ -2481,6 +2485,7 @@ fn convert_function(
     static_doubles: &mut Vec<(String, f64)>,
     var_struct_tags: &HashMap<String, String>,
     struct_defs: &HashMap<String, StructDef>,
+    local_function_names: &std::collections::HashSet<String>,
 ) -> Result<AsmFunction, String> {
     let mut instructions = Vec::new();
     static I128_LABEL_BASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -2661,6 +2666,7 @@ fn convert_function(
             &mut label_counter,
             var_struct_tags,
             struct_defs,
+            local_function_names,
         )?;
     }
     Ok(AsmFunction {
@@ -2674,6 +2680,7 @@ fn convert_function(
 // Phase 2: Replace pseudo-registers with stack slots
 // ============================================================
 
+#[allow(clippy::too_many_arguments)]
 fn replace_pseudos(
     func: &mut AsmFunction,
     static_vars: &std::collections::HashSet<String>,
@@ -2681,6 +2688,8 @@ fn replace_pseudos(
     types: &HashMap<String, CType>,
     arr_sizes: &HashMap<String, usize>,
     alignments: &HashMap<String, usize>,
+    var_struct_tags: &HashMap<String, String>,
+    struct_defs: &HashMap<String, StructDef>,
 ) -> i32 {
     let mut pseudo_map: HashMap<String, i32> = HashMap::new();
     let mut stack_offset: i32 = 0;
@@ -2690,6 +2699,8 @@ fn replace_pseudos(
         types: &'a HashMap<String, CType>,
         arr_sizes: &'a HashMap<String, usize>,
         alignments: &'a HashMap<String, usize>,
+        var_struct_tags: &'a HashMap<String, String>,
+        struct_defs: &'a HashMap<String, StructDef>,
     }
     let ctx = ReplaceCtx {
         statics: static_vars,
@@ -2697,6 +2708,8 @@ fn replace_pseudos(
         types,
         arr_sizes,
         alignments,
+        var_struct_tags,
+        struct_defs,
     };
 
     fn replace_operand(
@@ -2724,6 +2737,12 @@ fn replace_pseudos(
                             // so ensure at least 4 bytes
                             if ct == CType::Void {
                                 4
+                            } else if ct == CType::Struct {
+                                ctx.var_struct_tags
+                                    .get(&name)
+                                    .and_then(|tag| ctx.struct_defs.get(tag))
+                                    .map(|def| def.size as i32)
+                                    .unwrap_or(0)
                             } else {
                                 std::cmp::max(ct.size(), 1)
                             }
@@ -2767,7 +2786,16 @@ fn replace_pseudos(
                         let size = if let Some(&arr_size) = ctx.arr_sizes.get(&name) {
                             arr_size as i32
                         } else {
-                            ctx.types.get(&name).copied().unwrap_or(CType::Int).size()
+                            let ct = ctx.types.get(&name).copied().unwrap_or(CType::Int);
+                            if ct == CType::Struct {
+                                ctx.var_struct_tags
+                                    .get(&name)
+                                    .and_then(|tag| ctx.struct_defs.get(tag))
+                                    .map(|def| def.size as i32)
+                                    .unwrap_or(0)
+                            } else {
+                                ct.size()
+                            }
                         };
                         let align = if let Some(&decl_align) = ctx.alignments.get(&name) {
                             decl_align
@@ -3474,6 +3502,14 @@ pub fn gen(program: &TackyProgram, no_coalescing: bool) -> Result<AsmProgram, St
     let types = &program.symbol_types;
     let array_sizes = &program.array_sizes;
     let alignments = &program.symbol_alignments;
+    let local_function_names: std::collections::HashSet<String> = program
+        .top_level
+        .iter()
+        .filter_map(|tl| match tl {
+            TackyTopLevel::Function(tf) => Some(tf.name.clone()),
+            _ => None,
+        })
+        .collect();
     let mut top_level = Vec::new();
     let mut static_doubles = Vec::new();
 
@@ -3487,6 +3523,7 @@ pub fn gen(program: &TackyProgram, no_coalescing: bool) -> Result<AsmProgram, St
                     &mut static_doubles,
                     &program.var_struct_tags,
                     &program.struct_defs,
+                    &local_function_names,
                 )?;
 
                 // Compute aliased variables (address-taken + static)
@@ -3518,6 +3555,8 @@ pub fn gen(program: &TackyProgram, no_coalescing: bool) -> Result<AsmProgram, St
                     types,
                     array_sizes,
                     alignments,
+                    &program.var_struct_tags,
+                    &program.struct_defs,
                 );
 
                 // Phase 3: fix up instructions + callee-saved register handling

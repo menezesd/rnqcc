@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 
@@ -178,6 +179,8 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "x86-only GCC torture test"
     if "dg-require-effective-target untyped_assembly" in text:
         return "requires GCC untyped assembly symbols"
+    if "dg-require-effective-target label_values" in text or "&&" in text and "goto *" in text:
+        return "unsupported GCC labels-as-values extension"
     if "dg-require-effective-target trampolines" in text:
         return "requires GCC nested-function trampolines"
     if "scalar_storage_order" in text:
@@ -360,6 +363,12 @@ def main() -> int:
         f"(start={args.start}, limit={args.limit}, skipped={len(skipped)}, "
         f"expected_failed={len(expected_failed)})"
     )
+    if skipped:
+        skip_counts = Counter(reason for _, reason in skipped)
+        summary = ", ".join(
+            f"{count} {reason}" for reason, count in skip_counts.most_common()
+        )
+        print(f"skip reasons: {summary}")
     if args.failure_log:
         args.failure_log.parent.mkdir(parents=True, exist_ok=True)
         args.failure_log.write_text(

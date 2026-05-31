@@ -4490,6 +4490,79 @@ fn x86_float_to_int_overflow_saturates_to_int_max() {
 }
 
 #[test]
+fn x86_variadic_libc_call_uses_only_abi_stack_arguments() {
+    let src = temp_file("x86-variadic-libc-stack", "c");
+    let out = temp_file("x86-variadic-libc-stack", "s");
+    std::fs::write(
+        &src,
+        "#include <stdio.h>\n\
+         char buf[64];\n\
+         int main(void) {\n\
+             return sprintf(buf, \"%d%d%d%d%d%d%d%d%d%d\", 1,2,3,4,5,6,7,8,9,10);\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("call sprintf@PLT"), "{asm}");
+    assert!(
+        asm.contains("movl $5, 0(%rsp)") || asm.contains("movl $5, (%rsp)"),
+        "{asm}"
+    );
+    assert!(!asm.contains("movl $1, 0(%rsp)"), "{asm}");
+    assert!(!asm.contains("movl $2, 8(%rsp)"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn x86_va_arg_struct_temporary_gets_real_stack_storage() {
+    let src = temp_file("x86-va-arg-struct-storage", "c");
+    let out = temp_file("x86-va-arg-struct-storage", "s");
+    std::fs::write(
+        &src,
+        "#include <stdarg.h>\n\
+         typedef struct { double x, y; } point;\n\
+         int take(int n, ...) {\n\
+             va_list ap;\n\
+             point p;\n\
+             va_start(ap, n);\n\
+             p = va_arg(ap, point);\n\
+             va_end(ap);\n\
+             return p.x == 1.0 && p.y == 2.0;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(!asm.contains("0(%rbp)"), "{asm}");
+    assert!(
+        asm.contains("-32(%rbp)") || asm.contains("-24(%rbp)"),
+        "{asm}"
+    );
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn emits_real_fences_for_atomic_fence_builtins() {
     let src = temp_file("atomic-fence-builtins", "c");
     let x86_out = temp_file("atomic-fence-builtins-x86", "s");

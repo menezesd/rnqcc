@@ -952,6 +952,9 @@ fn rewrite_coalesced(instrs: &mut Vec<AsmInstr>, uf: &UnionFind) {
             AsmInstr::StoreIndirect(_, src, _) => {
                 rewrite_op(src, uf);
             }
+            AsmInstr::CopyToStackArg { src_ptr, .. } => {
+                rewrite_op(src_ptr, uf);
+            }
             AsmInstr::BuiltinSetjmp { buf, dst, .. } => {
                 rewrite_op(buf, uf);
                 rewrite_op(dst, uf);
@@ -1078,6 +1081,9 @@ fn apply_register_map(instrs: &mut Vec<AsmInstr>, map: &HashMap<String, RegId>) 
             }
             AsmInstr::StoreIndirect(_, src, _) => {
                 replace_op(src, map);
+            }
+            AsmInstr::CopyToStackArg { src_ptr, .. } => {
+                replace_op(src_ptr, map);
             }
             AsmInstr::BuiltinSetjmp { buf, dst, .. } => {
                 replace_op(buf, map);
@@ -1241,7 +1247,7 @@ fn visit_operands<F: FnMut(&AsmOperand)>(instr: &AsmInstr, mut f: F) {
         AsmInstr::Unary(_, _, op) => {
             f(op);
         }
-        AsmInstr::Idiv(_, op) | AsmInstr::Div(_, op) => {
+        AsmInstr::MulFull(_, op) | AsmInstr::Idiv(_, op) | AsmInstr::Div(_, op) => {
             f(op);
         }
         AsmInstr::SetCC(_, op) => {
@@ -1270,6 +1276,12 @@ fn visit_operands<F: FnMut(&AsmOperand)>(instr: &AsmInstr, mut f: F) {
         }
         AsmInstr::StoreIndirect(_, src, _) => {
             f(src);
+        }
+        AsmInstr::JmpIndirect(target) => {
+            f(target);
+        }
+        AsmInstr::CopyToStackArg { src_ptr, .. } => {
+            f(src_ptr);
         }
         AsmInstr::BuiltinSetjmp { buf, dst, .. } => {
             f(buf);

@@ -3070,10 +3070,11 @@ impl TackyGen {
         {
             let target_ft = FullType::Scalar(target_type);
             let result = self.fresh_tmp_full(&target_ft);
-            if let TackyVal::Var(ref result_name) = result {
-                let src_addr = self.get_struct_addr(val);
-                self.emit_struct_copy_to(src_addr, result_name, target_type.size() as usize);
-            }
+            let src_addr = self.get_struct_addr(val);
+            self.emit(TackyInstr::Load {
+                src_ptr: src_addr,
+                dst: result.clone(),
+            });
             return Ok((result, target_type));
         }
         if let Some(ft) = cast_ft.as_ref() {
@@ -3083,11 +3084,11 @@ impl TackyGen {
                     == source_ft.byte_size_with(&self.struct_defs)
             {
                 let result = self.fresh_tmp_full(ft);
-                let size = ft.byte_size_with(&self.struct_defs);
-                if let TackyVal::Var(ref result_name) = result {
-                    let src_addr = self.get_struct_addr(val);
-                    self.emit_struct_copy_to(src_addr, result_name, size);
-                }
+                let src_addr = self.get_struct_addr(val);
+                self.emit(TackyInstr::Load {
+                    src_ptr: src_addr,
+                    dst: result.clone(),
+                });
                 return Ok((result, target_type));
             }
             if ft.is_vector()

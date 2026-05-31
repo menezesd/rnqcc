@@ -510,17 +510,33 @@ fn convert_instruction(
                                 convert_val(src),
                                 low64_operand(dst_op.clone())?,
                             ));
+                            out.push(AsmInstr::Mov(
+                                AsmType::Quadword,
+                                convert_val(src),
+                                AsmOperand::Reg(Reg::R10),
+                            ));
                         } else {
                             out.push(AsmInstr::Movsx(
                                 src_t,
                                 AsmType::Quadword,
                                 convert_val(src),
+                                AsmOperand::Reg(Reg::R10),
+                            ));
+                            out.push(AsmInstr::Mov(
+                                AsmType::Quadword,
+                                AsmOperand::Reg(Reg::R10),
                                 low64_operand(dst_op.clone())?,
                             ));
                         }
+                        out.push(AsmInstr::Binary(
+                            AsmType::Quadword,
+                            AsmBinaryOp::Sar,
+                            AsmOperand::Imm(63),
+                            AsmOperand::Reg(Reg::R10),
+                        ));
                         out.push(AsmInstr::Mov(
                             AsmType::Quadword,
-                            AsmOperand::Imm(0),
+                            AsmOperand::Reg(Reg::R10),
                             high64_operand(dst_op)?,
                         ));
                     }
@@ -546,11 +562,25 @@ fn convert_instruction(
             let dst_t = val_type(dst, types);
             if dst_t == AsmType::Octword {
                 let dst_op = convert_val(dst);
-                out.push(AsmInstr::Mov(
-                    AsmType::Quadword,
-                    convert_val(src),
-                    low64_operand(dst_op.clone())?,
-                ));
+                if src_t == AsmType::Quadword {
+                    out.push(AsmInstr::Mov(
+                        AsmType::Quadword,
+                        convert_val(src),
+                        low64_operand(dst_op.clone())?,
+                    ));
+                } else {
+                    out.push(AsmInstr::MovZeroExtend(
+                        src_t,
+                        AsmType::Quadword,
+                        convert_val(src),
+                        AsmOperand::Reg(Reg::R10),
+                    ));
+                    out.push(AsmInstr::Mov(
+                        AsmType::Quadword,
+                        AsmOperand::Reg(Reg::R10),
+                        low64_operand(dst_op.clone())?,
+                    ));
+                }
                 out.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     AsmOperand::Imm(0),

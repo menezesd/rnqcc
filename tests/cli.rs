@@ -3428,6 +3428,42 @@ fn emits_aarch64_assembly_for_preprocessed_math_header_fixture() {
     let _ = std::fs::remove_file(out);
 }
 
+#[test]
+fn treats_standard_abs_names_as_builtins_even_with_visible_declarations() {
+    let src = temp_file("standard-abs-builtins", "c");
+    let exe = temp_file("standard-abs-builtins", "bin");
+    std::fs::write(
+        &src,
+        r#"
+long long a = -1;
+long long llabs(long long);
+
+int main(void) {
+    return llabs(a) == 1 ? 42 : 1;
+}
+
+long long llabs(long long value) {
+    return value == 0 ? 0 : -100;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
 #[cfg(not(target_arch = "aarch64"))]
 #[test]
 fn rejects_aarch64_object_output_on_non_aarch64_hosts() {
@@ -15235,6 +15271,20 @@ int main(void) {
 "#,
         ),
         (
+            "x86-linux-byte-to-word-sign-extend",
+            r#"
+signed char c = (signed char)0xffffffff;
+
+int foo(void) {
+    return (unsigned short)c ^ (signed char)0x99999999;
+}
+
+int main(void) {
+    return foo() == (int)0xffff0066 ? 42 : 1;
+}
+"#,
+        ),
+        (
             "x86-linux-signed-long-mul-overflow",
             r#"
 int overflows;
@@ -15293,6 +15343,10 @@ int main(void) {
         }
         if name == "x86-linux-word-to-ulong-zero-extend" {
             assert!(!asm.contains("movzwq %si, %eax"), "{name}: {asm}");
+        }
+        if name == "x86-linux-byte-to-word-sign-extend" {
+            assert!(asm.contains("movsbw"), "{name}: {asm}");
+            assert!(!asm.contains("movslq"), "{name}: {asm}");
         }
         let mut labels = std::collections::HashSet::new();
         for line in asm.lines() {

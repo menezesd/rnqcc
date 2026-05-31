@@ -319,7 +319,7 @@ def main() -> int:
 
             if args.mode == "execute":
                 exe = tmpdir / stem
-                compile_cmd = [*common, str(src), "-o", str(exe)]
+                compile_cmd = [*common, str(src), "-o", str(exe), "-lm"]
                 result = run(compile_cmd, timeout)
                 cmd = compile_cmd
                 if result.returncode == 0:

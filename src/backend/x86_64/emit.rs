@@ -544,6 +544,7 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
         }
         AsmInstr::Movsx(src_t, dst_t, src, dst) => {
             let mnemonic = match (src_t, dst_t) {
+                (AsmType::Byte, AsmType::Word) => "movsbw",
                 (AsmType::Byte, AsmType::Longword) => "movsbl",
                 (AsmType::Byte, AsmType::Quadword) => "movsbq",
                 (AsmType::Word, AsmType::Longword) => "movswl",
@@ -566,6 +567,7 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
         }
         AsmInstr::MovZeroExtend(src_t, dst_t, src, dst) => {
             let mnemonic = match (src_t, dst_t) {
+                (AsmType::Byte, AsmType::Word) => "movzbw",
                 (AsmType::Byte, AsmType::Longword) => "movzbl",
                 (AsmType::Byte, AsmType::Quadword) => "movzbq",
                 (AsmType::Word, AsmType::Longword) => "movzwl",

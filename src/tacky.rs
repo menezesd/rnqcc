@@ -4423,7 +4423,6 @@ impl TackyGen {
             name.as_str(),
             "abs" | "__builtin_abs" | "labs" | "__builtin_labs" | "llabs" | "__builtin_llabs"
         ) && args.len() == 1
-            && (!user_declares_function || name.starts_with("__builtin_"))
         {
             let ret_type = match name.as_str() {
                 "abs" | "__builtin_abs" => CType::Int,

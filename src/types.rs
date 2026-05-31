@@ -1948,6 +1948,7 @@ pub enum AsmInstr {
     MovZeroExtend(AsmType, AsmType, AsmOperand, AsmOperand), // (src_type, dst_type, src, dst) zero-extend
     Unary(AsmType, AsmUnaryOp, AsmOperand),
     Binary(AsmType, AsmBinaryOp, AsmOperand, AsmOperand),
+    MulFull(AsmType, AsmOperand), // RDX:RAX = RAX * operand
     Idiv(AsmType, AsmOperand),
     Div(AsmType, AsmOperand), // unsigned division
     Cdq(AsmType),             // Longword=cdq, Quadword=cqo

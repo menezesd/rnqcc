@@ -723,6 +723,14 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                 }
             }
         }
+        AsmInstr::MulFull(t, operand) => {
+            let mnemonic = match t {
+                AsmType::Longword => "mull",
+                AsmType::Quadword => "mulq",
+                _ => return invalid_input("full multiply requires an integer type"),
+            };
+            writeln!(w, "\t{} {}", mnemonic, show_operand(operand, *t, platform)?)
+        }
         AsmInstr::Idiv(t, operand) => {
             writeln!(
                 w,

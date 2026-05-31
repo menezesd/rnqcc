@@ -253,7 +253,7 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
         AsmInstr::SetCC(_, dst) => (vec![], operand_writes(dst)),
         AsmInstr::Push(val) => (operand_reads(val), vec![]),
         AsmInstr::Pop(reg) => (vec![], vec![RegId::Gp(*reg)]),
-        AsmInstr::Idiv(_, divisor) | AsmInstr::Div(_, divisor) => {
+        AsmInstr::MulFull(_, divisor) | AsmInstr::Idiv(_, divisor) | AsmInstr::Div(_, divisor) => {
             let mut used = operand_reads(divisor);
             used.push(RegId::Gp(Reg::AX));
             used.push(RegId::Gp(Reg::DX));
@@ -916,7 +916,7 @@ fn rewrite_coalesced(instrs: &mut Vec<AsmInstr>, uf: &UnionFind) {
             AsmInstr::Unary(_, _, op) => {
                 rewrite_op(op, uf);
             }
-            AsmInstr::Idiv(_, op) | AsmInstr::Div(_, op) => {
+            AsmInstr::MulFull(_, op) | AsmInstr::Idiv(_, op) | AsmInstr::Div(_, op) => {
                 rewrite_op(op, uf);
             }
             AsmInstr::SetCC(_, op) => {
@@ -924,6 +924,9 @@ fn rewrite_coalesced(instrs: &mut Vec<AsmInstr>, uf: &UnionFind) {
             }
             AsmInstr::Push(op) => {
                 rewrite_op(op, uf);
+            }
+            AsmInstr::JmpIndirect(target) => {
+                rewrite_op(target, uf);
             }
             AsmInstr::Cvtsi2sd(_, src, dst)
             | AsmInstr::Cvtsi2ss(_, src, dst)
@@ -1040,7 +1043,7 @@ fn apply_register_map(instrs: &mut Vec<AsmInstr>, map: &HashMap<String, RegId>) 
             AsmInstr::Unary(_, _, op) => {
                 replace_op(op, map);
             }
-            AsmInstr::Idiv(_, op) | AsmInstr::Div(_, op) => {
+            AsmInstr::MulFull(_, op) | AsmInstr::Idiv(_, op) | AsmInstr::Div(_, op) => {
                 replace_op(op, map);
             }
             AsmInstr::SetCC(_, op) => {
@@ -1048,6 +1051,9 @@ fn apply_register_map(instrs: &mut Vec<AsmInstr>, map: &HashMap<String, RegId>) 
             }
             AsmInstr::Push(op) => {
                 replace_op(op, map);
+            }
+            AsmInstr::JmpIndirect(target) => {
+                replace_op(target, map);
             }
             AsmInstr::Cvtsi2sd(_, src, dst)
             | AsmInstr::Cvtsi2ss(_, src, dst)

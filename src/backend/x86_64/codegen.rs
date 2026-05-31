@@ -240,6 +240,7 @@ fn get_struct_classes(
 
 #[allow(clippy::too_many_arguments)]
 fn convert_instruction(
+    function_name: &str,
     instr: &TackyInstr,
     types: &HashMap<String, CType>,
     _arr_sizes: &HashMap<String, usize>,
@@ -640,6 +641,37 @@ fn convert_instruction(
                             .to_string())
                     }
                 };
+                if t == AsmType::Octword {
+                    emit_i128_copy(out, src, dst)?;
+                    let dst_op = convert_val(dst);
+                    let dst_low = low64_operand(dst_op.clone())?;
+                    let dst_high = high64_operand(dst_op)?;
+                    out.push(AsmInstr::Unary(
+                        AsmType::Quadword,
+                        AsmUnaryOp::Not,
+                        dst_low.clone(),
+                    ));
+                    out.push(AsmInstr::Unary(
+                        AsmType::Quadword,
+                        AsmUnaryOp::Not,
+                        dst_high.clone(),
+                    ));
+                    if matches!(op, TackyUnaryOp::Negate) {
+                        out.push(AsmInstr::Binary(
+                            AsmType::Quadword,
+                            AsmBinaryOp::AddSetFlags,
+                            AsmOperand::Imm(1),
+                            dst_low,
+                        ));
+                        out.push(AsmInstr::Binary(
+                            AsmType::Quadword,
+                            AsmBinaryOp::Adc,
+                            AsmOperand::Imm(0),
+                            dst_high,
+                        ));
+                    }
+                    return Ok(());
+                }
                 out.push(AsmInstr::Mov(t, convert_val(src), convert_val(dst)));
                 out.push(AsmInstr::Unary(t, asm_op, convert_val(dst)));
             }
@@ -712,6 +744,20 @@ fn convert_instruction(
             dst,
         } => {
             let t = val_type(dst, types);
+            if t == AsmType::Octword {
+                convert_binary(
+                    op,
+                    left,
+                    right,
+                    dst,
+                    types,
+                    out,
+                    static_doubles,
+                    label_counter,
+                    function_name,
+                )?;
+                return Ok(());
+            }
             let dst_ctype = match dst {
                 TackyVal::Var(n) => types.get(n).copied().unwrap_or(CType::Int),
                 _ => CType::Int,
@@ -755,6 +801,7 @@ fn convert_instruction(
                 out,
                 static_doubles,
                 label_counter,
+                function_name,
             )?;
         }
         TackyInstr::Copy { src, dst } => {
@@ -1656,6 +1703,7 @@ fn convert_binary(
     out: &mut Vec<AsmInstr>,
     static_doubles: &mut Vec<(String, f64)>,
     label_counter: &mut usize,
+    function_name: &str,
 ) -> Result<(), String> {
     let left_ctype = match left {
         TackyVal::Var(n) => types.get(n).copied().unwrap_or(CType::Int),
@@ -1712,9 +1760,9 @@ fn convert_binary(
             let dst_op = convert_val(dst);
             let base = *label_counter;
             *label_counter += 1;
-            let true_label = format!("i128_cmp_true.{}", base);
-            let low_label = format!("i128_cmp_low.{}", base);
-            let end_label = format!("i128_cmp_end.{}", base);
+            let true_label = format!("i128_cmp_true.{}.{}", function_name, base);
+            let low_label = format!("i128_cmp_low.{}.{}", function_name, base);
+            let end_label = format!("i128_cmp_end.{}.{}", function_name, base);
             let (high_true, high_false, low_true) = match op {
                 TackyBinaryOp::Equal => (CondCode::E, CondCode::NE, CondCode::E),
                 TackyBinaryOp::NotEqual => (CondCode::NE, CondCode::E, CondCode::NE),
@@ -1925,16 +1973,70 @@ fn convert_binary(
                         ));
                     }
                     if matches!(op, TackyBinaryOp::Mul) {
+                        let left_low = low64_operand(dst_op.clone())?;
+                        let left_high = high64_operand(dst_op.clone())?;
+                        out.push(AsmInstr::Mov(
+                            AsmType::Quadword,
+                            left_low.clone(),
+                            AsmOperand::Reg(Reg::R10),
+                        ));
+                        out.push(AsmInstr::Mov(
+                            AsmType::Quadword,
+                            left_high.clone(),
+                            AsmOperand::Reg(Reg::R11),
+                        ));
+                        out.push(AsmInstr::Mov(
+                            AsmType::Quadword,
+                            AsmOperand::Reg(Reg::R10),
+                            AsmOperand::Reg(Reg::AX),
+                        ));
+                        out.push(AsmInstr::Mov(
+                            AsmType::Quadword,
+                            right_low.clone(),
+                            AsmOperand::Reg(Reg::DX),
+                        ));
+                        out.push(AsmInstr::MulFull(
+                            AsmType::Quadword,
+                            AsmOperand::Reg(Reg::DX),
+                        ));
+                        out.push(AsmInstr::Mov(
+                            AsmType::Quadword,
+                            AsmOperand::Reg(Reg::AX),
+                            left_low,
+                        ));
+                        out.push(AsmInstr::Mov(
+                            AsmType::Quadword,
+                            AsmOperand::Reg(Reg::DX),
+                            left_high.clone(),
+                        ));
+                        out.push(AsmInstr::Binary(
+                            AsmType::Quadword,
+                            AsmBinaryOp::Mul,
+                            right_high,
+                            AsmOperand::Reg(Reg::R10),
+                        ));
+                        out.push(AsmInstr::Binary(
+                            AsmType::Quadword,
+                            AsmBinaryOp::Add,
+                            AsmOperand::Reg(Reg::R10),
+                            left_high.clone(),
+                        ));
+                        out.push(AsmInstr::Mov(
+                            AsmType::Quadword,
+                            AsmOperand::Reg(Reg::R11),
+                            AsmOperand::Reg(Reg::R10),
+                        ));
                         out.push(AsmInstr::Binary(
                             AsmType::Quadword,
                             AsmBinaryOp::Mul,
                             right_low,
-                            low64_operand(dst_op.clone())?,
+                            AsmOperand::Reg(Reg::R10),
                         ));
-                        out.push(AsmInstr::Mov(
+                        out.push(AsmInstr::Binary(
                             AsmType::Quadword,
-                            AsmOperand::Imm(0),
-                            high64_operand(dst_op)?,
+                            AsmBinaryOp::Add,
+                            AsmOperand::Reg(Reg::R10),
+                            left_high,
                         ));
                         return Ok(());
                     }
@@ -2206,6 +2308,7 @@ fn convert_function(
 
     for instr in &func.body {
         convert_instruction(
+            &func.name,
             instr,
             types,
             arr_sizes,
@@ -2364,7 +2467,7 @@ fn replace_pseudos(
             AsmInstr::Unary(_, _, op) => {
                 replace_operand(op, &mut pseudo_map, &mut stack_offset, &ctx);
             }
-            AsmInstr::Idiv(_, op) | AsmInstr::Div(_, op) => {
+            AsmInstr::MulFull(_, op) | AsmInstr::Idiv(_, op) | AsmInstr::Div(_, op) => {
                 replace_operand(op, &mut pseudo_map, &mut stack_offset, &ctx);
             }
             AsmInstr::SetCC(_, op) => {
@@ -2372,6 +2475,9 @@ fn replace_pseudos(
             }
             AsmInstr::Push(op) => {
                 replace_operand(op, &mut pseudo_map, &mut stack_offset, &ctx);
+            }
+            AsmInstr::JmpIndirect(target) => {
+                replace_operand(target, &mut pseudo_map, &mut stack_offset, &ctx);
             }
             AsmInstr::Cvtsi2sd(_, src, dst)
             | AsmInstr::Cvtsi2ss(_, src, dst)
@@ -2485,6 +2591,15 @@ fn fixup_instructions(func: &mut AsmFunction, stack_size: i32, callee_saved: &[R
                     AsmOperand::Reg(Reg::R10),
                 ));
                 new_instructions.push(AsmInstr::Mov(dt, AsmOperand::Reg(Reg::R10), dst.clone()));
+            }
+            // full multiply / divide cannot use immediate operands
+            AsmInstr::MulFull(t, AsmOperand::Imm(val)) => {
+                new_instructions.push(AsmInstr::Mov(
+                    t,
+                    AsmOperand::Imm(val),
+                    AsmOperand::Reg(Reg::R10),
+                ));
+                new_instructions.push(AsmInstr::MulFull(t, AsmOperand::Reg(Reg::R10)));
             }
             // idiv imm / div imm
             AsmInstr::Idiv(t, AsmOperand::Imm(val)) => {
@@ -2876,6 +2991,7 @@ fn verify_final_function(func: &AsmFunction) -> Result<(), String> {
                 }
             }
             AsmInstr::Unary(_, _, op)
+            | AsmInstr::MulFull(_, op)
             | AsmInstr::Idiv(_, op)
             | AsmInstr::Div(_, op)
             | AsmInstr::SetCC(_, op)

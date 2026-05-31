@@ -7655,6 +7655,49 @@ fn internal_cpp_provides_more_system_virtual_headers() {
 }
 
 #[test]
+fn internal_cpp_provides_feature_and_cdefs_virtual_headers() {
+    let src = temp_file("internal-cpp-feature-cdefs-headers", "c");
+    let exe = temp_file("internal-cpp-feature-cdefs-headers", "bin");
+    std::fs::write(
+        &src,
+        "#include <features.h>\n\
+         #include <sys/cdefs.h>\n\
+         __BEGIN_DECLS\n\
+         __attribute_malloc__ __attribute_alloc_size__((1)) void *make_ptr(unsigned long size) __THROW;\n\
+         __END_DECLS\n\
+         void *make_ptr(unsigned long size) { return (void *)size; }\n\
+         int main(void) {\n\
+             int joined = __CONCAT(12, 34);\n\
+             char *text = __STRING(joined);\n\
+             void *p = make_ptr(7);\n\
+             int glibc_ok = __GLIBC__ >= 2 && __GLIBC_MINOR__ >= 0 && __GNUC_PREREQ(4, 0);\n\
+             int use_ok = __USE_POSIX && __USE_XOPEN2K && __USE_MISC && __GLIBC_USE(ISOC2X) == 0;\n\
+             int cdefs_ok = joined == 1234 && text[0] == 'j' && __glibc_likely(p != 0) && !__glibc_unlikely(0);\n\
+             return glibc_ok && use_ok && cdefs_ok ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-nostdinc")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
     let headers = [
         "assert.h",
@@ -7663,6 +7706,7 @@ fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
         "dirent.h",
         "errno.h",
         "fcntl.h",
+        "features.h",
         "float.h",
         "getopt.h",
         "grp.h",
@@ -7705,6 +7749,7 @@ fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
         "netinet/ip.h",
         "netinet/tcp.h",
         "netinet/udp.h",
+        "sys/cdefs.h",
         "sys/file.h",
         "sys/errno.h",
         "sys/poll.h",
@@ -14916,6 +14961,139 @@ out:
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn emits_x86_64_linux_assembly_for_ci_regression_cases() {
+    for (name, source) in [
+        (
+            "x86-linux-int128-cross-half-shift",
+            r#"
+unsigned long f(unsigned __int128 in1, unsigned long in2) {
+    __int128 mask = (__int128)0xffff << 56;
+    return ((in1 & mask) >> 56) | in2;
+}
+
+int main(void) {
+    unsigned __int128 in = 1;
+    in <<= 64;
+    return f(in, 2) == 0x102 ? 42 : 1;
+}
+"#,
+        ),
+        (
+            "x86-linux-int128-va-arg",
+            r#"
+#include <stdarg.h>
+
+__int128 take(int skip, ...) {
+    va_list ap;
+    va_start(ap, skip);
+    while (skip--) {
+        va_arg(ap, int);
+    }
+    __int128 value = va_arg(ap, __int128);
+    va_end(ap);
+    return value;
+}
+
+int main(void) {
+    __int128 value = ((__int128)0x1122334455667788LL << 64) | 0x0102030405060708LL;
+    return take(1, 0, value) == value ? 42 : 1;
+}
+"#,
+        ),
+        (
+            "x86-linux-vector-uint128-mask",
+            r#"
+typedef unsigned __int128 V __attribute__((vector_size(16)));
+
+int main(void) {
+    V r = (V){5} != 0;
+    return r[0] == ~(unsigned __int128)0 ? 42 : 1;
+}
+"#,
+        ),
+        (
+            "x86-linux-nested-local-label",
+            r#"
+int main(void) {
+    void *label = &&out;
+    int i = 0;
+    void test(void) {
+        label = &&out2;
+        goto *label;
+out2:
+        i++;
+    }
+    goto *label;
+out:
+    i += 2;
+    test();
+    return i == 3 ? 42 : 1;
+}
+"#,
+        ),
+        (
+            "x86-linux-i128-label-uniqueness",
+            r#"
+int f(__int128 x) { return x > 1 && x < 3; }
+int g(__int128 x) { return x > 4 && x < 6; }
+int main(void) { return f(2) && g(5) ? 42 : 1; }
+"#,
+        ),
+        (
+            "x86-linux-signed-long-mul-overflow",
+            r#"
+int overflows;
+
+long test(long *x, int y) {
+    long s = 1;
+    for (int i = 0; i < y; i++) {
+        if (__builtin_mul_overflow(s, x[i], &s)) {
+            overflows++;
+        }
+    }
+    return s;
+}
+
+int main(void) {
+    long d[7] = { 975, 975, 975, 975, 975, 975, 975 };
+    test(d, 7);
+    return overflows == 1 ? 42 : overflows;
+}
+"#,
+        ),
+    ] {
+        let src = temp_file(name, "c");
+        let out = temp_file(name, "s");
+        std::fs::write(&src, source).expect("failed to write input");
+
+        let output = Command::new(rnqcc())
+            .args(["--target", "x86_64-linux", "-S", "-o"])
+            .arg(&out)
+            .arg(&src)
+            .output()
+            .expect("failed to run rnqcc");
+
+        assert!(output.status.success(), "{name}: {}", stderr(output));
+        let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
+        assert!(!asm.contains("Pseudo-register"), "{name}: {asm}");
+        assert!(!asm.contains("Octword"), "{name}: {asm}");
+        let mut labels = std::collections::HashSet::new();
+        for line in asm.lines() {
+            let trimmed = line.trim();
+            if let Some(label) = trimmed.strip_suffix(':') {
+                assert!(
+                    labels.insert(label.to_string()),
+                    "{name}: duplicate {label}"
+                );
+            }
+        }
+
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(out);
+    }
 }
 
 #[test]

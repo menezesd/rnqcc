@@ -1492,6 +1492,10 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
         guard: Some("__rnqcc_fnmatch_h"),
     },
     VirtualHeaderInfo {
+        name: "features.h",
+        guard: Some("__rnqcc_features_h"),
+    },
+    VirtualHeaderInfo {
         name: "dlfcn.h",
         guard: Some("__rnqcc_dlfcn_h"),
     },
@@ -1566,6 +1570,10 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
     VirtualHeaderInfo {
         name: "sys/stat.h",
         guard: Some("__rnqcc_sys_stat_h"),
+    },
+    VirtualHeaderInfo {
+        name: "sys/cdefs.h",
+        guard: Some("__rnqcc_sys_cdefs_h"),
     },
     VirtualHeaderInfo {
         name: "sys/errno.h",
@@ -2083,6 +2091,51 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
             }
             include_str!("virtual_headers/fnmatch.h").to_string()
         }
+        "features.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("__GLIBC__", "2"),
+                    ("__GLIBC_MINOR__", "39"),
+                    ("__GLIBC_USE_ISOC2X", "0"),
+                    ("__GLIBC_USE_DEPRECATED_GETS", "0"),
+                    ("__GLIBC_USE_DEPRECATED_SCANF", "0"),
+                    ("__USE_ISOC95", "1"),
+                    ("__USE_ISOC99", "1"),
+                    ("__USE_ISOC11", "1"),
+                    ("__USE_POSIX", "1"),
+                    ("__USE_POSIX2", "1"),
+                    ("__USE_POSIX199309", "1"),
+                    ("__USE_POSIX199506", "1"),
+                    ("__USE_XOPEN2K", "1"),
+                    ("__USE_XOPEN2K8", "1"),
+                    ("__USE_MISC", "1"),
+                    ("__USE_ATFILE", "1"),
+                ],
+            );
+            for (name, params, body) in [
+                (
+                    "__GNUC_PREREQ",
+                    vec!["maj", "min"],
+                    "(((__GNUC__ << 16) + __GNUC_MINOR__) >= (((maj) << 16) + (min)))",
+                ),
+                ("__glibc_clang_prereq", vec!["maj", "min"], "0"),
+                ("__GLIBC_USE", vec!["F"], "0"),
+            ] {
+                macros.insert(
+                    name.to_string(),
+                    MacroDef::Function {
+                        params: params.into_iter().map(str::to_string).collect(),
+                        variadic: false,
+                        body: body.to_string(),
+                    },
+                );
+            }
+            if virtual_header_include_once(macros, "features.h") {
+                return String::new();
+            }
+            include_str!("virtual_headers/features.h").to_string()
+        }
         "dlfcn.h" => {
             define_virtual_object_macros(
                 macros,
@@ -2350,6 +2403,58 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 return String::new();
             }
             format!("{}{}", types, include_str!("virtual_headers/sys/stat.h"))
+        }
+        "sys/cdefs.h" => {
+            define_virtual_object_macros(
+                macros,
+                &[
+                    ("__ptr_t", "void *"),
+                    ("__BEGIN_DECLS", ""),
+                    ("__END_DECLS", ""),
+                    ("__THROW", ""),
+                    ("__THROWNL", ""),
+                    ("__attribute_malloc__", ""),
+                    ("__attribute_pure__", ""),
+                    ("__attribute_const__", ""),
+                    ("__attribute_used__", ""),
+                    ("__attribute_noinline__", ""),
+                    ("__attribute_deprecated__", ""),
+                    ("__wur", ""),
+                    ("__always_inline", "inline"),
+                    ("__extern_inline", "extern inline"),
+                    ("__fortify_function", "extern inline"),
+                    ("__restrict_arr", "__restrict"),
+                ],
+            );
+            for (name, params, body) in [
+                ("__P", vec!["args"], "args"),
+                ("__PMT", vec!["args"], "args"),
+                ("__CONCAT", vec!["x", "y"], "x ## y"),
+                ("__STRING", vec!["x"], "#x"),
+                ("__NTH", vec!["fct"], "fct"),
+                ("__NTHNL", vec!["fct"], "fct"),
+                ("__attribute__", vec!["attrs"], ""),
+                ("__attribute_alloc_size__", vec!["params"], ""),
+                ("__attribute_alloc_align__", vec!["param"], ""),
+                ("__attribute_format_arg__", vec!["x"], ""),
+                ("__attribute_format_strfmon__", vec!["a", "b"], ""),
+                ("__nonnull", vec!["params"], ""),
+                ("__glibc_unlikely", vec!["cond"], "(cond)"),
+                ("__glibc_likely", vec!["cond"], "(cond)"),
+            ] {
+                macros.insert(
+                    name.to_string(),
+                    MacroDef::Function {
+                        params: params.into_iter().map(str::to_string).collect(),
+                        variadic: false,
+                        body: body.to_string(),
+                    },
+                );
+            }
+            if virtual_header_include_once(macros, "sys/cdefs.h") {
+                return String::new();
+            }
+            include_str!("virtual_headers/sys/cdefs.h").to_string()
         }
         "sys/errno.h" => include_virtual_compat_header("errno.h", macros),
         "fcntl.h" => {

@@ -15222,6 +15222,19 @@ int main(void) { return f(2) && g(5) ? 42 : 1; }
 "#,
         ),
         (
+            "x86-linux-word-to-ulong-zero-extend",
+            r#"
+unsigned long f(unsigned long a, unsigned short b, unsigned long c) {
+    return (a + b) - c;
+}
+
+int main(void) {
+    unsigned long high = 1UL << 63;
+    return f(high - 1, 1, high) == 0 ? 42 : 1;
+}
+"#,
+        ),
+        (
             "x86-linux-signed-long-mul-overflow",
             r#"
 int overflows;
@@ -15277,6 +15290,9 @@ int main(void) {
                 !asm.contains("movq -88(%rbp), %rsi"),
                 "{name}: stack copy used stale spill slot instead of computed source pointer: {asm}"
             );
+        }
+        if name == "x86-linux-word-to-ulong-zero-extend" {
+            assert!(!asm.contains("movzwq %si, %eax"), "{name}: {asm}");
         }
         let mut labels = std::collections::HashSet::new();
         for line in asm.lines() {

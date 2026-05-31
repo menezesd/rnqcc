@@ -583,12 +583,19 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
             } else {
                 match dst {
                     AsmOperand::Reg(reg) => {
+                        let reg_type = if *dst_t == AsmType::Quadword
+                            && matches!(*src_t, AsmType::Byte | AsmType::Word)
+                        {
+                            AsmType::Quadword
+                        } else {
+                            AsmType::Longword
+                        };
                         writeln!(
                             w,
                             "\t{} {}, {}",
                             mnemonic,
                             show_operand(src, *src_t, platform)?,
-                            reg_name(reg, AsmType::Longword)?
+                            reg_name(reg, reg_type)?
                         )
                     }
                     _ => {

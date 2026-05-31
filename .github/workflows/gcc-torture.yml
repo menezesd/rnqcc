@@ -55,6 +55,7 @@ jobs:
             --mode "${{ inputs.mode || 'execute' }}" \
             --start "${{ inputs.start || '0' }}" \
             --limit "${{ inputs.limit || '75' }}" \
+            --expected-failures tests/fixtures/gcc_torture_expected_failures.txt \
             --failure-log "$CI_ARTIFACT_DIR/gcc-torture-failures.txt" \
             --artifact-dir "$CI_ARTIFACT_DIR"
 

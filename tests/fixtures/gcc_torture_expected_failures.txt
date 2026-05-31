@@ -1,0 +1,7 @@
+# Known GCC torture frontier failures.
+#
+# Format:
+# relative/path.c | diagnostic substring
+#
+# Keep this file as small as possible. The runner fails if an expected failure
+# starts passing, so entries can be removed as rnqcc improves.

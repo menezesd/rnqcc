@@ -197,6 +197,21 @@ def short_failure(result: subprocess.CompletedProcess[str]) -> str:
     return first[:240]
 
 
+def load_expected_failures(path: Path | None) -> dict[str, str]:
+    if path is None or not path.exists():
+        return {}
+    expected: dict[str, str] = {}
+    for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        fields = [field.strip() for field in line.split("|", 1)]
+        if len(fields) != 2 or not fields[0] or not fields[1]:
+            raise SystemExit(f"{path}:{line_no}: expected `relative/path.c | diagnostic substring`")
+        expected[fields[0]] = fields[1]
+    return expected
+
+
 def save_failure_artifact(
     artifact_dir: Path | None,
     suite: Path,
@@ -255,6 +270,11 @@ def main() -> int:
         help="write all failures to this file",
     )
     parser.add_argument(
+        "--expected-failures",
+        type=Path,
+        help="file of `relative/path.c | diagnostic substring` failures to treat as known",
+    )
+    parser.add_argument(
         "--artifact-dir",
         type=Path,
         default=Path(os.environ["CI_ARTIFACT_DIR"]) if "CI_ARTIFACT_DIR" in os.environ else None,
@@ -276,13 +296,17 @@ def main() -> int:
     selected = tests[args.start : args.start + args.limit]
     if not selected:
         raise SystemExit("no tests selected")
+    expected_failures = load_expected_failures(args.expected_failures)
 
     passed = 0
     skipped: list[tuple[Path, str]] = []
     failures: list[tuple[Path, str]] = []
+    expected_failed: list[tuple[Path, str]] = []
+    stale_expected: list[tuple[str, str]] = []
     with tempfile.TemporaryDirectory(prefix="rnqcc-gcc-torture.") as tmp:
         tmpdir = Path(tmp)
         for idx, src in enumerate(selected, start=args.start):
+            rel = str(src.relative_to(suite))
             if reason := skip_reason_for_test(src):
                 skipped.append((src, reason))
                 continue
@@ -304,28 +328,50 @@ def main() -> int:
                     cmd = run_cmd
                 if result.returncode == 0:
                     passed += 1
+                    if rel in expected_failures:
+                        stale_expected.append((rel, expected_failures[rel]))
                 else:
-                    failures.append((src, short_failure(result)))
-                    save_failure_artifact(args.artifact_dir, suite, idx, src, cmd, result)
+                    failure = short_failure(result)
+                    expected = expected_failures.get(rel)
+                    if expected is not None and expected in failure:
+                        expected_failed.append((src, failure))
+                    else:
+                        failures.append((src, failure))
+                        save_failure_artifact(args.artifact_dir, suite, idx, src, cmd, result)
             else:
                 obj = tmpdir / f"{stem}.o"
                 cmd = [*common, "-c", str(src), "-o", str(obj)]
                 result = run(cmd, timeout)
                 if result.returncode == 0:
                     passed += 1
+                    if rel in expected_failures:
+                        stale_expected.append((rel, expected_failures[rel]))
                 else:
-                    failures.append((src, short_failure(result)))
-                    save_failure_artifact(args.artifact_dir, suite, idx, src, cmd, result)
+                    failure = short_failure(result)
+                    expected = expected_failures.get(rel)
+                    if expected is not None and expected in failure:
+                        expected_failed.append((src, failure))
+                    else:
+                        failures.append((src, failure))
+                        save_failure_artifact(args.artifact_dir, suite, idx, src, cmd, result)
 
     print(
         f"gcc torture {args.mode}: {passed}/{len(selected) - len(skipped)} passed "
-        f"(start={args.start}, limit={args.limit}, skipped={len(skipped)})"
+        f"(start={args.start}, limit={args.limit}, skipped={len(skipped)}, "
+        f"expected_failed={len(expected_failed)})"
     )
     if args.failure_log:
         args.failure_log.parent.mkdir(parents=True, exist_ok=True)
         args.failure_log.write_text(
             "".join(
                 f"{src.relative_to(suite)}\t{reason}\n" for src, reason in failures
+            )
+            + "".join(
+                f"{rel}\tSTALE-XFAIL: {reason}\n" for rel, reason in stale_expected
+            )
+            + "".join(
+                f"{src.relative_to(suite)}\tXFAIL: {reason}\n"
+                for src, reason in expected_failed
             )
             + "".join(
                 f"{src.relative_to(suite)}\tSKIP: {reason}\n" for src, reason in skipped
@@ -338,7 +384,9 @@ def main() -> int:
         print(f"FAIL {rel}: {reason}")
     if args.max_failures != 0 and len(failures) > args.max_failures:
         print(f"... {len(failures) - args.max_failures} more failures")
-    return 1 if failures else 0
+    for rel, reason in stale_expected:
+        print(f"STALE-XFAIL {rel}: {reason}")
+    return 1 if failures or stale_expected else 0
 
 
 if __name__ == "__main__":

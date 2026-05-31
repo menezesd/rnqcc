@@ -5736,10 +5736,14 @@ fn preprocess(invocation: PreprocessInvocation<'_>) -> Result<PreprocessedSource
             line_markers: invocation.line_markers,
         })?
     } else {
-        let mut args: Vec<OsString> = gcc_arch_args(invocation.target)
-            .into_iter()
-            .map(OsString::from)
-            .collect();
+        let mut args: Vec<OsString> = if Target::host().os == TargetOs::MacOs {
+            gcc_arch_args(invocation.target)
+                .into_iter()
+                .map(OsString::from)
+                .collect()
+        } else {
+            Vec::new()
+        };
         args.push(OsString::from("-U__SIZEOF_LONG_DOUBLE__"));
         args.push(OsString::from(format!(
             "-D__SIZEOF_LONG_DOUBLE__={}",

@@ -739,6 +739,45 @@ fn aarch64_linux_long_double_uses_binary128_helpers() {
 }
 
 #[test]
+fn aarch64_linux_long_double_supports_comparisons_and_negation() {
+    let src = temp_file("aarch64-ld-cmp-neg", "c");
+    let out = temp_file("aarch64-ld-cmp-neg", "s");
+    std::fs::write(
+        &src,
+        "int eq(long double a, long double b) { return a == b; }\n\
+         int ne(long double a, long double b) { return a != b; }\n\
+         int lt(long double a, long double b) { return a < b; }\n\
+         int le(long double a, long double b) { return a <= b; }\n\
+         int gt(long double a, long double b) { return a > b; }\n\
+         int ge(long double a, long double b) { return a >= b; }\n\
+         long double neg(long double x) { return -x; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("bl __eqtf2"), "{asm}");
+    assert!(asm.contains("bl __netf2"), "{asm}");
+    assert!(asm.contains("bl __lttf2"), "{asm}");
+    assert!(asm.contains("bl __letf2"), "{asm}");
+    assert!(asm.contains("bl __gttf2"), "{asm}");
+    assert!(asm.contains("bl __getf2"), "{asm}");
+    assert!(asm.contains("cmp w0, w10"), "{asm}");
+    assert!(asm.contains("eor w9, w9, w10"), "{asm}");
+    assert!(asm.contains("str x30"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn long_double_size_follows_target() {
     for (target, expected) in [("x86_64-linux", 16), ("aarch64-macos", 8)] {
         let src = temp_file("target-long-double-size", "c");

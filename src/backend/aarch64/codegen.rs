@@ -108,6 +108,17 @@ fn high64_operand(op: &AsmOperand) -> Result<AsmOperand, String> {
     }
 }
 
+fn byte_offset_operand(op: &AsmOperand, offset: i32) -> Result<AsmOperand, String> {
+    match op {
+        AsmOperand::Stack(base) => Ok(AsmOperand::Stack(base + offset)),
+        AsmOperand::Data(name) => Ok(data_operand_with_offset(name, offset)),
+        other => Err(format!(
+            "AArch64 backend cannot address byte offset {} of {:?}",
+            offset, other
+        )),
+    }
+}
+
 fn i128_part_operands(
     val: &TackyVal,
     stack_slots: &HashMap<String, i32>,
@@ -1061,6 +1072,18 @@ fn long_double_helper(op: &TackyBinaryOp) -> Option<&'static str> {
     }
 }
 
+fn long_double_comparison_helper(op: &TackyBinaryOp) -> Option<(&'static str, CondCode)> {
+    match op {
+        TackyBinaryOp::Equal => Some(("__eqtf2", CondCode::E)),
+        TackyBinaryOp::NotEqual => Some(("__netf2", CondCode::NE)),
+        TackyBinaryOp::LessThan => Some(("__lttf2", CondCode::L)),
+        TackyBinaryOp::LessEqual => Some(("__letf2", CondCode::LE)),
+        TackyBinaryOp::GreaterThan => Some(("__gttf2", CondCode::G)),
+        TackyBinaryOp::GreaterEqual => Some(("__getf2", CondCode::GE)),
+        _ => None,
+    }
+}
+
 fn emit_long_double_helper_call(
     instructions: &mut Vec<AsmInstr>,
     helper: &str,
@@ -1085,6 +1108,72 @@ fn emit_long_double_helper_call(
         AsmType::LongDouble,
         AsmOperand::Xmm(XmmReg::XMM0),
         val_operand(dst, stack_slots, global_vars)?,
+    ));
+    Ok(())
+}
+
+fn emit_long_double_comparison(
+    instructions: &mut Vec<AsmInstr>,
+    comparison: (&str, CondCode),
+    left: &TackyVal,
+    right: &TackyVal,
+    dst: &TackyVal,
+    stack_slots: &HashMap<String, i32>,
+    global_vars: &HashSet<String>,
+) -> Result<(), String> {
+    let (helper, cc) = comparison;
+    instructions.push(AsmInstr::Mov(
+        AsmType::LongDouble,
+        val_operand(left, stack_slots, global_vars)?,
+        AsmOperand::Xmm(XmmReg::XMM0),
+    ));
+    instructions.push(AsmInstr::Mov(
+        AsmType::LongDouble,
+        val_operand(right, stack_slots, global_vars)?,
+        AsmOperand::Xmm(XmmReg::XMM1),
+    ));
+    instructions.push(AsmInstr::Call(helper.to_string(), 0, 2, false));
+    instructions.push(AsmInstr::Cmp(
+        AsmType::Longword,
+        AsmOperand::Imm(0),
+        AsmOperand::Reg(Reg::AX),
+    ));
+    instructions.push(AsmInstr::SetCC(
+        cc,
+        val_operand(dst, stack_slots, global_vars)?,
+    ));
+    Ok(())
+}
+
+fn emit_long_double_negate(
+    instructions: &mut Vec<AsmInstr>,
+    src: &TackyVal,
+    dst: &TackyVal,
+    stack_slots: &HashMap<String, i32>,
+    global_vars: &HashSet<String>,
+) -> Result<(), String> {
+    let dst_op = val_operand(dst, stack_slots, global_vars)?;
+    instructions.push(AsmInstr::Mov(
+        AsmType::LongDouble,
+        val_operand(src, stack_slots, global_vars)?,
+        dst_op.clone(),
+    ));
+    let sign_byte = byte_offset_operand(&dst_op, 15)?;
+    instructions.push(AsmInstr::Mov(
+        AsmType::Byte,
+        sign_byte.clone(),
+        AsmOperand::Reg(Reg::R10),
+    ));
+    instructions.push(AsmInstr::Binary(
+        AsmType::Byte,
+        AsmBinaryOp::Xor,
+        AsmOperand::Imm(0x80),
+        AsmOperand::Reg(Reg::R10),
+    ));
+    instructions.push(AsmInstr::Mov(
+        AsmType::Byte,
+        AsmOperand::Reg(Reg::R10),
+        sign_byte,
     ));
     Ok(())
 }
@@ -1147,9 +1236,17 @@ fn convert_function(
     )?;
     let saves_link_register = function.body.iter().any(|instr| match instr {
         TackyInstr::FunCall { .. } => true,
-        TackyInstr::Binary { op, dst, .. } => {
-            matches!(asm_type_for_val(dst, types), Ok(AsmType::LongDouble))
+        TackyInstr::Binary {
+            op,
+            left,
+            right,
+            dst,
+        } => {
+            (matches!(asm_type_for_val(dst, types), Ok(AsmType::LongDouble))
                 && long_double_helper(op).is_some()
+                || (long_double_comparison_helper(op).is_some()
+                    && (matches!(asm_type_for_val(left, types), Ok(AsmType::LongDouble))
+                        || matches!(asm_type_for_val(right, types), Ok(AsmType::LongDouble)))))
                 || matches!(
                     (op, asm_type_for_val(dst, types)),
                     (
@@ -1811,6 +1908,16 @@ fn convert_function(
                     instructions.push(AsmInstr::SetCC(CondCode::E, dst_op));
                     continue;
                 }
+                if ty == AsmType::LongDouble && matches!(op, TackyUnaryOp::Negate) {
+                    emit_long_double_negate(
+                        &mut instructions,
+                        src,
+                        dst,
+                        &stack_slots,
+                        global_vars,
+                    )?;
+                    continue;
+                }
                 instructions.push(AsmInstr::Mov(
                     ty,
                     val_operand(src, &stack_slots, global_vars)?,
@@ -2305,7 +2412,21 @@ fn convert_function(
             } => {
                 let ty = asm_type_for_val(dst, types)?;
                 let dst_op = val_operand(dst, &stack_slots, global_vars)?;
-                if ty == AsmType::LongDouble {
+                if asm_type_for_val(left, types)? == AsmType::LongDouble
+                    || asm_type_for_val(right, types)? == AsmType::LongDouble
+                {
+                    if let Some((helper, cc)) = long_double_comparison_helper(op) {
+                        emit_long_double_comparison(
+                            &mut instructions,
+                            (helper, cc),
+                            left,
+                            right,
+                            dst,
+                            &stack_slots,
+                            global_vars,
+                        )?;
+                        continue;
+                    }
                     let Some(helper) = long_double_helper(op) else {
                         return Err(format!(
                             "AArch64 backend does not support long double binary op yet: {:?}",

@@ -183,6 +183,9 @@ struct TackyGen {
     full_types: HashMap<String, FullType>,
     /// Function types: (return_type, param_types, return_ptr_info)
     func_types: HashMap<String, FunctionTypeInfo>,
+    /// Names that are functions, even when their prototype is not visible at
+    /// the current source position.
+    function_symbols: HashSet<String>,
     /// Function return full types
     func_full_types: HashMap<String, FullType>,
     /// Function parameter full types.
@@ -219,6 +222,7 @@ impl TackyGen {
             symbol_types: HashMap::new(),
             full_types: HashMap::new(),
             func_types: HashMap::new(),
+            function_symbols: HashSet::new(),
             func_full_types: HashMap::new(),
             func_param_full_types: HashMap::new(),
             vla_param_bounds: HashMap::new(),
@@ -2971,12 +2975,12 @@ impl TackyGen {
     }
 
     fn emit_var(&mut self, name: String) -> TackyResult<(TackyVal, CType)> {
-        if self.func_types.contains_key(&name) {
-            let (return_type, _, _, variadic) = self
-                .func_types
-                .get(&name)
-                .cloned()
-                .ok_or_else(|| format!("unknown function '{}'", name))?;
+        if self.function_symbols.contains(&name) {
+            let (return_type, _, _, variadic) =
+                self.func_types
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or((CType::Int, Vec::new(), None, true));
             let return_full_type = self
                 .func_full_types
                 .get(&name)
@@ -4760,6 +4764,7 @@ impl TackyGen {
         };
         let is_indirect = builtin_info.is_none()
             && !self.func_types.contains_key(&name)
+            && !self.function_symbols.contains(&name)
             && !name.starts_with("__builtin_");
         if uses_hidden_ptr {
             let rft = ret_ft
@@ -5278,7 +5283,7 @@ impl TackyGen {
         }
 
         if let Exp::Var(ref name) = inner {
-            if self.func_types.contains_key(name) {
+            if self.function_symbols.contains(name) {
                 let dst = self.fresh_tmp(CType::Pointer);
                 self.emit(TackyInstr::GetAddress {
                     src: TackyVal::Var(name.clone()),
@@ -10266,6 +10271,7 @@ impl TackyGen {
                 }
                 BlockItem::Declaration(Declaration::FunDecl(fd)) => {
                     // Register function type for block-scope prototypes
+                    self.function_symbols.insert(fd.name.clone());
                     let param_types: Vec<CType> = fd.params.iter().map(|(_, t, _)| *t).collect();
                     self.func_types.insert(
                         fd.name.clone(),
@@ -10355,7 +10361,7 @@ impl TackyGen {
             .filter(|name| {
                 !local_names.contains(name)
                     && self.full_types.contains_key(name)
-                    && !self.func_types.contains_key(name)
+                    && !self.function_symbols.contains(name)
             })
             .collect()
     }
@@ -10828,6 +10834,23 @@ impl TackyGen {
         let Some(body) = func.body else {
             return Ok(None);
         };
+
+        self.function_symbols.insert(func.name.clone());
+        let param_types: Vec<CType> = func.params.iter().map(|(_, t, _)| *t).collect();
+        self.func_types.insert(
+            func.name.clone(),
+            (
+                func.return_type,
+                param_types,
+                func.return_ptr_info,
+                func.variadic,
+            ),
+        );
+        self.func_param_full_types
+            .insert(func.name.clone(), func.param_full_types.clone());
+        if let Some(ref rft) = func.return_full_type {
+            self.func_full_types.insert(func.name.clone(), rft.clone());
+        }
 
         self.current_function = func.name.clone();
         self.instructions.clear();
@@ -11457,8 +11480,12 @@ pub fn generate_with_options(
     for decl in &program.declarations {
         match decl {
             Declaration::FunDecl(fd) => {
+                gen.function_symbols.insert(fd.name.clone());
                 if fd.no_instrument_function {
                     gen.no_instrument_functions.insert(fd.name.clone());
+                }
+                if fd.body.is_some() {
+                    continue;
                 }
                 let param_types: Vec<CType> = fd.params.iter().map(|(_, t, _)| *t).collect();
                 gen.func_types.insert(

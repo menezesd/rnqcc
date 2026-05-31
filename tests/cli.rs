@@ -647,6 +647,33 @@ fn rejects_direct_function_calls_with_wrong_argument_count() {
 }
 
 #[test]
+fn direct_function_prototypes_follow_source_order() {
+    let src = temp_file("source-order-function-prototype", "c");
+    let out = temp_file("source-order-function-prototype", "s");
+    std::fs::write(
+        &src,
+        "typedef struct node node;\n\
+         struct node { node *next; int value; };\n\
+         extern void use();\n\
+         static void before(node *p) { use(p); }\n\
+         void use(node **p) { if (*p) before(*p); }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn reports_tacky_errors_without_rust_panic_output() {
     let src = temp_file("bad-static-init", "i");
     std::fs::write(&src, "int f(void) { return 1; }\nint g = f();\n")

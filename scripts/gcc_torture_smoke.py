@@ -89,8 +89,6 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "unsupported GNU89 extern-inline redefinition semantics"
     if "-fpermissive" in text:
         return "unsupported permissive invalid-C compatibility test"
-    if "-std=gnu89" in text:
-        return "unsupported GNU89 compatibility torture test"
     if "-fgimple" in text or "__GIMPLE" in text:
         return "unsupported GCC GIMPLE source extension"
     if "dg-error" in text or "dg-warning" in text:
@@ -147,8 +145,6 @@ def skip_reason_for_test(src: Path) -> str | None:
             break
         if old_style_def:
             break
-    if "__attribute__" in text or "__attribute" in text:
-        return "unsupported GCC attribute placement/semantics test"
     if re.search(r"struct\s+\w*\s*\{\s*\}", text):
         return "unsupported empty struct extension"
     if re.search(r"^\s*struct\s+\w+\s+\w+\s*;", text, re.MULTILINE):

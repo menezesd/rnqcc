@@ -1659,6 +1659,7 @@ fn convert_instruction(
             struct_arg_groups,
             variadic,
             fixed_flat_arg_count,
+            hidden_return,
             indirect,
         } => {
             let mut ctx = FuncallContext {
@@ -1670,6 +1671,7 @@ fn convert_instruction(
                 local_function_names,
                 variadic: *variadic,
                 fixed_flat_arg_count: *fixed_flat_arg_count,
+                hidden_return: *hidden_return,
             };
             convert_funcall(
                 name,
@@ -1695,6 +1697,7 @@ struct FuncallContext<'a> {
     local_function_names: &'a std::collections::HashSet<String>,
     variadic: bool,
     fixed_flat_arg_count: usize,
+    hidden_return: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1948,6 +1951,9 @@ fn convert_funcall(
         let bytes_to_dealloc = outgoing_bytes as i32;
         if bytes_to_dealloc > 0 {
             out.push(AsmInstr::DeallocateStack(bytes_to_dealloc));
+        }
+        if ctx.hidden_return {
+            return Ok(());
         }
         let ret_t = val_type(dst, types);
         // Check if return value is a struct

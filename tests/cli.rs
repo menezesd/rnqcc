@@ -5496,6 +5496,49 @@ int main(void) {
 }
 
 #[test]
+fn compiles_and_runs_complex_function_returns() {
+    let src = temp_file("complex-function-returns", "i");
+    let exe = temp_file("complex-function-returns", "bin");
+    std::fs::write(
+        &src,
+        r#"
+double _Complex add(double _Complex x, double _Complex y) {
+    return x + y;
+}
+
+double _Complex make(void) {
+    return 1.0 + 2.0i;
+}
+
+int main(void) {
+    double _Complex a = 1.0 + 1.0i;
+    double _Complex b = -2.0 + 2.0i;
+    double _Complex c = add(a, b);
+    double _Complex d = make();
+    if (c != (double _Complex){-1.0, 3.0}) return 1;
+    if (d != (double _Complex){1.0, 2.0}) return 2;
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write test input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn aarch64_complex_int_arguments_use_integer_registers() {
     let src = temp_file("aarch64-complex-int-args", "c");
     let out = temp_file("aarch64-complex-int-args", "s");

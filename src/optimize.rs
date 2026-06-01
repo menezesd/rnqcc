@@ -348,6 +348,7 @@ fn resolve_constants(
             struct_arg_groups,
             variadic,
             fixed_flat_arg_count,
+            hidden_return,
             indirect,
         } => {
             let new_args: Vec<TackyVal> = args.iter().map(|a| resolve_val(a, const_map)).collect();
@@ -360,6 +361,7 @@ fn resolve_constants(
                 struct_arg_groups: struct_arg_groups.clone(),
                 variadic: *variadic,
                 fixed_flat_arg_count: *fixed_flat_arg_count,
+                hidden_return: *hidden_return,
                 indirect: *indirect,
             }
         }

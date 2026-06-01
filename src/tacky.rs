@@ -269,6 +269,7 @@ impl TackyGen {
                 struct_arg_groups: Vec::new(),
                 variadic: false,
                 fixed_flat_arg_count: 2,
+                hidden_return: false,
                 indirect: false,
             },
         ]
@@ -663,6 +664,7 @@ impl TackyGen {
                 struct_arg_groups: Vec::new(),
                 variadic: false,
                 fixed_flat_arg_count: 3,
+                hidden_return: false,
                 indirect: false,
             });
             return;
@@ -800,6 +802,7 @@ impl TackyGen {
             struct_arg_groups: Vec::new(),
             variadic: false,
             fixed_flat_arg_count: 3,
+            hidden_return: false,
             indirect: false,
         });
         result
@@ -5181,6 +5184,7 @@ impl TackyGen {
                 struct_arg_groups: shifted_groups,
                 variadic,
                 fixed_flat_arg_count: fixed_flat_arg_count + 1,
+                hidden_return: true,
                 indirect: is_indirect,
             });
             if let Some(pi) = ret_pi {
@@ -5220,6 +5224,7 @@ impl TackyGen {
             struct_arg_groups,
             variadic,
             fixed_flat_arg_count,
+            hidden_return: false,
             indirect: is_indirect,
         });
         if let Some(pi) = ret_pi {
@@ -5556,6 +5561,7 @@ impl TackyGen {
                 memory_arg_blocks: shifted_memory_blocks,
                 struct_arg_groups: shifted_groups,
                 variadic,
+                hidden_return: true,
                 indirect: true,
             });
             return Ok((dst, ret_type));
@@ -5585,6 +5591,7 @@ impl TackyGen {
             memory_arg_blocks,
             struct_arg_groups,
             variadic,
+            hidden_return: false,
             indirect: true,
         });
         Ok((dst, ret_type))

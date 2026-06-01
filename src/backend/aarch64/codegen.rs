@@ -2176,6 +2176,7 @@ fn convert_function(
                 struct_arg_groups,
                 variadic,
                 fixed_flat_arg_count,
+                hidden_return,
                 indirect,
             } => {
                 let arg_groups: HashMap<usize, (usize, Vec<bool>)> = struct_arg_groups
@@ -2364,6 +2365,9 @@ fn convert_function(
                 instructions.push(AsmInstr::Call(name.clone(), args.len(), 0, *indirect));
                 if outgoing_bytes > 0 {
                     instructions.push(AsmInstr::DeallocateStack(outgoing_bytes));
+                }
+                if *hidden_return {
+                    continue;
                 }
                 if val_ctype(dst, types) == Some(CType::Struct) {
                     if struct_size_for_val(dst, array_sizes, var_struct_tags, struct_defs)

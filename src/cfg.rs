@@ -816,6 +816,7 @@ fn rewrite_instruction(
             struct_arg_groups,
             variadic,
             fixed_flat_arg_count,
+            hidden_return,
             indirect,
         } => {
             let new_args: Vec<TackyVal> =
@@ -829,6 +830,7 @@ fn rewrite_instruction(
                 struct_arg_groups: struct_arg_groups.clone(),
                 variadic: *variadic,
                 fixed_flat_arg_count: *fixed_flat_arg_count,
+                hidden_return: *hidden_return,
                 indirect: *indirect,
             })
         }

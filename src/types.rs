@@ -1658,6 +1658,8 @@ pub enum TackyInstr {
         variadic: bool,
         /// Number of flattened TACKY arguments belonging to fixed prototype parameters.
         fixed_flat_arg_count: usize,
+        /// True when arg 0 is a caller-provided return buffer.
+        hidden_return: bool,
         /// True if calling through a function pointer variable
         indirect: bool,
     },

@@ -18,7 +18,7 @@ on:
       limit:
         description: Number of sorted tests to try
         required: true
-        default: "75"
+        default: "100000"
   schedule:
     - cron: "23 8 * * *"
 
@@ -54,15 +54,16 @@ jobs:
             --suite "$GCC_TORTURE_SUITE" \
             --mode "${{ inputs.mode || 'execute' }}" \
             --start "${{ inputs.start || '0' }}" \
-            --limit "${{ inputs.limit || '75' }}" \
+            --limit "${{ inputs.limit || '100000' }}" \
             --expected-failures tests/fixtures/gcc_torture_expected_failures.txt \
             --failure-log "$CI_ARTIFACT_DIR/gcc-torture-failures.txt" \
+            --skip-log "$CI_ARTIFACT_DIR/gcc-torture-skips.txt" \
             --artifact-dir "$CI_ARTIFACT_DIR"
 
-      - name: Upload failure artifacts
-        if: failure()
+      - name: Upload smoke artifacts
+        if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: rnqcc-gcc-torture-failure-artifacts
+          name: rnqcc-gcc-torture-smoke-artifacts
           path: target/ci-artifacts
           if-no-files-found: ignore

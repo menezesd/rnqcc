@@ -2034,6 +2034,7 @@ pub enum AsmInstr {
     X87Store(AsmOperand),
     X87UnaryNeg,
     X87Binary(AsmX87BinaryOp),
+    X87Compare,
     /// AArch64-only unsigned integer to double conversion.
     AArch64UIntToDouble(AsmType, AsmOperand, AsmOperand), // src_type, src, dst
     /// AArch64-only unsigned integer to float conversion.

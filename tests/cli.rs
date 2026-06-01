@@ -704,6 +704,44 @@ fn x86_64_long_double_uses_x87_stack_abi() {
 }
 
 #[test]
+fn x86_64_long_double_comparisons_use_x87_status_flags() {
+    let src = temp_file("x86-ld-x87-cmp", "c");
+    let out = temp_file("x86-ld-x87-cmp", "s");
+    std::fs::write(
+        &src,
+        "int eq(long double a, long double b) { return a == b; }\n\
+         int ne(long double a, long double b) { return a != b; }\n\
+         int lt(long double a, long double b) { return a < b; }\n\
+         int le(long double a, long double b) { return a <= b; }\n\
+         int gt(long double a, long double b) { return a > b; }\n\
+         int ge(long double a, long double b) { return a >= b; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("fucomip %st(1), %st"), "{asm}");
+    assert!(asm.contains("fstp %st(0)"), "{asm}");
+    assert!(asm.contains("sete"), "{asm}");
+    assert!(asm.contains("setne"), "{asm}");
+    assert!(asm.contains("setb"), "{asm}");
+    assert!(asm.contains("setbe"), "{asm}");
+    assert!(asm.contains("seta"), "{asm}");
+    assert!(asm.contains("setae"), "{asm}");
+    assert!(!asm.contains("cmpl %xmm"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn aarch64_linux_long_double_uses_binary128_helpers() {
     let src = temp_file("aarch64-ld-binary128", "c");
     let out = temp_file("aarch64-ld-binary128", "s");
@@ -779,7 +817,11 @@ fn aarch64_linux_long_double_supports_comparisons_and_negation() {
 
 #[test]
 fn long_double_size_follows_target() {
-    for (target, expected) in [("x86_64-linux", 16), ("aarch64-macos", 8)] {
+    for (target, expected) in [
+        ("x86_64-linux", 16),
+        ("aarch64-linux", 16),
+        ("aarch64-macos", 8),
+    ] {
         let src = temp_file("target-long-double-size", "c");
         let out = temp_file("target-long-double-size", "s");
         std::fs::write(

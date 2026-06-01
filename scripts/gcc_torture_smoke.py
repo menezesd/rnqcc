@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import signal
 import shlex
 import subprocess
 import sys
@@ -21,24 +22,47 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RNQCC = ROOT / "target" / "debug" / "rnqcc"
-DEFAULT_SUITE = Path("/tmp/rnqcc-gcc-torture/gcc/testsuite/gcc.c-torture")
+DEFAULT_SUITE_CANDIDATES = [
+    Path("/tmp/rnqcc-gcc-torture/gcc/testsuite/gcc.c-torture"),
+    Path("/tmp/rnqcc-gcc-torture/gcc/gcc/testsuite/gcc.c-torture"),
+]
+
+
+def resolve_suite(path: Path | None) -> Path:
+    candidates = [path] if path is not None else DEFAULT_SUITE_CANDIDATES
+    for candidate in candidates:
+        if candidate is not None and candidate.is_dir():
+            return candidate
+    searched = ", ".join(str(candidate) for candidate in candidates if candidate is not None)
+    raise SystemExit(f"gcc.c-torture suite not found; searched: {searched}")
 
 
 def run(cmd: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
+    use_process_group = hasattr(os, "killpg")
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=use_process_group,
+    )
     try:
-        return subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=timeout,
-        )
+        stdout, stderr = process.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(cmd, process.returncode, stdout=stdout, stderr=stderr)
     except subprocess.TimeoutExpired as exc:
+        if use_process_group:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            process.kill()
+        stdout, stderr = process.communicate()
         return subprocess.CompletedProcess(
             cmd,
             124,
-            stdout=(exc.stdout or b"").decode() if isinstance(exc.stdout, bytes) else exc.stdout,
-            stderr=f"timed out after {timeout:.1f}s",
+            stdout=(exc.stdout or "") + (stdout or ""),
+            stderr=((exc.stderr or "") + (stderr or "") + f"\ntimed out after {timeout:.1f}s").lstrip(),
         )
 
 
@@ -221,6 +245,8 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "oversized code-generation stress test"
     if "! { i?86-*-* x86_64-*-* }" in text:
         return "x86-only GCC torture test"
+    if src.parent.name == "execute" and src.name == "20061220-1.c":
+        return "unsupported inline asm input/output constraints in nested function"
     if re.search(r"^\s+void\s+nested\w*\s*\(", text, re.MULTILINE):
         return "unsupported GCC nested-function extension"
     if "gcc_tmpnam.h" in text and "dg-require-effective-target fileio" in text:
@@ -249,6 +275,16 @@ def load_expected_failures(path: Path | None) -> dict[str, str]:
             raise SystemExit(f"{path}:{line_no}: expected `relative/path.c | diagnostic substring`")
         expected[fields[0]] = fields[1]
     return expected
+
+
+def write_skip_log(path: Path | None, suite: Path, skipped: list[tuple[Path, str]]) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(f"{src.relative_to(suite)}\tSKIP: {reason}\n" for src, reason in skipped),
+        encoding="utf-8",
+    )
 
 
 def save_failure_artifact(
@@ -287,7 +323,11 @@ def main() -> int:
         description="Run a bounded rnqcc smoke pass over GCC C torture tests."
     )
     parser.add_argument("--rnqcc", default=str(DEFAULT_RNQCC))
-    parser.add_argument("--suite", default=str(DEFAULT_SUITE))
+    parser.add_argument(
+        "--suite",
+        type=Path,
+        help="gcc.c-torture suite path; defaults to common local and CI sparse-checkout paths",
+    )
     parser.add_argument(
         "--mode",
         choices=["execute", "compile"],
@@ -309,6 +349,16 @@ def main() -> int:
         help="write all failures to this file",
     )
     parser.add_argument(
+        "--skip-log",
+        type=Path,
+        help="write all skipped tests and reasons to this file",
+    )
+    parser.add_argument(
+        "--print-skips",
+        action="store_true",
+        help="print every skipped test and reason to stdout",
+    )
+    parser.add_argument(
         "--expected-failures",
         type=Path,
         help="file of `relative/path.c | diagnostic substring` failures to treat as known",
@@ -327,7 +377,7 @@ def main() -> int:
     args = parser.parse_args()
 
     rnqcc = Path(args.rnqcc)
-    suite = Path(args.suite)
+    suite = resolve_suite(args.suite)
     if not rnqcc.exists():
         subprocess.run(["cargo", "build"], cwd=ROOT, check=True)
 
@@ -405,6 +455,10 @@ def main() -> int:
             f"{count} {reason}" for reason, count in skip_counts.most_common()
         )
         print(f"skip reasons: {summary}")
+    write_skip_log(args.skip_log, suite, skipped)
+    if args.print_skips:
+        for src, reason in skipped:
+            print(f"SKIP {src.relative_to(suite)}: {reason}")
     if args.failure_log:
         args.failure_log.parent.mkdir(parents=True, exist_ok=True)
         args.failure_log.write_text(

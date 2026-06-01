@@ -2062,6 +2062,7 @@ fn convert_binary(
                     CType::Int128 | CType::UInt128 => AsmType::Octword,
                     CType::Float => AsmType::Float,
                     CType::Double => AsmType::Double,
+                    CType::LongDouble => AsmType::LongDouble,
                     _ => AsmType::Longword,
                 }),
                 TackyVal::DoubleConstant(_) => Some(AsmType::Double),
@@ -2084,7 +2085,11 @@ fn convert_binary(
                 }
             }
         };
-        if cmp_type == AsmType::Octword {
+        if cmp_type == AsmType::LongDouble {
+            x87_load_val(out, right, types, static_doubles);
+            x87_load_val(out, left, types, static_doubles);
+            out.push(AsmInstr::X87Compare);
+        } else if cmp_type == AsmType::Octword {
             let (left_low, left_high) = i128_part_operands(left)?;
             let (right_low, right_high) = i128_part_operands(right)?;
             let dst_op = convert_val(dst);
@@ -2160,7 +2165,8 @@ fn convert_binary(
             out.push(AsmInstr::Label(end_label));
             return Ok(());
         }
-        if matches!(cmp_type, AsmType::Float | AsmType::Double) {
+        if cmp_type == AsmType::LongDouble {
+        } else if matches!(cmp_type, AsmType::Float | AsmType::Double) {
             let l = convert_double_val(left, static_doubles);
             let r = convert_double_val(right, static_doubles);
             out.push(AsmInstr::Cmp(cmp_type, r, l));

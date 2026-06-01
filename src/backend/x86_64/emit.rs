@@ -565,6 +565,10 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
             };
             writeln!(w, "\t{} %st, %st(1)", mnemonic)
         }
+        AsmInstr::X87Compare => {
+            writeln!(w, "\tfucomip %st(1), %st")?;
+            writeln!(w, "\tfstp %st(0)")
+        }
         AsmInstr::AtomicRmw(ty, op, return_old, dst) => {
             emit_atomic_rmw(w, *ty, op, *return_old, dst, platform)
         }

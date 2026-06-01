@@ -102,6 +102,7 @@ def skip_reason_for_test(src: Path) -> str | None:
     target_specific_dejagnu = "dg-do compile { target" in text or "dg-do assemble { target" in text
     portable_target_compile_smoke = {
         "103818.c",
+        "20010327-1.c",
         "20111209-1.c",
         "asmgoto-2.c",
         "asmgoto-3.c",
@@ -182,8 +183,6 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "oversized code-generation stress test"
     if "! { i?86-*-* x86_64-*-* }" in text:
         return "x86-only GCC torture test"
-    if src.parent.name == "compile" and src.name == "20011114-1.c":
-        return "unsupported external symbol arithmetic initializer"
     if "dg-require-effective-target trampolines" in text:
         return "requires GCC nested-function trampolines"
     scalar_storage_order_execute_gaps = {

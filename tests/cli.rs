@@ -8428,6 +8428,34 @@ fn compiles_extern_void_assembly_symbol_reference() {
 }
 
 #[test]
+fn compiles_external_symbol_arithmetic_static_initializer() {
+    let src = temp_file("external-symbol-arithmetic-static-initializer", "c");
+    let out = temp_file("external-symbol-arithmetic-static-initializer", "s");
+    std::fs::write(
+        &src,
+        "extern void _text;\n\
+         static unsigned long x = (unsigned long)&_text - 16 - 1;\n\
+         unsigned long *addr(void) { return &x; }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-S")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let assembly = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(assembly.contains("_text-17"), "{assembly}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn function_name_identifier_expands_to_current_function() {
     let src = temp_file("function-name-identifier", "c");
     let exe = temp_file("function-name-identifier", "bin");

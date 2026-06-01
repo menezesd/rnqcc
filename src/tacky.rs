@@ -319,6 +319,21 @@ impl TackyGen {
         }
     }
 
+    fn static_symbol_offset_integer_initializer(
+        &mut self,
+        init: &Exp,
+        ctype: CType,
+    ) -> Option<StaticInit> {
+        if !matches!(ctype, CType::Long | CType::ULong) {
+            return None;
+        }
+        match self.static_address_constant(init)? {
+            (Some(label), 0) => Some(StaticInit::PointerInit(label)),
+            (Some(label), offset) => Some(StaticInit::PointerInitOffset(label, offset)),
+            (None, _) => None,
+        }
+    }
+
     fn static_label_diff_initializer(&self, init: &Exp, ctype: CType) -> Option<StaticInit> {
         let Exp::Binary(BinaryOp::Sub, left, right) = init else {
             return None;
@@ -12519,6 +12534,7 @@ pub fn generate_with_options(
 
     // Collect file-scope variables, merging
     let mut file_scope_vars: HashMap<String, FileScopeVarInfo> = HashMap::new();
+    let mut file_scope_static_inits: HashMap<String, StaticInit> = HashMap::new();
     let mut file_scope_alignments: HashMap<String, usize> = HashMap::new();
     let mut file_scope_order: Vec<String> = Vec::new();
 
@@ -12544,7 +12560,12 @@ pub fn generate_with_options(
             {
                 continue;
             }
+            let symbolic_static_init = vd
+                .init
+                .as_ref()
+                .and_then(|exp| gen.static_symbol_offset_integer_initializer(exp, vd.var_type));
             let init_val: Option<(i64, bool, bool)> = match &vd.init {
+                Some(_) if symbolic_static_init.is_some() => None,
                 Some(_)
                     if matches!(
                         vd.decl_full_type,
@@ -12591,9 +12612,17 @@ pub fn generate_with_options(
             if let Some(value) = init_val {
                 gen.static_const_values.insert(vd.name.clone(), value);
             }
+            if let Some(init) = symbolic_static_init {
+                file_scope_static_inits.insert(vd.name.clone(), init);
+            } else if init_val.is_some() {
+                file_scope_static_inits.remove(&vd.name);
+            }
             if let Some(entry) = file_scope_vars.get_mut(&vd.name) {
                 if init_val.is_some() {
                     entry.2 = init_val;
+                }
+                if file_scope_static_inits.contains_key(&vd.name) {
+                    entry.2 = None;
                 }
                 entry.1 |= is_thread_local;
             } else {
@@ -12982,7 +13011,9 @@ pub fn generate_with_options(
         let align = file_scope_alignments
             .remove(&name)
             .map_or(align, |a| a.max(align));
-        let init_v = make_static_init(converted_init, var_type);
+        let init_v = file_scope_static_inits
+            .remove(&name)
+            .unwrap_or_else(|| make_static_init(converted_init, var_type));
         top_level.push(TackyTopLevel::StaticVar(TackyStaticVar {
             name,
             global: is_global,

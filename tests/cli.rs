@@ -5453,6 +5453,49 @@ int main(void) {
 }
 
 #[test]
+fn compiles_and_runs_gnu_imaginary_literals() {
+    let src = temp_file("gnu-imaginary-literals", "i");
+    let exe = temp_file("gnu-imaginary-literals", "bin");
+    std::fs::write(
+        &src,
+        r#"
+double _Complex ag = 1.0 + 1.0i;
+double _Complex bg = -2.0 + 2.0i;
+_Complex bare = 3.0 + 1.0iF;
+typedef struct { _Complex char a; _Complex char b; } Scc2;
+Scc2 s = { 1+2i, 3+4i };
+
+int main(void) {
+    double _Complex x = 1.0 + 2.0i;
+    double _Complex y = ~x;
+    if (x != (double _Complex){1.0, 2.0}) return 1;
+    if (y != (double _Complex){1.0, -2.0}) return 2;
+    if (ag != (double _Complex){1.0, 1.0}) return 3;
+    if (bg != (double _Complex){-2.0, 2.0}) return 4;
+    if (bare != (double _Complex){3.0, 1.0}) return 5;
+    if (s.a != 1+2i || s.b != 3+4i) return 6;
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write test input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn aarch64_complex_int_arguments_use_integer_registers() {
     let src = temp_file("aarch64-complex-int-args", "c");
     let out = temp_file("aarch64-complex-int-args", "s");

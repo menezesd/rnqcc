@@ -428,6 +428,8 @@ impl Resolver {
             | Exp::ULongConstant(_)
             | Exp::UInt128Constant(_)
             | Exp::DoubleConstant(_)
+            | Exp::ImaginaryIntConstant(_)
+            | Exp::ImaginaryDoubleConstant(_)
             | Exp::StringLiteral(_)
             | Exp::WideStringLiteral(_)
             | Exp::Unreachable

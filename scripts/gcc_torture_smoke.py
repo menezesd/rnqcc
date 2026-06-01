@@ -106,7 +106,6 @@ def skip_reason_for_test(src: Path) -> str | None:
     if "#if empty#cpu" in text:
         return "invalid preprocessor token-paste edge test"
     complex_compile_gaps = {
-        "20001222-1.c": "unsupported GNU imaginary literal complex conjugate",
         "compound-literal-3.c": "unsupported address of complex compound literal",
         "pr110386-2.c": "unsupported complex torture edge case",
         "pr27341-2.c": "unsupported complex pointer compatibility edge case",
@@ -117,6 +116,7 @@ def skip_reason_for_test(src: Path) -> str | None:
         "20010605-2.c": "unsupported complex runtime semantics edge case",
         "20020227-1.c": "unsupported complex runtime semantics edge case",
         "20020411-1.c": "unsupported complex runtime semantics edge case",
+        "20070614-1.c": "unsupported complex runtime semantics edge case",
         "20030910-1.c": "unsupported complex runtime semantics edge case",
         "20050121-1.c": "unsupported complex runtime semantics edge case",
         "960512-1.c": "unsupported complex runtime semantics edge case",

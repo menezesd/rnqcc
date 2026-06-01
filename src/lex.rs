@@ -358,7 +358,7 @@ impl Lexer {
         false
     }
 
-    fn consume_float_suffixes(&mut self) {
+    fn consume_float_suffixes(&mut self) -> bool {
         let mut saw_float_suffix = false;
         let mut saw_imaginary_suffix = false;
         loop {
@@ -377,6 +377,7 @@ impl Lexer {
                 _ => break,
             }
         }
+        saw_imaginary_suffix
     }
 
     fn read_number(&mut self) -> Result<Token, String> {
@@ -410,8 +411,12 @@ impl Lexer {
             let value = num_str
                 .parse::<f64>()
                 .map_err(|_| format!("invalid float literal: {}", num_str))?;
-            self.consume_float_suffixes();
-            return Ok(Token::DoubleLiteral(value));
+            let imaginary = self.consume_float_suffixes();
+            return Ok(if imaginary {
+                Token::ImaginaryDoubleLiteral(value)
+            } else {
+                Token::DoubleLiteral(value)
+            });
         }
 
         let mut radix = 10;
@@ -486,7 +491,7 @@ impl Lexer {
                 ));
             }
             if is_hex_float {
-                self.consume_float_suffixes();
+                let imaginary = self.consume_float_suffixes();
                 if let Some(c) = self.peek() {
                     if c.is_ascii_alphabetic() || c == '_' {
                         return Err(format!(
@@ -495,7 +500,11 @@ impl Lexer {
                         ));
                     }
                 }
-                return Ok(Token::DoubleLiteral(value));
+                return Ok(if imaginary {
+                    Token::ImaginaryDoubleLiteral(value)
+                } else {
+                    Token::DoubleLiteral(value)
+                });
             }
         } else if self.peek() == Some('0') && matches!(self.peek_ahead(1), Some('b' | 'B')) {
             self.advance();
@@ -580,7 +589,7 @@ impl Lexer {
                 .parse::<f64>()
                 .map_err(|_| format!("invalid float literal: {}", num_str))?;
             // Consume optional floating and GNU imaginary suffixes (all treated as double).
-            self.consume_float_suffixes();
+            let imaginary = self.consume_float_suffixes();
             if let Some(c) = self.peek() {
                 if c.is_ascii_alphabetic() || c == '_' {
                     return Err(format!(
@@ -589,7 +598,11 @@ impl Lexer {
                     ));
                 }
             }
-            return Ok(Token::DoubleLiteral(value));
+            return Ok(if imaginary {
+                Token::ImaginaryDoubleLiteral(value)
+            } else {
+                Token::DoubleLiteral(value)
+            });
         }
 
         let num_end = self.pos;
@@ -646,7 +659,7 @@ impl Lexer {
         let unsigned_value = u128::from_str_radix(digits, radix)
             .map_err(|_| format!("invalid integer literal: {}", num_str))?;
         if has_imaginary_suffix && unsigned_value <= i64::MAX as u128 {
-            return Ok(Token::IntLiteral(unsigned_value as i64));
+            return Ok(Token::ImaginaryIntLiteral(unsigned_value as i64));
         }
         let value64 = unsigned_value as u64 as i64;
         if is_unsigned {

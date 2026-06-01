@@ -1540,6 +1540,8 @@ impl Parser {
             Exp::ULongConstant(_) => Ok(FullType::Scalar(CType::ULong)),
             Exp::UInt128Constant(_) => Ok(FullType::Scalar(CType::UInt128)),
             Exp::DoubleConstant(_) => Ok(FullType::Scalar(CType::Double)),
+            Exp::ImaginaryIntConstant(_) => Ok(Self::complex_full_type(CType::Int)),
+            Exp::ImaginaryDoubleConstant(_) => Ok(Self::complex_full_type(CType::Double)),
             Exp::StringLiteral(value) => Ok(FullType::Array {
                 elem: Box::new(FullType::Scalar(CType::Char)),
                 size: c_string_byte_len(value) + 1,
@@ -2259,6 +2261,11 @@ impl Parser {
                     self.last_type_was_enum = is_enum;
                     return Ok((sc, ct));
                 }
+            }
+            if saw_complex {
+                self.last_typedef_full_type = Some(Self::complex_full_type(CType::Double));
+                self.last_type_was_enum = false;
+                return Ok((sc, CType::Double));
             }
             if saw_non_type_specifier
                 && matches!(
@@ -5465,6 +5472,14 @@ impl Parser {
                 self.advance()?;
                 Ok(Exp::DoubleConstant(val))
             }
+            Some(Token::ImaginaryIntLiteral(val)) => {
+                self.advance()?;
+                Ok(Exp::ImaginaryIntConstant(val))
+            }
+            Some(Token::ImaginaryDoubleLiteral(val)) => {
+                self.advance()?;
+                Ok(Exp::ImaginaryDoubleConstant(val))
+            }
             Some(Token::CharLiteral(val)) => {
                 self.advance()?;
                 Ok(Exp::Constant(val)) // char constants have type int
@@ -6544,8 +6559,9 @@ mod tests {
 
     #[test]
     fn parses_complex_type_specifiers_with_rich_type_metadata() -> Result<(), String> {
-        let program =
-            parse_source("float _Complex cf;\n_Complex double cd;\n__complex__ float alias;\n")?;
+        let program = parse_source(
+            "float _Complex cf;\n_Complex double cd;\n__complex__ float alias;\n_Complex bare;\n",
+        )?;
         let Declaration::VarDecl(cf) = &program.declarations[0] else {
             return Err("expected cf declaration".to_string());
         };
@@ -6554,6 +6570,9 @@ mod tests {
         };
         let Declaration::VarDecl(alias) = &program.declarations[2] else {
             return Err("expected alias declaration".to_string());
+        };
+        let Declaration::VarDecl(bare) = &program.declarations[3] else {
+            return Err("expected bare declaration".to_string());
         };
 
         assert_eq!(
@@ -6576,6 +6595,14 @@ mod tests {
             alias.decl_full_type,
             Some(FullType::Vector {
                 elem: Box::new(FullType::Scalar(CType::Float)),
+                lanes: 2,
+                complex: true,
+            })
+        );
+        assert_eq!(
+            bare.decl_full_type,
+            Some(FullType::Vector {
+                elem: Box::new(FullType::Scalar(CType::Double)),
                 lanes: 2,
                 complex: true,
             })

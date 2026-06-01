@@ -4,6 +4,8 @@ use crate::types::*;
 use std::collections::{HashMap, HashSet};
 
 type FileScopeVarInfo = (bool, bool, Option<(i64, bool, bool)>, CType);
+type StaticScalarValue = (i64, bool, bool);
+type StaticComplexValue = (StaticScalarValue, StaticScalarValue);
 type BuiltinFunctionInfo = (
     &'static str,
     CType,
@@ -1516,6 +1518,16 @@ impl TackyGen {
             Exp::ULongConstant(_) => FullType::Scalar(CType::ULong),
             Exp::UInt128Constant(_) => FullType::Scalar(CType::UInt128),
             Exp::DoubleConstant(_) => FullType::Scalar(CType::Double),
+            Exp::ImaginaryIntConstant(_) => FullType::Vector {
+                elem: Box::new(FullType::Scalar(CType::Int)),
+                lanes: 2,
+                complex: true,
+            },
+            Exp::ImaginaryDoubleConstant(_) => FullType::Vector {
+                elem: Box::new(FullType::Scalar(CType::Double)),
+                lanes: 2,
+                complex: true,
+            },
             Exp::StringLiteral(s) => FullType::Array {
                 elem: Box::new(FullType::Scalar(CType::Char)),
                 size: c_string_byte_len(s) + 1,
@@ -2183,6 +2195,42 @@ impl TackyGen {
                 self.emit(TackyInstr::Copy {
                     src: TackyVal::DoubleConstant(val),
                     dst: dst.clone(),
+                });
+                Ok((dst, CType::Double))
+            }
+            Exp::ImaginaryIntConstant(val) => {
+                let ft = FullType::Vector {
+                    elem: Box::new(FullType::Scalar(CType::Int)),
+                    lanes: 2,
+                    complex: true,
+                };
+                let dst = self.fresh_tmp_full(&ft);
+                let TackyVal::Var(dst_name) = dst.clone() else {
+                    return Err("complex literal result must be addressable".to_string());
+                };
+                self.zero_init_local(&dst_name, ft.byte_size_with(&self.struct_defs));
+                self.emit(TackyInstr::CopyToOffset {
+                    src: TackyVal::Constant(val),
+                    dst_name,
+                    offset: CType::Int.size() as i64,
+                });
+                Ok((dst, CType::Int))
+            }
+            Exp::ImaginaryDoubleConstant(val) => {
+                let ft = FullType::Vector {
+                    elem: Box::new(FullType::Scalar(CType::Double)),
+                    lanes: 2,
+                    complex: true,
+                };
+                let dst = self.fresh_tmp_full(&ft);
+                let TackyVal::Var(dst_name) = dst.clone() else {
+                    return Err("complex literal result must be addressable".to_string());
+                };
+                self.zero_init_local(&dst_name, ft.byte_size_with(&self.struct_defs));
+                self.emit(TackyInstr::CopyToOffset {
+                    src: TackyVal::DoubleConstant(val),
+                    dst_name,
+                    offset: CType::Double.size() as i64,
                 });
                 Ok((dst, CType::Double))
             }
@@ -7232,20 +7280,25 @@ impl TackyGen {
         value: TackyVal,
         value_ft: FullType,
         elem_type: CType,
-        elem_size: usize,
+        _elem_size: usize,
         lane: usize,
     ) -> TackyResult<TackyVal> {
         if value_ft.is_complex() {
             let TackyVal::Var(name) = value else {
                 return Err("complex values must lower to addressable temporaries".to_string());
             };
-            let dst = self.fresh_tmp(elem_type);
+            let FullType::Vector { elem, .. } = value_ft.clone() else {
+                return Err("internal error: expected complex vector type".to_string());
+            };
+            let source_elem_type = elem.to_ctype();
+            let source_elem_size = elem.byte_size_with(&self.struct_defs);
+            let dst = self.fresh_tmp(source_elem_type);
             self.emit(TackyInstr::CopyFromOffset {
                 src_name: name,
-                offset: (lane * elem_size) as i64,
+                offset: (lane * source_elem_size) as i64,
                 dst: dst.clone(),
             });
-            Ok(dst)
+            Ok(self.convert_to(dst, source_elem_type, elem_type))
         } else if lane == 0 {
             Ok(self.convert_to(value, value_ft.to_ctype(), elem_type))
         } else {
@@ -9309,10 +9362,13 @@ impl TackyGen {
                     }
                 }
                 _ => {
-                    let (v, is_dbl, is_uns) =
-                        self.eval_static_constant_init(&Some(init.clone()))?;
-                    let cv = convert_init_value(v, elem_type, is_dbl, is_uns);
+                    let ((real, real_dbl, real_uns), (imag, imag_dbl, imag_uns)) = self
+                        .eval_static_complex_constant_init(init)
+                        .ok_or_else(|| "Static complex initializer must be constant".to_string())?;
+                    let cv = convert_init_value(real, elem_type, real_dbl, real_uns);
                     builder.put(base_offset, make_static_init(cv, elem_type))?;
+                    let cv = convert_init_value(imag, elem_type, imag_dbl, imag_uns);
+                    builder.put(base_offset + elem_size, make_static_init(cv, elem_type))?;
                 }
             }
             return Ok(());
@@ -9685,6 +9741,41 @@ impl TackyGen {
             .ok_or_else(|| "Static variable initializer must be a constant".to_string())
         } else {
             Ok((0, false, false))
+        }
+    }
+
+    fn eval_static_complex_constant_init(&self, init: &Exp) -> Option<StaticComplexValue> {
+        let zero = (0, false, false);
+        match init {
+            Exp::ImaginaryIntConstant(value) => Some((zero, (*value, false, false))),
+            Exp::ImaginaryDoubleConstant(value) => {
+                Some((zero, (value.to_bits() as i64, true, false)))
+            }
+            Exp::Unary(UnaryOp::Negate, inner) => {
+                let (real, imag) = self.eval_static_complex_constant_init(inner)?;
+                Some((neg_static_init_value(real), neg_static_init_value(imag)))
+            }
+            Exp::Binary(BinaryOp::Add | BinaryOp::Sub, left, right) => {
+                let (left_real, left_imag) = self.eval_static_complex_constant_init(left)?;
+                let (right_real, right_imag) = self.eval_static_complex_constant_init(right)?;
+                let sign = if matches!(init, Exp::Binary(BinaryOp::Sub, _, _)) {
+                    -1.0
+                } else {
+                    1.0
+                };
+                let real = static_init_value_to_f64(left_real)
+                    + sign * static_init_value_to_f64(right_real);
+                let imag = static_init_value_to_f64(left_imag)
+                    + sign * static_init_value_to_f64(right_imag);
+                Some((
+                    (real.to_bits() as i64, true, false),
+                    (imag.to_bits() as i64, true, false),
+                ))
+            }
+            _ => {
+                let value = self.eval_static_constant_init(&Some(init.clone())).ok()?;
+                Some((value, zero))
+            }
         }
     }
 
@@ -11446,6 +11537,26 @@ fn convert_init_value(
     }
 }
 
+fn static_init_value_to_f64((val, source_is_double, source_is_unsigned): StaticScalarValue) -> f64 {
+    if source_is_double {
+        f64::from_bits(val as u64)
+    } else if source_is_unsigned {
+        val as u64 as f64
+    } else {
+        val as f64
+    }
+}
+
+fn neg_static_init_value(
+    (val, source_is_double, source_is_unsigned): StaticScalarValue,
+) -> StaticScalarValue {
+    if source_is_double {
+        ((-f64::from_bits(val as u64)).to_bits() as i64, true, false)
+    } else {
+        (val.wrapping_neg(), false, source_is_unsigned)
+    }
+}
+
 fn make_static_init(val: i64, t: CType) -> StaticInit {
     if val == 0 {
         StaticInit::ZeroInit(t.size() as usize)
@@ -11969,6 +12080,14 @@ pub fn generate_with_options(
                 continue;
             }
             let init_val: Option<(i64, bool, bool)> = match &vd.init {
+                Some(_)
+                    if matches!(
+                        vd.decl_full_type,
+                        Some(FullType::Vector { complex: true, .. })
+                    ) =>
+                {
+                    None
+                }
                 Some(exp)
                     if (vd.array_dims.is_some()
                         || matches!(

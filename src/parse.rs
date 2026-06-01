@@ -39,6 +39,7 @@ enum Declarator {
         Vec<ParamDecl>,
         Vec<FullType>,
         bool,
+        bool,
         Vec<Exp>,
         Box<Declarator>,
     ),
@@ -49,6 +50,7 @@ struct FunctionDeclaratorInfo {
     params: Vec<ParamDecl>,
     param_full_types: Vec<FullType>,
     variadic: bool,
+    zero_fixed_variadic: bool,
     old_style: bool,
     param_vla_bounds: Vec<Exp>,
 }
@@ -2639,7 +2641,7 @@ impl Parser {
                 };
                 Self::process_declarator_with_type(inner, derived)
             }
-            Declarator::Function(params, pfts, variadic, bounds, inner) => {
+            Declarator::Function(params, pfts, variadic, zero_fixed_variadic, bounds, inner) => {
                 if let Declarator::Ident(name) = inner.as_ref() {
                     (
                         name.clone(),
@@ -2648,6 +2650,7 @@ impl Parser {
                             params: params.clone(),
                             param_full_types: pfts.clone(),
                             variadic: *variadic,
+                            zero_fixed_variadic: *zero_fixed_variadic,
                             old_style: false,
                             param_vla_bounds: bounds.clone(),
                         }),
@@ -2681,7 +2684,7 @@ impl Parser {
                 };
                 Self::process_declarator_with_type(inner, derived)
             }
-            Declarator::Function(params, pfts, variadic, bounds, inner) => {
+            Declarator::Function(params, pfts, variadic, zero_fixed_variadic, bounds, inner) => {
                 if let Declarator::Ident(name) = inner.as_ref() {
                     // Function returning current_type: void *func() or int *func()
                     (
@@ -2691,6 +2694,7 @@ impl Parser {
                             params: params.clone(),
                             param_full_types: pfts.clone(),
                             variadic: *variadic,
+                            zero_fixed_variadic: *zero_fixed_variadic,
                             old_style: false,
                             param_vla_bounds: bounds.clone(),
                         }),
@@ -2816,9 +2820,17 @@ impl Parser {
         // Trailing suffixes: (params) or [size]
         if self.at(&Token::OpenParen) {
             self.expect_token(Token::OpenParen)?;
-            let (params, param_fts, variadic, bounds) = self.parse_param_list()?;
+            let (params, param_fts, variadic, zero_fixed_variadic, bounds) =
+                self.parse_param_list()?;
             self.expect_token(Token::CloseParen)?;
-            decl = Declarator::Function(params, param_fts, variadic, bounds, Box::new(decl));
+            decl = Declarator::Function(
+                params,
+                param_fts,
+                variadic,
+                zero_fixed_variadic,
+                bounds,
+                Box::new(decl),
+            );
         }
         while self.eat(&Token::OpenBracket) {
             let size = self.parse_array_size(true)?;
@@ -2874,7 +2886,7 @@ impl Parser {
 
         if self.at(&Token::OpenParen) {
             self.expect_token(Token::OpenParen)?;
-            let (_, param_fts, variadic, _) = self.parse_param_list()?;
+            let (_, param_fts, variadic, _, _) = self.parse_param_list()?;
             self.expect_token(Token::CloseParen)?;
             decl = AbstractDecl::Function(param_fts, variadic, Box::new(decl));
         }
@@ -3345,13 +3357,14 @@ impl Parser {
             {
                 let name = self.parse_identifier()?;
                 self.expect_token(Token::OpenParen)?;
-                let (params, param_full_types, variadic, param_vla_bounds) =
+                let (params, param_full_types, variadic, zero_fixed_variadic, param_vla_bounds) =
                     self.parse_param_list()?;
                 self.expect_token(Token::CloseParen)?;
                 let func_info = FunctionDeclaratorInfo {
                     params,
                     param_full_types,
                     variadic,
+                    zero_fixed_variadic,
                     old_style: false,
                     param_vla_bounds,
                 };
@@ -3388,6 +3401,7 @@ impl Parser {
                     param_full_types: func_info.param_full_types,
                     param_vla_bounds: func_info.param_vla_bounds,
                     variadic: func_info.variadic,
+                    zero_fixed_variadic: func_info.zero_fixed_variadic,
                     old_style: func_info.old_style,
                     noreturn: false,
                     no_instrument_function: false,
@@ -3585,6 +3599,7 @@ impl Parser {
                                 param_full_types: func_info2.param_full_types,
                                 param_vla_bounds: func_info2.param_vla_bounds,
                                 variadic: func_info2.variadic,
+                                zero_fixed_variadic: func_info2.zero_fixed_variadic,
                                 old_style: func_info2.old_style,
                                 noreturn: first_noreturn,
                                 no_instrument_function: first_no_instrument,
@@ -3627,6 +3642,7 @@ impl Parser {
                 param_full_types: func_info.param_full_types,
                 param_vla_bounds: func_info.param_vla_bounds,
                 variadic: func_info.variadic,
+                zero_fixed_variadic: func_info.zero_fixed_variadic,
                 old_style: func_info.old_style,
                 noreturn: first_noreturn,
                 no_instrument_function: first_no_instrument,
@@ -3636,12 +3652,14 @@ impl Parser {
         // Check for function (in case declarator didn't catch params)
         if self.at(&Token::OpenParen) {
             self.expect_token(Token::OpenParen)?;
-            let (params, param_fts, variadic, param_vla_bounds) = self.parse_param_list()?;
+            let (params, param_fts, variadic, zero_fixed_variadic, param_vla_bounds) =
+                self.parse_param_list()?;
             self.expect_token(Token::CloseParen)?;
             let func_info = FunctionDeclaratorInfo {
                 params,
                 param_full_types: param_fts,
                 variadic,
+                zero_fixed_variadic,
                 old_style: false,
                 param_vla_bounds,
             };
@@ -3703,6 +3721,7 @@ impl Parser {
                                 param_full_types: func_info2.param_full_types,
                                 param_vla_bounds: func_info2.param_vla_bounds,
                                 variadic: func_info2.variadic,
+                                zero_fixed_variadic: func_info2.zero_fixed_variadic,
                                 old_style: func_info2.old_style,
                                 noreturn: first_noreturn,
                                 no_instrument_function: first_no_instrument,
@@ -3745,6 +3764,7 @@ impl Parser {
                 param_full_types: func_info.param_full_types,
                 param_vla_bounds: func_info.param_vla_bounds,
                 variadic: func_info.variadic,
+                zero_fixed_variadic: func_info.zero_fixed_variadic,
                 old_style: func_info.old_style,
                 noreturn: first_noreturn,
                 no_instrument_function: first_no_instrument,
@@ -3797,6 +3817,7 @@ impl Parser {
                         param_full_types: func_info2.param_full_types,
                         param_vla_bounds: func_info2.param_vla_bounds,
                         variadic: func_info2.variadic,
+                        zero_fixed_variadic: func_info2.zero_fixed_variadic,
                         old_style: func_info2.old_style,
                         noreturn: first_noreturn,
                         no_instrument_function: first_no_instrument,
@@ -3900,17 +3921,22 @@ impl Parser {
     }
 
     #[allow(clippy::type_complexity)]
-    fn parse_param_list(&mut self) -> ParseResult<(Vec<ParamDecl>, Vec<FullType>, bool, Vec<Exp>)> {
+    fn parse_param_list(
+        &mut self,
+    ) -> ParseResult<(Vec<ParamDecl>, Vec<FullType>, bool, bool, Vec<Exp>)> {
         // "void" or empty or "int x, long y, ..."
         if self.at(&Token::KWVoid)
             && self.pos + 1 < self.tokens.len()
             && self.tokens[self.pos + 1] == Token::CloseParen
         {
             self.advance()?;
-            return Ok((Vec::new(), Vec::new(), false, Vec::new()));
+            return Ok((Vec::new(), Vec::new(), false, false, Vec::new()));
         }
         if self.at(&Token::CloseParen) {
-            return Ok((Vec::new(), Vec::new(), true, Vec::new()));
+            return Ok((Vec::new(), Vec::new(), true, false, Vec::new()));
+        }
+        if self.eat(&Token::Ellipsis) {
+            return Ok((Vec::new(), Vec::new(), true, true, Vec::new()));
         }
         if let Some(Token::Identifier(name)) = self.peek().cloned() {
             if !self.is_type_keyword(&Token::Identifier(name.clone())) {
@@ -3924,7 +3950,7 @@ impl Parser {
                         break;
                     }
                 }
-                return Ok((params, param_fts, false, Vec::new()));
+                return Ok((params, param_fts, false, false, Vec::new()));
             }
         }
         let mut params = Vec::new();
@@ -3998,7 +4024,7 @@ impl Parser {
                 &mut param_vla_bounds,
             )?);
         }
-        Ok((params, param_fts, variadic, param_vla_bounds))
+        Ok((params, param_fts, variadic, false, param_vla_bounds))
     }
 
     fn parse_old_style_param_declarations(
@@ -4006,6 +4032,7 @@ impl Parser {
         mut info: FunctionDeclaratorInfo,
     ) -> ParseResult<FunctionDeclaratorInfo> {
         info.old_style = true;
+        info.zero_fixed_variadic = false;
         while !self.at(&Token::OpenBrace) {
             let (_sc, base_type) = self.parse_specifiers()?;
             let td_ft = self.last_typedef_full_type.take();
@@ -4445,13 +4472,14 @@ impl Parser {
                     info
                 } else {
                     self.expect_token(Token::OpenParen)?;
-                    let (params, param_full_types, variadic, param_vla_bounds) =
+                    let (params, param_full_types, variadic, zero_fixed_variadic, param_vla_bounds) =
                         self.parse_param_list()?;
                     self.expect_token(Token::CloseParen)?;
                     FunctionDeclaratorInfo {
                         params,
                         param_full_types,
                         variadic,
+                        zero_fixed_variadic,
                         old_style: false,
                         param_vla_bounds,
                     }
@@ -4519,6 +4547,7 @@ impl Parser {
                                         param_full_types: func_info2.param_full_types,
                                         param_vla_bounds: func_info2.param_vla_bounds,
                                         variadic: func_info2.variadic,
+                                        zero_fixed_variadic: func_info2.zero_fixed_variadic,
                                         old_style: func_info2.old_style,
                                         noreturn: decl_noreturn,
                                         no_instrument_function: decl_no_instrument,
@@ -4560,6 +4589,7 @@ impl Parser {
                         param_full_types: func_info.param_full_types,
                         param_vla_bounds: func_info.param_vla_bounds,
                         variadic: func_info.variadic,
+                        zero_fixed_variadic: func_info.zero_fixed_variadic,
                         old_style: func_info.old_style,
                         noreturn: decl_noreturn,
                         no_instrument_function: decl_no_instrument,
@@ -4607,6 +4637,7 @@ impl Parser {
                                     param_full_types: func_info2.param_full_types,
                                     param_vla_bounds: func_info2.param_vla_bounds,
                                     variadic: func_info2.variadic,
+                                    zero_fixed_variadic: func_info2.zero_fixed_variadic,
                                     old_style: func_info2.old_style,
                                     noreturn: decl_noreturn,
                                     no_instrument_function: decl_no_instrument,

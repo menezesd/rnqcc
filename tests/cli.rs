@@ -16736,3 +16736,53 @@ l2:
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
 }
+
+#[test]
+fn supports_gnu_single_argument_va_start_for_zero_fixed_variadic_function() {
+    let src = temp_file("gnu-single-arg-va-start", "c");
+    let exe = temp_file("gnu-single-arg-va-start", "bin");
+    std::fs::write(
+        &src,
+        r#"
+#include <stdarg.h>
+
+long long r;
+
+void qux(...)
+{
+    va_list ap;
+    va_start(ap);
+    if (!r)
+        r = va_arg(ap, long long);
+    else
+        r = va_arg(ap, int);
+    va_end(ap);
+}
+
+int main(void)
+{
+    qux(-2LL, 0);
+    if (r != -2LL)
+        return 1;
+    qux(-2, 0);
+    return r == -2 ? 42 : 2;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}

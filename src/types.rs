@@ -1509,6 +1509,8 @@ pub struct FunctionDeclaration {
     pub param_vla_bounds: Vec<Exp>,
     /// True if the prototype ends in `...`.
     pub variadic: bool,
+    /// True for GNU/C23-style declarations with no fixed parameters: `f(...)`.
+    pub zero_fixed_variadic: bool,
     /// True if the declaration came from an old-style identifier-list function.
     pub old_style: bool,
     /// True if the declaration used a noreturn spelling.

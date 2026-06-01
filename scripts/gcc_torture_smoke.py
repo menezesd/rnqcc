@@ -76,6 +76,14 @@ def rnqcc_options_for_test(src: Path) -> list[str]:
     return options
 
 
+def use_internal_cpp_for_test(src: Path) -> bool:
+    try:
+        text = src.read_text(errors="ignore")
+    except OSError:
+        return False
+    return re.search(r"\bva_start\s*\(\s*[^,\)]+\s*\)", text) is not None
+
+
 def skip_reason_for_test(src: Path) -> str | None:
     try:
         text = src.read_text(errors="ignore")
@@ -101,8 +109,6 @@ def skip_reason_for_test(src: Path) -> str | None:
         r"(?:[0-9]|\.)[0-9A-Fa-fXxPpEe.+-]*[iIjJ]\b", text
     ):
         return "unsupported C/GNU complex number type"
-    if re.search(r"\bva_start\s*\(\s*[^,\)]+\s*\)", text):
-        return "unsupported GCC single-argument va_start extension"
     if re.search(r"struct\s+\w*\s*\{[^}]*\[[^\]\d][^\]]*\]", text, re.DOTALL):
         return "unsupported GNU variably modified struct member"
     if re.search(r"\basm\s+goto\b|\b__asm__\s+goto\b", text):
@@ -285,7 +291,7 @@ def main() -> int:
             common = [str(rnqcc), "--Wno-missing-return"]
             common.extend(rnqcc_options_for_test(src))
             timeout = timeout_for_test(src, args.timeout)
-            if args.internal_cpp:
+            if args.internal_cpp or use_internal_cpp_for_test(src):
                 common.append("--internal-cpp")
 
             if args.mode == "execute":

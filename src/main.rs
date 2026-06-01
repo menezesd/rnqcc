@@ -1839,18 +1839,28 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
             )
         }
         "stdarg.h" => {
-            for (name, params, body) in [
-                ("va_start", vec!["ap", "last"], "((void)0)"),
-                ("va_end", vec!["ap"], "((void)0)"),
-                ("va_copy", vec!["dst", "src"], "((dst) = (src))"),
-                ("__va_copy", vec!["dst", "src"], "((dst) = (src))"),
-                ("va_arg", vec!["ap", "type"], "(*((type *)0))"),
+            for (name, params, variadic, body) in [
+                (
+                    "va_start",
+                    vec!["ap"],
+                    true,
+                    "__builtin_va_start(ap, ##__VA_ARGS__)",
+                ),
+                ("va_end", vec!["ap"], false, "((void)0)"),
+                ("va_copy", vec!["dst", "src"], false, "((dst) = (src))"),
+                ("__va_copy", vec!["dst", "src"], false, "((dst) = (src))"),
+                (
+                    "va_arg",
+                    vec!["ap", "type"],
+                    false,
+                    "__builtin_va_arg(ap, type)",
+                ),
             ] {
                 macros.insert(
                     name.to_string(),
                     MacroDef::Function {
                         params: params.into_iter().map(str::to_string).collect(),
-                        variadic: false,
+                        variadic,
                         body: body.to_string(),
                     },
                 );

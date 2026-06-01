@@ -193,6 +193,7 @@ struct TackyGen {
     /// Function parameter full types.
     func_param_full_types: HashMap<String, Vec<FullType>>,
     old_style_functions: HashSet<String>,
+    zero_fixed_variadic_functions: HashSet<String>,
     vla_param_bounds: HashMap<String, Exp>,
     /// Scalar type cache for variables and temporaries.
     var_types: HashMap<String, CType>,
@@ -231,6 +232,7 @@ impl TackyGen {
             func_full_types: HashMap::new(),
             func_param_full_types: HashMap::new(),
             old_style_functions: HashSet::new(),
+            zero_fixed_variadic_functions: HashSet::new(),
             vla_param_bounds: HashMap::new(),
             var_types: HashMap::new(),
             symbol_alignments: HashMap::new(),
@@ -1218,6 +1220,14 @@ impl TackyGen {
 
     fn has_unspecified_function_params(params: &[FullType], variadic: bool) -> bool {
         params.is_empty() && variadic
+    }
+
+    fn record_zero_fixed_variadic_function(&mut self, fd: &FunctionDeclaration) {
+        if fd.zero_fixed_variadic {
+            self.zero_fixed_variadic_functions.insert(fd.name.clone());
+        } else {
+            self.zero_fixed_variadic_functions.remove(&fd.name);
+        }
     }
 
     fn canonical_param_full_type(&self, ft: &FullType) -> FullType {
@@ -3985,7 +3995,7 @@ impl TackyGen {
             self.emit(TackyInstr::BuiltinLongjmp { buf, value });
             return Ok((TackyVal::Constant(0), CType::Void));
         }
-        if name == "__builtin_va_start" && args.len() >= 2 {
+        if name == "__builtin_va_start" && !args.is_empty() {
             match &args[0] {
                 Exp::Var(ap_name) => {
                     self.emit(TackyInstr::VaStart {
@@ -5004,7 +5014,12 @@ impl TackyGen {
             }
         }
         if param_types.is_empty() {
-            fixed_flat_arg_count = if variadic { tacky_args.len() } else { 0 };
+            fixed_flat_arg_count =
+                if variadic && !self.zero_fixed_variadic_functions.contains(&name) {
+                    tacky_args.len()
+                } else {
+                    0
+                };
         }
 
         let uses_hidden_ptr = match ret_ft.as_ref() {
@@ -10476,6 +10491,7 @@ impl TackyGen {
                     } else {
                         self.old_style_functions.remove(&fd.name);
                     }
+                    self.record_zero_fixed_variadic_function(&fd);
                     self.func_param_full_types
                         .insert(fd.name.clone(), fd.param_full_types.clone());
                     if let Some(ref rft) = fd.return_full_type {
@@ -11036,10 +11052,6 @@ impl TackyGen {
     }
 
     fn emit_function(&mut self, func: FunctionDeclaration) -> TackyResult<Option<TackyFunction>> {
-        let Some(body) = func.body else {
-            return Ok(None);
-        };
-
         self.function_symbols.insert(func.name.clone());
         let param_types: Vec<CType> = func.params.iter().map(|(_, t, _)| *t).collect();
         self.func_types.insert(
@@ -11056,11 +11068,16 @@ impl TackyGen {
         } else {
             self.old_style_functions.remove(&func.name);
         }
+        self.record_zero_fixed_variadic_function(&func);
         self.func_param_full_types
             .insert(func.name.clone(), func.param_full_types.clone());
         if let Some(ref rft) = func.return_full_type {
             self.func_full_types.insert(func.name.clone(), rft.clone());
         }
+
+        let Some(body) = func.body else {
+            return Ok(None);
+        };
 
         self.current_function = func.name.clone();
         self.instructions.clear();
@@ -11762,6 +11779,7 @@ pub fn generate_with_options(
                 } else {
                     gen.old_style_functions.remove(&fd.name);
                 }
+                gen.record_zero_fixed_variadic_function(fd);
                 gen.func_param_full_types
                     .insert(fd.name.clone(), fd.param_full_types.clone());
                 if let Some(ref rft) = fd.return_full_type {

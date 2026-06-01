@@ -11511,6 +11511,40 @@ fn skips_simple_inline_asm_statements() {
 }
 
 #[test]
+fn skips_empty_asm_goto_statements() {
+    let src = temp_file("asm-goto-compat", "c");
+    let exe = temp_file("asm-goto-compat", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    asm goto ("" : : : : label);
+    return 42;
+label:
+    return 1;
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn supports_empty_inline_asm_tied_zero_output_compatibility() {
     let src = temp_file("inline-asm-tied-zero-output", "c");
     let exe = temp_file("inline-asm-tied-zero-output", "bin");

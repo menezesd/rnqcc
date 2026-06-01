@@ -117,8 +117,6 @@ def skip_reason_for_test(src: Path) -> str | None:
         r"\bgoto\s+\w+\s*;", text
     ):
         return "unsupported VLA stack deallocation across goto"
-    if re.search(r"\basm\s+goto\b|\b__asm__\s+goto\b", text):
-        return "unsupported GCC asm-goto extension"
     lines = text.splitlines()
     old_style_def = False
     for index, line in enumerate(lines[:-1]):
@@ -163,8 +161,12 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "requires GCC untyped assembly symbols"
     if "dg-require-effective-target trampolines" in text:
         return "requires GCC nested-function trampolines"
-    if "scalar_storage_order" in text:
-        return "unsupported GCC scalar_storage_order attribute"
+    scalar_storage_order_execute_gaps = {
+        "20230630-2.c": "unsupported reverse scalar_storage_order bit-field layout",
+        "20230630-4.c": "unsupported reverse scalar_storage_order bit-field layout",
+    }
+    if src.parent.name == "execute" and src.name in scalar_storage_order_execute_gaps:
+        return scalar_storage_order_execute_gaps[src.name]
     if re.search(r"^\s+void\s+nested\w*\s*\(", text, re.MULTILINE):
         return "unsupported GCC nested-function extension"
     if "gcc_tmpnam.h" in text and "dg-require-effective-target fileio" in text:

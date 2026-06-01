@@ -4222,7 +4222,7 @@ impl TackyGen {
 
     fn substitute_inline_locals_exp(exp: Exp, locals: &HashMap<String, Exp>) -> Exp {
         match exp {
-            Exp::Var(name) => locals.get(&name).cloned().unwrap_or_else(|| Exp::Var(name)),
+            Exp::Var(name) => locals.get(&name).cloned().unwrap_or(Exp::Var(name)),
             Exp::FunctionCall(name, args) => Exp::FunctionCall(
                 name,
                 args.into_iter()

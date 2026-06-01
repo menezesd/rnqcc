@@ -498,12 +498,14 @@ impl Parser {
                 ptr_info,
                 array_dims: None,
                 decl_full_type: Some(ptr_ft),
+                dynamic_size: Some(Box::new(size_exp.clone())),
                 init: Some(Exp::FunctionCall("alloca".to_string(), vec![size_exp])),
                 storage_class: sc,
                 alignment,
                 alias: self.pending_alias.take(),
             });
         }
+        let dynamic_size = self.dynamic_size_expr_for_decl_type(&full_type);
         let var_type = if array_dims.is_some() {
             let mut t = &full_type;
             while let FullType::Array { elem, .. } = t {
@@ -523,6 +525,7 @@ impl Parser {
             ptr_info: pi,
             array_dims,
             decl_full_type: Some(full_type),
+            dynamic_size: dynamic_size.map(Box::new),
             init,
             storage_class: sc,
             alignment,
@@ -556,6 +559,7 @@ impl Parser {
             ptr_info: pi,
             array_dims: Self::extract_array_dims(&full_type),
             decl_full_type: Some(full_type),
+            dynamic_size: None,
             init: Some(init),
             storage_class: sc,
             alignment,
@@ -1701,6 +1705,7 @@ impl Parser {
                     ptr_info: None,
                     array_dims: None,
                     decl_full_type: Some(FullType::Scalar(CType::Long)),
+                    dynamic_size: None,
                     init: Some(exp),
                     storage_class: None,
                     alignment: None,
@@ -1776,8 +1781,63 @@ impl Parser {
         }
     }
 
+    fn dynamic_size_expr_for_full_type(&self, full_type: &FullType) -> Option<Exp> {
+        match full_type {
+            FullType::Array { elem, size } if *size == VLA_STATIC_SCALE_FALLBACK => {
+                Some(Exp::SizeOfType(elem.to_ctype(), elem.as_ref().clone()))
+            }
+            FullType::Array { elem, size } => {
+                self.dynamic_size_expr_for_full_type(elem).map(|inner| {
+                    Exp::Binary(
+                        BinaryOp::Mul,
+                        Box::new(Exp::ULongConstant(*size as i64)),
+                        Box::new(inner),
+                    )
+                })
+            }
+            FullType::Struct(tag) => {
+                let def = self.struct_defs.get(tag)?;
+                for mem in &def.members {
+                    if !matches!(
+                        mem.member_full_type,
+                        FullType::Array {
+                            size: VLA_STATIC_SCALE_FALLBACK,
+                            ..
+                        }
+                    ) {
+                        continue;
+                    }
+                    if let Some(size) = self
+                        .struct_member_vla_elem_sizes
+                        .get(&(tag.clone(), mem.name.clone()))
+                    {
+                        return Some(if mem.offset == 0 {
+                            size.clone()
+                        } else {
+                            Exp::Binary(
+                                BinaryOp::Add,
+                                Box::new(Exp::ULongConstant(mem.offset as i64)),
+                                Box::new(size.clone()),
+                            )
+                        });
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn dynamic_size_expr_for_decl_type(&self, full_type: &FullType) -> Option<Exp> {
+        match full_type {
+            FullType::Pointer(inner) => self.dynamic_size_expr_for_full_type(inner),
+            other => self.dynamic_size_expr_for_full_type(other),
+        }
+    }
+
     fn typedef_vla_size_expr(&mut self, full_type: &FullType) -> Option<Exp> {
         self.pending_vla_size_expr_for_type(full_type)
+            .or_else(|| self.dynamic_size_expr_for_full_type(full_type))
     }
 
     /// Parse enum body: { A, B = 5, C }
@@ -3142,6 +3202,7 @@ impl Parser {
                 } else {
                     full_type
                 };
+                let direct_vla_bound = self.pending_vla_bound.clone();
                 let bit_width = if self.eat(&Token::Colon) {
                     let width_exp = self.parse_assignment()?;
                     let width = self
@@ -3184,6 +3245,21 @@ impl Parser {
                     if let Some(base_size) = base_typedef_vla_size.clone() {
                         vla_elem_sizes.push((name.clone(), base_size));
                     }
+                } else if !name.is_empty()
+                    && matches!(
+                        member_full_type,
+                        FullType::Array {
+                            size: VLA_STATIC_SCALE_FALLBACK,
+                            ..
+                        }
+                    )
+                {
+                    if let Some(bound) = direct_vla_bound {
+                        if let Some(size) = Self::vla_size_expr_from_bound(bound, &member_full_type)
+                        {
+                            vla_elem_sizes.push((name.clone(), size));
+                        }
+                    }
                 }
                 members.push(MemberDeclaration {
                     name,
@@ -3202,6 +3278,7 @@ impl Parser {
             }
             self.last_typedef_full_type = None;
         }
+        self.pending_vla_bound = None;
         self.expect_token(Token::CloseBrace)?;
         self.pending_struct_member_vla_elem_sizes
             .push(vla_elem_sizes);
@@ -3913,6 +3990,9 @@ impl Parser {
             ptr_info: pi,
             array_dims,
             decl_full_type: Some(full_type.clone()),
+            dynamic_size: self
+                .dynamic_size_expr_for_decl_type(&full_type)
+                .map(Box::new),
             init,
             storage_class: sc,
             alignment: decl_alignment,
@@ -4164,6 +4244,7 @@ impl Parser {
                     ptr_info: None,
                     array_dims: None,
                     decl_full_type: Some(FullType::Scalar(CType::Long)),
+                    dynamic_size: None,
                     init: Some(bound.clone()),
                     storage_class: None,
                     alignment: None,
@@ -5152,7 +5233,8 @@ impl Parser {
                     let vla_size = self
                         .last_type_name_vla_size
                         .take()
-                        .or_else(|| self.pending_vla_size_expr_for_type(&full_type));
+                        .or_else(|| self.pending_vla_size_expr_for_type(&full_type))
+                        .or_else(|| self.dynamic_size_expr_for_full_type(&full_type));
                     self.expect_token(Token::CloseParen)?;
                     if let Some(size) = vla_size {
                         return Ok(size);

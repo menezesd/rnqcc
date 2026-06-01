@@ -1489,6 +1489,9 @@ pub struct VarDeclaration {
     pub array_dims: Option<Vec<usize>>,
     /// Full derived type from declarator (includes pointer-to-array info)
     pub decl_full_type: Option<FullType>,
+    /// Runtime byte size for VLA-derived objects, or pointer element size for
+    /// pointers to VLA-derived aggregate types.
+    pub dynamic_size: Option<Box<Exp>>,
     pub init: Option<Exp>,
     pub storage_class: Option<StorageClass>,
     pub alignment: Option<std::num::NonZeroUsize>,

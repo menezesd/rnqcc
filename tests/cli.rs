@@ -1448,6 +1448,58 @@ fn x86_float_indirect_load_to_stack_uses_xmm_scratch() {
 }
 
 #[test]
+fn runs_gnu_vla_struct_member_pointer_copies() {
+    let src = temp_file("gnu-vla-struct-member-copies", "c");
+    let exe = temp_file("gnu-vla-struct-member-copies", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef __SIZE_TYPE__ size_t;
+int memcmp(const void *, const void *, size_t);
+void abort(void);
+
+void __attribute__((noinline)) bar(void *x, void *y) {
+    struct S { char w[8]; } *p = x, *q = y;
+    if (memcmp(p->w, "zyxwvut", 8) != 0) abort();
+    if (memcmp(q[0].w, "abcdefg", 8) != 0) abort();
+    if (memcmp(q[1].w, "ABCDEFG", 8) != 0) abort();
+    if (memcmp(q[2].w, "zyxwvut", 8) != 0) abort();
+    if (memcmp(q[3].w, "zyxwvut", 8) != 0) abort();
+}
+
+void __attribute__((noinline)) foo(void *x, int y) {
+    struct S { char w[y]; } *p = x, a;
+    a = ({ struct S b; b = p[2]; p[3] = b; });
+    bar(&a, x);
+}
+
+int main(void) {
+    struct S { char w[8]; } p[4] = {
+        "abcdefg", "ABCDEFG", "zyxwvut", "ZYXWVUT"
+    };
+    foo(p, 8);
+    return 0;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(0));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn reports_tacky_errors_without_rust_panic_output() {
     let src = temp_file("bad-static-init", "i");
     std::fs::write(&src, "int f(void) { return 1; }\nint g = f();\n")

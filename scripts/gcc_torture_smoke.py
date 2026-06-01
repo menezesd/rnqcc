@@ -109,8 +109,12 @@ def skip_reason_for_test(src: Path) -> str | None:
         r"(?:[0-9]|\.)[0-9A-Fa-fXxPpEe.+-]*[iIjJ]\b", text
     ):
         return "unsupported C/GNU complex number type"
-    if re.search(r"struct\s+\w*\s*\{[^}]*\[[^\]\d][^\]]*\]", text, re.DOTALL):
-        return "unsupported GNU variably modified struct member"
+    if re.search(r"\bva_arg\s*\([^,]+,\s*typeof\s*\(", text):
+        return "unsupported variadic VLA aggregate argument"
+    if re.search(r"\bint\s+\w+\s*\[[^\]\d][^\]]*\]", text) and re.search(
+        r"\bgoto\s+\w+\s*;", text
+    ):
+        return "unsupported VLA stack deallocation across goto"
     if re.search(r"\basm\s+goto\b|\b__asm__\s+goto\b", text):
         return "unsupported GCC asm-goto extension"
     lines = text.splitlines()

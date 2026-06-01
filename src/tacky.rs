@@ -195,6 +195,7 @@ struct TackyGen {
     old_style_functions: HashSet<String>,
     zero_fixed_variadic_functions: HashSet<String>,
     vla_param_bounds: HashMap<String, Exp>,
+    dynamic_sizes: HashMap<String, Exp>,
     /// Scalar type cache for variables and temporaries.
     var_types: HashMap<String, CType>,
     symbol_alignments: HashMap<String, usize>,
@@ -234,6 +235,7 @@ impl TackyGen {
             old_style_functions: HashSet::new(),
             zero_fixed_variadic_functions: HashSet::new(),
             vla_param_bounds: HashMap::new(),
+            dynamic_sizes: HashMap::new(),
             var_types: HashMap::new(),
             symbol_alignments: HashMap::new(),
             ptr_info: HashMap::new(),
@@ -766,6 +768,39 @@ impl TackyGen {
                 self.array_sizes.insert(name.to_string(), def.size);
             }
         }
+    }
+
+    fn register_dynamic_size(&mut self, name: &str, size: Option<Box<Exp>>) {
+        if let Some(size) = size {
+            self.dynamic_sizes.insert(name.to_string(), *size);
+        }
+    }
+
+    fn copy_dynamic_size(&mut self, src: &str, dst: &TackyVal) {
+        if let (Some(size), TackyVal::Var(dst_name)) = (self.dynamic_sizes.get(src).cloned(), dst) {
+            self.dynamic_sizes.insert(dst_name.clone(), size);
+        }
+    }
+
+    fn emit_dynamic_size(&mut self, size: Exp) -> TackyResult<TackyVal> {
+        let (val, ty) = self.emit_exp(size)?;
+        Ok(self.convert_to(val, ty, CType::Long))
+    }
+
+    fn emit_memcpy(&mut self, dst: TackyVal, src: TackyVal, size: TackyVal) -> TackyVal {
+        let result = self.fresh_tmp(CType::Pointer);
+        self.emit(TackyInstr::FunCall {
+            name: "memcpy".to_string(),
+            args: vec![dst, src, size],
+            dst: result.clone(),
+            stack_arg_indices: std::collections::HashSet::new(),
+            memory_arg_blocks: Vec::new(),
+            struct_arg_groups: Vec::new(),
+            variadic: false,
+            fixed_flat_arg_count: 3,
+            indirect: false,
+        });
+        result
     }
 
     fn ptr_info_from_full(ft: &FullType) -> (CType, usize) {
@@ -2244,6 +2279,13 @@ impl TackyGen {
                     } else {
                         self.get_struct_addr(rhs.clone())
                     };
+                    if let TackyVal::Var(ref ptr_name) = ptr {
+                        if let Some(size_exp) = self.dynamic_sizes.get(ptr_name).cloned() {
+                            let size = self.emit_dynamic_size(size_exp)?;
+                            self.emit_memcpy(ptr.clone(), src_addr, size);
+                            return Ok((rhs, rhs_type));
+                        }
+                    }
                     self.emit_struct_copy_ptr_to_ptr(src_addr, ptr.clone(), struct_size);
                     return Ok((rhs, rhs_type));
                 }
@@ -2596,12 +2638,25 @@ impl TackyGen {
                         None
                     };
                     if let Some(src_addr) = src_addr {
-                        self.emit_struct_copy_to(src_addr, &lhs_name, struct_size);
+                        if let Some(size_exp) = self.dynamic_sizes.get(&lhs_name).cloned() {
+                            let size = self.emit_dynamic_size(size_exp)?;
+                            let dst_addr = self.get_struct_addr(TackyVal::Var(lhs_name.clone()));
+                            self.emit_memcpy(dst_addr, src_addr, size);
+                        } else {
+                            self.emit_struct_copy_to(src_addr, &lhs_name, struct_size);
+                        }
                     } else if let Some(src_name) = rhs_struct_name {
-                        self.emit(TackyInstr::CopyStruct {
-                            src_name,
-                            dst_name: lhs_name.clone(),
-                        });
+                        if let Some(size_exp) = self.dynamic_sizes.get(&lhs_name).cloned() {
+                            let size = self.emit_dynamic_size(size_exp)?;
+                            let src_addr = self.get_struct_addr(TackyVal::Var(src_name));
+                            let dst_addr = self.get_struct_addr(TackyVal::Var(lhs_name.clone()));
+                            self.emit_memcpy(dst_addr, src_addr, size);
+                        } else {
+                            self.emit(TackyInstr::CopyStruct {
+                                src_name,
+                                dst_name: lhs_name.clone(),
+                            });
+                        }
                     } else {
                         self.zero_init_local(&lhs_name, struct_size);
                         let rhs_conv = self.convert_to(rhs, rhs_type, lhs_ft.to_ctype());
@@ -3227,9 +3282,10 @@ impl TackyGen {
             let decayed = ft.decay();
             let ptr = self.fresh_tmp_full(&decayed);
             self.emit(TackyInstr::GetAddress {
-                src: TackyVal::Var(name),
+                src: TackyVal::Var(name.clone()),
                 dst: ptr.clone(),
             });
+            self.copy_dynamic_size(&name, &ptr);
             return Ok((ptr, decayed.to_ctype()));
         }
         if matches!(ft, FullType::Function { .. }) {
@@ -7046,7 +7102,12 @@ impl TackyGen {
 
         let idx_long = self.convert_to(idx_val, idx_type, CType::Long);
         if let TackyVal::Var(ref arr_name) = arr_val {
-            if let Some(scale_exp) = self.vla_param_bounds.get(arr_name).cloned() {
+            if let Some(scale_exp) = self
+                .dynamic_sizes
+                .get(arr_name)
+                .cloned()
+                .or_else(|| self.vla_param_bounds.get(arr_name).cloned())
+            {
                 let (scale_val, scale_type) = self.emit_exp(scale_exp)?;
                 let scale_long = self.convert_to(scale_val, scale_type, CType::Long);
                 let byte_offset = self.fresh_tmp(CType::Long);
@@ -7069,6 +7130,9 @@ impl TackyGen {
                         self.ptr_info.insert(pname.clone(), info);
                     } else {
                         self.ptr_info.insert(pname.clone(), (elem_type, 1));
+                    }
+                    if let Some(size) = self.dynamic_sizes.get(arr_name).cloned() {
+                        self.dynamic_sizes.insert(pname.clone(), size);
                     }
                 }
                 return Ok((ptr, elem_type, elem_full));
@@ -9779,6 +9843,7 @@ impl TackyGen {
             };
             let align = vd.alignment.map_or(align, |a| a.get().max(align));
             self.register_var(&vd.name, full_type.clone());
+            self.register_dynamic_size(&vd.name, vd.dynamic_size.clone());
             let init_values = if let Some(ref init_exp) = vd.init {
                 self.build_static_initializer(&full_type, init_exp)?
             } else {
@@ -9803,6 +9868,7 @@ impl TackyGen {
                 .unwrap_or_else(|| FullType::from_decl(base_type, vd.ptr_info, &vd.array_dims));
             let total_bytes = full_type.byte_size_with(&self.struct_defs);
             self.register_var(&vd.name, full_type.clone());
+            self.register_dynamic_size(&vd.name, vd.dynamic_size.clone());
             self.array_sizes.insert(vd.name.clone(), total_bytes);
             let scalar_type = {
                 let mut t = &full_type;
@@ -9877,6 +9943,7 @@ impl TackyGen {
                 .is_some_and(StorageClass::is_static)
             {
                 self.register_var(&vd.name, ft.clone());
+                self.register_dynamic_size(&vd.name, vd.dynamic_size.clone());
                 self.array_sizes.insert(vd.name.clone(), struct_size);
                 let init_values = if let Some(ref init) = vd.init {
                     self.build_static_initializer(&ft, init)?
@@ -9901,10 +9968,12 @@ impl TackyGen {
                 .is_some_and(StorageClass::is_extern)
             {
                 self.register_var(&vd.name, ft);
+                self.register_dynamic_size(&vd.name, vd.dynamic_size.clone());
                 self.extern_vars.push(vd.name);
                 return Ok(());
             }
             self.register_var(&vd.name, ft);
+            self.register_dynamic_size(&vd.name, vd.dynamic_size.clone());
             self.array_sizes.insert(vd.name.clone(), struct_size);
             // Aggregate initializers zero-fill omitted members; uninitialized automatic structs do not.
             if vd.init.is_some() {
@@ -10253,6 +10322,7 @@ impl TackyGen {
             self.ptr_info.insert(vd.name.clone(), pi);
         }
         self.full_types.insert(vd.name.clone(), ft.clone());
+        self.register_dynamic_size(&vd.name, vd.dynamic_size.clone());
         if ft.is_vector() {
             self.array_sizes
                 .insert(vd.name.clone(), ft.byte_size_with(&self.struct_defs));
@@ -12675,6 +12745,7 @@ mod tests {
                 ptr_info: None,
                 array_dims: None,
                 decl_full_type: Some(FullType::Struct("box".to_string())),
+                dynamic_size: None,
                 init: Some(Exp::ArrayInit(vec![Exp::Binary(
                     BinaryOp::Add,
                     Box::new(Exp::ArrayInit(vec![Exp::Constant(1)])),

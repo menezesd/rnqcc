@@ -755,8 +755,20 @@ impl Resolver {
                 ..vd
             });
         }
-        let unique_name = self.declare_var(&vd.name)?;
+        let unique_name = if vd.name.starts_with("__rnqcc_vla_bound_")
+            || vd.name.starts_with("__rnqcc_param_vla_bound_")
+        {
+            self.current_scope_mut()?
+                .insert(vd.name.clone(), vd.name.clone());
+            vd.name.clone()
+        } else {
+            self.declare_var(&vd.name)?
+        };
         let init = vd.init.map(|e| self.resolve_exp(e)).transpose()?;
+        let dynamic_size = vd
+            .dynamic_size
+            .map(|e| self.resolve_exp(*e).map(Box::new))
+            .transpose()?;
         let resolved_dft = vd
             .decl_full_type
             .map(|ft| self.resolve_struct_tags_in_ft(ft));
@@ -766,6 +778,7 @@ impl Resolver {
             ptr_info: vd.ptr_info,
             array_dims: vd.array_dims,
             decl_full_type: resolved_dft,
+            dynamic_size,
             init,
             storage_class: vd.storage_class,
             alignment: vd.alignment,
@@ -1164,6 +1177,10 @@ pub fn resolve(program: Program) -> ResolveResult<ResolveOutput> {
                 Declaration::FunDecl(fd) => Declaration::FunDecl(resolver.resolve_function(fd)?),
                 Declaration::VarDecl(vd) => {
                     let init = vd.init.map(|e| resolver.resolve_exp(e)).transpose()?;
+                    let dynamic_size = vd
+                        .dynamic_size
+                        .map(|e| resolver.resolve_exp(*e).map(Box::new))
+                        .transpose()?;
                     let resolved_dft = vd
                         .decl_full_type
                         .map(|ft| resolver.resolve_struct_tags_in_ft(ft));
@@ -1173,6 +1190,7 @@ pub fn resolve(program: Program) -> ResolveResult<ResolveOutput> {
                         ptr_info: vd.ptr_info,
                         array_dims: vd.array_dims,
                         decl_full_type: resolved_dft,
+                        dynamic_size,
                         init,
                         storage_class: vd.storage_class,
                         alignment: vd.alignment,

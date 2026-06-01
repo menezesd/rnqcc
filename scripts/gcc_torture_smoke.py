@@ -155,10 +155,8 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "oversized code-generation stress test"
     if "! { i?86-*-* x86_64-*-* }" in text:
         return "x86-only GCC torture test"
-    if "dg-require-effective-target untyped_assembly" in text:
-        return "requires GCC untyped assembly symbols"
-    if re.search(r"^\s*extern\s+void\s+\w+\s*;", text, re.MULTILINE):
-        return "requires GCC untyped assembly symbols"
+    if src.parent.name == "compile" and src.name == "20011114-1.c":
+        return "unsupported external symbol arithmetic initializer"
     if "dg-require-effective-target trampolines" in text:
         return "requires GCC nested-function trampolines"
     scalar_storage_order_execute_gaps = {

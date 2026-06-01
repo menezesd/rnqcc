@@ -8373,6 +8373,61 @@ fn parses_and_runs_old_style_function_definitions() {
 }
 
 #[test]
+fn treats_identifier_list_definition_as_non_prototype_without_param_decls() {
+    let src = temp_file("old-style-implicit-param-decls", "c");
+    let out = temp_file("old-style-implicit-param-decls", "s");
+    std::fs::write(
+        &src,
+        "foo(a, b)\n\
+         {\n\
+             return foo();\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--Wno-missing-return")
+        .arg("-S")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn compiles_extern_void_assembly_symbol_reference() {
+    let src = temp_file("extern-void-assembly-symbol", "c");
+    let out = temp_file("extern-void-assembly-symbol", "s");
+    std::fs::write(
+        &src,
+        "extern void _text;\n\
+         unsigned long addr(void) {\n\
+             return (unsigned long)&_text;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-S")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn function_name_identifier_expands_to_current_function() {
     let src = temp_file("function-name-identifier", "c");
     let exe = temp_file("function-name-identifier", "bin");

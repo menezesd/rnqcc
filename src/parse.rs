@@ -2659,9 +2659,11 @@ impl Parser {
 
     /// Abstract declarator tree (mirrors Declarator but without names)
     fn parse_abstract_decl_tree(&mut self) -> ParseResult<AbstractDecl> {
+        self.consume_declarator_qualifiers()?;
         let mut stars = 0;
         while self.eat(&Token::Star) {
             stars += 1;
+            self.consume_declarator_qualifiers()?;
         }
 
         let mut decl = if self.eat(&Token::OpenParen) {
@@ -3109,6 +3111,20 @@ impl Parser {
                     self.validate_flexible_array_members(&members, is_union)?;
                     if self.at(&Token::Semicolon) {
                         self.advance()?;
+                        let attrs = Self::merge_aggregate_attributes(prefix_attrs, suffix_attrs);
+                        let declaration = StructDeclaration {
+                            tag: tag.clone(),
+                            members,
+                            is_union,
+                            packed: attrs.packed,
+                            alignment: attrs.alignment,
+                        };
+                        self.record_struct_definition(&declaration)?;
+                        self.record_struct_member_vla_elem_sizes(&tag, member_vla_sizes);
+                        return Ok(Declaration::StructDecl(declaration));
+                    } else if matches!(self.peek(), Some(Token::Identifier(_)))
+                        && self.tokens.get(self.pos + 1) == Some(&Token::OpenParen)
+                    {
                         let attrs = Self::merge_aggregate_attributes(prefix_attrs, suffix_attrs);
                         let declaration = StructDeclaration {
                             tag: tag.clone(),
@@ -5188,17 +5204,7 @@ impl Parser {
                         return Ok(Exp::Constant(compatible as i64));
                     }
                     if name == "__builtin_offsetof" {
-                        let base_type = self.parse_type()?;
-                        let full_type = self.parse_abstract_declarator_type(base_type)?;
-                        let full_type = if base_type == CType::Struct {
-                            if let Some(ref tag) = self.last_struct_tag {
-                                Self::replace_scalar_struct(&full_type, tag)
-                            } else {
-                                full_type
-                            }
-                        } else {
-                            full_type
-                        };
+                        let full_type = self.parse_type_name_full()?;
                         self.expect_token(Token::Comma)?;
                         let offset = self.offsetof_member_designator(full_type)?;
                         self.expect_token(Token::CloseParen)?;

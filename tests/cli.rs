@@ -2709,6 +2709,117 @@ fn compiles_struct_member_function_pointer_returning_struct_pointer() {
 }
 
 #[test]
+fn compiles_gnu_qualified_pointer_cast_static_initializer() {
+    let src = temp_file("gnu-qualified-pointer-cast-static-init", "c");
+    std::fs::write(
+        &src,
+        "struct S { char s; };\n\
+         struct T { struct S t; };\n\
+         struct S *const p = &((struct T * const)(0x4000))->t;\n\
+         void foo(void) { }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn compiles_typeof_offsetof_member_designator() {
+    let src = temp_file("typeof-offsetof-member-designator", "c");
+    let exe = temp_file("typeof-offsetof-member-designator", "bin");
+    std::fs::write(
+        &src,
+        "struct list_head { struct list_head *next; };\n\
+         struct xt_target { struct list_head list; int value; };\n\
+         const struct xt_target *t;\n\
+         int main(void) {\n\
+             return __builtin_offsetof(typeof (*t), value) == sizeof(struct list_head) ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn compiles_gnu89_pointer_integer_conversions() {
+    let src = temp_file("gnu89-pointer-integer-conversions", "c");
+    std::fs::write(
+        &src,
+        "typedef unsigned long si;\n\
+         si move_si(p) si *p; { si x = p; p = (si *)x; return p[0]; }\n\
+         x(p) int *p; { int y = p; return y; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn recovers_missing_struct_semicolon_before_implicit_int_function() {
+    let src = temp_file("missing-struct-semicolon-implicit-int", "c");
+    let exe = temp_file("missing-struct-semicolon-implicit-int", "bin");
+    std::fs::write(
+        &src,
+        "struct st { char a, b, c, d; }\n\
+         zloop(struct st *s, int *p, int *q) {\n\
+             int i;\n\
+             struct st ss;\n\
+             for (i = 0; i < 1; i++) { ss = s[i]; p[i] = ss.c; q[i] = ss.b; }\n\
+         }\n\
+         int main(void) {\n\
+             struct st s[1]; int p[1]; int q[1];\n\
+             s[0].b = 40; s[0].c = 2;\n\
+             zloop(s, p, q);\n\
+             return p[0] + q[0];\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn compiles_static_pointer_designator_initializers() {
     let src = temp_file("static-pointer-designator-initializers", "c");
     let exe = temp_file("static-pointer-designator-initializers", "bin");

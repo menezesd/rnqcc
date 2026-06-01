@@ -396,10 +396,8 @@ impl TackyGen {
                 Some((Some(format!("label.{}.{}", function, label)), 0))
             }
             Exp::StringLiteral(s) => Some((Some(self.make_string_constant(s)), 0)),
-            Exp::Constant(0)
-            | Exp::LongConstant(0)
-            | Exp::UIntConstant(0)
-            | Exp::ULongConstant(0) => Some((None, 0)),
+            Exp::Constant(value) | Exp::LongConstant(value) => Some((None, *value)),
+            Exp::UIntConstant(value) | Exp::ULongConstant(value) => Some((None, *value)),
             Exp::Cast(_, _, inner) => self.static_address_constant(inner),
             Exp::Unary(UnaryOp::AddrOf, inner) => self.static_lvalue_address_constant(inner),
             Exp::Unary(UnaryOp::Deref, inner) => self.static_address_constant(inner),
@@ -1293,6 +1291,11 @@ impl TackyGen {
         if matches!(dst, FullType::Pointer(_)) && Self::is_null_pointer_constant(src_exp) {
             return Ok(());
         }
+        if Self::is_integer_full_type(dst) && matches!(src, FullType::Pointer(_))
+            || matches!(dst, FullType::Pointer(_)) && Self::is_integer_full_type(src)
+        {
+            return Ok(());
+        }
         if let (FullType::Struct(dst_tag), FullType::Pointer(src_inner)) = (dst, src) {
             if matches!(src_inner.as_ref(), FullType::Struct(src_tag) if src_tag == dst_tag)
                 && matches!(
@@ -1308,6 +1311,26 @@ impl TackyGen {
             }
         }
         self.assert_assignable_full_type(dst, src, context)
+    }
+
+    fn is_integer_full_type(ft: &FullType) -> bool {
+        matches!(
+            ft,
+            FullType::Scalar(
+                CType::Bool
+                    | CType::Char
+                    | CType::SChar
+                    | CType::UChar
+                    | CType::Short
+                    | CType::UShort
+                    | CType::Int
+                    | CType::UInt
+                    | CType::Long
+                    | CType::ULong
+                    | CType::Int128
+                    | CType::UInt128
+            )
+        )
     }
 
     /// Get the FullType for a variable (with fallback)

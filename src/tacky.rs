@@ -1559,6 +1559,16 @@ impl TackyGen {
             Exp::Unary(UnaryOp::AddrOf, inner) => {
                 FullType::Pointer(Box::new(self.typeof_exp(inner)))
             }
+            Exp::Unary(UnaryOp::RealPart | UnaryOp::ImagPart, inner) => {
+                match self.typeof_exp(inner) {
+                    FullType::Vector {
+                        elem,
+                        complex: true,
+                        ..
+                    } => *elem,
+                    inner_type => inner_type,
+                }
+            }
             Exp::Subscript(arr, _) => {
                 let arr_ft = self.typeof_exp(arr);
                 match arr_ft {
@@ -2308,6 +2318,20 @@ impl TackyGen {
                     )),
                 }
             }
+            Exp::Unary(op @ (UnaryOp::RealPart | UnaryOp::ImagPart), inner) => {
+                self.emit_complex_lane_value(op, *inner)
+            }
+            Exp::Assign(left, right)
+                if matches!(
+                    left.as_ref(),
+                    Exp::Unary(UnaryOp::RealPart | UnaryOp::ImagPart, _)
+                ) =>
+            {
+                let Exp::Unary(op, inner) = *left else {
+                    unreachable!();
+                };
+                self.emit_complex_lane_assignment(op, *inner, *right)
+            }
             Exp::Assign(left, right) if matches!(left.as_ref(), Exp::Subscript(_, _)) => {
                 let lhs_ft = self.typeof_exp(&left);
                 if lhs_ft.is_struct() {
@@ -2760,6 +2784,17 @@ impl TackyGen {
                 ) =>
             {
                 Err("Expression is not a simple lvalue".to_string())
+            }
+            Exp::CompoundAssign(op, left, right)
+                if matches!(
+                    left.as_ref(),
+                    Exp::Unary(UnaryOp::RealPart | UnaryOp::ImagPart, _)
+                ) =>
+            {
+                let Exp::Unary(component_op, inner) = *left else {
+                    unreachable!();
+                };
+                self.emit_complex_lane_compound_assignment(component_op, op, *inner, *right)
             }
             Exp::CompoundAssign(op, left, right)
                 if matches!(left.as_ref(), Exp::Subscript(_, _)) =>
@@ -5602,6 +5637,10 @@ impl TackyGen {
             return self.emit_exp(*ptr_exp);
         }
 
+        if let Exp::Unary(op @ (UnaryOp::RealPart | UnaryOp::ImagPart), component_inner) = inner {
+            return self.emit_complex_lane_address(op, *component_inner);
+        }
+
         if let Exp::StringLiteral(s) = inner {
             let label = self.make_string_constant(&s);
             let str_size = c_string_byte_len(&s) + 1;
@@ -5972,6 +6011,237 @@ impl TackyGen {
         });
         self.emit(TackyInstr::Label(end2_label));
         Ok((result, common))
+    }
+
+    fn emit_complex_lane_value(
+        &mut self,
+        op: UnaryOp,
+        inner: Exp,
+    ) -> TackyResult<(TackyVal, CType)> {
+        let lane = match op {
+            UnaryOp::RealPart => 0,
+            UnaryOp::ImagPart => 1,
+            _ => return Err("internal error: expected complex component operator".to_string()),
+        };
+        let (src, src_type) = self.emit_exp(inner)?;
+        let src_ft = self.val_full_type(&src);
+        if src_ft.is_complex() {
+            let FullType::Vector { elem, .. } = src_ft.clone() else {
+                return Err("internal error: expected complex vector type".to_string());
+            };
+            let elem_type = elem.to_ctype();
+            let elem_size = elem.byte_size_with(&self.struct_defs);
+            let value =
+                self.emit_complex_component_value(src, src_ft, elem_type, elem_size, lane)?;
+            Ok((value, elem_type))
+        } else if lane == 0 {
+            Ok((src, src_type))
+        } else {
+            Ok((
+                self.convert_to(TackyVal::Constant(0), CType::Int, src_type),
+                src_type,
+            ))
+        }
+    }
+
+    fn emit_complex_lane_assignment(
+        &mut self,
+        op: UnaryOp,
+        inner: Exp,
+        right: Exp,
+    ) -> TackyResult<(TackyVal, CType)> {
+        let lane = match op {
+            UnaryOp::RealPart => 0,
+            UnaryOp::ImagPart => 1,
+            _ => return Err("internal error: expected complex component operator".to_string()),
+        };
+        let lhs_ft = self.typeof_exp(&inner);
+        if !lhs_ft.is_complex() {
+            if lane == 0 {
+                return self.emit_exp(Exp::Assign(Box::new(inner), Box::new(right)));
+            }
+            return Err("assignment to scalar imaginary component".to_string());
+        }
+        let FullType::Vector { elem, .. } = lhs_ft.clone() else {
+            return Err("internal error: expected complex vector type".to_string());
+        };
+        let elem_type = elem.to_ctype();
+        let elem_size = elem.byte_size_with(&self.struct_defs);
+        let right_for_type = right.clone();
+        let (rhs, rhs_type) = self.emit_exp(right)?;
+        let rhs_ft = self.val_full_type(&rhs);
+        self.assert_assignable_exp_full_type(&elem, &rhs_ft, &right_for_type, "assignment")?;
+        let rhs_conv = self.convert_to(rhs, rhs_type, elem_type);
+        let offset = (lane * elem_size) as i64;
+
+        if let Exp::Var(name) = inner {
+            self.emit(TackyInstr::CopyToOffset {
+                src: rhs_conv.clone(),
+                dst_name: name,
+                offset,
+            });
+            return Ok((rhs_conv, elem_type));
+        }
+
+        let Some((mut ptr, _, _)) = self.scalar_lvalue_address(inner)? else {
+            return Err("Expression is not a simple lvalue".to_string());
+        };
+        if offset != 0 {
+            let lane_ptr = self.fresh_tmp(CType::Pointer);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::Add,
+                left: ptr,
+                right: TackyVal::Constant(offset),
+                dst: lane_ptr.clone(),
+            });
+            ptr = lane_ptr;
+        }
+        self.emit(TackyInstr::Store {
+            src: rhs_conv.clone(),
+            dst_ptr: ptr,
+        });
+        Ok((rhs_conv, elem_type))
+    }
+
+    fn emit_complex_lane_compound_assignment(
+        &mut self,
+        component_op: UnaryOp,
+        op: BinaryOp,
+        inner: Exp,
+        right: Exp,
+    ) -> TackyResult<(TackyVal, CType)> {
+        let lane = match component_op {
+            UnaryOp::RealPart => 0,
+            UnaryOp::ImagPart => 1,
+            _ => return Err("internal error: expected complex component operator".to_string()),
+        };
+        let lhs_ft = self.typeof_exp(&inner);
+        if !lhs_ft.is_complex() {
+            if lane == 0 {
+                return self.emit_exp(Exp::CompoundAssign(op, Box::new(inner), Box::new(right)));
+            }
+            return Err("compound assignment to scalar imaginary component".to_string());
+        }
+        let FullType::Vector { elem, .. } = lhs_ft.clone() else {
+            return Err("internal error: expected complex vector type".to_string());
+        };
+        let elem_type = elem.to_ctype();
+        let elem_size = elem.byte_size_with(&self.struct_defs);
+        let offset = (lane * elem_size) as i64;
+
+        let (current, dst_ptr, dst_name) = if let Exp::Var(name) = inner {
+            let current = self.fresh_tmp(elem_type);
+            self.emit(TackyInstr::CopyFromOffset {
+                src_name: name.clone(),
+                offset,
+                dst: current.clone(),
+            });
+            (current, None, Some(name))
+        } else {
+            let Some((mut ptr, _, _)) = self.scalar_lvalue_address(inner)? else {
+                return Err("Expression is not a simple lvalue".to_string());
+            };
+            if offset != 0 {
+                let lane_ptr = self.fresh_tmp(CType::Pointer);
+                self.emit(TackyInstr::Binary {
+                    op: TackyBinaryOp::Add,
+                    left: ptr,
+                    right: TackyVal::Constant(offset),
+                    dst: lane_ptr.clone(),
+                });
+                ptr = lane_ptr;
+            }
+            let current = self.fresh_tmp(elem_type);
+            self.emit(TackyInstr::Load {
+                src_ptr: ptr.clone(),
+                dst: current.clone(),
+            });
+            (current, Some(ptr), None)
+        };
+
+        let (rhs, rhs_type) = self.emit_exp(right)?;
+        let common = CType::common(elem_type, rhs_type);
+        let lhs_conv = self.convert_to(current, elem_type, common);
+        let rhs_conv = self.convert_to(rhs, rhs_type, common);
+        let result = self.fresh_tmp(common);
+        let tacky_op = Self::convert_binop(op)?;
+        self.emit(TackyInstr::Binary {
+            op: tacky_op,
+            left: lhs_conv,
+            right: rhs_conv,
+            dst: result.clone(),
+        });
+        let result_conv = self.convert_to(result, common, elem_type);
+        if let Some(ptr) = dst_ptr {
+            self.emit(TackyInstr::Store {
+                src: result_conv.clone(),
+                dst_ptr: ptr,
+            });
+        } else if let Some(name) = dst_name {
+            self.emit(TackyInstr::CopyToOffset {
+                src: result_conv.clone(),
+                dst_name: name,
+                offset,
+            });
+        }
+        Ok((result_conv, elem_type))
+    }
+
+    fn emit_complex_lane_address(
+        &mut self,
+        op: UnaryOp,
+        inner: Exp,
+    ) -> TackyResult<(TackyVal, CType)> {
+        let lane = match op {
+            UnaryOp::RealPart => 0,
+            UnaryOp::ImagPart => 1,
+            _ => return Err("internal error: expected complex component operator".to_string()),
+        };
+        let inner_ft = self.typeof_exp(&inner);
+        if !inner_ft.is_complex() {
+            if lane == 0 {
+                return self.emit_addr_of(inner);
+            }
+            return Err("cannot take address of scalar imaginary component".to_string());
+        }
+        let FullType::Vector { elem, .. } = inner_ft else {
+            return Err("internal error: expected complex vector type".to_string());
+        };
+        let elem_size = elem.byte_size_with(&self.struct_defs);
+        let offset = (lane * elem_size) as i64;
+        let ptr_ft = FullType::Pointer(elem);
+        let mut ptr = match inner {
+            Exp::Var(name) => {
+                let base = self.fresh_tmp_full(&ptr_ft);
+                self.emit(TackyInstr::GetAddress {
+                    src: TackyVal::Var(name),
+                    dst: base.clone(),
+                });
+                base
+            }
+            other => {
+                let Some((base, _, _)) = self.scalar_lvalue_address(other)? else {
+                    return Err("Expression is not a simple lvalue".to_string());
+                };
+                let typed_base = self.fresh_tmp_full(&ptr_ft);
+                self.emit(TackyInstr::Copy {
+                    src: base,
+                    dst: typed_base.clone(),
+                });
+                typed_base
+            }
+        };
+        if offset != 0 {
+            let lane_ptr = self.fresh_tmp_full(&ptr_ft);
+            self.emit(TackyInstr::Binary {
+                op: TackyBinaryOp::Add,
+                left: ptr,
+                right: TackyVal::Constant(offset),
+                dst: lane_ptr.clone(),
+            });
+            ptr = lane_ptr;
+        }
+        Ok((ptr, CType::Pointer))
     }
 
     fn emit_scalar_unary(&mut self, op: UnaryOp, inner: Exp) -> TackyResult<(TackyVal, CType)> {

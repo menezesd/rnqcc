@@ -5421,6 +5421,63 @@ int main(void) {
 }
 
 #[test]
+fn compiles_and_runs_complex_component_lvalues() {
+    let src = temp_file("complex-component-lvalues", "i");
+    let exe = temp_file("complex-component-lvalues", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef struct { double _Complex z; } Box;
+
+int main(void) {
+    double _Complex z = 1.0 + 2.0i;
+    double _Complex arr[1];
+    Box box;
+    double _Complex *p;
+
+    __real__ z = 3.0;
+    __imag__ z = 4.0;
+    if (__real__ z != 3.0) return 1;
+    if (__imag__ z != 4.0) return 2;
+
+    arr[0] = z;
+    __imag__ arr[0] = 5.0;
+    if (arr[0] != 3.0 + 5.0i) return 3;
+
+    box.z = arr[0];
+    __real__ box.z = 6.0;
+    if (box.z != 6.0 + 5.0i) return 4;
+
+    p = &box.z;
+    __imag__ *p = 7.0;
+    if (box.z != 6.0 + 7.0i) return 5;
+
+    double *rp = &(__real__ z);
+    *rp = 8.0;
+    if (z != 8.0 + 4.0i) return 6;
+
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write test input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn compiles_and_runs_complex_conjugate_operator() {
     let src = temp_file("complex-conjugate", "i");
     let exe = temp_file("complex-conjugate", "bin");

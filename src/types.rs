@@ -1271,6 +1271,8 @@ pub enum UnaryOp {
     PostDecrement,
     AddrOf,
     Deref,
+    RealPart,
+    ImagPart,
 }
 
 #[derive(Debug, Clone)]

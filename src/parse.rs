@@ -1563,6 +1563,16 @@ impl Parser {
                 FullType::Pointer(inner) | FullType::Array { elem: inner, .. } => Ok(*inner),
                 _ => Err(self.format_error("typeof cannot dereference non-pointer expression")),
             },
+            Exp::Unary(UnaryOp::RealPart | UnaryOp::ImagPart, inner) => {
+                match self.typeof_expression(inner)? {
+                    FullType::Vector {
+                        elem,
+                        complex: true,
+                        ..
+                    } => Ok(*elem),
+                    inner_type => Ok(inner_type),
+                }
+            }
             Exp::Subscript(array, _) => match self.typeof_expression(array)? {
                 FullType::Pointer(inner)
                 | FullType::Array { elem: inner, .. }
@@ -5224,8 +5234,13 @@ impl Parser {
             Some(Token::Identifier(name))
                 if matches!(name.as_str(), "__real__" | "__imag__" | "__real" | "__imag") =>
             {
+                let op = if matches!(name.as_str(), "__real__" | "__real") {
+                    UnaryOp::RealPart
+                } else {
+                    UnaryOp::ImagPart
+                };
                 self.advance()?;
-                self.parse_unary()
+                Ok(Exp::Unary(op, Box::new(self.parse_unary()?)))
             }
             // sizeof expression or sizeof(type)
             Some(Token::KWSizeOf) => {

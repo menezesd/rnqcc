@@ -99,7 +99,34 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "unsupported GCC GIMPLE source extension"
     if "dg-error" in text or "dg-warning" in text:
         return "expected-diagnostic GCC torture test"
-    if "dg-do compile { target" in text or "dg-do assemble { target" in text:
+    target_specific_dejagnu = "dg-do compile { target" in text or "dg-do assemble { target" in text
+    portable_target_compile_smoke = {
+        "103818.c",
+        "20111209-1.c",
+        "asmgoto-2.c",
+        "asmgoto-3.c",
+        "asmgoto-4.c",
+        "asmgoto-5.c",
+        "asmgoto-6.c",
+        "attr-retain-1.c",
+        "attr-retain-2.c",
+        "mipscop-1.c",
+        "mipscop-2.c",
+        "mipscop-3.c",
+        "mipscop-4.c",
+        "pr29201.c",
+        "pr30311.c",
+        "pr44707.c",
+        "pr65014.c",
+        "pr65680.c",
+        "pr84960.c",
+        "pr93335.c",
+        "pr96998.c",
+        "pr98096.c",
+    }
+    if target_specific_dejagnu and not (
+        src.parent.name == "compile" and src.name in portable_target_compile_smoke
+    ):
         return "target-specific DejaGnu test outside smoke target model"
     if "../../gcc.target/" in text or "../../gcc.dg/" in text:
         return "target-specific included GCC test"

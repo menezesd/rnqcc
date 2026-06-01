@@ -4935,7 +4935,11 @@ impl Parser {
                     None
                 };
                 self.expect_token(Token::Colon)?;
-                let body = Box::new(self.parse_statement()?);
+                let body = if self.at(&Token::CloseBrace) {
+                    Box::new(Statement::Null)
+                } else {
+                    Box::new(self.parse_statement()?)
+                };
                 Ok(Statement::Case {
                     value,
                     end_value,
@@ -4946,7 +4950,11 @@ impl Parser {
             Some(Token::KWDefault) => {
                 self.advance()?;
                 self.expect_token(Token::Colon)?;
-                let body = Box::new(self.parse_statement()?);
+                let body = if self.at(&Token::CloseBrace) {
+                    Box::new(Statement::Null)
+                } else {
+                    Box::new(self.parse_statement()?)
+                };
                 Ok(Statement::Default {
                     body,
                     label: String::new(),
@@ -4975,7 +4983,11 @@ impl Parser {
             {
                 let name = self.parse_identifier()?;
                 self.expect_token(Token::Colon)?;
-                let stmt = Box::new(self.parse_statement()?);
+                let stmt = if self.at(&Token::CloseBrace) {
+                    Box::new(Statement::Null)
+                } else {
+                    Box::new(self.parse_statement()?)
+                };
                 Ok(Statement::Label(name, stmt))
             }
             _ => {

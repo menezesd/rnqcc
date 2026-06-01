@@ -11600,6 +11600,39 @@ label:
 }
 
 #[test]
+fn accepts_label_at_end_of_block_after_skipped_asm_goto() {
+    let src = temp_file("asm-goto-label-at-end", "c");
+    let out = temp_file("asm-goto-label-at-end", "s");
+    std::fs::write(
+        &src,
+        r#"
+void g(void);
+void f(void) {
+    int value;
+    asm goto ("" : "=&r"(value) : : : done);
+    g();
+done:
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--Wno-missing-return")
+        .arg("-S")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn supports_empty_inline_asm_tied_zero_output_compatibility() {
     let src = temp_file("inline-asm-tied-zero-output", "c");
     let exe = temp_file("inline-asm-tied-zero-output", "bin");

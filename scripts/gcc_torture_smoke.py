@@ -120,7 +120,6 @@ def skip_reason_for_test(src: Path) -> str | None:
         "20050121-1.c": "unsupported complex runtime semantics edge case",
         "960512-1.c": "unsupported complex runtime semantics edge case",
         "complex-1.c": "unsupported mutable __real__/__imag__ complex lvalue",
-        "complex-5.c": "unsupported complex runtime semantics edge case",
         "complex-6.c": "unsupported mixed-type complex conjugate edge case",
         "pr104604.c": "unsupported complex torture edge case",
         "pr38969.c": "unsupported complex runtime semantics edge case",

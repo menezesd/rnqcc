@@ -5539,6 +5539,45 @@ int main(void) {
 }
 
 #[test]
+fn compiles_and_runs_static_complex_constant_products() {
+    let src = temp_file("static-complex-products", "i");
+    let exe = temp_file("static-complex-products", "bin");
+    std::fs::write(
+        &src,
+        r#"
+float _Complex x = 1.0 + 14.0 * (1.0fi);
+float _Complex y = 7.0 + 5.0 * (1.0fi);
+float _Complex w = 8.0 + 19.0 * (1.0fi);
+
+float _Complex p(float _Complex a, float _Complex b) {
+    return a + b;
+}
+
+int main(void) {
+    float _Complex z = p(x, y);
+    if (z != w) return 1;
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write test input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn aarch64_complex_int_arguments_use_integer_registers() {
     let src = temp_file("aarch64-complex-int-args", "c");
     let out = temp_file("aarch64-complex-int-args", "s");

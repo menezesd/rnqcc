@@ -9762,18 +9762,33 @@ impl TackyGen {
                 let (real, imag) = self.eval_static_complex_constant_init(inner)?;
                 Some((neg_static_init_value(real), neg_static_init_value(imag)))
             }
-            Exp::Binary(BinaryOp::Add | BinaryOp::Sub, left, right) => {
+            Exp::Binary(
+                op @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div),
+                left,
+                right,
+            ) => {
                 let (left_real, left_imag) = self.eval_static_complex_constant_init(left)?;
                 let (right_real, right_imag) = self.eval_static_complex_constant_init(right)?;
-                let sign = if matches!(init, Exp::Binary(BinaryOp::Sub, _, _)) {
-                    -1.0
-                } else {
-                    1.0
+                let left_real = static_init_value_to_f64(left_real);
+                let left_imag = static_init_value_to_f64(left_imag);
+                let right_real = static_init_value_to_f64(right_real);
+                let right_imag = static_init_value_to_f64(right_imag);
+                let (real, imag) = match op {
+                    BinaryOp::Add => (left_real + right_real, left_imag + right_imag),
+                    BinaryOp::Sub => (left_real - right_real, left_imag - right_imag),
+                    BinaryOp::Mul => (
+                        left_real * right_real - left_imag * right_imag,
+                        left_real * right_imag + left_imag * right_real,
+                    ),
+                    BinaryOp::Div => {
+                        let denom = right_real * right_real + right_imag * right_imag;
+                        (
+                            (left_real * right_real + left_imag * right_imag) / denom,
+                            (left_imag * right_real - left_real * right_imag) / denom,
+                        )
+                    }
+                    _ => unreachable!(),
                 };
-                let real = static_init_value_to_f64(left_real)
-                    + sign * static_init_value_to_f64(right_real);
-                let imag = static_init_value_to_f64(left_imag)
-                    + sign * static_init_value_to_f64(right_imag);
                 Some((
                     (real.to_bits() as i64, true, false),
                     (imag.to_bits() as i64, true, false),

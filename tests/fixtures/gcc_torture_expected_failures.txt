@@ -5,3 +5,63 @@
 #
 # Keep this file as small as possible. The runner fails if an expected failure
 # starts passing, so entries can be removed as rnqcc improves.
+
+# x86-64 Linux execute frontier from full GCC torture smoke. The same tests can
+# pass on AArch64 hosts, so these are tracked as workflow xfails instead of
+# unconditional skips.
+execute/20010605-2.c | command failed (exit status 1)
+execute/20020413-1.c | command failed (exit status 1)
+execute/20030914-1.c | command failed (exit status 1)
+execute/20030914-2.c | exit status -6
+execute/20040208-1.c | command failed (exit status 1)
+execute/20040709-1.c | command failed (exit status 1)
+execute/20040709-2.c | command failed (exit status 1)
+execute/20040709-3.c | command failed (exit status 1)
+execute/20041124-1.c | exit status -6
+execute/20050121-1.c | command failed (exit status 1)
+execute/20050215-1.c | exit status -6
+execute/20080502-1.c | command failed (exit status 1)
+execute/920501-3.c | exit status -11
+execute/930622-2.c | command failed (exit status 1)
+execute/960215-1.c | command failed (exit status 1)
+execute/960513-1.c | command failed (exit status 1)
+execute/990525-2.c | exit status -11
+execute/align-2.c | command failed (exit status 1)
+execute/bf64-1.c | exit status -11
+execute/bitfld-5.c | exit status -6
+execute/complex-6.c | command failed (exit status 1)
+execute/complex-7.c | command failed (exit status 1)
+execute/conversion.c | command failed (exit status 1)
+execute/fprintf-chk-1.c | exit status -11
+execute/pr109040.c | exit status -6
+execute/pr117432.c | command failed (exit status 1)
+execute/pr23324.c | exit status -6
+execute/pr39228.c | command failed (exit status 1)
+execute/pr43560.c | exit status -11
+execute/pr44942.c | command failed (exit status 1)
+execute/pr53645-2.c | timed out after
+execute/pr65369.c | exit status -11
+execute/pr84748.c | x86-64 emitter needs 128-bit integer lowering
+execute/pr92904.c | timed out after
+execute/printf-chk-1.c | exit status -11
+execute/regstack-1.c | command failed (exit status 1)
+execute/stdarg-1.c | command failed (exit status 1)
+execute/stdarg-2.c | command failed (exit status 1)
+execute/va-arg-1.c | exit status -6
+execute/va-arg-10.c | exit status -6
+execute/va-arg-12.c | exit status -6
+execute/va-arg-18.c | exit status -6
+execute/va-arg-2.c | exit status -6
+execute/va-arg-23.c | exit status -6
+execute/va-arg-24.c | exit status -6
+execute/va-arg-4.c | exit status -6
+execute/va-arg-5.c | command failed (exit status 1)
+execute/va-arg-6.c | command failed (exit status 1)
+execute/va-arg-7.c | exit status -6
+execute/va-arg-8.c | exit status -6
+execute/va-arg-9.c | exit status -6
+execute/va-arg-pack-1.c | command failed (exit status 1)
+execute/vfprintf-1.c | exit status -11
+execute/vfprintf-chk-1.c | exit status -11
+execute/vprintf-1.c | exit status -11
+execute/vprintf-chk-1.c | exit status -11

@@ -85,8 +85,6 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "unsupported GCC __builtin_va_arg_pack extension"
     if "__builtin_apply" in text or "__builtin_apply_args" in text:
         return "unsupported GCC __builtin_apply extension"
-    if "-fgnu89-inline" in text:
-        return "unsupported GNU89 extern-inline redefinition semantics"
     if "-fpermissive" in text:
         return "unsupported permissive invalid-C compatibility test"
     if "-fgimple" in text or "__GIMPLE" in text:
@@ -107,16 +105,8 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "unsupported GCC single-argument va_start extension"
     if re.search(r"struct\s+\w*\s*\{[^}]*\[[^\]\d][^\]]*\]", text, re.DOTALL):
         return "unsupported GNU variably modified struct member"
-    if re.search(r"\benum\s+\w*\s*:", text):
-        return "unsupported C23 fixed underlying enum type"
     if re.search(r"\basm\s+goto\b|\b__asm__\s+goto\b", text):
         return "unsupported GCC asm-goto extension"
-    if "((unsigned char *) &" in text and "- (unsigned char *) 0" in text:
-        return "unsupported static offsetof-style address arithmetic initializer"
-    if re.search(r"sizeof\s*\([^)]*,\s*[A-Za-z_]\w+\s*\)", text):
-        return "unsupported sizeof comma/function-decay edge test"
-    if "sizeof ((" in text and " ? " in text and " : " in text and ")." in text:
-        return "unsupported sizeof conditional aggregate member edge test"
     lines = text.splitlines()
     old_style_def = False
     for index, line in enumerate(lines[:-1]):

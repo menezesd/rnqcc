@@ -681,6 +681,20 @@ impl Parser {
     }
 
     fn add_value_type(&mut self, name: String, full_type: FullType) -> ParseResult<()> {
+        let full_type = if let FullType::Array { elem, size: 0 } = &full_type {
+            match self.lookup_value_type(&name) {
+                Some(FullType::Array {
+                    elem: existing_elem,
+                    size,
+                }) if size > 0 && existing_elem.as_ref() == elem.as_ref() => FullType::Array {
+                    elem: existing_elem,
+                    size,
+                },
+                _ => full_type,
+            }
+        } else {
+            full_type
+        };
         let Some(scope) = self.value_scopes.last_mut() else {
             return Err(self.format_error("parser value scope stack is empty"));
         };
@@ -689,8 +703,24 @@ impl Parser {
     }
 
     fn lookup_value_type(&self, name: &str) -> Option<FullType> {
-        for scope in self.value_scopes.iter().rev() {
+        for (index, scope) in self.value_scopes.iter().enumerate().rev() {
             if let Some(full_type) = scope.get(name) {
+                if let FullType::Array { elem, size: 0 } = full_type {
+                    for outer in self.value_scopes[..index].iter().rev() {
+                        if let Some(FullType::Array {
+                            elem: existing_elem,
+                            size,
+                        }) = outer.get(name)
+                        {
+                            if *size > 0 && existing_elem.as_ref() == elem.as_ref() {
+                                return Some(FullType::Array {
+                                    elem: existing_elem.clone(),
+                                    size: *size,
+                                });
+                            }
+                        }
+                    }
+                }
                 return Some(full_type.clone());
             }
         }
@@ -851,7 +881,59 @@ impl Parser {
     }
 
     fn eval_integer_constant_exp_with_layout(&self, exp: &Exp) -> Option<i64> {
-        Self::eval_integer_constant_exp_with_defs(exp, &self.struct_defs)
+        match exp {
+            Exp::SizeOf(inner) => {
+                let ft = self.typeof_expression(inner).ok()?;
+                Some(ft.byte_size_with(&self.struct_defs) as i64)
+            }
+            Exp::Cast(_, _, inner) => self.eval_integer_constant_exp_with_layout(inner),
+            Exp::Unary(op, inner) => {
+                let value = self.eval_integer_constant_exp_with_layout(inner)?;
+                match op {
+                    UnaryOp::Negate => Some(-value),
+                    UnaryOp::Complement => Some(!value),
+                    UnaryOp::LogicalNot => Some((value == 0) as i64),
+                    _ => None,
+                }
+            }
+            Exp::Binary(op, left, right) => {
+                let left = self.eval_integer_constant_exp_with_layout(left)?;
+                let right = self.eval_integer_constant_exp_with_layout(right)?;
+                match op {
+                    BinaryOp::Add => Some(left.wrapping_add(right)),
+                    BinaryOp::Sub => Some(left.wrapping_sub(right)),
+                    BinaryOp::Mul => Some(left.wrapping_mul(right)),
+                    BinaryOp::Div => left.checked_div(right),
+                    BinaryOp::Mod => left.checked_rem(right),
+                    BinaryOp::BitwiseAnd => Some(left & right),
+                    BinaryOp::BitwiseNand => Some(!(left & right)),
+                    BinaryOp::BitwiseOr => Some(left | right),
+                    BinaryOp::BitwiseXor => Some(left ^ right),
+                    BinaryOp::ShiftLeft => u32::try_from(right)
+                        .ok()
+                        .and_then(|amount| left.checked_shl(amount)),
+                    BinaryOp::ShiftRight => u32::try_from(right)
+                        .ok()
+                        .and_then(|amount| left.checked_shr(amount)),
+                    BinaryOp::LogicalAnd => Some((left != 0 && right != 0) as i64),
+                    BinaryOp::LogicalOr => Some((left != 0 || right != 0) as i64),
+                    BinaryOp::Equal => Some((left == right) as i64),
+                    BinaryOp::NotEqual => Some((left != right) as i64),
+                    BinaryOp::LessThan => Some((left < right) as i64),
+                    BinaryOp::GreaterThan => Some((left > right) as i64),
+                    BinaryOp::LessEqual => Some((left <= right) as i64),
+                    BinaryOp::GreaterEqual => Some((left >= right) as i64),
+                }
+            }
+            Exp::Conditional(cond, then_exp, else_exp) => {
+                if self.eval_integer_constant_exp_with_layout(cond)? != 0 {
+                    self.eval_integer_constant_exp_with_layout(then_exp)
+                } else {
+                    self.eval_integer_constant_exp_with_layout(else_exp)
+                }
+            }
+            _ => Self::eval_integer_constant_exp_with_defs(exp, &self.struct_defs),
+        }
     }
 
     fn eval_integer_constant_exp_with_defs(
@@ -915,6 +997,13 @@ impl Parser {
             }
             _ => None,
         }
+    }
+
+    fn parse_enum_fixed_underlying_type(&mut self) -> ParseResult<()> {
+        if self.eat(&Token::Colon) {
+            let _ = self.parse_type()?;
+        }
+        Ok(())
     }
 
     fn atomic_fetch_op(name: &str) -> Option<BinaryOp> {
@@ -2068,6 +2157,7 @@ impl Parser {
                 if let Some(Token::Identifier(_)) = self.peek() {
                     self.advance()?; // consume tag (we don't track enum tags)
                 }
+                self.parse_enum_fixed_underlying_type()?;
                 // Optional body
                 if self.at(&Token::OpenBrace) {
                     self.parse_enum_body()?;
@@ -2077,6 +2167,11 @@ impl Parser {
             }
             // Check for typedef name
             if let Some(Token::Identifier(name)) = self.peek() {
+                if name == "bool" {
+                    self.advance()?;
+                    self.last_typedef_full_type = None;
+                    return Ok((sc, CType::Bool));
+                }
                 if Self::is_builtin_float_type_name(name) {
                     self.advance()?;
                     self.last_typedef_full_type = None;
@@ -2305,11 +2400,19 @@ impl Parser {
             self.advance()?;
             return Ok(CType::Bool);
         }
+        if self
+            .peek()
+            .is_some_and(|tok| matches!(tok, Token::Identifier(name) if name == "bool"))
+        {
+            self.advance()?;
+            return Ok(CType::Bool);
+        }
         if self.at(&Token::KWEnum) {
             self.advance()?;
             if let Some(Token::Identifier(_)) = self.peek() {
                 self.advance()?;
             }
+            self.parse_enum_fixed_underlying_type()?;
             if self.at(&Token::OpenBrace) {
                 self.parse_enum_body()?;
             }
@@ -3298,7 +3401,7 @@ impl Parser {
         let spec_inline = std::mem::take(&mut self.pending_inline);
         let decl_alignment = self.pending_alignment.take();
         sc = self.consume_post_type_storage_class(sc)?;
-        if self.at(&Token::Semicolon) && base_type == CType::Struct {
+        if self.at(&Token::Semicolon) && (base_type == CType::Struct || self.last_type_was_enum) {
             self.advance()?;
             return Ok(Declaration::TypedefDecl);
         }
@@ -3440,7 +3543,7 @@ impl Parser {
                     &param_value_types,
                     &func_info.param_vla_bounds,
                 )?;
-                Some(body)
+                (!spec_inline || !sc.as_ref().is_some_and(StorageClass::is_extern)).then_some(body)
             } else {
                 if self.eat(&Token::Comma) {
                     let mut extra = Vec::new();
@@ -4258,7 +4361,7 @@ impl Parser {
             let is_auto_type = std::mem::take(&mut self.pending_auto_type);
             let spec_noreturn = std::mem::take(&mut self.pending_noreturn);
             let spec_no_instrument = std::mem::take(&mut self.pending_no_instrument_function);
-            let _spec_inline = std::mem::take(&mut self.pending_inline);
+            let spec_inline = std::mem::take(&mut self.pending_inline);
             let decl_alignment = self.pending_alignment.take();
             let saved_struct_tag = if base_type == CType::Struct {
                 self.last_struct_tag.clone()
@@ -4374,7 +4477,8 @@ impl Parser {
                         &param_value_types,
                         &func_info.param_vla_bounds,
                     )?;
-                    Some(body)
+                    (!spec_inline || !sc.as_ref().is_some_and(StorageClass::is_extern))
+                        .then_some(body)
                 } else {
                     if self.eat(&Token::Comma) {
                         let mut extra = Vec::new();

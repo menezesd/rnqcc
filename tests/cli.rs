@@ -1183,6 +1183,103 @@ fn compiles_forward_struct_return_tag_before_later_prototypes() {
 }
 
 #[test]
+fn compiles_sizeof_expression_edges_in_file_scope_bounds() {
+    let src = temp_file("sizeof-expression-edges-file-scope-bounds", "c");
+    std::fs::write(
+        &src,
+        "void foo(void);\n\
+         void (*fp)(void);\n\
+         char x[sizeof(1, foo) == sizeof(fp) ? 1 : -1];\n\
+         struct s { char c; } a, b;\n\
+         int c;\n\
+         char y[sizeof((c ? a : b).c) == 1 ? 1 : -1];\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn compiles_sizeof_incomplete_extern_array_redeclaration() {
+    let src = temp_file("sizeof-incomplete-extern-array-redeclaration", "c");
+    std::fs::write(
+        &src,
+        "void foo(void)\n\
+         {\n\
+             extern char i[10];\n\
+             { extern char i[]; char x[sizeof(i) == 10 ? 1 : -1]; }\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn compiles_c23_fixed_underlying_enum_type() {
+    let src = temp_file("c23-fixed-underlying-enum-type", "c");
+    std::fs::write(
+        &src,
+        "enum e : bool { X };\n\
+         enum e f(void) { return __INT_MAX__ + 1; }\n\
+         int g(void) { return !(enum e)(__INT_MAX__ + 1); }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn compiles_gnu89_extern_inline_redefinition_once() {
+    let src = temp_file("gnu89-extern-inline-redefinition-once", "c");
+    let out = temp_file("gnu89-extern-inline-redefinition-once", "o");
+    std::fs::write(
+        &src,
+        "extern __inline__ int odd(int i) { return i & 1; }\n\
+         int foo(int i, int j) { return odd(i + j); }\n\
+         int odd(int i) { return i & 1; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--Wno-missing-return", "-c"])
+        .arg(&src)
+        .args(["-o"])
+        .arg(&out)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn compiles_gnu_qualified_old_style_parameter_declarations() {
     let src = temp_file("gnu-qualified-old-style-params", "c");
     let out = temp_file("gnu-qualified-old-style-params", "s");

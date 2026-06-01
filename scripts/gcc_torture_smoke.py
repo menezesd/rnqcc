@@ -105,10 +105,34 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "target-specific included GCC test"
     if "#if empty#cpu" in text:
         return "invalid preprocessor token-paste edge test"
-    if re.search(r"\b(?:__complex__|__complex|_Complex)\b", text) or re.search(
-        r"(?:[0-9]|\.)[0-9A-Fa-fXxPpEe.+-]*[iIjJ]\b", text
-    ):
-        return "unsupported C/GNU complex number type"
+    complex_compile_gaps = {
+        "20001222-1.c": "unsupported GNU imaginary literal complex conjugate",
+        "20030903-1.c": "unsupported scalar-to-complex argument conversion edge case",
+        "complex-1.c": "unsupported scalar-to-complex argument conversion edge case",
+        "compound-literal-3.c": "unsupported address of complex compound literal",
+        "pr110386-2.c": "unsupported complex torture edge case",
+        "pr27341-2.c": "unsupported complex pointer compatibility edge case",
+        "pr28776-2.c": "unsupported complex pointer compatibility edge case",
+        "sra-1.c": "unsupported mutable __real__/__imag__ complex lvalue",
+    }
+    complex_execute_gaps = {
+        "20010605-2.c": "unsupported complex runtime semantics edge case",
+        "20020227-1.c": "unsupported complex runtime semantics edge case",
+        "20020411-1.c": "unsupported complex runtime semantics edge case",
+        "20030910-1.c": "unsupported complex runtime semantics edge case",
+        "20050121-1.c": "unsupported complex runtime semantics edge case",
+        "960512-1.c": "unsupported complex runtime semantics edge case",
+        "complex-1.c": "unsupported mutable __real__/__imag__ complex lvalue",
+        "complex-2.c": "unsupported complex runtime semantics edge case",
+        "complex-5.c": "unsupported complex runtime semantics edge case",
+        "complex-6.c": "unsupported mixed-type complex conjugate edge case",
+        "pr104604.c": "unsupported complex torture edge case",
+        "pr38969.c": "unsupported complex runtime semantics edge case",
+    }
+    if src.parent.name == "compile" and src.name in complex_compile_gaps:
+        return complex_compile_gaps[src.name]
+    if src.parent.name == "execute" and src.name in complex_execute_gaps:
+        return complex_execute_gaps[src.name]
     if re.search(r"\bva_arg\s*\([^,]+,\s*typeof\s*\(", text):
         return "unsupported variadic VLA aggregate argument"
     if re.search(r"\bint\s+\w+\s*\[[^\]\d][^\]]*\]", text) and re.search(

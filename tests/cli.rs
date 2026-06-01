@@ -5421,6 +5421,38 @@ int main(void) {
 }
 
 #[test]
+fn compiles_and_runs_complex_conjugate_operator() {
+    let src = temp_file("complex-conjugate", "i");
+    let exe = temp_file("complex-conjugate", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    double _Complex x = {1.0, 2.0};
+    double _Complex y = ~x;
+    if (y != (double _Complex){1.0, -2.0}) return 1;
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write test input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn compiles_and_runs_host_printf_variadic_call() {
     let src = temp_file("printf-varargs-src", "i");
     let exe = temp_file("printf-varargs-exe", "bin");

@@ -6003,7 +6003,39 @@ impl TackyGen {
                     return Ok((result, value_ft.to_ctype()));
                 }
                 UnaryOp::Complement => {
-                    return Err("invalid complex unary operator".to_string());
+                    let real = self.emit_complex_component_value(
+                        src.clone(),
+                        value_ft.clone(),
+                        elem_type,
+                        elem_size,
+                        0,
+                    )?;
+                    let imag = self.emit_complex_component_value(
+                        src,
+                        value_ft.clone(),
+                        elem_type,
+                        elem_size,
+                        1,
+                    )?;
+                    let zero = self.convert_to(TackyVal::Constant(0), CType::Int, elem_type);
+                    let neg_imag = self.fresh_tmp(elem_type);
+                    self.emit(TackyInstr::Binary {
+                        op: TackyBinaryOp::Sub,
+                        left: zero,
+                        right: imag,
+                        dst: neg_imag.clone(),
+                    });
+                    self.emit(TackyInstr::CopyToOffset {
+                        src: real,
+                        dst_name: result_name.clone(),
+                        offset: 0,
+                    });
+                    self.emit(TackyInstr::CopyToOffset {
+                        src: neg_imag,
+                        dst_name: result_name.clone(),
+                        offset: elem_size as i64,
+                    });
+                    return Ok((result, value_ft.to_ctype()));
                 }
                 _ => return Err("invalid complex unary operator".to_string()),
             }

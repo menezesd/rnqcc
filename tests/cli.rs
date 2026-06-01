@@ -5453,6 +5453,32 @@ int main(void) {
 }
 
 #[test]
+fn aarch64_complex_int_arguments_use_integer_registers() {
+    let src = temp_file("aarch64-complex-int-args", "c");
+    let out = temp_file("aarch64-complex-int-args", "s");
+    std::fs::write(
+        &src,
+        "extern void u(int, int);\n\
+         void f(__complex__ int x) { u(0, x); }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-macos", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(!asm.contains("fmov d"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn compiles_and_runs_host_printf_variadic_call() {
     let src = temp_file("printf-varargs-src", "i");
     let exe = temp_file("printf-varargs-exe", "bin");

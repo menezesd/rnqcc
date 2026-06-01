@@ -107,8 +107,6 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "invalid preprocessor token-paste edge test"
     complex_compile_gaps = {
         "20001222-1.c": "unsupported GNU imaginary literal complex conjugate",
-        "20030903-1.c": "unsupported scalar-to-complex argument conversion edge case",
-        "complex-1.c": "unsupported scalar-to-complex argument conversion edge case",
         "compound-literal-3.c": "unsupported address of complex compound literal",
         "pr110386-2.c": "unsupported complex torture edge case",
         "pr27341-2.c": "unsupported complex pointer compatibility edge case",

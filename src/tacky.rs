@@ -4911,7 +4911,8 @@ impl TackyGen {
                 )?;
                 tacky_args.push(real);
                 tacky_args.push(imag);
-                struct_arg_groups.push((group_start, 2, vec![true, true]));
+                let lane_is_float = elem_type.is_floating();
+                struct_arg_groups.push((group_start, 2, vec![lane_is_float, lane_is_float]));
                 if i + 1 == param_types.len() {
                     fixed_flat_arg_count = tacky_args.len();
                 }
@@ -5302,7 +5303,8 @@ impl TackyGen {
                 )?;
                 tacky_args.push(real);
                 tacky_args.push(imag);
-                struct_arg_groups.push((group_start, 2, vec![true, true]));
+                let lane_is_float = elem_type.is_floating();
+                struct_arg_groups.push((group_start, 2, vec![lane_is_float, lane_is_float]));
                 if i + 1 == param_types.len() {
                     fixed_flat_arg_count = tacky_args.len();
                 }

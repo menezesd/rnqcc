@@ -16744,19 +16744,16 @@ fn supports_gnu_single_argument_va_start_for_zero_fixed_variadic_function() {
     std::fs::write(
         &src,
         r#"
-#include <stdarg.h>
-
 long long r;
 
 void qux(...)
 {
-    va_list ap;
-    va_start(ap);
+    __builtin_va_list ap;
+    __builtin_va_start(ap);
     if (!r)
-        r = va_arg(ap, long long);
+        r = __builtin_va_arg(ap, long long);
     else
-        r = va_arg(ap, int);
-    va_end(ap);
+        r = __builtin_va_arg(ap, int);
 }
 
 int main(void)

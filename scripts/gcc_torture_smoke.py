@@ -139,7 +139,7 @@ def skip_reason_for_test(src: Path) -> str | None:
         return complex_compile_gaps[src.name]
     if src.parent.name == "execute" and src.name in complex_execute_gaps:
         return complex_execute_gaps[src.name]
-    if re.search(r"\bva_arg\s*\([^,]+,\s*typeof\s*\(", text):
+    if src.parent.name == "execute" and src.name == "20020412-1.c":
         return "unsupported variadic VLA aggregate argument"
     if re.search(r"\bint\s+\w+\s*\[[^\]\d][^\]]*\]", text) and re.search(
         r"\bgoto\s+\w+\s*;", text

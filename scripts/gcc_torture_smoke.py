@@ -149,8 +149,6 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "requires GCC untyped assembly symbols"
     if re.search(r"^\s*extern\s+void\s+\w+\s*;", text, re.MULTILINE):
         return "requires GCC untyped assembly symbols"
-    if "dg-require-effective-target label_values" in text or "&&" in text and "goto *" in text:
-        return "unsupported GCC labels-as-values extension"
     if "dg-require-effective-target trampolines" in text:
         return "requires GCC nested-function trampolines"
     if "scalar_storage_order" in text:

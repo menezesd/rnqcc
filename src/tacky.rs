@@ -322,6 +322,8 @@ impl TackyGen {
             return None;
         };
         let bytes = match ctype {
+            CType::Char | CType::SChar | CType::UChar => 1,
+            CType::Short | CType::UShort => 2,
             CType::Int | CType::UInt => 4,
             CType::Long | CType::ULong | CType::Pointer => 8,
             _ => return None,

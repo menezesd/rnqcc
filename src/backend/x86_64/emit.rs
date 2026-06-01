@@ -1338,6 +1338,18 @@ fn emit_static_init(
                 offset
             )
         }
+        StaticInit::LabelDiffInit(left, right, 1) => writeln!(
+            w,
+            "\t.byte {}-{}",
+            static_label_name(platform, left),
+            static_label_name(platform, right)
+        ),
+        StaticInit::LabelDiffInit(left, right, 2) => writeln!(
+            w,
+            "\t.short {}-{}",
+            static_label_name(platform, left),
+            static_label_name(platform, right)
+        ),
         StaticInit::LabelDiffInit(left, right, 4) => writeln!(
             w,
             "\t.long {}-{}",

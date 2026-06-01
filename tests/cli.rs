@@ -16701,3 +16701,38 @@ nonlocal_lab:
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(exe);
 }
+
+#[test]
+fn supports_narrow_static_label_difference_initializers() {
+    let src = temp_file("narrow-label-diff-init", "c");
+    let out = temp_file("narrow-label-diff-init", "o");
+    std::fs::write(
+        &src,
+        r#"
+int foo(int a)
+{
+    static const short offsets[] = { &&l1 - &&l1, &&l2 - &&l1 };
+    void *p = &&l1 + offsets[a];
+    goto *p;
+l1:
+    return 1;
+l2:
+    return 2;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-c")
+        .arg(&src)
+        .args(["-o"])
+        .arg(&out)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}

@@ -183,6 +183,39 @@ impl Parser {
         }
     }
 
+    fn consume_post_type_storage_class(
+        &mut self,
+        mut sc: Option<StorageClass>,
+    ) -> ParseResult<Option<StorageClass>> {
+        loop {
+            match self.peek() {
+                Some(Token::KWStatic) if sc.as_ref().is_none_or(StorageClass::is_thread_local) => {
+                    self.advance()?;
+                    sc = Some(match sc {
+                        Some(existing) => existing.with_static(),
+                        None => StorageClass::Static,
+                    });
+                }
+                Some(Token::KWExtern) if sc.as_ref().is_none_or(StorageClass::is_thread_local) => {
+                    self.advance()?;
+                    sc = Some(match sc {
+                        Some(existing) => existing.with_extern(),
+                        None => StorageClass::Extern,
+                    });
+                }
+                Some(Token::KWThreadLocal) => {
+                    self.advance()?;
+                    sc = Some(match sc {
+                        Some(existing) => existing.with_thread_local(),
+                        None => StorageClass::ThreadLocal,
+                    });
+                }
+                _ => break,
+            }
+        }
+        Ok(sc)
+    }
+
     fn mark_pending_transparent_union(&mut self, tag: &str) {
         for declaration in self.pending_struct_decls.iter_mut().rev() {
             if declaration.tag == tag && declaration.is_union {
@@ -452,6 +485,10 @@ impl Parser {
                 FullType::Pointer(inner) => Some(ptr_info_from_full(inner)),
                 _ => None,
             };
+            if let Some(alignment) = alignment {
+                self.function_alignments
+                    .insert(name.clone(), alignment.get());
+            }
             self.add_value_vla_size(name.clone(), size_exp.clone())?;
             return Ok(VarDeclaration {
                 name,
@@ -474,6 +511,10 @@ impl Parser {
         } else {
             ctype
         };
+        if let Some(alignment) = alignment {
+            self.function_alignments
+                .insert(name.clone(), alignment.get());
+        }
         Ok(VarDeclaration {
             name,
             var_type,
@@ -3178,21 +3219,6 @@ impl Parser {
                         self.record_struct_definition(&declaration)?;
                         self.record_struct_member_vla_elem_sizes(&tag, member_vla_sizes);
                         return Ok(Declaration::StructDecl(declaration));
-                    } else if matches!(self.peek(), Some(Token::Identifier(_)))
-                        && self.tokens.get(self.pos + 1) == Some(&Token::OpenParen)
-                    {
-                        let attrs = Self::merge_aggregate_attributes(prefix_attrs, suffix_attrs);
-                        let declaration = StructDeclaration {
-                            tag: tag.clone(),
-                            members,
-                            is_union,
-                            transparent_union: attrs.transparent_union,
-                            packed: attrs.packed,
-                            alignment: attrs.alignment,
-                        };
-                        self.record_struct_definition(&declaration)?;
-                        self.record_struct_member_vla_elem_sizes(&tag, member_vla_sizes);
-                        return Ok(Declaration::StructDecl(declaration));
                     }
                 } else if self.at(&Token::Semicolon) {
                     self.advance()?;
@@ -3239,7 +3265,7 @@ impl Parser {
                 let param_value_types =
                     Self::param_value_types(&func_info.params, &func_info.param_full_types);
                 let body = if self.at(&Token::OpenBrace) {
-                    Some(self.parse_function_body_with_values(
+                    Some(self.parse_function_body_preserving_type_decls(
                         &name,
                         &param_value_types,
                         &func_info.param_vla_bounds,
@@ -3271,13 +3297,7 @@ impl Parser {
         let spec_no_instrument = std::mem::take(&mut self.pending_no_instrument_function);
         let spec_inline = std::mem::take(&mut self.pending_inline);
         let decl_alignment = self.pending_alignment.take();
-        if sc.is_none() {
-            if self.eat(&Token::KWStatic) {
-                sc = Some(StorageClass::Static);
-            } else if self.eat(&Token::KWExtern) {
-                sc = Some(StorageClass::Extern);
-            }
-        }
+        sc = self.consume_post_type_storage_class(sc)?;
         // Save struct tag before declarator parsing (params may overwrite last_struct_tag)
         let saved_struct_tag = if base_type == CType::Struct {
             self.last_struct_tag.clone()
@@ -3411,7 +3431,7 @@ impl Parser {
             let param_value_types =
                 Self::param_value_types(&func_info.params, &func_info.param_full_types);
             let body = if self.at(&Token::OpenBrace) {
-                let body = self.parse_function_body_with_values(
+                let body = self.parse_function_body_preserving_type_decls(
                     &name,
                     &param_value_types,
                     &func_info.param_vla_bounds,
@@ -3533,7 +3553,7 @@ impl Parser {
             let param_value_types =
                 Self::param_value_types(&func_info.params, &func_info.param_full_types);
             let body = if self.at(&Token::OpenBrace) {
-                let body = self.parse_function_body_with_values(
+                let body = self.parse_function_body_preserving_type_decls(
                     &name,
                     &param_value_types,
                     &func_info.param_vla_bounds,
@@ -4057,6 +4077,20 @@ impl Parser {
         result
     }
 
+    fn parse_function_body_preserving_type_decls(
+        &mut self,
+        function_name: &str,
+        initial_values: &[(String, FullType)],
+        param_vla_bounds: &[Exp],
+    ) -> ParseResult<Block> {
+        let mut pending_type_decls = std::mem::take(&mut self.pending_struct_decls);
+        let body =
+            self.parse_function_body_with_values(function_name, initial_values, param_vla_bounds)?;
+        pending_type_decls.append(&mut self.pending_struct_decls);
+        self.pending_struct_decls = pending_type_decls;
+        Ok(body)
+    }
+
     fn parse_statement_expression(&mut self) -> ParseResult<Exp> {
         self.expect_token(Token::OpenParen)?;
         self.expect_token(Token::OpenBrace)?;
@@ -4215,7 +4249,8 @@ impl Parser {
                 // Not a standalone decl — put back and let parse_specifiers handle it
                 self.pos = save_pos;
             }
-            let (sc, base_type) = self.parse_specifiers()?;
+            let (mut sc, base_type) = self.parse_specifiers()?;
+            sc = self.consume_post_type_storage_class(sc)?;
             let is_auto_type = std::mem::take(&mut self.pending_auto_type);
             let spec_noreturn = std::mem::take(&mut self.pending_noreturn);
             let spec_no_instrument = std::mem::take(&mut self.pending_no_instrument_function);
@@ -4330,7 +4365,7 @@ impl Parser {
                 let param_value_types =
                     Self::param_value_types(&func_info.params, &func_info.param_full_types);
                 let body = if self.at(&Token::OpenBrace) {
-                    let body = self.parse_function_body_with_values(
+                    let body = self.parse_function_body_preserving_type_decls(
                         &name,
                         &param_value_types,
                         &func_info.param_vla_bounds,
@@ -5450,6 +5485,18 @@ impl Parser {
                             return Err(self.format_error("__builtin_bswap64 requires an argument"));
                         };
                         return Ok(Self::bswap_exp(arg.clone(), 64));
+                    }
+                    if name == "__builtin_convertvector" && args.len() == 2 {
+                        if let Exp::Var(type_name) = &args[1] {
+                            if let Some(info) = self.lookup_visible_typedef(type_name) {
+                                let target_ft = info.full_type.clone();
+                                return Ok(Exp::Cast(
+                                    target_ft.to_ctype(),
+                                    Some(target_ft),
+                                    Box::new(args[0].clone()),
+                                ));
+                            }
+                        }
                     }
                     if name == "__atomic_load_n" && args.len() >= 2 {
                         return Ok(Self::ordered_atomic_builtin_exp(Exp::Unary(

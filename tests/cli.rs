@@ -979,6 +979,138 @@ fn compiles_transparent_union_typeof_redeclaration() {
 }
 
 #[test]
+fn compiles_post_struct_storage_class_and_thread_local() {
+    let src = temp_file("post-struct-storage-class-thread-local", "c");
+    std::fs::write(
+        &src,
+        "struct wrapper { int value; } extern __thread a;\n\
+         int f(void) { return a.value; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn compiles_struct_definition_function_return_declarator() {
+    let src = temp_file("struct-definition-function-return-declarator", "c");
+    std::fs::write(
+        &src,
+        "struct a b;\n\
+         struct a { unsigned c:4; } d(void) { return b; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn compiles_static_cast_pointer_difference_integer_initializer() {
+    let src = temp_file("static-cast-pointer-difference-integer-init", "c");
+    std::fs::write(
+        &src,
+        "struct s { char p[2]; };\n\
+         static struct s v;\n\
+         const int o0 = (int)((void *)&v.p[0] - (void *)&v) + 0U;\n\
+         const int o1 = (int)((void *)&v.p[0] - (void *)&v) + 1;\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn compiles_static_float_initializers_from_prior_scalar_constant() {
+    let src = temp_file("static-float-init-from-prior-scalar-constant", "c");
+    std::fs::write(
+        &src,
+        "const char a = 0x42;\n\
+         const double b = (double) a;\n\
+         double c[] = { (double) a, a, 1 + (double) a, 1 + a };\n\
+         void f(void) { static const double d = (double) a; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn compiles_builtin_convertvector_to_typedef_vector_type() {
+    let src = temp_file("builtin-convertvector-typedef-vector", "c");
+    std::fs::write(
+        &src,
+        "typedef long long V __attribute__((vector_size(16)));\n\
+         typedef double W __attribute__((vector_size(16)));\n\
+         void foo(V *v) { __builtin_convertvector(*v, W); }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn compiles_alignof_aligned_vector_variable_bound() {
+    let src = temp_file("alignof-aligned-vector-variable-bound", "c");
+    std::fs::write(
+        &src,
+        "#define alignment 128\n\
+         char x __attribute__((aligned(alignment), vector_size(2)));\n\
+         int f[__alignof__(x) == alignment ? 1 : -1];\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn compiles_gnu_qualified_old_style_parameter_declarations() {
     let src = temp_file("gnu-qualified-old-style-params", "c");
     let out = temp_file("gnu-qualified-old-style-params", "s");

@@ -947,14 +947,20 @@ impl Lexer {
                 if let Some(mode) = Self::parse_mode_attribute(&text) {
                     return Ok(Token::AttributeMode(mode));
                 }
-                if let Some(vector_size) = Self::parse_vector_size_attribute(&text) {
-                    return Ok(Token::AttributeVectorSize(vector_size));
-                }
+                let vector_size = Self::parse_vector_size_attribute(&text);
                 let alignment = Self::parse_aligned_attribute(&text);
                 let noreturn = Self::contains_noreturn_attribute(&text);
                 let no_instrument_function = Self::contains_no_instrument_function_attribute(&text);
                 let packed = Self::contains_packed_attribute(&text);
                 let transparent_union = Self::contains_transparent_union_attribute(&text);
+                if let Some(vector_size) = vector_size.clone() {
+                    if alignment.is_some() || packed || noreturn || no_instrument_function {
+                        self.pending_tokens
+                            .push_back(Token::AttributeVectorSize(vector_size));
+                    } else {
+                        return Ok(Token::AttributeVectorSize(vector_size));
+                    }
+                }
                 if let Some(alignment) = alignment {
                     return Ok(if packed && noreturn {
                         Token::AttributePackedAlignedNoreturn(alignment)

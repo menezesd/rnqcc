@@ -292,6 +292,15 @@ impl Resolver {
         tag.to_string()
     }
 
+    fn resolve_or_declare_tag(&mut self, tag: &str) -> String {
+        for scope in self.tag_scopes.iter().rev() {
+            if let Some(unique) = scope.get(tag) {
+                return unique.clone();
+            }
+        }
+        self.declare_tag(tag).unwrap_or_else(|_| tag.to_string())
+    }
+
     fn resolve_var(&self, name: &str) -> ResolveResult<String> {
         for scope in self.scopes.iter().rev() {
             if let Some(unique) = scope.get(name) {
@@ -383,9 +392,9 @@ impl Resolver {
         label
     }
 
-    fn resolve_struct_tags_in_ft(&self, ft: FullType) -> FullType {
+    fn resolve_struct_tags_in_ft(&mut self, ft: FullType) -> FullType {
         match ft {
-            FullType::Struct(tag) => FullType::Struct(self.resolve_tag(&tag)),
+            FullType::Struct(tag) => FullType::Struct(self.resolve_or_declare_tag(&tag)),
             FullType::Pointer(inner) => {
                 FullType::Pointer(Box::new(self.resolve_struct_tags_in_ft(*inner)))
             }

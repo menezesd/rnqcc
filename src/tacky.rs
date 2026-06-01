@@ -177,6 +177,7 @@ struct TackyGen {
     hidden_ret_ptr: Option<String>,
     static_vars: Vec<TackyStaticVar>,
     static_constants: Vec<TackyStaticConstant>,
+    static_const_values: HashMap<String, (i64, bool, bool)>,
     extern_vars: Vec<String>,
     /// CType for each variable/temporary (for codegen output)
     symbol_types: HashMap<String, CType>,
@@ -221,6 +222,7 @@ impl TackyGen {
             hidden_ret_ptr: None,
             static_vars: Vec::new(),
             static_constants: Vec::new(),
+            static_const_values: HashMap::new(),
             extern_vars: Vec::new(),
             symbol_types: HashMap::new(),
             full_types: HashMap::new(),
@@ -336,27 +338,61 @@ impl TackyGen {
     }
 
     fn static_pointer_diff_integer(&mut self, init: &Exp) -> Option<i64> {
-        let Exp::Binary(BinaryOp::Sub, left, right) = init else {
-            return None;
-        };
-        if let Some(diff) = Self::static_same_string_lvalue_diff(left, right) {
-            return Some(diff);
+        match init {
+            Exp::Cast(_, _, inner) => self.static_pointer_diff_integer(inner),
+            Exp::Binary(BinaryOp::Add, left, right) => {
+                if let Some(diff) = self.static_pointer_diff_integer(left) {
+                    let (value, _, _) = eval_static_integer_constant_exp_with_context(
+                        right,
+                        &self.struct_defs,
+                        &self.full_types,
+                    )?;
+                    return Some(diff.wrapping_add(value));
+                }
+                if let Some(diff) = self.static_pointer_diff_integer(right) {
+                    let (value, _, _) = eval_static_integer_constant_exp_with_context(
+                        left,
+                        &self.struct_defs,
+                        &self.full_types,
+                    )?;
+                    return Some(value.wrapping_add(diff));
+                }
+                None
+            }
+            Exp::Binary(BinaryOp::Sub, left, right) => {
+                if let Some(diff) = self.static_pointer_diff_integer(left) {
+                    let (value, _, _) = eval_static_integer_constant_exp_with_context(
+                        right,
+                        &self.struct_defs,
+                        &self.full_types,
+                    )?;
+                    return Some(diff.wrapping_sub(value));
+                }
+                if let Some(diff) = Self::static_same_string_lvalue_diff(left, right) {
+                    return Some(diff);
+                }
+                let (left_label, left_offset) = self.static_address_constant(left)?;
+                let (right_label, right_offset) = self.static_address_constant(right)?;
+                if left_label != right_label {
+                    return None;
+                }
+                let elem_size = match self.static_exp_full_type(left) {
+                    Some(FullType::Pointer(pointee)) => {
+                        pointee.byte_size_with(&self.struct_defs) as i64
+                    }
+                    Some(FullType::Array { elem, .. }) => {
+                        elem.byte_size_with(&self.struct_defs) as i64
+                    }
+                    _ => 1,
+                };
+                if elem_size == 0 {
+                    return None;
+                }
+                let byte_diff = left_offset - right_offset;
+                (byte_diff % elem_size == 0).then_some(byte_diff / elem_size)
+            }
+            _ => None,
         }
-        let (left_label, left_offset) = self.static_address_constant(left)?;
-        let (right_label, right_offset) = self.static_address_constant(right)?;
-        if left_label != right_label {
-            return None;
-        }
-        let elem_size = match self.static_exp_full_type(left) {
-            Some(FullType::Pointer(pointee)) => pointee.byte_size_with(&self.struct_defs) as i64,
-            Some(FullType::Array { elem, .. }) => elem.byte_size_with(&self.struct_defs) as i64,
-            _ => 1,
-        };
-        if elem_size == 0 {
-            return None;
-        }
-        let byte_diff = left_offset - right_offset;
-        (byte_diff % elem_size == 0).then_some(byte_diff / elem_size)
     }
 
     fn static_same_string_lvalue_diff(left: &Exp, right: &Exp) -> Option<i64> {
@@ -9525,8 +9561,13 @@ impl TackyGen {
 
     fn eval_static_constant_init(&self, init: &Option<Exp>) -> TackyResult<(i64, bool, bool)> {
         if let Some(exp) = init {
-            eval_static_integer_constant_exp_with_context(exp, &self.struct_defs, &self.full_types)
-                .ok_or_else(|| "Static variable initializer must be a constant".to_string())
+            eval_static_integer_constant_exp_with_context_and_values(
+                exp,
+                &self.struct_defs,
+                &self.full_types,
+                &self.static_const_values,
+            )
+            .ok_or_else(|| "Static variable initializer must be a constant".to_string())
         } else {
             Ok((0, false, false))
         }
@@ -11343,12 +11384,27 @@ fn eval_static_integer_constant_exp_with_context(
     struct_defs: &HashMap<String, StructDef>,
     full_types: &HashMap<String, FullType>,
 ) -> Option<(i64, bool, bool)> {
+    eval_static_integer_constant_exp_with_context_and_values(
+        exp,
+        struct_defs,
+        full_types,
+        &HashMap::new(),
+    )
+}
+
+fn eval_static_integer_constant_exp_with_context_and_values(
+    exp: &Exp,
+    struct_defs: &HashMap<String, StructDef>,
+    full_types: &HashMap<String, FullType>,
+    static_const_values: &HashMap<String, (i64, bool, bool)>,
+) -> Option<(i64, bool, bool)> {
     match exp {
         Exp::Constant(c) | Exp::LongConstant(c) => Some((*c, false, false)),
         Exp::UIntConstant(c) | Exp::ULongConstant(c) => Some((*c, false, true)),
         Exp::Int128Constant(c) => Some((*c as i64, false, false)),
         Exp::UInt128Constant(c) => Some((*c as i64, false, true)),
         Exp::DoubleConstant(d) => Some((d.to_bits() as i64, true, false)),
+        Exp::Var(name) => static_const_values.get(name).copied(),
         Exp::SizeOf(inner) => {
             let ft = eval_static_expr_full_type(inner, full_types)?;
             Some((ft.byte_size_with(struct_defs) as i64, false, true))
@@ -11360,10 +11416,20 @@ fn eval_static_integer_constant_exp_with_context(
                 let [value] = elems.as_slice() else {
                     return None;
                 };
-                eval_static_integer_constant_exp_with_context(value, struct_defs, full_types)
+                eval_static_integer_constant_exp_with_context_and_values(
+                    value,
+                    struct_defs,
+                    full_types,
+                    static_const_values,
+                )
             } else {
                 let (value, is_double, is_unsigned) =
-                    eval_static_integer_constant_exp_with_context(inner, struct_defs, full_types)?;
+                    eval_static_integer_constant_exp_with_context_and_values(
+                        inner,
+                        struct_defs,
+                        full_types,
+                        static_const_values,
+                    )?;
                 if target.is_floating() {
                     let value = if is_double {
                         f64::from_bits(value as u64)
@@ -11415,7 +11481,12 @@ fn eval_static_integer_constant_exp_with_context(
         }
         Exp::Unary(op, inner) => {
             let (value, is_double, is_unsigned) =
-                eval_static_integer_constant_exp_with_context(inner, struct_defs, full_types)?;
+                eval_static_integer_constant_exp_with_context_and_values(
+                    inner,
+                    struct_defs,
+                    full_types,
+                    static_const_values,
+                )?;
             match op {
                 UnaryOp::Negate if is_double => {
                     let d = -f64::from_bits(value as u64);
@@ -11429,9 +11500,19 @@ fn eval_static_integer_constant_exp_with_context(
         }
         Exp::Binary(op, left, right) => {
             let (left, left_double, left_unsigned) =
-                eval_static_integer_constant_exp_with_context(left, struct_defs, full_types)?;
+                eval_static_integer_constant_exp_with_context_and_values(
+                    left,
+                    struct_defs,
+                    full_types,
+                    static_const_values,
+                )?;
             let (right, right_double, right_unsigned) =
-                eval_static_integer_constant_exp_with_context(right, struct_defs, full_types)?;
+                eval_static_integer_constant_exp_with_context_and_values(
+                    right,
+                    struct_defs,
+                    full_types,
+                    static_const_values,
+                )?;
             if left_double || right_double {
                 let use_float =
                     (left_unsigned || !left_double) && (right_unsigned || !right_double);
@@ -11586,15 +11667,29 @@ fn eval_static_integer_constant_exp_with_context(
             Some((value, false, is_unsigned))
         }
         Exp::Conditional(cond, then_exp, else_exp) => {
-            let (cond, is_double, _) =
-                eval_static_integer_constant_exp_with_context(cond, struct_defs, full_types)?;
+            let (cond, is_double, _) = eval_static_integer_constant_exp_with_context_and_values(
+                cond,
+                struct_defs,
+                full_types,
+                static_const_values,
+            )?;
             if is_double {
                 return None;
             }
             if cond != 0 {
-                eval_static_integer_constant_exp_with_context(then_exp, struct_defs, full_types)
+                eval_static_integer_constant_exp_with_context_and_values(
+                    then_exp,
+                    struct_defs,
+                    full_types,
+                    static_const_values,
+                )
             } else {
-                eval_static_integer_constant_exp_with_context(else_exp, struct_defs, full_types)
+                eval_static_integer_constant_exp_with_context_and_values(
+                    else_exp,
+                    struct_defs,
+                    full_types,
+                    static_const_values,
+                )
             }
         }
         _ => None,
@@ -11771,10 +11866,11 @@ pub fn generate_with_options(
                     .static_pointer_diff_integer(exp)
                     .map(|v| (v, false, false)),
                 Some(exp) => Some(
-                    eval_static_integer_constant_exp_with_context(
+                    eval_static_integer_constant_exp_with_context_and_values(
                         exp,
                         &gen.struct_defs,
                         &gen.full_types,
+                        &gen.static_const_values,
                     )
                     .ok_or_else(|| "Global initializer must be constant".to_string())?,
                 ),
@@ -11783,6 +11879,9 @@ pub fn generate_with_options(
             let is_global = *linkage.get(&vd.name).unwrap_or(&true);
             if let Some(alignment) = vd.alignment {
                 file_scope_alignments.insert(vd.name.clone(), alignment.get());
+            }
+            if let Some(value) = init_val {
+                gen.static_const_values.insert(vd.name.clone(), value);
             }
             if let Some(entry) = file_scope_vars.get_mut(&vd.name) {
                 if init_val.is_some() {

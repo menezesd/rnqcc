@@ -93,7 +93,18 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "unsupported GCC __builtin_va_arg_pack extension"
     if "__builtin_apply" in text or "__builtin_apply_args" in text:
         return "unsupported GCC __builtin_apply extension"
-    if "-fpermissive" in text:
+    permissive_compile_gaps = {
+        "20101216-1.c",
+        "950816-2.c",
+        "pr27341-2.c",
+        "pr28776-2.c",
+        "pr43635.c",
+        "pr72802.c",
+        "pr90275-2.c",
+        "pr90275.c",
+        "regs-arg-size.c",
+    }
+    if src.parent.name == "compile" and src.name in permissive_compile_gaps:
         return "unsupported permissive invalid-C compatibility test"
     if "-fgimple" in text or "__GIMPLE" in text:
         return "unsupported GCC GIMPLE source extension"

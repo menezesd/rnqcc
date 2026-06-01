@@ -916,6 +916,16 @@ impl Resolver {
                 })
             }
             Some(body) => {
+                let resolved_rft = func
+                    .return_full_type
+                    .clone()
+                    .map(|ft| self.resolve_struct_tags_in_ft(ft));
+                let resolved_pfts: Vec<FullType> = func
+                    .param_full_types
+                    .clone()
+                    .into_iter()
+                    .map(|ft| self.resolve_struct_tags_in_ft(ft))
+                    .collect();
                 self.push_scope();
                 let saved_defined_labels = std::mem::take(&mut self.defined_labels);
                 let saved_goto_targets = std::mem::take(&mut self.goto_targets);
@@ -942,14 +952,6 @@ impl Resolver {
                 self.function_depth -= 1;
                 self.defined_labels = saved_defined_labels;
                 self.goto_targets = saved_goto_targets;
-                let resolved_rft = func
-                    .return_full_type
-                    .map(|ft| self.resolve_struct_tags_in_ft(ft));
-                let resolved_pfts: Vec<FullType> = func
-                    .param_full_types
-                    .into_iter()
-                    .map(|ft| self.resolve_struct_tags_in_ft(ft))
-                    .collect();
                 Ok(FunctionDeclaration {
                     name: func.name,
                     return_type: func.return_type,

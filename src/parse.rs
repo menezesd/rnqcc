@@ -3298,6 +3298,10 @@ impl Parser {
         let spec_inline = std::mem::take(&mut self.pending_inline);
         let decl_alignment = self.pending_alignment.take();
         sc = self.consume_post_type_storage_class(sc)?;
+        if self.at(&Token::Semicolon) && base_type == CType::Struct {
+            self.advance()?;
+            return Ok(Declaration::TypedefDecl);
+        }
         // Save struct tag before declarator parsing (params may overwrite last_struct_tag)
         let saved_struct_tag = if base_type == CType::Struct {
             self.last_struct_tag.clone()

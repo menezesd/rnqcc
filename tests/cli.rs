@@ -1111,6 +1111,78 @@ fn compiles_alignof_aligned_vector_variable_bound() {
 }
 
 #[test]
+fn compiles_anonymous_empty_aggregate_declaration() {
+    let src = temp_file("anonymous-empty-aggregate-declaration", "c");
+    std::fs::write(
+        &src,
+        "typedef union { struct s { __extension__ union { }; } data; } named;\n\
+         typedef union { struct t { union { }; } data; };\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn compiles_zero_sized_struct_array_subscript_argument() {
+    let src = temp_file("zero-sized-struct-array-subscript-argument", "c");
+    std::fs::write(
+        &src,
+        "struct U {};\n\
+         static struct U a[1];\n\
+         extern void bar(struct U);\n\
+         void foo(void) { bar(a[0]); }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn compiles_forward_struct_return_tag_before_later_prototypes() {
+    let src = temp_file("forward-struct-return-tag-before-prototypes", "c");
+    std::fs::write(
+        &src,
+        "struct outer { int x; };\n\
+         static inline struct hidden *to_hidden(struct outer *value)\n\
+         {\n\
+             const struct outer *tmp = value;\n\
+             return (struct hidden *)(char *)tmp;\n\
+         }\n\
+         void use_a(struct hidden *);\n\
+         void use_b(struct hidden *);\n\
+         void call(struct outer *value) { use_a(to_hidden(value)); use_b(to_hidden(value)); }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn compiles_gnu_qualified_old_style_parameter_declarations() {
     let src = temp_file("gnu-qualified-old-style-params", "c");
     let out = temp_file("gnu-qualified-old-style-params", "s");

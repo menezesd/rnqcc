@@ -103,9 +103,9 @@ pub fn validate_tacky_program(program: &TackyProgram) -> Result<(), String> {
                         }
                     }
                     if let TackyInstr::AddPtr { scale, .. } = instr {
-                        if *scale <= 0 {
+                        if *scale < 0 {
                             return Err(format!(
-                                "function '{}' has non-positive pointer scale {}",
+                                "function '{}' has negative pointer scale {}",
                                 function.name, scale
                             ));
                         }

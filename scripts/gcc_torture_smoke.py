@@ -139,8 +139,6 @@ def skip_reason_for_test(src: Path) -> str | None:
             break
         if old_style_def:
             break
-    if re.search(r"struct\s+\w*\s*\{\s*\}", text):
-        return "unsupported empty struct extension"
     if "SIZE1 ((size_t) -1)" in text and "__builtin_" in text:
         return "builtin library stress test with huge object sizes"
     if src.name.startswith("limits-"):

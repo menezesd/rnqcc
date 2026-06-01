@@ -3,8 +3,8 @@
 # Format:
 # relative/path.c | diagnostic substring
 #
-# Keep this file as small as possible. The runner fails if an expected failure
-# starts passing, so entries can be removed as rnqcc improves.
+# Keep this file as small as possible. By default the runner fails if an
+# expected failure starts passing, so entries can be removed as rnqcc improves.
 
 # x86-64 Linux execute frontier from full GCC torture smoke. The same tests can
 # pass on AArch64 hosts, so these are tracked as workflow xfails instead of
@@ -41,6 +41,7 @@ execute/pr39228.c | command failed (exit status 1)
 execute/pr43560.c | exit status -11
 execute/pr44942.c | command failed (exit status 1)
 execute/pr42833.c | exit status -6
+execute/pr53645-2.c | timed out after
 execute/pr65369.c | exit status -11
 execute/pr84748.c | x86-64 emitter needs 128-bit integer lowering
 execute/pr92904.c | timed out after

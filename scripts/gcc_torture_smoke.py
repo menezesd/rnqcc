@@ -364,6 +364,11 @@ def main() -> int:
         help="file of `relative/path.c | diagnostic substring` failures to treat as known",
     )
     parser.add_argument(
+        "--allow-stale-expected-failures",
+        action="store_true",
+        help="do not fail if an expected failure passes in this run",
+    )
+    parser.add_argument(
         "--artifact-dir",
         type=Path,
         default=Path(os.environ["CI_ARTIFACT_DIR"]) if "CI_ARTIFACT_DIR" in os.environ else None,
@@ -485,7 +490,7 @@ def main() -> int:
         print(f"... {len(failures) - args.max_failures} more failures")
     for rel, reason in stale_expected:
         print(f"STALE-XFAIL {rel}: {reason}")
-    return 1 if failures or stale_expected else 0
+    return 1 if failures or (stale_expected and not args.allow_stale_expected_failures) else 0
 
 
 if __name__ == "__main__":

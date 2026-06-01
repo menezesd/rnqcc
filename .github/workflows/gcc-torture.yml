@@ -55,6 +55,7 @@ jobs:
             --mode "${{ inputs.mode || 'execute' }}" \
             --start "${{ inputs.start || '0' }}" \
             --limit "${{ inputs.limit || '100000' }}" \
+            --progress-every 100 \
             --expected-failures tests/fixtures/gcc_torture_expected_failures.txt \
             --allow-stale-expected-failures \
             --failure-log "$CI_ARTIFACT_DIR/gcc-torture-failures.txt" \

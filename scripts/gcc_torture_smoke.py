@@ -359,6 +359,12 @@ def main() -> int:
         help="print every skipped test and reason to stdout",
     )
     parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=0,
+        help="print progress after this many selected tests; 0 disables progress output",
+    )
+    parser.add_argument(
         "--expected-failures",
         type=Path,
         help="file of `relative/path.c | diagnostic substring` failures to treat as known",
@@ -399,10 +405,18 @@ def main() -> int:
     stale_expected: list[tuple[str, str]] = []
     with tempfile.TemporaryDirectory(prefix="rnqcc-gcc-torture.") as tmp:
         tmpdir = Path(tmp)
-        for idx, src in enumerate(selected, start=args.start):
+        for offset, src in enumerate(selected):
+            idx = args.start + offset
             rel = str(src.relative_to(suite))
             if reason := skip_reason_for_test(src):
                 skipped.append((src, reason))
+                if args.progress_every > 0 and (offset + 1) % args.progress_every == 0:
+                    print(
+                        f"progress {offset + 1}/{len(selected)} selected: "
+                        f"passed={passed}, skipped={len(skipped)}, "
+                        f"xfail={len(expected_failed)}, failed={len(failures)}",
+                        flush=True,
+                    )
                 continue
             stem = f"{idx:04d}-{src.stem}"
             common = [str(rnqcc), "--Wno-missing-return"]
@@ -432,6 +446,7 @@ def main() -> int:
                     else:
                         failures.append((src, failure))
                         save_failure_artifact(args.artifact_dir, suite, idx, src, cmd, result)
+
             else:
                 obj = tmpdir / f"{stem}.o"
                 cmd = [*common, "-c", str(src), "-o", str(obj)]
@@ -448,6 +463,14 @@ def main() -> int:
                     else:
                         failures.append((src, failure))
                         save_failure_artifact(args.artifact_dir, suite, idx, src, cmd, result)
+
+            if args.progress_every > 0 and (offset + 1) % args.progress_every == 0:
+                print(
+                    f"progress {offset + 1}/{len(selected)} selected: "
+                    f"passed={passed}, skipped={len(skipped)}, "
+                    f"xfail={len(expected_failed)}, failed={len(failures)}",
+                    flush=True,
+                )
 
     print(
         f"gcc torture {args.mode}: {passed}/{len(selected) - len(skipped)} passed "

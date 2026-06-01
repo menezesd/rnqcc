@@ -2377,6 +2377,10 @@ impl TackyGen {
                     &right_for_type,
                     "assignment",
                 )?;
+                if elem_ft.is_complex() {
+                    self.emit_complex_value_to_ptr(ptr, &elem_ft, rhs.clone(), rhs_type, rhs_ft)?;
+                    return Ok((rhs, elem_type));
+                }
                 let rhs_conv = self.convert_to(rhs, rhs_type, elem_type);
                 self.emit(TackyInstr::Store {
                     src: rhs_conv.clone(),
@@ -2406,6 +2410,16 @@ impl TackyGen {
                         &right_for_type,
                         "assignment",
                     )?;
+                    if pointee_ft.is_complex() {
+                        self.emit_complex_value_to_ptr(
+                            ptr.clone(),
+                            &pointee_ft,
+                            rhs.clone(),
+                            _rhs_type,
+                            rhs_ft,
+                        )?;
+                        return Ok((rhs, lhs_ft.to_ctype()));
+                    }
                     let src_addr = if let TackyVal::Var(ref n) = rhs {
                         if self.array_sizes.contains_key(n) {
                             let a = self.fresh_tmp(CType::Pointer);
@@ -2517,6 +2531,17 @@ impl TackyGen {
                         &right_for_type,
                         "assignment",
                     )?;
+                    if mem_ft.is_complex() {
+                        self.emit_complex_value_to_offset(
+                            &struct_name,
+                            &mem_ft,
+                            rhs.clone(),
+                            rhs_type,
+                            rhs_ft,
+                            mem.offset as i64,
+                        )?;
+                        return Ok((rhs, mem.member_type));
+                    }
                     let rhs_conv = self.convert_to(rhs, rhs_type, mem.member_type);
                     self.emit(TackyInstr::CopyToOffset {
                         src: rhs_conv.clone(),
@@ -2583,6 +2608,16 @@ impl TackyGen {
                         &right_for_type,
                         "assignment",
                     )?;
+                    if mem_ft.is_complex() {
+                        self.emit_complex_value_to_ptr(
+                            member_addr,
+                            &mem_ft,
+                            rhs.clone(),
+                            rhs_type,
+                            rhs_ft,
+                        )?;
+                        return Ok((rhs, mem_type));
+                    }
                     let rhs_conv = self.convert_to(rhs, rhs_type, mem_type);
                     self.emit(TackyInstr::Store {
                         src: rhs_conv.clone(),
@@ -2668,6 +2703,16 @@ impl TackyGen {
                     &right_for_type,
                     "assignment",
                 )?;
+                if mem_ft.is_complex() {
+                    self.emit_complex_value_to_ptr(
+                        mem_ptr,
+                        &mem_ft,
+                        rhs.clone(),
+                        rhs_type,
+                        rhs_ft,
+                    )?;
+                    return Ok((rhs, mem_type));
+                }
                 let rhs_conv = self.convert_to(rhs, rhs_type, mem_type);
                 if mem.bit_width.is_some() {
                     let value = self.store_bit_field_to_ptr(mem_ptr, &mem, rhs_conv)?;
@@ -2686,7 +2731,6 @@ impl TackyGen {
                     let Exp::Var(lhs_name) = *left else {
                         return Err("Expression is not a variable lvalue".to_string());
                     };
-                    let struct_size = lhs_ft.byte_size_with(&self.struct_defs);
                     let right_for_type = (*right).clone();
                     let (rhs, rhs_type) = self.emit_exp(*right)?;
                     let rhs_ft = self.val_full_type(&rhs);
@@ -2696,6 +2740,13 @@ impl TackyGen {
                         &right_for_type,
                         "assignment",
                     )?;
+                    if lhs_ft.is_complex() {
+                        self.emit_complex_value_to_offset(
+                            &lhs_name, &lhs_ft, rhs, rhs_type, rhs_ft, 0,
+                        )?;
+                        return Ok((TackyVal::Var(lhs_name), lhs_ft.to_ctype()));
+                    }
+                    let struct_size = lhs_ft.byte_size_with(&self.struct_defs);
                     let rhs_struct_name = if rhs_type == CType::Struct || rhs_ft.is_vector() {
                         if let TackyVal::Var(ref n) = rhs {
                             Some(n.clone())
@@ -3568,6 +3619,23 @@ impl TackyGen {
                 let elem_type = elem_ft.to_ctype();
                 let elem_size = elem_ft.byte_size_with(&self.struct_defs);
                 if let TackyVal::Var(ref name) = result {
+                    if ft.is_complex() && elems.len() == 1 {
+                        let elem = elems.into_iter().next().unwrap();
+                        if self.typeof_exp(&elem).is_complex() {
+                            let (val, val_type) = self.emit_exp(elem)?;
+                            let val_ft = self.val_full_type(&val);
+                            self.emit_complex_value_to_offset(name, &ft, val, val_type, val_ft, 0)?;
+                            return Ok((result, target_type));
+                        }
+                        let (val, from_type) = self.emit_exp(elem)?;
+                        let converted = self.convert_to(val, from_type, elem_type);
+                        self.emit(TackyInstr::CopyToOffset {
+                            src: converted,
+                            dst_name: name.clone(),
+                            offset: 0,
+                        });
+                        return Ok((result, target_type));
+                    }
                     for (index, elem) in elems.into_iter().enumerate() {
                         let (val, from_type) = self.emit_exp(elem)?;
                         let converted = self.convert_to(val, from_type, elem_type);
@@ -3978,6 +4046,19 @@ impl TackyGen {
                 };
                 return self.emit_bit_builtin(kind, arg_type, width, arg_exp);
             }
+        }
+        if matches!(
+            name.as_str(),
+            "__builtin_conjf" | "__builtin_conj" | "__builtin_conjl"
+        ) && args.len() == 1
+        {
+            let Some(arg_exp) = args.into_iter().next() else {
+                return Err(format!("{} requires an argument", name));
+            };
+            if self.typeof_exp(&arg_exp).is_complex() {
+                return self.emit_unary(UnaryOp::Complement, arg_exp);
+            }
+            return self.emit_exp(arg_exp);
         }
         if matches!(
             name.as_str(),
@@ -5694,13 +5775,13 @@ impl TackyGen {
             }
         }
 
-        let is_struct_compound_literal = matches!(
+        let is_aggregate_compound_literal = matches!(
             &inner,
-            Exp::Cast(_, Some(FullType::Struct(_)), boxed) if matches!(boxed.as_ref(), Exp::ArrayInit(_))
+            Exp::Cast(_, Some(ft), boxed) if (ft.is_struct() || ft.is_vector()) && matches!(boxed.as_ref(), Exp::ArrayInit(_))
         );
-        if is_struct_compound_literal {
-            let Exp::Cast(target_type, Some(ft @ FullType::Struct(_)), boxed) = inner else {
-                return Err("internal error: expected struct compound literal".to_string());
+        if is_aggregate_compound_literal {
+            let Exp::Cast(target_type, Some(ft), boxed) = inner else {
+                return Err("internal error: expected aggregate compound literal".to_string());
             };
             let pointee_ft = ft.clone();
             let (var, _) = self.emit_compound_literal_cast(target_type, Some(ft), *boxed)?;
@@ -6242,6 +6323,89 @@ impl TackyGen {
             ptr = lane_ptr;
         }
         Ok((ptr, CType::Pointer))
+    }
+
+    fn emit_complex_value_parts(
+        &mut self,
+        target_ft: &FullType,
+        value: TackyVal,
+        value_type: CType,
+        value_ft: FullType,
+    ) -> TackyResult<(TackyVal, TackyVal, CType, usize)> {
+        let FullType::Vector { elem, .. } = target_ft else {
+            return Err("internal error: expected complex target type".to_string());
+        };
+        let elem_type = elem.to_ctype();
+        let elem_size = elem.byte_size_with(&self.struct_defs);
+        let real = if value_ft.is_complex() {
+            self.emit_complex_component_value(
+                value.clone(),
+                value_ft.clone(),
+                elem_type,
+                elem_size,
+                0,
+            )?
+        } else {
+            self.convert_to(value.clone(), value_type, elem_type)
+        };
+        let imag = if value_ft.is_complex() {
+            self.emit_complex_component_value(value, value_ft, elem_type, elem_size, 1)?
+        } else {
+            self.convert_to(TackyVal::Constant(0), CType::Int, elem_type)
+        };
+        Ok((real, imag, elem_type, elem_size))
+    }
+
+    fn emit_complex_value_to_offset(
+        &mut self,
+        dst_name: &str,
+        target_ft: &FullType,
+        value: TackyVal,
+        value_type: CType,
+        value_ft: FullType,
+        offset: i64,
+    ) -> TackyResult<()> {
+        let (real, imag, _elem_type, elem_size) =
+            self.emit_complex_value_parts(target_ft, value, value_type, value_ft)?;
+        self.emit(TackyInstr::CopyToOffset {
+            src: real,
+            dst_name: dst_name.to_string(),
+            offset,
+        });
+        self.emit(TackyInstr::CopyToOffset {
+            src: imag,
+            dst_name: dst_name.to_string(),
+            offset: offset + elem_size as i64,
+        });
+        Ok(())
+    }
+
+    fn emit_complex_value_to_ptr(
+        &mut self,
+        dst_ptr: TackyVal,
+        target_ft: &FullType,
+        value: TackyVal,
+        value_type: CType,
+        value_ft: FullType,
+    ) -> TackyResult<()> {
+        let (real, imag, _elem_type, elem_size) =
+            self.emit_complex_value_parts(target_ft, value, value_type, value_ft)?;
+        self.emit(TackyInstr::Store {
+            src: real,
+            dst_ptr: dst_ptr.clone(),
+        });
+        let imag_ptr = self.fresh_tmp(CType::Pointer);
+        self.emit(TackyInstr::Binary {
+            op: TackyBinaryOp::Add,
+            left: dst_ptr,
+            right: TackyVal::Constant(elem_size as i64),
+            dst: imag_ptr.clone(),
+        });
+        self.emit(TackyInstr::Store {
+            src: imag,
+            dst_ptr: imag_ptr,
+        });
+        Ok(())
     }
 
     fn emit_scalar_unary(&mut self, op: UnaryOp, inner: Exp) -> TackyResult<(TackyVal, CType)> {
@@ -9419,6 +9583,14 @@ impl TackyGen {
             match value {
                 Exp::ArrayInit(elems) => {
                     if let Some(first) = elems.first() {
+                        if elems.len() == 1 && self.typeof_exp(first).is_complex() {
+                            let (val, val_type) = self.emit_exp(first.clone())?;
+                            let val_ft = self.val_full_type(&val);
+                            self.emit_complex_value_to_offset(
+                                arr_name, target_ft, val, val_type, val_ft, offset,
+                            )?;
+                            return Ok(());
+                        }
                         let (val, val_type) = self.emit_exp(first.clone())?;
                         let real = self.convert_to(val, val_type, elem_type);
                         self.emit(TackyInstr::CopyToOffset {
@@ -11685,7 +11857,8 @@ impl TackyGen {
                     self.symbol_types.insert(flat_name.clone(), elem_type);
                     tacky_params.push(flat_name.clone());
                 }
-                struct_param_groups.push((group_start, 2, vec![true, true]));
+                let is_fp = elem_type.is_floating();
+                struct_param_groups.push((group_start, 2, vec![is_fp, is_fp]));
                 complex_param_fixups.push((name.clone(), elem_size));
                 self.register_var(name, ft.clone());
                 self.array_sizes

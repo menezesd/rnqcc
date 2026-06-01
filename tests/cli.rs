@@ -5635,6 +5635,73 @@ int main(void) {
 }
 
 #[test]
+fn compiles_and_runs_complex_torture_edges() {
+    let src = temp_file("complex-torture-edges", "i");
+    let exe = temp_file("complex-torture-edges", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef __complex__ float cf;
+struct packed_x { char c; cf f; } __attribute__ ((__packed__));
+unsigned char g;
+
+__complex__ int ctest_int(__complex__ int x) {
+    return ~x;
+}
+
+__complex__ float ctest_float(__complex__ float x) {
+    return __builtin_conjf(x);
+}
+
+unsigned char div_unsigned(_Complex unsigned c) {
+    unsigned char v = g;
+    _Complex unsigned t = 42;
+    t /= c;
+    return v + t;
+}
+
+int takes_complex_pointer(_Complex float *p) {
+    return *p == 2.0f + 3.0fi;
+}
+
+int main(void) {
+    struct packed_x s;
+    s.f = 1;
+    s.c = 42;
+    if (s.f != 1 || s.c != 42) return 1;
+
+    __complex__ float f = ctest_float(1.0f + 2.0fi);
+    if (f != 1.0f - 2.0fi) return 2;
+
+    __complex__ int i = ctest_int(1.0 + 2.0i);
+    if (i != 1.0 - 2.0i) return 3;
+
+    if (div_unsigned(7) != 6) return 4;
+
+    if (!takes_complex_pointer(&(_Complex float){2.0f + 3.0fi})) return 5;
+
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write test input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn aarch64_complex_int_arguments_use_integer_registers() {
     let src = temp_file("aarch64-complex-int-args", "c");
     let out = temp_file("aarch64-complex-int-args", "s");
@@ -5655,6 +5722,8 @@ fn aarch64_complex_int_arguments_use_integer_registers() {
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
     assert!(!asm.contains("fmov d"), "{asm}");
+    assert!(!asm.contains("str d0"), "{asm}");
+    assert!(asm.contains("str w0") || asm.contains("str x0"), "{asm}");
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);

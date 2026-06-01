@@ -105,18 +105,8 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "target-specific included GCC test"
     if "#if empty#cpu" in text:
         return "invalid preprocessor token-paste edge test"
-    complex_compile_gaps = {
-        "compound-literal-3.c": "unsupported address of complex compound literal",
-        "pr110386-2.c": "unsupported complex torture edge case",
-        "pr27341-2.c": "unsupported complex pointer compatibility edge case",
-        "pr28776-2.c": "unsupported complex pointer compatibility edge case",
-    }
-    complex_execute_gaps = {
-        "20020227-1.c": "unsupported complex runtime semantics edge case",
-        "20020411-1.c": "unsupported complex runtime semantics edge case",
-        "complex-6.c": "unsupported mixed-type complex conjugate edge case",
-        "pr104604.c": "unsupported complex torture edge case",
-    }
+    complex_compile_gaps: dict[str, str] = {}
+    complex_execute_gaps: dict[str, str] = {}
     if src.parent.name == "compile" and src.name in complex_compile_gaps:
         return complex_compile_gaps[src.name]
     if src.parent.name == "execute" and src.name in complex_execute_gaps:

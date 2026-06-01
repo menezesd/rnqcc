@@ -294,6 +294,9 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
         | AsmInstr::AArch64DoubleToFloat(src, dst) => (operand_reads(src), operand_writes(dst)),
         AsmInstr::X87Load(_, src) => (operand_reads(src), vec![]),
         AsmInstr::X87Store(dst) => (vec![], operand_writes(dst)),
+        AsmInstr::X87LoadIndirect(_, reg) | AsmInstr::X87StoreIndirect(reg) => {
+            (vec![RegId::Gp(*reg)], vec![])
+        }
         AsmInstr::X87UnaryNeg | AsmInstr::X87Binary(_) | AsmInstr::X87Compare => (vec![], vec![]),
         AsmInstr::Lea(src, dst) => {
             // Lea reads address components from src, writes result to dst
@@ -942,6 +945,9 @@ fn rewrite_coalesced(instrs: &mut Vec<AsmInstr>, uf: &UnionFind) {
                 rewrite_op(src, uf);
                 rewrite_op(dst, uf);
             }
+            AsmInstr::X87Load(t, src) if *t != AsmType::LongDouble => {
+                rewrite_op(src, uf);
+            }
             AsmInstr::Lea(src, dst) => {
                 rewrite_op(src, uf);
                 rewrite_op(dst, uf);
@@ -1071,6 +1077,9 @@ fn apply_register_map(instrs: &mut Vec<AsmInstr>, map: &HashMap<String, RegId>) 
             AsmInstr::Cvtss2sd(src, dst) | AsmInstr::Cvtsd2ss(src, dst) => {
                 replace_op(src, map);
                 replace_op(dst, map);
+            }
+            AsmInstr::X87Load(t, src) if *t != AsmType::LongDouble => {
+                replace_op(src, map);
             }
             AsmInstr::Lea(src, dst) => {
                 replace_op(src, map);
@@ -1269,6 +1278,9 @@ fn visit_operands<F: FnMut(&AsmOperand)>(instr: &AsmInstr, mut f: F) {
         AsmInstr::Cvtss2sd(src, dst) | AsmInstr::Cvtsd2ss(src, dst) => {
             f(src);
             f(dst);
+        }
+        AsmInstr::X87Load(t, src) if *t != AsmType::LongDouble => {
+            f(src);
         }
         AsmInstr::Lea(src, dst) => {
             f(src);

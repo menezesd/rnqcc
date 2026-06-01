@@ -891,6 +891,7 @@ impl TackyGen {
             "ptr" => Some(CType::Pointer),
             "float" => Some(CType::Double),
             "double" => Some(CType::Double),
+            "long_double" => Some(CType::LongDouble),
             "int128" => Some(CType::Int128),
             "uint128" => Some(CType::UInt128),
             _ => None,
@@ -1919,6 +1920,42 @@ impl TackyGen {
         if to == CType::Float && from == CType::Double {
             self.emit(TackyInstr::DoubleToFloat {
                 src: val,
+                dst: dst.clone(),
+            });
+            return dst;
+        }
+        if to == CType::LongDouble {
+            let src = if !from.is_floating()
+                && (matches!(val, TackyVal::Constant(_)) || from.size() < CType::Int.size())
+            {
+                let promoted = if from.is_signed() {
+                    CType::Int
+                } else {
+                    CType::UInt
+                };
+                let tmp = self.fresh_tmp(promoted);
+                if from == promoted || matches!(val, TackyVal::Constant(_)) {
+                    self.emit(TackyInstr::Copy {
+                        src: val,
+                        dst: tmp.clone(),
+                    });
+                } else if from.is_signed() {
+                    self.emit(TackyInstr::SignExtend {
+                        src: val,
+                        dst: tmp.clone(),
+                    });
+                } else {
+                    self.emit(TackyInstr::ZeroExtend {
+                        src: val,
+                        dst: tmp.clone(),
+                    });
+                }
+                tmp
+            } else {
+                val
+            };
+            self.emit(TackyInstr::Copy {
+                src,
                 dst: dst.clone(),
             });
             return dst;

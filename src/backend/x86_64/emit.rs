@@ -536,6 +536,9 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
         }
         AsmInstr::X87Load(t, src) => {
             let mnemonic = match t {
+                AsmType::Word => "filds",
+                AsmType::Longword => "fildl",
+                AsmType::Quadword => "fildll",
                 AsmType::Float => "flds",
                 AsmType::Double => "fldl",
                 AsmType::LongDouble => "fldt",
@@ -546,6 +549,31 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                     ))
                 }
             };
+            if matches!(src, AsmOperand::Reg(_) | AsmOperand::Xmm(_) | AsmOperand::Imm(_)) {
+                writeln!(w, "\tsubq $16, %rsp")?;
+                if *t == AsmType::Double {
+                    writeln!(
+                        w,
+                        "\tmovsd {}, (%rsp)",
+                        show_operand(src, *t, platform)?
+                    )?;
+                } else if *t == AsmType::Float {
+                    writeln!(
+                        w,
+                        "\tmovss {}, (%rsp)",
+                        show_operand(src, *t, platform)?
+                    )?;
+                } else {
+                    writeln!(
+                        w,
+                        "\tmov{} {}, (%rsp)",
+                        suffix(*t),
+                        show_operand(src, *t, platform)?
+                    )?;
+                }
+                writeln!(w, "\t{} (%rsp)", mnemonic)?;
+                return writeln!(w, "\taddq $16, %rsp");
+            }
             writeln!(w, "\t{} {}", mnemonic, show_operand(src, *t, platform)?)
         }
         AsmInstr::X87Store(dst) => {
@@ -554,6 +582,23 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                 "\tfstpt {}",
                 show_operand(dst, AsmType::LongDouble, platform)?
             )
+        }
+        AsmInstr::X87LoadIndirect(t, reg) => {
+            let mnemonic = match t {
+                AsmType::Float => "flds",
+                AsmType::Double => "fldl",
+                AsmType::LongDouble => "fldt",
+                other => {
+                    return invalid_input(format!(
+                        "unsupported x87 indirect load type in x86-64 emitter: {:?}",
+                        other
+                    ))
+                }
+            };
+            writeln!(w, "\t{} ({})", mnemonic, reg_name(reg, AsmType::Quadword)?)
+        }
+        AsmInstr::X87StoreIndirect(reg) => {
+            writeln!(w, "\tfstpt ({})", reg_name(reg, AsmType::Quadword)?)
         }
         AsmInstr::X87UnaryNeg => writeln!(w, "\tfchs"),
         AsmInstr::X87Binary(op) => {

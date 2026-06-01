@@ -5645,7 +5645,7 @@ impl Parser {
                                     CType::UChar => "uchar",
                                     CType::Float => "float",
                                     CType::Double => "double",
-                                    CType::LongDouble => "long double",
+                                    CType::LongDouble => "long_double",
                                     CType::Int128 => "int128",
                                     CType::UInt128 => "uint128",
                                     _ => "int",

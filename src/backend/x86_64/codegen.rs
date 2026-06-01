@@ -94,8 +94,7 @@ fn x87_load_val(
             out.push(AsmInstr::X87Load(ty, convert_val(val)));
         }
         _ => {
-            // Integer-to-long-double conversion is lowered elsewhere before this helper is used.
-            out.push(AsmInstr::X87Load(AsmType::LongDouble, convert_val(val)));
+            out.push(AsmInstr::X87Load(ty, convert_val(val)));
         }
     }
 }
@@ -1345,6 +1344,14 @@ fn convert_instruction(
             let dst_t = val_type(dst, types);
             if dst_t == AsmType::Octword {
                 emit_i128_load(out, src_ptr, dst)?;
+            } else if dst_t == AsmType::LongDouble {
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    convert_val(src_ptr),
+                    AsmOperand::Reg(Reg::R11),
+                ));
+                out.push(AsmInstr::X87LoadIndirect(AsmType::LongDouble, Reg::R11));
+                out.push(AsmInstr::X87Store(convert_val(dst)));
             } else {
                 // Load pointer value into R11, then load indirectly
                 out.push(AsmInstr::Mov(
@@ -1359,6 +1366,14 @@ fn convert_instruction(
             let src_t = val_type(src, types);
             if src_t == AsmType::Octword {
                 emit_i128_store(out, src, dst_ptr)?;
+            } else if src_t == AsmType::LongDouble {
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    convert_val(dst_ptr),
+                    AsmOperand::Reg(Reg::R11),
+                ));
+                x87_load_val(out, src, types, static_doubles);
+                out.push(AsmInstr::X87StoreIndirect(Reg::R11));
             } else {
                 // Load pointer value into R11, then store indirectly
                 out.push(AsmInstr::Mov(
@@ -2985,6 +3000,7 @@ fn replace_pseudos(
             AsmInstr::X87Store(dst) => {
                 replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
             }
+            AsmInstr::X87LoadIndirect(_, _) | AsmInstr::X87StoreIndirect(_) => {}
             AsmInstr::Lea(src, dst) => {
                 replace_operand(src, &mut pseudo_map, &mut stack_offset, &ctx);
                 replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
@@ -3510,6 +3526,7 @@ fn verify_final_function(func: &AsmFunction) -> Result<(), String> {
             AsmInstr::X87Load(_, src) | AsmInstr::X87Store(src) => {
                 assert_no_pseudo_operand(src, instr)?;
             }
+            AsmInstr::X87LoadIndirect(_, _) | AsmInstr::X87StoreIndirect(_) => {}
             _ => {}
         }
 

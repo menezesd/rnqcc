@@ -742,6 +742,60 @@ fn x86_64_long_double_comparisons_use_x87_status_flags() {
 }
 
 #[test]
+fn x86_64_long_double_va_arg_uses_x87_loads_and_conversions() {
+    let src = temp_file("x86-ld-va-arg", "c");
+    let out = temp_file("x86-ld-va-arg", "s");
+    std::fs::write(
+        &src,
+        "#include <stdarg.h>\n\
+         long double take(int tag, ...) {\n\
+             va_list ap;\n\
+             va_start(ap, tag);\n\
+             long double x = va_arg(ap, long double);\n\
+             va_end(ap);\n\
+             return x;\n\
+         }\n\
+         int cmp(int tag, ...) {\n\
+             va_list ap;\n\
+             va_start(ap, tag);\n\
+             long double x = va_arg(ap, long double);\n\
+             long double y = va_arg(ap, long double);\n\
+             va_end(ap);\n\
+             return x == y;\n\
+         }\n\
+         int cmp_int(int tag, ...) {\n\
+             va_list ap;\n\
+             va_start(ap, tag);\n\
+             long double x = va_arg(ap, long double);\n\
+             va_end(ap);\n\
+             return x != 131;\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(!asm.contains("__rnqcc_va_arg_long double"), "{asm}");
+    assert!(asm.contains("fldt (%r11)"), "{asm}");
+    assert!(asm.contains("fstpt"), "{asm}");
+    assert!(asm.contains("fildl"), "{asm}");
+    assert!(asm.contains("fucomip %st(1), %st"), "{asm}");
+    assert!(!asm.contains("movt"), "{asm}");
+    assert!(!asm.contains("movl %xmm"), "{asm}");
+    assert!(!asm.contains("cvtsi2sdl %eax"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn aarch64_linux_long_double_uses_binary128_helpers() {
     let src = temp_file("aarch64-ld-binary128", "c");
     let out = temp_file("aarch64-ld-binary128", "s");

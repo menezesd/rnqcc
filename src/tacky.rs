@@ -407,6 +407,9 @@ impl TackyGen {
             Exp::Binary(BinaryOp::Sub, left, right) => {
                 self.static_address_add_constant(left, right, -1)
             }
+            _ if matches!(self.static_exp_full_type(exp), Some(FullType::Array { .. })) => {
+                self.static_lvalue_address_constant(exp)
+            }
             _ => None,
         }
     }

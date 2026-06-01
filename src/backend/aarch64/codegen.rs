@@ -913,7 +913,16 @@ fn collect_stack_slots(
                 collect_var(buf, &mut vars, global_vars);
                 collect_var(value, &mut vars, global_vars);
             }
-            TackyInstr::FunCall { args, dst, .. } => {
+            TackyInstr::FunCall {
+                name,
+                args,
+                dst,
+                indirect,
+                ..
+            } => {
+                if *indirect && !global_vars.contains(name) && !vars.contains(name) {
+                    vars.push(name.clone());
+                }
                 for arg in args {
                     collect_var(arg, &mut vars, global_vars);
                 }

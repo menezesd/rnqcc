@@ -305,8 +305,24 @@ impl Parser {
         None
     }
 
+    fn lookup_visible_typedef(&self, name: &str) -> Option<&TypedefInfo> {
+        for index in (0..self.typedef_scopes.len()).rev() {
+            if self
+                .value_scopes
+                .get(index)
+                .is_some_and(|scope| scope.contains_key(name))
+            {
+                return None;
+            }
+            if let Some(info) = self.typedef_scopes[index].get(name) {
+                return Some(info);
+            }
+        }
+        None
+    }
+
     fn is_typedef_name(&self, name: &str) -> bool {
-        self.lookup_typedef(name).is_some()
+        self.lookup_visible_typedef(name).is_some()
     }
 
     fn is_builtin_float_type_name(name: &str) -> bool {
@@ -1040,11 +1056,11 @@ impl Parser {
             .any(|pair| matches!(pair, [Token::KWLong, Token::KWDouble]));
         let enum_typedef = match tokens {
             [Token::Identifier(name)] => self
-                .lookup_typedef(name)
+                .lookup_visible_typedef(name)
                 .filter(|info| info.is_enum)
                 .map(|_| name.clone()),
             [Token::KWTypeOf, Token::OpenParen, Token::Identifier(name), Token::CloseParen] => self
-                .lookup_typedef(name)
+                .lookup_visible_typedef(name)
                 .filter(|info| info.is_enum)
                 .map(|_| name.clone()),
             _ => None,
@@ -1993,7 +2009,7 @@ impl Parser {
                     self.last_typedef_full_type = None;
                     return Ok((sc, CType::Int128));
                 }
-                if let Some(info) = self.lookup_typedef(name) {
+                if let Some(info) = self.lookup_visible_typedef(name) {
                     let ct = info.base_type;
                     let tag = info.struct_tag.clone();
                     let ft = info.full_type.clone();
@@ -2234,7 +2250,7 @@ impl Parser {
                 self.last_typedef_full_type = None;
                 return Ok(CType::Int128);
             }
-            if let Some(info) = self.lookup_typedef(name) {
+            if let Some(info) = self.lookup_visible_typedef(name) {
                 let ct = info.base_type;
                 let tag = info.struct_tag.clone();
                 let ft = info.full_type.clone();

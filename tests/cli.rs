@@ -2820,6 +2820,93 @@ fn recovers_missing_struct_semicolon_before_implicit_int_function() {
 }
 
 #[test]
+fn local_object_declaration_shadows_typedef_name_in_statements() {
+    let src = temp_file("local-object-shadows-typedef", "c");
+    let exe = temp_file("local-object-shadows-typedef", "bin");
+    std::fs::write(
+        &src,
+        "typedef struct { int x; } p;\n\
+         typedef struct { int y; } t;\n\
+         int main(void) {\n\
+             t src;\n\
+             t p;\n\
+             src.y = 42;\n\
+             p = src;\n\
+             return p.y;\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn compiles_static_array_member_pointer_difference() {
+    let src = temp_file("static-array-member-pointer-diff", "c");
+    let exe = temp_file("static-array-member-pointer-diff", "bin");
+    std::fs::write(
+        &src,
+        "struct { char a, b, f[3]; } s;\n\
+         long i = s.f - &s.b;\n\
+         long long j = s.f - &s.b;\n\
+         int main(void) { return i == 1 && j == 1 ? 42 : 1; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn aarch64_indirect_call_callee_gets_stack_slot() {
+    let src = temp_file("aarch64-indirect-call-callee-stack-slot", "c");
+    let out = temp_file("aarch64-indirect-call-callee-stack-slot", "s");
+    std::fs::write(
+        &src,
+        "typedef void foo(void);\n\
+         int f(int x) {\n\
+             if (x) { const foo *v; (*v)(); } else g(0);\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--stage", "s", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn compiles_static_pointer_designator_initializers() {
     let src = temp_file("static-pointer-designator-initializers", "c");
     let exe = temp_file("static-pointer-designator-initializers", "bin");

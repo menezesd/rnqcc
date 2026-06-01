@@ -25,6 +25,11 @@ pub struct WarningOptions {
     pub error: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CompatibilityOptions {
+    pub permissive: bool,
+}
+
 impl Default for WarningOptions {
     fn default() -> Self {
         Self {
@@ -303,6 +308,7 @@ pub fn compile(
     opt_flags: &optimize::OptimizationFlags,
     no_coalescing: bool,
     instrument_functions: bool,
+    compatibility: CompatibilityOptions,
     dumps: DumpOptions,
     warnings: WarningOptions,
 ) -> Result<(), String> {
@@ -359,8 +365,9 @@ pub fn compile(
     }
 
     // Generate TACKY IR
-    let mut tacky_program = tacky::generate_with_options(resolved_ast, instrument_functions)
-        .map_err(|err| Diagnostic::tacky(err).render())?;
+    let mut tacky_program =
+        tacky::generate_with_options(resolved_ast, instrument_functions, compatibility.permissive)
+            .map_err(|err| Diagnostic::tacky(err).render())?;
     validate_tacky_program(&tacky_program).map_err(|err| Diagnostic::tacky(err).render())?;
     if dumps.tacky_pre_opt {
         eprintln!("{:#?}", tacky_program);

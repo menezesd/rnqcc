@@ -13,6 +13,7 @@ struct AggregateAttributes {
     packed: bool,
     transparent_union: bool,
     alignment: Option<std::num::NonZeroUsize>,
+    reverse_storage_order: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -162,6 +163,7 @@ impl Parser {
         AggregateAttributes {
             packed: prefix.packed || suffix.packed,
             transparent_union: prefix.transparent_union || suffix.transparent_union,
+            reverse_storage_order: prefix.reverse_storage_order || suffix.reverse_storage_order,
             alignment: match (prefix.alignment, suffix.alignment) {
                 (Some(prefix), Some(suffix)) => Some(prefix.max(suffix)),
                 (Some(prefix), None) => Some(prefix),
@@ -430,6 +432,7 @@ impl Parser {
                 | Some(Token::AttributePackedAlignedNoreturn(_))
                 | Some(Token::AttributeTransparentUnion)
                 | Some(Token::AttributeMode(_))
+                | Some(Token::AttributeScalarStorageOrderReverse)
         ) || matches!(
             self.peek(),
             Some(Token::Identifier(name)) if Self::is_gnu_qualifier_name(name)
@@ -1383,7 +1386,9 @@ impl Parser {
                     attrs.alignment = Self::merge_alignment(attrs.alignment, value);
                     attrs.packed = true;
                 }
-                Some(Token::AttributeMode(_)) | Some(Token::AttributeVectorSize(_)) => {
+                Some(Token::AttributeMode(_))
+                | Some(Token::AttributeVectorSize(_))
+                | Some(Token::AttributeScalarStorageOrderReverse) => {
                     self.advance()?;
                 }
                 _ => break,
@@ -1449,7 +1454,7 @@ impl Parser {
                     alignment = Self::merge_alignment(alignment, value);
                     noreturn = true;
                 }
-                Some(Token::AttributeMode(_)) => {
+                Some(Token::AttributeMode(_)) | Some(Token::AttributeScalarStorageOrderReverse) => {
                     self.advance()?;
                 }
                 Some(Token::AttributeVectorSize(expression)) => {
@@ -1514,6 +1519,10 @@ impl Parser {
                 }
                 Some(Token::AttributeMode(_)) | Some(Token::AttributeVectorSize(_)) => {
                     self.advance()?;
+                }
+                Some(Token::AttributeScalarStorageOrderReverse) => {
+                    self.advance()?;
+                    attrs.reverse_storage_order = true;
                 }
                 _ => break,
             }
@@ -1979,29 +1988,23 @@ impl Parser {
         let mut saw_complex = false;
         let mut mode_attr: Option<String> = None;
         let mut vector_size_attr: Option<usize> = None;
-        let mut saw_non_type_specifier = false;
-
         loop {
             match self.peek().cloned() {
                 // Ignored qualifiers/specifiers
                 Some(Token::KWConst) | Some(Token::KWVolatile) | Some(Token::KWRestrict) => {
-                    saw_non_type_specifier = true;
                     self.advance()?;
                     continue;
                 }
                 Some(Token::Identifier(name)) if Self::is_gnu_qualifier_name(&name) => {
-                    saw_non_type_specifier = true;
                     self.advance()?;
                     continue;
                 }
                 Some(Token::KWInline) => {
-                    saw_non_type_specifier = true;
                     self.pending_inline = true;
                     self.advance()?;
                     continue;
                 }
                 Some(Token::Identifier(name)) if Self::is_complex_type_name(&name) => {
-                    saw_non_type_specifier = true;
                     saw_complex = true;
                     self.advance()?;
                     continue;
@@ -2011,19 +2014,16 @@ impl Parser {
                     has_int128 = true;
                 }
                 Some(Token::KWNoreturn) | Some(Token::AttributeNoreturn) => {
-                    saw_non_type_specifier = true;
                     self.pending_noreturn = true;
                     self.advance()?;
                     continue;
                 }
                 Some(Token::AttributeNoInstrumentFunction) => {
-                    saw_non_type_specifier = true;
                     self.pending_no_instrument_function = true;
                     self.advance()?;
                     continue;
                 }
                 Some(Token::KWThreadLocal) => {
-                    saw_non_type_specifier = true;
                     self.advance()?;
                     sc = Some(match sc {
                         Some(existing) => existing.with_thread_local(),
@@ -2031,7 +2031,6 @@ impl Parser {
                     });
                 }
                 Some(Token::KWAlignAs) => {
-                    saw_non_type_specifier = true;
                     let alignment = self.parse_alignment_specifier()?;
                     self.pending_alignment =
                         Self::merge_alignment(self.pending_alignment, alignment);
@@ -2039,7 +2038,6 @@ impl Parser {
                 }
                 Some(Token::AttributeAligned(value))
                 | Some(Token::AttributePackedAligned(value)) => {
-                    saw_non_type_specifier = true;
                     let alignment = self.parse_attribute_alignment(&value)?;
                     self.advance()?;
                     self.pending_alignment =
@@ -2048,7 +2046,6 @@ impl Parser {
                 }
                 Some(Token::AttributeAlignedNoreturn(value))
                 | Some(Token::AttributePackedAlignedNoreturn(value)) => {
-                    saw_non_type_specifier = true;
                     let alignment = self.parse_attribute_alignment(&value)?;
                     self.advance()?;
                     self.pending_alignment =
@@ -2057,24 +2054,20 @@ impl Parser {
                     continue;
                 }
                 Some(Token::AttributePacked) => {
-                    saw_non_type_specifier = true;
                     self.advance()?;
                     continue;
                 }
                 Some(Token::AttributeMode(mode)) => {
-                    saw_non_type_specifier = true;
                     mode_attr = Some(mode);
                     self.advance()?;
                     continue;
                 }
                 Some(Token::AttributeVectorSize(expression)) => {
-                    saw_non_type_specifier = true;
                     vector_size_attr = Some(self.parse_attribute_vector_size(&expression)?);
                     self.advance()?;
                     continue;
                 }
                 Some(Token::KWAtomic) => {
-                    saw_non_type_specifier = true;
                     self.advance()?;
                     if self.eat(&Token::OpenParen) {
                         let (_atomic_sc, atomic_type) = self.parse_specifiers()?;
@@ -2112,7 +2105,6 @@ impl Parser {
                     return Ok((sc, CType::Void));
                 }
                 Some(Token::KWStatic) if sc.as_ref().is_none_or(StorageClass::is_thread_local) => {
-                    saw_non_type_specifier = true;
                     self.advance()?;
                     sc = Some(match sc {
                         Some(existing) => existing.with_static(),
@@ -2120,7 +2112,6 @@ impl Parser {
                     });
                 }
                 Some(Token::KWExtern) if sc.as_ref().is_none_or(StorageClass::is_thread_local) => {
-                    saw_non_type_specifier = true;
                     self.advance()?;
                     sc = Some(match sc {
                         Some(existing) => existing.with_extern(),
@@ -2128,16 +2119,13 @@ impl Parser {
                     });
                 }
                 Some(Token::KWTypedef) if sc.is_none() => {
-                    saw_non_type_specifier = true;
                     self.advance()?;
                     sc = Some(StorageClass::Typedef);
                 }
                 Some(Token::KWRegister) if sc.is_none() => {
-                    saw_non_type_specifier = true;
                     self.advance()?; // ignore register storage class
                 }
                 Some(Token::KWAuto) if sc.is_none() => {
-                    saw_non_type_specifier = true;
                     self.advance()?; // ignore auto storage class
                 }
                 Some(Token::KWInt) if !has_int && !has_void && !has_char => {
@@ -2280,12 +2268,10 @@ impl Parser {
                 self.last_type_was_enum = false;
                 return Ok((sc, CType::Double));
             }
-            if saw_non_type_specifier
-                && matches!(
-                    self.peek(),
-                    Some(Token::Identifier(_)) | Some(Token::Star) | Some(Token::OpenParen)
-                )
-            {
+            if matches!(
+                self.peek(),
+                Some(Token::Identifier(_)) | Some(Token::Star) | Some(Token::OpenParen)
+            ) {
                 return Ok((sc, CType::Int));
             }
             return Err(self.format_error("expected type specifier"));
@@ -2687,6 +2673,7 @@ impl Parser {
             | Token::AttributeNoInstrumentFunction
             | Token::AttributeMode(_)
             | Token::AttributeVectorSize(_)
+            | Token::AttributeScalarStorageOrderReverse
             | Token::KWNoreturn => true,
             Token::Identifier(name) => {
                 self.is_typedef_name(name)
@@ -3310,6 +3297,9 @@ impl Parser {
                 if self.eat(&Token::Comma) {
                     continue;
                 }
+                if self.at(&Token::CloseBrace) {
+                    break;
+                }
                 self.expect_token(Token::Semicolon)?;
                 break;
             }
@@ -3355,6 +3345,7 @@ impl Parser {
                 transparent_union: attrs.transparent_union,
                 packed: attrs.packed,
                 alignment: attrs.alignment,
+                reverse_storage_order: attrs.reverse_storage_order,
             };
             self.record_struct_definition(&declaration)?;
             self.record_struct_member_vla_elem_sizes(&tag, member_vla_sizes);
@@ -3444,6 +3435,7 @@ impl Parser {
                             transparent_union: attrs.transparent_union,
                             packed: attrs.packed,
                             alignment: attrs.alignment,
+                            reverse_storage_order: attrs.reverse_storage_order,
                         };
                         self.record_struct_definition(&declaration)?;
                         self.record_struct_member_vla_elem_sizes(&tag, member_vla_sizes);
@@ -3458,6 +3450,7 @@ impl Parser {
                         transparent_union: prefix_attrs.transparent_union,
                         packed: prefix_attrs.packed,
                         alignment: prefix_attrs.alignment,
+                        reverse_storage_order: prefix_attrs.reverse_storage_order,
                     }));
                 }
             }
@@ -3525,6 +3518,7 @@ impl Parser {
                     old_style: func_info.old_style,
                     noreturn: false,
                     no_instrument_function: false,
+                    is_inline: false,
                 }));
             }
         }
@@ -3672,12 +3666,11 @@ impl Parser {
             let param_value_types =
                 Self::param_value_types(&func_info.params, &func_info.param_full_types);
             let body = if self.at(&Token::OpenBrace) {
-                let body = self.parse_function_body_preserving_type_decls(
+                Some(self.parse_function_body_preserving_type_decls(
                     &name,
                     &param_value_types,
                     &func_info.param_vla_bounds,
-                )?;
-                (!spec_inline || !sc.as_ref().is_some_and(StorageClass::is_extern)).then_some(body)
+                )?)
             } else {
                 if self.eat(&Token::Comma) {
                     let mut extra = Vec::new();
@@ -3723,6 +3716,7 @@ impl Parser {
                                 old_style: func_info2.old_style,
                                 noreturn: first_noreturn,
                                 no_instrument_function: first_no_instrument,
+                                is_inline: spec_inline,
                             }));
                         } else {
                             let decl = self.make_var_decl(
@@ -3766,6 +3760,7 @@ impl Parser {
                 old_style: func_info.old_style,
                 noreturn: first_noreturn,
                 no_instrument_function: first_no_instrument,
+                is_inline: spec_inline,
             }));
         }
 
@@ -3798,12 +3793,11 @@ impl Parser {
             let param_value_types =
                 Self::param_value_types(&func_info.params, &func_info.param_full_types);
             let body = if self.at(&Token::OpenBrace) {
-                let body = self.parse_function_body_preserving_type_decls(
+                Some(self.parse_function_body_preserving_type_decls(
                     &name,
                     &param_value_types,
                     &func_info.param_vla_bounds,
-                )?;
-                (!spec_inline || !sc.as_ref().is_some_and(StorageClass::is_extern)).then_some(body)
+                )?)
             } else {
                 if self.eat(&Token::Comma) {
                     let mut extra = Vec::new();
@@ -3845,6 +3839,7 @@ impl Parser {
                                 old_style: func_info2.old_style,
                                 noreturn: first_noreturn,
                                 no_instrument_function: first_no_instrument,
+                                is_inline: spec_inline,
                             }));
                         } else {
                             let decl = self.make_var_decl(
@@ -3888,6 +3883,7 @@ impl Parser {
                 old_style: func_info.old_style,
                 noreturn: first_noreturn,
                 no_instrument_function: first_no_instrument,
+                is_inline: spec_inline,
             }));
         }
 
@@ -3941,6 +3937,7 @@ impl Parser {
                         old_style: func_info2.old_style,
                         noreturn: first_noreturn,
                         no_instrument_function: first_no_instrument,
+                        is_inline: spec_inline,
                     }));
                 } else {
                     let decl = self.make_var_decl(
@@ -4417,6 +4414,7 @@ impl Parser {
             | Some(Token::AttributeNoInstrumentFunction)
             | Some(Token::AttributeMode(_))
             | Some(Token::AttributeVectorSize(_))
+            | Some(Token::AttributeScalarStorageOrderReverse)
             | Some(Token::KWNoreturn) => true,
             Some(Token::Identifier(name)) => {
                 self.is_typedef_name(name)
@@ -4483,6 +4481,7 @@ impl Parser {
                                 transparent_union: attrs.transparent_union,
                                 packed: attrs.packed,
                                 alignment: attrs.alignment,
+                                reverse_storage_order: attrs.reverse_storage_order,
                             };
                             self.record_struct_definition(&declaration)?;
                             self.record_struct_member_vla_elem_sizes(&tag, member_vla_sizes);
@@ -4500,6 +4499,7 @@ impl Parser {
                                 transparent_union: prefix_attrs.transparent_union,
                                 packed: prefix_attrs.packed,
                                 alignment: prefix_attrs.alignment,
+                                reverse_storage_order: prefix_attrs.reverse_storage_order,
                             },
                         )));
                     }
@@ -4630,13 +4630,11 @@ impl Parser {
                 let param_value_types =
                     Self::param_value_types(&func_info.params, &func_info.param_full_types);
                 let body = if self.at(&Token::OpenBrace) {
-                    let body = self.parse_function_body_preserving_type_decls(
+                    Some(self.parse_function_body_preserving_type_decls(
                         &name,
                         &param_value_types,
                         &func_info.param_vla_bounds,
-                    )?;
-                    (!spec_inline || !sc.as_ref().is_some_and(StorageClass::is_extern))
-                        .then_some(body)
+                    )?)
                 } else {
                     if self.eat(&Token::Comma) {
                         let mut extra = Vec::new();
@@ -4681,6 +4679,7 @@ impl Parser {
                                         old_style: func_info2.old_style,
                                         noreturn: decl_noreturn,
                                         no_instrument_function: decl_no_instrument,
+                                        is_inline: spec_inline,
                                     },
                                 )));
                             } else {
@@ -4723,6 +4722,7 @@ impl Parser {
                         old_style: func_info.old_style,
                         noreturn: decl_noreturn,
                         no_instrument_function: decl_no_instrument,
+                        is_inline: spec_inline,
                     },
                 )))
             } else {
@@ -4771,6 +4771,7 @@ impl Parser {
                                     old_style: func_info2.old_style,
                                     noreturn: decl_noreturn,
                                     no_instrument_function: decl_no_instrument,
+                                    is_inline: spec_inline,
                                 },
                             )));
                         } else {
@@ -6427,10 +6428,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_struct_members_reports_missing_member_semicolon() -> Result<(), String> {
+    fn parse_struct_members_accepts_missing_final_member_semicolon() -> Result<(), String> {
         let mut parser = parser_source("{ int x }")?;
-        let err = require_err(parser.parse_struct_members(), "struct members should fail")?;
-        assert!(err.contains("expected Semicolon"), "{err}");
+        parser.parse_struct_members()?;
         Ok(())
     }
 

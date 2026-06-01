@@ -173,8 +173,11 @@ struct TackyGen {
     string_counter: usize,
     instructions: Vec<TackyInstr>,
     current_function: String,
+    current_function_params: Vec<String>,
     label_address_function: Option<String>,
     local_label_stack: Vec<HashSet<String>>,
+    current_label_bodies: HashMap<String, Statement>,
+    current_escaped_functions: HashSet<String>,
     /// Hidden return pointer name for functions returning large structs
     hidden_ret_ptr: Option<String>,
     static_vars: Vec<TackyStaticVar>,
@@ -210,7 +213,10 @@ struct TackyGen {
     transparent_unions: HashMap<String, FullType>,
     nested_functions: Vec<TackyFunction>,
     instrument_functions: bool,
+    permissive: bool,
     no_instrument_functions: std::collections::HashSet<String>,
+    inline_va_arg_pack_functions: HashMap<String, FunctionDeclaration>,
+    nested_capture_slots: HashMap<String, Vec<(String, String)>>,
 }
 
 impl TackyGen {
@@ -221,8 +227,11 @@ impl TackyGen {
             string_counter: 0,
             instructions: Vec::new(),
             current_function: String::new(),
+            current_function_params: Vec::new(),
             label_address_function: None,
             local_label_stack: Vec::new(),
+            current_label_bodies: HashMap::new(),
+            current_escaped_functions: HashSet::new(),
             hidden_ret_ptr: None,
             static_vars: Vec::new(),
             static_constants: Vec::new(),
@@ -247,7 +256,10 @@ impl TackyGen {
             transparent_unions: HashMap::new(),
             nested_functions: Vec::new(),
             instrument_functions: false,
+            permissive: false,
             no_instrument_functions: std::collections::HashSet::new(),
+            inline_va_arg_pack_functions: HashMap::new(),
+            nested_capture_slots: HashMap::new(),
         }
     }
 
@@ -760,6 +772,11 @@ impl TackyGen {
         if ft.is_vector() {
             self.array_sizes
                 .insert(name.clone(), ft.byte_size_with(&self.struct_defs));
+        }
+        if let FullType::Struct(ref tag) = ft {
+            if let Some(def) = self.struct_defs.get(tag) {
+                self.array_sizes.insert(name.clone(), def.size);
+            }
         }
         TackyVal::Var(name)
     }
@@ -1438,6 +1455,12 @@ impl TackyGen {
         if matches!(dst, FullType::Pointer(_)) && Self::is_null_pointer_constant(src_exp) {
             return Ok(());
         }
+        if self.permissive
+            && Self::is_pointer_like_full_type(dst)
+            && Self::is_pointer_like_full_type(src)
+        {
+            return Ok(());
+        }
         if Self::is_integer_full_type(dst) && matches!(src, FullType::Pointer(_))
             || matches!(dst, FullType::Pointer(_)) && Self::is_integer_full_type(src)
         {
@@ -1458,6 +1481,13 @@ impl TackyGen {
             }
         }
         self.assert_assignable_full_type(dst, src, context)
+    }
+
+    fn is_pointer_like_full_type(ft: &FullType) -> bool {
+        matches!(
+            ft,
+            FullType::Pointer(_) | FullType::Function { .. } | FullType::Scalar(CType::Pointer)
+        )
     }
 
     fn is_integer_full_type(ft: &FullType) -> bool {
@@ -3400,6 +3430,7 @@ impl TackyGen {
 
     fn emit_var(&mut self, name: String) -> TackyResult<(TackyVal, CType)> {
         if self.function_symbols.contains(&name) {
+            self.emit_nested_capture_updates(&name);
             let (return_type, _, _, variadic) =
                 self.func_types
                     .get(&name)
@@ -4021,11 +4052,372 @@ impl TackyGen {
         Ok((result, CType::Int))
     }
 
+    fn builtin_apply_target_name(exp: &Exp) -> Option<String> {
+        match exp {
+            Exp::Var(name) | Exp::FunctionCall(name, _) => Some(name.clone()),
+            Exp::Cast(_, _, inner) => Self::builtin_apply_target_name(inner),
+            Exp::Unary(UnaryOp::AddrOf, inner) => Self::builtin_apply_target_name(inner),
+            _ => None,
+        }
+    }
+
+    fn exp_contains_va_arg_pack(exp: &Exp) -> bool {
+        match exp {
+            Exp::FunctionCall(name, args) => {
+                (name == "__builtin_va_arg_pack" && args.is_empty())
+                    || args.iter().any(Self::exp_contains_va_arg_pack)
+            }
+            Exp::Cast(_, _, inner)
+            | Exp::Unary(_, inner)
+            | Exp::SizeOf(inner)
+            | Exp::Dot(inner, _)
+            | Exp::Arrow(inner, _) => Self::exp_contains_va_arg_pack(inner),
+            Exp::Binary(_, left, right)
+            | Exp::Assign(left, right)
+            | Exp::CompoundAssign(_, left, right)
+            | Exp::Subscript(left, right)
+            | Exp::Comma(left, right) => {
+                Self::exp_contains_va_arg_pack(left) || Self::exp_contains_va_arg_pack(right)
+            }
+            Exp::Conditional(cond, then_exp, else_exp) => {
+                Self::exp_contains_va_arg_pack(cond)
+                    || Self::exp_contains_va_arg_pack(then_exp)
+                    || Self::exp_contains_va_arg_pack(else_exp)
+            }
+            Exp::BuiltinExpect(value, hints) => {
+                Self::exp_contains_va_arg_pack(value)
+                    || hints.iter().any(Self::exp_contains_va_arg_pack)
+            }
+            Exp::ArrayInit(elems) => elems.iter().any(Self::exp_contains_va_arg_pack),
+            Exp::DesignatedInit(_, value) => Self::exp_contains_va_arg_pack(value),
+            Exp::StatementExpr(block, tail, _) => {
+                Self::block_contains_va_arg_pack(block)
+                    || tail
+                        .as_ref()
+                        .is_some_and(|exp| Self::exp_contains_va_arg_pack(exp))
+            }
+            Exp::IndirectCall(callee, args) => {
+                Self::exp_contains_va_arg_pack(callee)
+                    || args.iter().any(Self::exp_contains_va_arg_pack)
+            }
+            Exp::AtomicFetch { ptr, arg, .. } => {
+                Self::exp_contains_va_arg_pack(ptr) || Self::exp_contains_va_arg_pack(arg)
+            }
+            Exp::AtomicExchange { ptr, value } => {
+                Self::exp_contains_va_arg_pack(ptr) || Self::exp_contains_va_arg_pack(value)
+            }
+            Exp::AtomicCompareExchange {
+                ptr,
+                expected,
+                desired,
+            }
+            | Exp::AtomicCompareSwap {
+                ptr,
+                expected,
+                desired,
+                ..
+            } => {
+                Self::exp_contains_va_arg_pack(ptr)
+                    || Self::exp_contains_va_arg_pack(expected)
+                    || Self::exp_contains_va_arg_pack(desired)
+            }
+            Exp::Constant(_)
+            | Exp::LongConstant(_)
+            | Exp::Int128Constant(_)
+            | Exp::UIntConstant(_)
+            | Exp::ULongConstant(_)
+            | Exp::UInt128Constant(_)
+            | Exp::DoubleConstant(_)
+            | Exp::ImaginaryIntConstant(_)
+            | Exp::ImaginaryDoubleConstant(_)
+            | Exp::StringLiteral(_)
+            | Exp::WideStringLiteral(_)
+            | Exp::Var(_)
+            | Exp::LabelAddress(_)
+            | Exp::SizeOfType(_, _)
+            | Exp::AlignOfType(_)
+            | Exp::Unreachable
+            | Exp::AtomicFence => false,
+        }
+    }
+
+    fn statement_contains_va_arg_pack(statement: &Statement) -> bool {
+        match statement {
+            Statement::Return(Some(exp)) | Statement::Expression(exp) => {
+                Self::exp_contains_va_arg_pack(exp)
+            }
+            Statement::Return(None)
+            | Statement::Break(_)
+            | Statement::Continue(_)
+            | Statement::Goto(_)
+            | Statement::Null => false,
+            Statement::If(cond, then_stmt, else_stmt) => {
+                Self::exp_contains_va_arg_pack(cond)
+                    || Self::statement_contains_va_arg_pack(then_stmt)
+                    || else_stmt
+                        .as_ref()
+                        .is_some_and(|stmt| Self::statement_contains_va_arg_pack(stmt))
+            }
+            Statement::Block(block) => Self::block_contains_va_arg_pack(block),
+            Statement::While {
+                condition, body, ..
+            } => {
+                Self::exp_contains_va_arg_pack(condition)
+                    || Self::statement_contains_va_arg_pack(body)
+            }
+            Statement::DoWhile {
+                body, condition, ..
+            } => {
+                Self::statement_contains_va_arg_pack(body)
+                    || Self::exp_contains_va_arg_pack(condition)
+            }
+            Statement::For {
+                init,
+                condition,
+                post,
+                body,
+                ..
+            } => {
+                matches!(init.as_ref(), ForInit::Expression(Some(exp)) if Self::exp_contains_va_arg_pack(exp))
+                    || condition
+                        .as_ref()
+                        .is_some_and(Self::exp_contains_va_arg_pack)
+                    || post.as_ref().is_some_and(Self::exp_contains_va_arg_pack)
+                    || Self::statement_contains_va_arg_pack(body)
+            }
+            Statement::IndirectGoto(exp) => Self::exp_contains_va_arg_pack(exp),
+            Statement::Label(_, body)
+            | Statement::Case { body, .. }
+            | Statement::Default { body, .. } => Self::statement_contains_va_arg_pack(body),
+            Statement::Switch { control, body, .. } => {
+                Self::exp_contains_va_arg_pack(control)
+                    || Self::statement_contains_va_arg_pack(body)
+            }
+        }
+    }
+
+    fn block_contains_va_arg_pack(block: &Block) -> bool {
+        block.iter().any(|item| match item {
+            BlockItem::Declaration(_) => false,
+            BlockItem::Statement(stmt) => Self::statement_contains_va_arg_pack(stmt),
+        })
+    }
+
+    fn inline_return_expression(statement: &Statement) -> Option<Exp> {
+        match statement {
+            Statement::Return(Some(exp)) => Some(exp.clone()),
+            Statement::Block(block) => Self::inline_block_expression(block),
+            Statement::If(cond, then_stmt, Some(else_stmt)) => {
+                let then_exp = Self::inline_return_expression(then_stmt)?;
+                let else_exp = Self::inline_return_expression(else_stmt)?;
+                Some(Exp::Conditional(
+                    Box::new(cond.clone()),
+                    Box::new(then_exp),
+                    Box::new(else_exp),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    fn substitute_inline_locals_exp(exp: Exp, locals: &HashMap<String, Exp>) -> Exp {
+        match exp {
+            Exp::Var(name) => locals.get(&name).cloned().unwrap_or_else(|| Exp::Var(name)),
+            Exp::FunctionCall(name, args) => Exp::FunctionCall(
+                name,
+                args.into_iter()
+                    .map(|arg| Self::substitute_inline_locals_exp(arg, locals))
+                    .collect(),
+            ),
+            Exp::Cast(ct, ft, inner) => Exp::Cast(
+                ct,
+                ft,
+                Box::new(Self::substitute_inline_locals_exp(*inner, locals)),
+            ),
+            Exp::Unary(op, inner) => Exp::Unary(
+                op,
+                Box::new(Self::substitute_inline_locals_exp(*inner, locals)),
+            ),
+            Exp::Binary(op, left, right) => Exp::Binary(
+                op,
+                Box::new(Self::substitute_inline_locals_exp(*left, locals)),
+                Box::new(Self::substitute_inline_locals_exp(*right, locals)),
+            ),
+            Exp::Conditional(cond, then_exp, else_exp) => Exp::Conditional(
+                Box::new(Self::substitute_inline_locals_exp(*cond, locals)),
+                Box::new(Self::substitute_inline_locals_exp(*then_exp, locals)),
+                Box::new(Self::substitute_inline_locals_exp(*else_exp, locals)),
+            ),
+            Exp::Comma(left, right) => Exp::Comma(
+                Box::new(Self::substitute_inline_locals_exp(*left, locals)),
+                Box::new(Self::substitute_inline_locals_exp(*right, locals)),
+            ),
+            other => other,
+        }
+    }
+
+    fn inline_block_expression(block: &Block) -> Option<Exp> {
+        match block.as_slice() {
+            [BlockItem::Statement(statement)] => Self::inline_return_expression(statement),
+            [BlockItem::Statement(Statement::If(cond, then_stmt, None)), BlockItem::Statement(fallback)] =>
+            {
+                let then_exp = Self::inline_return_expression(then_stmt)?;
+                let else_exp = Self::inline_return_expression(fallback)?;
+                Some(Exp::Conditional(
+                    Box::new(cond.clone()),
+                    Box::new(then_exp),
+                    Box::new(else_exp),
+                ))
+            }
+            _ => {
+                let (last, prefix) = block.split_last()?;
+                let BlockItem::Statement(statement) = last else {
+                    return None;
+                };
+                let mut locals = HashMap::new();
+                let mut side_effects = Vec::new();
+                for item in prefix {
+                    match item {
+                        BlockItem::Declaration(Declaration::VarDecl(vd)) => {
+                            let init = vd.init.as_ref()?.clone();
+                            locals.insert(vd.name.clone(), init);
+                        }
+                        BlockItem::Statement(Statement::Expression(exp)) => {
+                            side_effects.push(exp.clone());
+                        }
+                        _ => return None,
+                    }
+                }
+                let mut result = Self::inline_return_expression(statement)?;
+                result = Self::substitute_inline_locals_exp(result, &locals);
+                for effect in side_effects.into_iter().rev() {
+                    result = Exp::Comma(Box::new(effect), Box::new(result));
+                }
+                Some(result)
+            }
+        }
+    }
+
+    fn substitute_va_arg_pack_exp(
+        exp: &Exp,
+        params: &HashMap<String, Exp>,
+        tail_args: &[Exp],
+    ) -> Option<Exp> {
+        match exp {
+            Exp::Var(name) => Some(params.get(name).cloned().unwrap_or_else(|| exp.clone())),
+            Exp::FunctionCall(name, args) => {
+                if name == "__builtin_va_arg_pack" && args.is_empty() {
+                    return None;
+                }
+                let mut substituted = Vec::new();
+                for arg in args {
+                    if matches!(arg, Exp::FunctionCall(inner, inner_args)
+                        if inner == "__builtin_va_arg_pack" && inner_args.is_empty())
+                    {
+                        substituted.extend(tail_args.iter().cloned());
+                    } else {
+                        substituted.push(Self::substitute_va_arg_pack_exp(arg, params, tail_args)?);
+                    }
+                }
+                Some(Exp::FunctionCall(name.clone(), substituted))
+            }
+            Exp::Cast(ct, ft, inner) => Some(Exp::Cast(
+                *ct,
+                ft.clone(),
+                Box::new(Self::substitute_va_arg_pack_exp(inner, params, tail_args)?),
+            )),
+            Exp::Unary(op, inner) => Some(Exp::Unary(
+                op.clone(),
+                Box::new(Self::substitute_va_arg_pack_exp(inner, params, tail_args)?),
+            )),
+            Exp::Binary(op, left, right) => Some(Exp::Binary(
+                op.clone(),
+                Box::new(Self::substitute_va_arg_pack_exp(left, params, tail_args)?),
+                Box::new(Self::substitute_va_arg_pack_exp(right, params, tail_args)?),
+            )),
+            Exp::Assign(left, right) => Some(Exp::Assign(
+                Box::new(Self::substitute_va_arg_pack_exp(left, params, tail_args)?),
+                Box::new(Self::substitute_va_arg_pack_exp(right, params, tail_args)?),
+            )),
+            Exp::CompoundAssign(op, left, right) => Some(Exp::CompoundAssign(
+                op.clone(),
+                Box::new(Self::substitute_va_arg_pack_exp(left, params, tail_args)?),
+                Box::new(Self::substitute_va_arg_pack_exp(right, params, tail_args)?),
+            )),
+            Exp::Conditional(cond, then_exp, else_exp) => Some(Exp::Conditional(
+                Box::new(Self::substitute_va_arg_pack_exp(cond, params, tail_args)?),
+                Box::new(Self::substitute_va_arg_pack_exp(
+                    then_exp, params, tail_args,
+                )?),
+                Box::new(Self::substitute_va_arg_pack_exp(
+                    else_exp, params, tail_args,
+                )?),
+            )),
+            Exp::Comma(left, right) => Some(Exp::Comma(
+                Box::new(Self::substitute_va_arg_pack_exp(left, params, tail_args)?),
+                Box::new(Self::substitute_va_arg_pack_exp(right, params, tail_args)?),
+            )),
+            _ => Some(exp.clone()),
+        }
+    }
+
+    fn expand_inline_va_arg_pack_call(&self, name: &str, args: &[Exp]) -> Option<Exp> {
+        let func = self.inline_va_arg_pack_functions.get(name)?;
+        if !func.variadic || args.len() < func.params.len() {
+            return None;
+        }
+        let body = func.body.as_ref()?;
+        let return_exp = Self::inline_block_expression(body)?;
+        let mut params = HashMap::new();
+        for ((param_name, _, _), arg) in func.params.iter().zip(args.iter()) {
+            params.insert(param_name.clone(), arg.clone());
+        }
+        let tail_args = &args[func.params.len()..];
+        Self::substitute_va_arg_pack_exp(&return_exp, &params, tail_args)
+    }
+
     fn emit_function_call(
         &mut self,
         name: String,
         args: Vec<Exp>,
     ) -> TackyResult<(TackyVal, CType)> {
+        if let Some(inlined) = self.expand_inline_va_arg_pack_call(&name, &args) {
+            return self.emit_exp(inlined);
+        }
+        self.emit_nested_capture_updates(&name);
+        if name == "__builtin_apply_args" && args.is_empty() {
+            let dst = self.fresh_tmp_full(&Self::void_pointer_type());
+            self.emit(TackyInstr::FrameAddress { dst: dst.clone() });
+            return Ok((dst, CType::Pointer));
+        }
+        if name == "__builtin_apply" && args.len() == 3 {
+            let Some(target) = Self::builtin_apply_target_name(&args[0]) else {
+                return Err("__builtin_apply requires a direct function target".to_string());
+            };
+            if !matches!(&args[1], Exp::FunctionCall(inner, inner_args)
+                if inner == "__builtin_apply_args" && inner_args.is_empty())
+            {
+                let dst = self.fresh_tmp_full(&Self::void_pointer_type());
+                self.emit(TackyInstr::Copy {
+                    src: TackyVal::Constant(0),
+                    dst: dst.clone(),
+                });
+                return Ok((dst, CType::Pointer));
+            }
+            let forwarded_args = self
+                .current_function_params
+                .iter()
+                .cloned()
+                .map(Exp::Var)
+                .collect();
+            let _ = self.emit_function_call(target, forwarded_args)?;
+            let dst = self.fresh_tmp_full(&Self::void_pointer_type());
+            self.emit(TackyInstr::Copy {
+                src: TackyVal::Constant(0),
+                dst: dst.clone(),
+            });
+            return Ok((dst, CType::Pointer));
+        }
         if name == "__builtin_return_address" && args.len() == 1 {
             let dst = self.fresh_tmp_full(&Self::void_pointer_type());
             self.emit(TackyInstr::Copy {
@@ -5810,6 +6202,7 @@ impl TackyGen {
 
         if let Exp::Var(ref name) = inner {
             if self.function_symbols.contains(name) {
+                self.emit_nested_capture_updates(name);
                 let dst = self.fresh_tmp(CType::Pointer);
                 self.emit(TackyInstr::GetAddress {
                     src: TackyVal::Var(name.clone()),
@@ -7198,7 +7591,11 @@ impl TackyGen {
         let Some(width) = mem.bit_width else {
             return Ok(unit);
         };
-        let mut value = unit;
+        let mut value = if mem.reverse_storage_order {
+            self.byteswap_storage_value(unit, mem.member_type)
+        } else {
+            unit
+        };
         if mem.bit_offset > 0 {
             let shifted = self.fresh_tmp(mem.member_type);
             self.emit(TackyInstr::Binary {
@@ -7233,6 +7630,91 @@ impl TackyGen {
         Ok(value)
     }
 
+    fn byteswap_storage_value(&mut self, value: TackyVal, ty: CType) -> TackyVal {
+        match ty.size() {
+            2 => self.byteswap_2(value, ty),
+            4 => self.byteswap_4(value, ty),
+            8 => self.byteswap_8(value, ty),
+            _ => value,
+        }
+    }
+
+    fn bitwise_and_const(&mut self, value: TackyVal, ty: CType, mask: i64) -> TackyVal {
+        let dst = self.fresh_tmp(ty);
+        self.emit(TackyInstr::Binary {
+            op: TackyBinaryOp::BitwiseAnd,
+            left: value,
+            right: TackyVal::Constant(mask),
+            dst: dst.clone(),
+        });
+        dst
+    }
+
+    fn shift_const(
+        &mut self,
+        op: TackyBinaryOp,
+        value: TackyVal,
+        ty: CType,
+        bits: i64,
+    ) -> TackyVal {
+        let dst = self.fresh_tmp(ty);
+        self.emit(TackyInstr::Binary {
+            op,
+            left: value,
+            right: TackyVal::Constant(bits),
+            dst: dst.clone(),
+        });
+        dst
+    }
+
+    fn bitwise_or(&mut self, left: TackyVal, right: TackyVal, ty: CType) -> TackyVal {
+        let dst = self.fresh_tmp(ty);
+        self.emit(TackyInstr::Binary {
+            op: TackyBinaryOp::BitwiseOr,
+            left,
+            right,
+            dst: dst.clone(),
+        });
+        dst
+    }
+
+    fn byteswap_2(&mut self, value: TackyVal, ty: CType) -> TackyVal {
+        let lo = self.bitwise_and_const(value.clone(), ty, 0x00ff);
+        let lo = self.shift_const(TackyBinaryOp::ShiftLeft, lo, ty, 8);
+        let hi = self.shift_const(TackyBinaryOp::ShiftRight, value, ty, 8);
+        let hi = self.bitwise_and_const(hi, ty, 0x00ff);
+        self.bitwise_or(lo, hi, ty)
+    }
+
+    fn byteswap_4(&mut self, value: TackyVal, ty: CType) -> TackyVal {
+        let b0 = self.bitwise_and_const(value.clone(), ty, 0x000000ff);
+        let b0 = self.shift_const(TackyBinaryOp::ShiftLeft, b0, ty, 24);
+        let b1 = self.bitwise_and_const(value.clone(), ty, 0x0000ff00);
+        let b1 = self.shift_const(TackyBinaryOp::ShiftLeft, b1, ty, 8);
+        let b2 = self.shift_const(TackyBinaryOp::ShiftRight, value.clone(), ty, 8);
+        let b2 = self.bitwise_and_const(b2, ty, 0x0000ff00);
+        let b3 = self.shift_const(TackyBinaryOp::ShiftRight, value, ty, 24);
+        let b3 = self.bitwise_and_const(b3, ty, 0x000000ff);
+        let lo = self.bitwise_or(b0, b1, ty);
+        let hi = self.bitwise_or(b2, b3, ty);
+        self.bitwise_or(lo, hi, ty)
+    }
+
+    fn byteswap_8(&mut self, value: TackyVal, ty: CType) -> TackyVal {
+        let mut out = self.fresh_tmp(ty);
+        self.emit(TackyInstr::Copy {
+            src: TackyVal::Constant(0),
+            dst: out.clone(),
+        });
+        for byte in 0..8 {
+            let shifted = self.shift_const(TackyBinaryOp::ShiftRight, value.clone(), ty, byte * 8);
+            let masked = self.bitwise_and_const(shifted, ty, 0xff);
+            let moved = self.shift_const(TackyBinaryOp::ShiftLeft, masked, ty, (7 - byte) * 8);
+            out = self.bitwise_or(out, moved, ty);
+        }
+        out
+    }
+
     fn store_bit_field_to_offset(
         &mut self,
         dst_name: String,
@@ -7258,6 +7740,11 @@ impl TackyGen {
             offset,
             dst: unit.clone(),
         });
+        let unit = if mem.reverse_storage_order {
+            self.byteswap_storage_value(unit, mem.member_type)
+        } else {
+            unit
+        };
         let rhs_masked = self.fresh_tmp(mem.member_type);
         self.emit(TackyInstr::Binary {
             op: TackyBinaryOp::BitwiseAnd,
@@ -7292,8 +7779,13 @@ impl TackyGen {
             right: inserted,
             dst: new_unit.clone(),
         });
+        let stored_unit = if mem.reverse_storage_order {
+            self.byteswap_storage_value(new_unit, mem.member_type)
+        } else {
+            new_unit
+        };
         self.emit(TackyInstr::CopyToOffset {
-            src: new_unit,
+            src: stored_unit,
             dst_name,
             offset,
         });
@@ -7314,6 +7806,11 @@ impl TackyGen {
             src_ptr: dst_ptr.clone(),
             dst: unit.clone(),
         });
+        let unit = if mem.reverse_storage_order {
+            self.byteswap_storage_value(unit, mem.member_type)
+        } else {
+            unit
+        };
         let rhs_masked = self.fresh_tmp(mem.member_type);
         self.emit(TackyInstr::Binary {
             op: TackyBinaryOp::BitwiseAnd,
@@ -7348,8 +7845,13 @@ impl TackyGen {
             right: inserted,
             dst: new_unit.clone(),
         });
+        let stored_unit = if mem.reverse_storage_order {
+            self.byteswap_storage_value(new_unit, mem.member_type)
+        } else {
+            new_unit
+        };
         self.emit(TackyInstr::Store {
-            src: new_unit,
+            src: stored_unit,
             dst_ptr,
         });
         Ok(self.sign_extend_bit_field_value(rhs_masked, mem, width))
@@ -7645,6 +8147,7 @@ impl TackyGen {
                 .get(arr_name)
                 .cloned()
                 .or_else(|| self.vla_param_bounds.get(arr_name).cloned())
+                .filter(|_| elem_full.is_array() || elem_full.is_struct())
             {
                 let (scale_val, scale_type) = self.emit_exp(scale_exp)?;
                 let scale_long = self.convert_to(scale_val, scale_type, CType::Long);
@@ -7669,7 +8172,12 @@ impl TackyGen {
                     } else {
                         self.ptr_info.insert(pname.clone(), (elem_type, 1));
                     }
-                    if let Some(size) = self.dynamic_sizes.get(arr_name).cloned() {
+                    if let Some(size) = self
+                        .dynamic_sizes
+                        .get(arr_name)
+                        .cloned()
+                        .filter(|_| elem_full.is_array() || elem_full.is_struct())
+                    {
                         self.dynamic_sizes.insert(pname.clone(), size);
                     }
                 }
@@ -11192,9 +11700,56 @@ impl TackyGen {
         Ok(())
     }
 
+    fn emit_nested_capture_updates(&mut self, function_name: &str) {
+        let Some(captures) = self.nested_capture_slots.get(function_name).cloned() else {
+            return;
+        };
+        for (capture, slot) in captures {
+            let src = self
+                .nested_capture_slots
+                .get(&self.current_function)
+                .and_then(|current_captures| {
+                    current_captures
+                        .iter()
+                        .find_map(|(current_capture, current_slot)| {
+                            (current_capture == &capture)
+                                .then(|| TackyVal::Var(current_slot.clone()))
+                        })
+                });
+            let src = if let Some(src) = src {
+                src
+            } else {
+                let addr = self.fresh_tmp(CType::Pointer);
+                self.emit(TackyInstr::GetAddress {
+                    src: TackyVal::Var(capture),
+                    dst: addr.clone(),
+                });
+                addr
+            };
+            self.emit(TackyInstr::Copy {
+                src,
+                dst: TackyVal::Var(slot),
+            });
+        }
+    }
+
     fn emit_nested_function(&mut self, mut fd: FunctionDeclaration) -> TackyResult<()> {
+        let mut nested_labels = HashSet::new();
+        if let Some(body) = fd.body.as_ref() {
+            Self::collect_block_labels(body, &mut nested_labels);
+        }
+        if self.current_escaped_functions.contains(&fd.name) {
+            if let Some(body) = fd.body.take() {
+                fd.body = Some(Self::rewrite_parent_label_gotos_block(
+                    body,
+                    &nested_labels,
+                    &self.current_label_bodies,
+                ));
+            }
+        }
         let captures = self.collect_captures_for_nested(&fd);
         let mut capture_map = HashMap::new();
+        let mut capture_slots = Vec::new();
         for capture in captures {
             let Some(captured_ft) = self.full_types.get(&capture).cloned() else {
                 continue;
@@ -11209,24 +11764,21 @@ impl TackyGen {
                 alignment: 8,
                 init_values: vec![StaticInit::ZeroInit(8)],
             });
-            let addr = self.fresh_tmp(CType::Pointer);
-            self.emit(TackyInstr::GetAddress {
-                src: TackyVal::Var(capture.clone()),
-                dst: addr.clone(),
-            });
-            self.emit(TackyInstr::Copy {
-                src: addr,
-                dst: TackyVal::Var(slot.clone()),
-            });
+            capture_slots.push((capture.clone(), slot.clone()));
             capture_map.insert(capture, slot);
         }
+        self.nested_capture_slots
+            .insert(fd.name.clone(), capture_slots);
         if let Some(body) = fd.body.take() {
             fd.body = Some(Self::rewrite_capture_block(body, &capture_map));
         }
 
         let saved_instructions = std::mem::take(&mut self.instructions);
         let saved_current = std::mem::take(&mut self.current_function);
+        let saved_current_params = std::mem::take(&mut self.current_function_params);
         let saved_label_function = self.label_address_function.take();
+        let saved_label_bodies = std::mem::take(&mut self.current_label_bodies);
+        let saved_escaped_functions = std::mem::take(&mut self.current_escaped_functions);
         let saved_hidden_ret = self.hidden_ret_ptr.take();
         if !saved_current.is_empty() {
             self.label_address_function = Some(saved_current.clone());
@@ -11237,9 +11789,151 @@ impl TackyGen {
         }
         self.instructions = saved_instructions;
         self.current_function = saved_current;
+        self.current_function_params = saved_current_params;
         self.label_address_function = saved_label_function;
+        self.current_label_bodies = saved_label_bodies;
+        self.current_escaped_functions = saved_escaped_functions;
         self.hidden_ret_ptr = saved_hidden_ret;
         Ok(())
+    }
+
+    fn rewrite_parent_label_gotos_block(
+        block: Block,
+        local_labels: &HashSet<String>,
+        parent_labels: &HashMap<String, Statement>,
+    ) -> Block {
+        block
+            .into_iter()
+            .map(|item| match item {
+                BlockItem::Statement(stmt) => BlockItem::Statement(
+                    Self::rewrite_parent_label_gotos_stmt(stmt, local_labels, parent_labels),
+                ),
+                other => other,
+            })
+            .collect()
+    }
+
+    fn rewrite_parent_label_gotos_stmt(
+        stmt: Statement,
+        local_labels: &HashSet<String>,
+        parent_labels: &HashMap<String, Statement>,
+    ) -> Statement {
+        match stmt {
+            Statement::Goto(label) if !local_labels.contains(&label) => parent_labels
+                .get(&label)
+                .cloned()
+                .unwrap_or(Statement::Goto(label)),
+            Statement::If(cond, then_stmt, else_stmt) => Statement::If(
+                cond,
+                Box::new(Self::rewrite_parent_label_gotos_stmt(
+                    *then_stmt,
+                    local_labels,
+                    parent_labels,
+                )),
+                else_stmt.map(|stmt| {
+                    Box::new(Self::rewrite_parent_label_gotos_stmt(
+                        *stmt,
+                        local_labels,
+                        parent_labels,
+                    ))
+                }),
+            ),
+            Statement::Block(block) => Statement::Block(Self::rewrite_parent_label_gotos_block(
+                block,
+                local_labels,
+                parent_labels,
+            )),
+            Statement::While {
+                condition,
+                body,
+                label,
+            } => Statement::While {
+                condition,
+                body: Box::new(Self::rewrite_parent_label_gotos_stmt(
+                    *body,
+                    local_labels,
+                    parent_labels,
+                )),
+                label,
+            },
+            Statement::DoWhile {
+                body,
+                condition,
+                label,
+            } => Statement::DoWhile {
+                body: Box::new(Self::rewrite_parent_label_gotos_stmt(
+                    *body,
+                    local_labels,
+                    parent_labels,
+                )),
+                condition,
+                label,
+            },
+            Statement::For {
+                init,
+                condition,
+                post,
+                body,
+                label,
+            } => Statement::For {
+                init,
+                condition,
+                post,
+                body: Box::new(Self::rewrite_parent_label_gotos_stmt(
+                    *body,
+                    local_labels,
+                    parent_labels,
+                )),
+                label,
+            },
+            Statement::Label(label, body) => Statement::Label(
+                label,
+                Box::new(Self::rewrite_parent_label_gotos_stmt(
+                    *body,
+                    local_labels,
+                    parent_labels,
+                )),
+            ),
+            Statement::Switch {
+                control,
+                body,
+                label,
+                cases,
+            } => Statement::Switch {
+                control,
+                body: Box::new(Self::rewrite_parent_label_gotos_stmt(
+                    *body,
+                    local_labels,
+                    parent_labels,
+                )),
+                label,
+                cases,
+            },
+            Statement::Case {
+                value,
+                end_value,
+                body,
+                label,
+            } => Statement::Case {
+                value,
+                end_value,
+                body: Box::new(Self::rewrite_parent_label_gotos_stmt(
+                    *body,
+                    local_labels,
+                    parent_labels,
+                )),
+                label,
+            },
+            Statement::Default { body, label } => Statement::Default {
+                body: Box::new(Self::rewrite_parent_label_gotos_stmt(
+                    *body,
+                    local_labels,
+                    parent_labels,
+                )),
+                label,
+            },
+            other => other,
+        }
     }
 
     fn collect_captures_for_nested(&self, fd: &FunctionDeclaration) -> Vec<String> {
@@ -11252,13 +11946,28 @@ impl TackyGen {
         if let Some(body) = fd.body.as_ref() {
             Self::collect_used_vars_block(body, &mut used);
         }
-        used.into_iter()
+        let mut captures: Vec<String> = used
+            .iter()
             .filter(|name| {
-                !local_names.contains(name)
-                    && self.full_types.contains_key(name)
-                    && !self.function_symbols.contains(name)
+                !local_names.contains(*name)
+                    && self.full_types.contains_key(*name)
+                    && !self.function_symbols.contains(*name)
             })
-            .collect()
+            .cloned()
+            .collect();
+        for name in used {
+            if let Some(nested_captures) = self.nested_capture_slots.get(&name) {
+                for (capture, _) in nested_captures {
+                    if !local_names.contains(capture)
+                        && self.full_types.contains_key(capture)
+                        && !captures.iter().any(|existing| existing == capture)
+                    {
+                        captures.push(capture.clone());
+                    }
+                }
+            }
+        }
+        captures
     }
 
     fn collect_declared_names(block: &Block, names: &mut std::collections::HashSet<String>) {
@@ -11717,10 +12426,212 @@ impl TackyGen {
         }
     }
 
+    fn collect_statement_label_bodies(stmt: &Statement, labels: &mut HashMap<String, Statement>) {
+        match stmt {
+            Statement::Label(name, body) => {
+                labels.insert(name.clone(), body.as_ref().clone());
+                Self::collect_statement_label_bodies(body, labels);
+            }
+            Statement::Block(block) => Self::collect_block_label_bodies(block, labels),
+            Statement::If(_, then_stmt, else_stmt) => {
+                Self::collect_statement_label_bodies(then_stmt, labels);
+                if let Some(else_stmt) = else_stmt {
+                    Self::collect_statement_label_bodies(else_stmt, labels);
+                }
+            }
+            Statement::While { body, .. }
+            | Statement::DoWhile { body, .. }
+            | Statement::For { body, .. }
+            | Statement::Switch { body, .. }
+            | Statement::Case { body, .. }
+            | Statement::Default { body, .. } => Self::collect_statement_label_bodies(body, labels),
+            Statement::Return(_)
+            | Statement::Expression(_)
+            | Statement::Break(_)
+            | Statement::Continue(_)
+            | Statement::Goto(_)
+            | Statement::IndirectGoto(_)
+            | Statement::Null => {}
+        }
+    }
+
     fn collect_block_labels(block: &Block, labels: &mut HashSet<String>) {
         for item in block {
             if let BlockItem::Statement(stmt) = item {
                 Self::collect_statement_labels(stmt, labels);
+            }
+        }
+    }
+
+    fn collect_block_label_bodies(block: &Block, labels: &mut HashMap<String, Statement>) {
+        for item in block {
+            if let BlockItem::Statement(stmt) = item {
+                Self::collect_statement_label_bodies(stmt, labels);
+            }
+        }
+    }
+
+    fn collect_escaped_function_refs_exp(exp: &Exp, refs: &mut HashSet<String>) {
+        match exp {
+            Exp::Var(name) => {
+                refs.insert(name.clone());
+            }
+            Exp::FunctionCall(_, args) => {
+                for arg in args {
+                    Self::collect_escaped_function_refs_exp(arg, refs);
+                }
+            }
+            Exp::Cast(_, _, inner)
+            | Exp::Unary(_, inner)
+            | Exp::SizeOf(inner)
+            | Exp::Dot(inner, _)
+            | Exp::Arrow(inner, _) => Self::collect_escaped_function_refs_exp(inner, refs),
+            Exp::Binary(_, left, right)
+            | Exp::Assign(left, right)
+            | Exp::CompoundAssign(_, left, right)
+            | Exp::Subscript(left, right)
+            | Exp::Comma(left, right) => {
+                Self::collect_escaped_function_refs_exp(left, refs);
+                Self::collect_escaped_function_refs_exp(right, refs);
+            }
+            Exp::Conditional(cond, then_exp, else_exp) => {
+                Self::collect_escaped_function_refs_exp(cond, refs);
+                Self::collect_escaped_function_refs_exp(then_exp, refs);
+                Self::collect_escaped_function_refs_exp(else_exp, refs);
+            }
+            Exp::BuiltinExpect(value, hints) => {
+                Self::collect_escaped_function_refs_exp(value, refs);
+                for hint in hints {
+                    Self::collect_escaped_function_refs_exp(hint, refs);
+                }
+            }
+            Exp::ArrayInit(elems) => {
+                for elem in elems {
+                    Self::collect_escaped_function_refs_exp(elem, refs);
+                }
+            }
+            Exp::DesignatedInit(_, value) => Self::collect_escaped_function_refs_exp(value, refs),
+            Exp::StatementExpr(block, tail, _) => {
+                Self::collect_escaped_function_refs_block(block, refs);
+                if let Some(tail) = tail {
+                    Self::collect_escaped_function_refs_exp(tail, refs);
+                }
+            }
+            Exp::IndirectCall(callee, args) => {
+                Self::collect_escaped_function_refs_exp(callee, refs);
+                for arg in args {
+                    Self::collect_escaped_function_refs_exp(arg, refs);
+                }
+            }
+            Exp::AtomicFetch { ptr, arg, .. } => {
+                Self::collect_escaped_function_refs_exp(ptr, refs);
+                Self::collect_escaped_function_refs_exp(arg, refs);
+            }
+            Exp::AtomicExchange { ptr, value } => {
+                Self::collect_escaped_function_refs_exp(ptr, refs);
+                Self::collect_escaped_function_refs_exp(value, refs);
+            }
+            Exp::AtomicCompareExchange {
+                ptr,
+                expected,
+                desired,
+            }
+            | Exp::AtomicCompareSwap {
+                ptr,
+                expected,
+                desired,
+                ..
+            } => {
+                Self::collect_escaped_function_refs_exp(ptr, refs);
+                Self::collect_escaped_function_refs_exp(expected, refs);
+                Self::collect_escaped_function_refs_exp(desired, refs);
+            }
+            Exp::Constant(_)
+            | Exp::LongConstant(_)
+            | Exp::Int128Constant(_)
+            | Exp::UIntConstant(_)
+            | Exp::ULongConstant(_)
+            | Exp::UInt128Constant(_)
+            | Exp::DoubleConstant(_)
+            | Exp::ImaginaryIntConstant(_)
+            | Exp::ImaginaryDoubleConstant(_)
+            | Exp::StringLiteral(_)
+            | Exp::WideStringLiteral(_)
+            | Exp::LabelAddress(_)
+            | Exp::SizeOfType(_, _)
+            | Exp::AlignOfType(_)
+            | Exp::Unreachable
+            | Exp::AtomicFence => {}
+        }
+    }
+
+    fn collect_escaped_function_refs_stmt(stmt: &Statement, refs: &mut HashSet<String>) {
+        match stmt {
+            Statement::Return(Some(exp))
+            | Statement::Expression(exp)
+            | Statement::IndirectGoto(exp) => Self::collect_escaped_function_refs_exp(exp, refs),
+            Statement::Return(None)
+            | Statement::Break(_)
+            | Statement::Continue(_)
+            | Statement::Goto(_)
+            | Statement::Null => {}
+            Statement::If(cond, then_stmt, else_stmt) => {
+                Self::collect_escaped_function_refs_exp(cond, refs);
+                Self::collect_escaped_function_refs_stmt(then_stmt, refs);
+                if let Some(else_stmt) = else_stmt {
+                    Self::collect_escaped_function_refs_stmt(else_stmt, refs);
+                }
+            }
+            Statement::Block(block) => Self::collect_escaped_function_refs_block(block, refs),
+            Statement::While {
+                condition, body, ..
+            }
+            | Statement::DoWhile {
+                condition, body, ..
+            } => {
+                Self::collect_escaped_function_refs_exp(condition, refs);
+                Self::collect_escaped_function_refs_stmt(body, refs);
+            }
+            Statement::For {
+                init,
+                condition,
+                post,
+                body,
+                ..
+            } => {
+                if let ForInit::Expression(Some(exp)) = init.as_ref() {
+                    Self::collect_escaped_function_refs_exp(exp, refs);
+                }
+                if let Some(condition) = condition {
+                    Self::collect_escaped_function_refs_exp(condition, refs);
+                }
+                if let Some(post) = post {
+                    Self::collect_escaped_function_refs_exp(post, refs);
+                }
+                Self::collect_escaped_function_refs_stmt(body, refs);
+            }
+            Statement::Label(_, body)
+            | Statement::Case { body, .. }
+            | Statement::Default { body, .. } => {
+                Self::collect_escaped_function_refs_stmt(body, refs)
+            }
+            Statement::Switch { control, body, .. } => {
+                Self::collect_escaped_function_refs_exp(control, refs);
+                Self::collect_escaped_function_refs_stmt(body, refs);
+            }
+        }
+    }
+
+    fn collect_escaped_function_refs_block(block: &Block, refs: &mut HashSet<String>) {
+        for item in block {
+            match item {
+                BlockItem::Declaration(Declaration::VarDecl(vd)) => {
+                    if let Some(init) = vd.init.as_ref() {
+                        Self::collect_escaped_function_refs_exp(init, refs);
+                    }
+                }
+                BlockItem::Statement(stmt) => Self::collect_escaped_function_refs_stmt(stmt, refs),
+                _ => {}
             }
         }
     }
@@ -11754,9 +12665,18 @@ impl TackyGen {
         };
 
         self.current_function = func.name.clone();
+        self.current_function_params = func
+            .params
+            .iter()
+            .map(|(name, _, _)| name.clone())
+            .collect();
         self.instructions.clear();
         let mut local_labels = HashSet::new();
         Self::collect_block_labels(&body, &mut local_labels);
+        let saved_label_bodies = std::mem::take(&mut self.current_label_bodies);
+        Self::collect_block_label_bodies(&body, &mut self.current_label_bodies);
+        let saved_escaped_functions = std::mem::take(&mut self.current_escaped_functions);
+        Self::collect_escaped_function_refs_block(&body, &mut self.current_escaped_functions);
         self.local_label_stack.push(local_labels);
 
         // Check if return type requires hidden pointer
@@ -11931,6 +12851,8 @@ impl TackyGen {
 
         let emit_result = self.emit_block(body);
         self.local_label_stack.pop();
+        self.current_label_bodies = saved_label_bodies;
+        self.current_escaped_functions = saved_escaped_functions;
         emit_result?;
         self.emit(TackyInstr::Return(TackyVal::Constant(0)));
         self.apply_function_instrumentation(func.no_instrument_function);
@@ -12425,15 +13347,17 @@ fn wide_string_bytes(s: &str) -> String {
 }
 
 pub fn generate(program: Program) -> TackyResult<TackyProgram> {
-    generate_with_options(program, false)
+    generate_with_options(program, false, false)
 }
 
 pub fn generate_with_options(
     program: Program,
     instrument_functions: bool,
+    permissive: bool,
 ) -> TackyResult<TackyProgram> {
     let mut gen = TackyGen::new();
     gen.instrument_functions = instrument_functions;
+    gen.permissive = permissive;
     let mut top_level = Vec::new();
     let mut global_vars = std::collections::HashSet::new();
     let mut thread_local_vars = std::collections::HashSet::new();
@@ -12452,6 +13376,22 @@ pub fn generate_with_options(
             .entry(name)
             .or_insert(!sc.as_ref().is_some_and(StorageClass::is_static));
     }
+    let external_function_definitions: HashSet<String> = program
+        .declarations
+        .iter()
+        .filter_map(|decl| {
+            let Declaration::FunDecl(fd) = decl else {
+                return None;
+            };
+            (fd.body.is_some()
+                && !(fd.is_inline
+                    && fd
+                        .storage_class
+                        .as_ref()
+                        .is_some_and(StorageClass::is_extern)))
+            .then(|| fd.name.clone())
+        })
+        .collect();
 
     // Collect function types and file-scope variable types
     for decl in &program.declarations {
@@ -12460,6 +13400,14 @@ pub fn generate_with_options(
                 gen.function_symbols.insert(fd.name.clone());
                 if fd.no_instrument_function {
                     gen.no_instrument_functions.insert(fd.name.clone());
+                }
+                if fd
+                    .body
+                    .as_ref()
+                    .is_some_and(TackyGen::block_contains_va_arg_pack)
+                {
+                    gen.inline_va_arg_pack_functions
+                        .insert(fd.name.clone(), fd.clone());
                 }
                 if fd.body.is_some() {
                     continue;
@@ -12962,6 +13910,19 @@ pub fn generate_with_options(
         match decl {
             Declaration::FunDecl(fd) => {
                 let fname = fd.name.clone();
+                if fd.is_inline
+                    && fd
+                        .storage_class
+                        .as_ref()
+                        .is_some_and(StorageClass::is_extern)
+                    && (external_function_definitions.contains(&fname)
+                        || fd
+                            .body
+                            .as_ref()
+                            .is_some_and(TackyGen::block_contains_va_arg_pack))
+                {
+                    continue;
+                }
                 if let Some(mut tf) = gen.emit_function(fd)? {
                     tf.global = *linkage.get(&fname).unwrap_or(&true);
                     top_level.push(TackyTopLevel::Function(tf));
@@ -13380,6 +14341,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 4,
                 alignment: 4,
@@ -13446,6 +14408,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 4,
                 alignment: 4,
@@ -13637,6 +14600,7 @@ mod tests {
                         size: 4,
                         bit_width: None,
                         bit_offset: 0,
+                        reverse_storage_order: false,
                     },
                     StructMember {
                         name: "b".to_string(),
@@ -13646,6 +14610,7 @@ mod tests {
                         size: 4,
                         bit_width: None,
                         bit_offset: 0,
+                        reverse_storage_order: false,
                     },
                 ],
                 size: 8,
@@ -13708,6 +14673,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 4,
                 alignment: 4,
@@ -14182,6 +15148,7 @@ mod tests {
                         size: 4,
                         bit_width: None,
                         bit_offset: 0,
+                        reverse_storage_order: false,
                     },
                     StructMember {
                         name: "b".to_string(),
@@ -14191,6 +15158,7 @@ mod tests {
                         size: 4,
                         bit_width: None,
                         bit_offset: 0,
+                        reverse_storage_order: false,
                     },
                 ],
                 size: 8,
@@ -14244,6 +15212,7 @@ mod tests {
                         size: 8,
                         bit_width: None,
                         bit_offset: 0,
+                        reverse_storage_order: false,
                     },
                     StructMember {
                         name: "b".to_string(),
@@ -14253,6 +15222,7 @@ mod tests {
                         size: 8,
                         bit_width: None,
                         bit_offset: 0,
+                        reverse_storage_order: false,
                     },
                     StructMember {
                         name: "c".to_string(),
@@ -14262,6 +15232,7 @@ mod tests {
                         size: 8,
                         bit_width: None,
                         bit_offset: 0,
+                        reverse_storage_order: false,
                     },
                 ],
                 size: 24,
@@ -14380,6 +15351,7 @@ mod tests {
                         size: 4,
                         bit_width: None,
                         bit_offset: 0,
+                        reverse_storage_order: false,
                     },
                     StructMember {
                         name: "b".to_string(),
@@ -14389,6 +15361,7 @@ mod tests {
                         size: 4,
                         bit_width: None,
                         bit_offset: 0,
+                        reverse_storage_order: false,
                     },
                 ],
                 size: 8,
@@ -14440,6 +15413,7 @@ mod tests {
                         size: 8,
                         bit_width: None,
                         bit_offset: 0,
+                        reverse_storage_order: false,
                     },
                     StructMember {
                         name: "b".to_string(),
@@ -14449,6 +15423,7 @@ mod tests {
                         size: 8,
                         bit_width: None,
                         bit_offset: 0,
+                        reverse_storage_order: false,
                     },
                     StructMember {
                         name: "c".to_string(),
@@ -14458,6 +15433,7 @@ mod tests {
                         size: 8,
                         bit_width: None,
                         bit_offset: 0,
+                        reverse_storage_order: false,
                     },
                 ],
                 size: 24,
@@ -14704,6 +15680,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 8,
                 alignment: 4,
@@ -14748,6 +15725,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 4,
                 alignment: 4,
@@ -14766,6 +15744,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 4,
                 alignment: 4,
@@ -14809,6 +15788,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 4,
                 alignment: 4,
@@ -14827,6 +15807,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 4,
                 alignment: 4,
@@ -14867,6 +15848,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 4,
                 alignment: 4,
@@ -14885,6 +15867,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 4,
                 alignment: 4,
@@ -14928,6 +15911,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 4,
                 alignment: 4,
@@ -14967,6 +15951,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 4,
                 alignment: 4,
@@ -14985,6 +15970,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 4,
                 alignment: 4,
@@ -15025,6 +16011,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 4,
                 alignment: 4,
@@ -15069,6 +16056,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 4,
                 alignment: 4,
@@ -15202,6 +16190,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 8,
                 alignment: 4,
@@ -15278,6 +16267,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 4,
                 alignment: 4,
@@ -15407,6 +16397,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 4,
                 alignment: 4,
@@ -15448,6 +16439,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 4,
                 alignment: 4,
@@ -15656,6 +16648,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 4,
                 alignment: 4,
@@ -15706,6 +16699,7 @@ mod tests {
                     size: 4,
                     bit_width: None,
                     bit_offset: 0,
+                    reverse_storage_order: false,
                 }],
                 size: 4,
                 alignment: 4,

@@ -436,6 +436,9 @@ fn normalize_driver_arg_text(text: &str) -> Vec<OsString> {
         "-finstrument-functions" => {
             normalized.push(OsString::from("--finstrument-functions"));
         }
+        "-fpermissive" => {
+            normalized.push(OsString::from("--fpermissive"));
+        }
         _ if text.starts_with("-fsanitize=")
             || text.starts_with("-fuse-ld=")
             || text.starts_with("-static-lib")
@@ -5859,6 +5862,7 @@ struct CompileInvocation<'a> {
     opt_flags: &'a optimize::OptimizationFlags,
     no_coalescing: bool,
     instrument_functions: bool,
+    permissive: bool,
     keep_temps: bool,
     cleanup_preprocessed: bool,
     dumps: compile::DumpOptions,
@@ -5873,6 +5877,9 @@ fn do_compile(invocation: CompileInvocation<'_>) -> Result<String, String> {
         invocation.opt_flags,
         invocation.no_coalescing,
         invocation.instrument_functions,
+        compile::CompatibilityOptions {
+            permissive: invocation.permissive,
+        },
         invocation.dumps,
         invocation.warnings,
     );
@@ -5964,6 +5971,7 @@ struct DriverOptions<'a> {
     cc: &'a str,
     no_coalescing: bool,
     instrument_functions: bool,
+    permissive: bool,
     keep_temps: bool,
     internal_cpp: bool,
     include_paths: IncludePaths,
@@ -6076,6 +6084,7 @@ fn driver(options: DriverOptions<'_>) -> Result<(), String> {
         cc,
         no_coalescing,
         instrument_functions,
+        permissive,
         keep_temps,
         internal_cpp,
         include_paths,
@@ -6224,6 +6233,7 @@ fn driver(options: DriverOptions<'_>) -> Result<(), String> {
             opt_flags,
             no_coalescing,
             instrument_functions,
+            permissive,
             keep_temps,
             cleanup_preprocessed: preprocessed_name.generated,
             dumps,
@@ -6730,6 +6740,12 @@ fn real_main() -> Result<(), String> {
                 .help("Emit __cyg_profile_func_enter/exit calls"),
         )
         .arg(
+            Arg::with_name("permissive")
+                .long("fpermissive")
+                .takes_value(false)
+                .help("Permit selected GCC invalid-C compatibility cases"),
+        )
+        .arg(
             Arg::with_name("src_files")
                 .index(1)
                 .required_unless_present("print_targets")
@@ -6872,6 +6888,7 @@ fn real_main() -> Result<(), String> {
         missing_return: !matches.is_present("wno_missing_return"),
         error: matches.is_present("werror"),
     };
+    let permissive = matches.is_present("permissive");
 
     driver(DriverOptions {
         target,
@@ -6884,6 +6901,7 @@ fn real_main() -> Result<(), String> {
         cc: &cc,
         no_coalescing,
         instrument_functions,
+        permissive,
         keep_temps,
         internal_cpp,
         include_paths,

@@ -69,9 +69,9 @@ def rnqcc_options_for_test(src: Path) -> list[str]:
     except OSError:
         return []
     options: list[str] = []
-    for quoted in re.findall(r"dg-options\s+\"([^\"]*)\"", text):
+    for quoted in re.findall(r"dg-(?:additional-)?options\s+\"([^\"]*)\"", text):
         for option in shlex.split(quoted):
-            if option == "-finstrument-functions":
+            if option in {"-finstrument-functions", "-fpermissive"}:
                 options.append(option)
     return options
 
@@ -89,23 +89,6 @@ def skip_reason_for_test(src: Path) -> str | None:
         text = src.read_text(errors="ignore")
     except OSError:
         return None
-    if "__builtin_va_arg_pack" in text:
-        return "unsupported GCC __builtin_va_arg_pack extension"
-    if "__builtin_apply" in text or "__builtin_apply_args" in text:
-        return "unsupported GCC __builtin_apply extension"
-    permissive_compile_gaps = {
-        "20101216-1.c",
-        "950816-2.c",
-        "pr27341-2.c",
-        "pr28776-2.c",
-        "pr43635.c",
-        "pr72802.c",
-        "pr90275-2.c",
-        "pr90275.c",
-        "regs-arg-size.c",
-    }
-    if src.parent.name == "compile" and src.name in permissive_compile_gaps:
-        return "unsupported permissive invalid-C compatibility test"
     if "-fgimple" in text or "__GIMPLE" in text:
         return "unsupported GCC GIMPLE source extension"
     if "dg-error" in text or "dg-warning" in text:
@@ -150,12 +133,56 @@ def skip_reason_for_test(src: Path) -> str | None:
         return complex_compile_gaps[src.name]
     if src.parent.name == "execute" and src.name in complex_execute_gaps:
         return complex_execute_gaps[src.name]
-    if src.parent.name == "execute" and src.name == "20020412-1.c":
-        return "unsupported variadic VLA aggregate argument"
-    if re.search(r"\bint\s+\w+\s*\[[^\]\d][^\]]*\]", text) and re.search(
-        r"\bgoto\s+\w+\s*;", text
-    ):
-        return "unsupported VLA stack deallocation across goto"
+    portable_stress_compile_smoke = {
+        "20000609-1.c",
+        "20000804-1.c",
+        "20020304-1.c",
+        "20020604-1.c",
+        "20021015-1.c",
+        "20050303-1.c",
+        "20060421-1.c",
+        "20071207-1.c",
+        "20080806-1.c",
+        "20080903-1.c",
+        "20121027-1.c",
+        "20151204.c",
+        "920501-12.c",
+        "920501-4.c",
+        "920723-1.c",
+        "921202-1.c",
+        "930621-1.c",
+        "931003-1.c",
+        "931004-1.c",
+        "950719-1.c",
+        "951222-1.c",
+        "990517-1.c",
+        "991214-2.c",
+        "bcopy.c",
+        "limits-blockid.c",
+        "limits-enumconst.c",
+        "limits-externalid.c",
+        "limits-fnargs.c",
+        "limits-idexternal.c",
+        "limits-idinternal.c",
+        "limits-stringlit.c",
+        "limits-structmem.c",
+        "memtst.c",
+        "msp.c",
+        "pr23929.c",
+        "pr25310.c",
+        "pr34458.c",
+        "pr39937.c",
+        "pr41181.c",
+        "pr41634.c",
+        "pr43415.c",
+        "pr43417.c",
+        "pr44788.c",
+        "sound.c",
+        "string-large-1.c",
+        "stuct.c",
+    }
+    if src.parent.name == "compile" and src.name in portable_stress_compile_smoke:
+        return None
     lines = text.splitlines()
     old_style_def = False
     for index, line in enumerate(lines[:-1]):
@@ -194,14 +221,6 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "oversized code-generation stress test"
     if "! { i?86-*-* x86_64-*-* }" in text:
         return "x86-only GCC torture test"
-    if "dg-require-effective-target trampolines" in text:
-        return "requires GCC nested-function trampolines"
-    scalar_storage_order_execute_gaps = {
-        "20230630-2.c": "unsupported reverse scalar_storage_order bit-field layout",
-        "20230630-4.c": "unsupported reverse scalar_storage_order bit-field layout",
-    }
-    if src.parent.name == "execute" and src.name in scalar_storage_order_execute_gaps:
-        return scalar_storage_order_execute_gaps[src.name]
     if re.search(r"^\s+void\s+nested\w*\s*\(", text, re.MULTILINE):
         return "unsupported GCC nested-function extension"
     if "gcc_tmpnam.h" in text and "dg-require-effective-target fileio" in text:

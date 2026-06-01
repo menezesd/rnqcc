@@ -16927,6 +16927,638 @@ out:
 }
 
 #[test]
+fn supports_reverse_scalar_storage_order_bitfields() {
+    let src = temp_file("reverse-scalar-storage-order-bitfields", "c");
+    let exe = temp_file("reverse-scalar-storage-order-bitfields", "bin");
+    std::fs::write(
+        &src,
+        r#"
+struct S {
+    short int i : 12;
+    char c1 : 1;
+    char c2 : 1;
+    char c3 : 1;
+    char c4 : 1;
+} __attribute__((scalar_storage_order("big-endian")));
+
+int main(void) {
+    struct S s = { 341, 1, 1, 1, 1 };
+    unsigned char *p = (unsigned char *)&s;
+    if (p[0] != 21) return 1;
+    if (p[1] != 80) return 2;
+    if (s.i != 341 || !s.c1 || !s.c2 || !s.c3 || !s.c4) return 3;
+    s.i = 0x123;
+    s.c1 = 0;
+    s.c4 = 0;
+    if (p[0] != 18) return 4;
+    if (p[1] != 48) return 5;
+    if (p[2] != 96) return 6;
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn vla_subscript_uses_element_stride_after_backward_goto() {
+    let src = temp_file("vla-subscript-backward-goto", "c");
+    let exe = temp_file("vla-subscript-backward-goto", "bin");
+    std::fs::write(
+        &src,
+        r#"
+void *volatile sink;
+
+int main(void) {
+    int n = 0;
+lab:
+    {
+        int x[n % 8 + 1];
+        x[0] = 1;
+        x[n % 8] = 2;
+        sink = x;
+    }
+    n++;
+    if (n < 256) goto lab;
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn builtin_apply_forwards_current_integer_argument() {
+    let src = temp_file("builtin-apply-forward-int", "c");
+    let exe = temp_file("builtin-apply-forward-int", "bin");
+    std::fs::write(
+        &src,
+        r#"
+void abort(void);
+
+static void check(int arg) {
+    if (arg != 5) abort();
+}
+
+static void forward(int arg) {
+    __builtin_apply(check, __builtin_apply_args(), 16);
+}
+
+int main(void) {
+    forward(5);
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn variadic_va_arg_struct_temporary_gets_full_storage() {
+    let src = temp_file("variadic-va-arg-struct-temp", "c");
+    let exe = temp_file("variadic-va-arg-struct-temp", "bin");
+    std::fs::write(
+        &src,
+        r#"
+#include <stdarg.h>
+
+void abort(void);
+
+static void take(int size, ...) {
+    struct { char x[size]; } d;
+    va_list ap;
+    int i;
+    va_start(ap, size);
+    d = va_arg(ap, typeof(d));
+    for (i = 0; i < size; i++) {
+        if (d.x[i] != '0' + i) abort();
+    }
+    d = va_arg(ap, typeof(d));
+    for (i = 0; i < size; i++) {
+        if (d.x[i] != '5' + i) abort();
+    }
+    va_end(ap);
+}
+
+int main(void) {
+    int n = 5;
+    struct { char x[n]; } a, b;
+    a.x[0] = '0'; a.x[1] = '1'; a.x[2] = '2'; a.x[3] = '3'; a.x[4] = '4';
+    b.x[0] = '5'; b.x[1] = '6'; b.x[2] = '7'; b.x[3] = '8'; b.x[4] = '9';
+    take(n, a, b);
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn accepts_permissive_implicit_int_file_scope_declarations() {
+    let src = temp_file("permissive-implicit-int-file-scope", "c");
+    let out = temp_file("permissive-implicit-int-file-scope", "s");
+    std::fs::write(
+        &src,
+        r#"
+a, b;
+two52 = 4.50359962737049600000e+15;
+static c[];
+*p;
+
+e() {
+    return a + b + c[0] + (p != 0);
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-S")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn accepts_permissive_missing_final_struct_member_semicolon() {
+    let src = temp_file("permissive-missing-struct-member-semi", "c");
+    let out = temp_file("permissive-missing-struct-member-semi", "s");
+    std::fs::write(
+        &src,
+        r#"
+struct S {
+    short a;
+    signed b
+};
+
+struct S s;
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-S")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn extern_inline_body_is_available_for_calls() {
+    let src = temp_file("extern-inline-body", "c");
+    let exe = temp_file("extern-inline-body", "bin");
+    std::fs::write(
+        &src,
+        r#"
+extern inline int add1(int x) {
+    return x + 1;
+}
+
+int main(void) {
+    return add1(41);
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn builtin_va_arg_pack_forwards_inline_variadic_tail() {
+    let src = temp_file("builtin-va-arg-pack-inline-tail", "c");
+    let exe = temp_file("builtin-va-arg-pack-inline-tail", "bin");
+    std::fs::write(
+        &src,
+        r#"
+#include <stdarg.h>
+
+void abort(void);
+
+static int seen;
+
+__attribute__((noinline)) int sink(int x, int y, ...) {
+    va_list ap;
+    int a, b;
+    va_start(ap, y);
+    a = va_arg(ap, int);
+    b = va_arg(ap, int);
+    va_end(ap);
+    if (x != 3 || y != 6 || a != 5 || b != 9) abort();
+    seen = 1;
+    return 42;
+}
+
+extern inline __attribute__((always_inline, gnu_inline)) int wrap(int x, ...) {
+    return sink(x, 6, 5, __builtin_va_arg_pack());
+}
+
+int main(void) {
+    int result = wrap(3, 9);
+    if (!seen) abort();
+    return result;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn builtin_va_arg_pack_inline_wrapper_allows_simple_locals() {
+    let src = temp_file("builtin-va-arg-pack-inline-locals", "c");
+    let exe = temp_file("builtin-va-arg-pack-inline-locals", "bin");
+    std::fs::write(
+        &src,
+        r#"
+#include <stdarg.h>
+
+void abort(void);
+
+static int seed;
+
+__attribute__((noinline)) int sink(int x, int y, ...) {
+    va_list ap;
+    int a;
+    va_start(ap, y);
+    a = va_arg(ap, int);
+    va_end(ap);
+    if (x != 4 || y != 7 || a != 31) abort();
+    return 42;
+}
+
+extern inline __attribute__((always_inline, gnu_inline)) int wrap(int x, ...) {
+    int y = seed + 2;
+    seed = 5;
+    return sink(x, y, __builtin_va_arg_pack());
+}
+
+int main(void) {
+    seed = 5;
+    return wrap(4, 31);
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn escaped_nested_nonlocal_goto_uses_captured_parent_state() {
+    let src = temp_file("escaped-nested-nonlocal-goto", "c");
+    let exe = temp_file("escaped-nested-nonlocal-goto", "bin");
+    std::fs::write(
+        &src,
+        r#"
+void abort(void);
+void exit(int);
+
+static void recursive(int n, void (*proc)(void)) {
+    __label__ l1;
+
+    void do_goto(void) {
+        goto l1;
+    }
+
+    if (n == 3)
+        recursive(n - 1, do_goto);
+    else if (n > 0)
+        recursive(n - 1, proc);
+    else
+        (*proc)();
+    return;
+
+l1:
+    if (n == 3)
+        exit(42);
+    else
+        abort();
+}
+
+int main(void) {
+    recursive(10, abort);
+    abort();
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn escaped_nested_nonlocal_goto_captures_parent_parameter() {
+    let src = temp_file("escaped-nested-nonlocal-goto-param", "c");
+    let exe = temp_file("escaped-nested-nonlocal-goto-param", "bin");
+    std::fs::write(
+        &src,
+        r#"
+void abort(void);
+void exit(int);
+
+static void walk(int n, int expected, void (*proc)(void)) {
+    __label__ done;
+
+    void jump_done(void) {
+        goto done;
+    }
+
+    if (n == expected)
+        walk(n - 1, expected, jump_done);
+    else if (n > 0)
+        walk(n - 1, expected, proc);
+    else
+        (*proc)();
+    return;
+
+done:
+    if (n == expected)
+        exit(42);
+    abort();
+}
+
+int main(void) {
+    walk(8, 4, abort);
+    abort();
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn nested_function_transitively_forwards_parent_capture() {
+    let src = temp_file("nested-function-transitive-capture", "c");
+    let exe = temp_file("nested-function-transitive-capture", "bin");
+    std::fs::write(
+        &src,
+        r#"
+void abort(void);
+
+static long use(long (*func)(long, long), long a, long b) {
+    return func(b, a);
+}
+
+static long foo(long a, long b, long (*func)(long, long)) {
+    return func(a, b);
+}
+
+int main(void) {
+    long sum = 0;
+    long i;
+
+    long nested_0(long a, long b) {
+        if (a > 2 * b)
+            return a - b;
+        return b - a;
+    }
+
+    long nested_1(long a, long b) {
+        return use(nested_0, b, a) + sum;
+    }
+
+    long nested_2(long a, long b) {
+        return nested_1(b, a);
+    }
+
+    for (i = 0; i < 10; ++i) {
+        long j;
+        for (j = 0; j < 10; ++j) {
+            long k;
+            for (k = 0; k < 10; ++k)
+                sum += foo(i, j > k ? j - k : k - j, nested_2);
+        }
+    }
+
+    if ((sum & 0xffffffff) != 0xbecfcbf5)
+        abort();
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn fpermissive_allows_gcc_invalid_pointer_compatibility_cases() {
+    let src = temp_file("fpermissive-pointer-compat", "c");
+    let out = temp_file("fpermissive-pointer-compat", "s");
+    std::fs::write(
+        &src,
+        r#"
+int func(char *);
+void callee(const int *, const double *);
+void d(void);
+void a(void) {}
+
+void (*foo(void))(float) {
+    void (*(*x)(void))(float) = d;
+    return (*x)();
+}
+
+void test(float *fp, const double *dp) {
+    long long *lp = a;
+    func(fp);
+    callee(dp, lp);
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-fpermissive")
+        .arg("-S")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn driver_normalizes_fpermissive_to_compatibility_mode() {
+    let src = temp_file("driver-fpermissive-pointer-compat", "c");
+    let out = temp_file("driver-fpermissive-pointer-compat", "s");
+    std::fs::write(
+        &src,
+        r#"
+int func(char *);
+void test(float *fp) {
+    func(fp);
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-fpermissive")
+        .arg("-S")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn emits_x86_64_linux_assembly_for_ci_regression_cases() {
     for (name, source) in [
         (

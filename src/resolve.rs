@@ -360,6 +360,7 @@ impl Resolver {
                     old_style: signature.old_style,
                     noreturn: signature.noreturn,
                     no_instrument_function: false,
+                    is_inline: false,
                     body: None,
                     storage_class: None,
                 }))
@@ -865,6 +866,7 @@ impl Resolver {
                         transparent_union: sd.transparent_union,
                         packed: sd.packed,
                         alignment: sd.alignment,
+                        reverse_storage_order: sd.reverse_storage_order,
                     }))
                 }
                 BlockItem::Declaration(Declaration::TypedefDecl) => {
@@ -983,6 +985,7 @@ impl Resolver {
                     old_style: func.old_style,
                     noreturn: func.noreturn,
                     no_instrument_function: func.no_instrument_function,
+                    is_inline: func.is_inline,
                 })
             }
         }
@@ -1225,6 +1228,7 @@ pub fn resolve(program: Program) -> ResolveResult<ResolveOutput> {
                         transparent_union: sd.transparent_union,
                         packed: sd.packed,
                         alignment: sd.alignment,
+                        reverse_storage_order: sd.reverse_storage_order,
                     })
                 }
                 Declaration::TypedefDecl => Declaration::TypedefDecl,

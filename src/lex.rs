@@ -336,6 +336,10 @@ impl Lexer {
         Self::contains_named_attribute(text, &["transparent_union", "__transparent_union__"])
     }
 
+    fn contains_reverse_scalar_storage_order_attribute(text: &str) -> bool {
+        text.contains("scalar_storage_order") && text.contains("big-endian")
+    }
+
     fn contains_named_attribute(text: &str, names: &[&str]) -> bool {
         let chars: Vec<char> = text.chars().collect();
         let mut pos = 0;
@@ -966,6 +970,8 @@ impl Lexer {
                 let no_instrument_function = Self::contains_no_instrument_function_attribute(&text);
                 let packed = Self::contains_packed_attribute(&text);
                 let transparent_union = Self::contains_transparent_union_attribute(&text);
+                let reverse_scalar_storage_order =
+                    Self::contains_reverse_scalar_storage_order_attribute(&text);
                 if let Some(vector_size) = vector_size.clone() {
                     if alignment.is_some() || packed || noreturn || no_instrument_function {
                         self.pending_tokens
@@ -990,6 +996,9 @@ impl Lexer {
                 }
                 if transparent_union {
                     return Ok(Token::AttributeTransparentUnion);
+                }
+                if reverse_scalar_storage_order {
+                    return Ok(Token::AttributeScalarStorageOrderReverse);
                 }
                 if noreturn {
                     return Ok(Token::AttributeNoreturn);

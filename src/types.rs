@@ -708,6 +708,7 @@ pub struct StructMember {
     pub size: usize,
     pub bit_width: Option<u8>,
     pub bit_offset: u8,
+    pub reverse_storage_order: bool,
 }
 
 impl StructDef {
@@ -715,48 +716,15 @@ impl StructDef {
         declaration: &StructDeclaration,
         struct_defs: &std::collections::HashMap<String, StructDef>,
     ) -> Result<Self, String> {
-        match (
+        Self::from_members_ex(
+            &declaration.tag,
+            &declaration.members,
+            struct_defs,
             declaration.is_union,
             declaration.packed,
             declaration.alignment,
-        ) {
-            (true, true, Some(alignment)) => Self::from_members_union_packed_aligned(
-                &declaration.tag,
-                &declaration.members,
-                struct_defs,
-                alignment,
-            ),
-            (true, true, None) => {
-                Self::from_members_union_packed(&declaration.tag, &declaration.members, struct_defs)
-            }
-            (true, false, Some(alignment)) => Self::from_members_union_aligned(
-                &declaration.tag,
-                &declaration.members,
-                struct_defs,
-                alignment,
-            ),
-            (true, false, None) => {
-                Self::from_members_union(&declaration.tag, &declaration.members, struct_defs)
-            }
-            (false, true, Some(alignment)) => Self::from_members_packed_aligned(
-                &declaration.tag,
-                &declaration.members,
-                struct_defs,
-                alignment,
-            ),
-            (false, true, None) => {
-                Self::from_members_packed(&declaration.tag, &declaration.members, struct_defs)
-            }
-            (false, false, Some(alignment)) => Self::from_members_aligned(
-                &declaration.tag,
-                &declaration.members,
-                struct_defs,
-                alignment,
-            ),
-            (false, false, None) => {
-                Self::from_members(&declaration.tag, &declaration.members, struct_defs)
-            }
-        }
+            declaration.reverse_storage_order,
+        )
     }
 
     /// Compute layout from member declarations
@@ -765,7 +733,7 @@ impl StructDef {
         members: &[MemberDeclaration],
         struct_defs: &std::collections::HashMap<String, StructDef>,
     ) -> Result<Self, String> {
-        Self::from_members_ex(tag, members, struct_defs, false, false, None)
+        Self::from_members_ex(tag, members, struct_defs, false, false, None, false)
     }
 
     pub fn from_members_packed(
@@ -773,7 +741,7 @@ impl StructDef {
         members: &[MemberDeclaration],
         struct_defs: &std::collections::HashMap<String, StructDef>,
     ) -> Result<Self, String> {
-        Self::from_members_ex(tag, members, struct_defs, false, true, None)
+        Self::from_members_ex(tag, members, struct_defs, false, true, None, false)
     }
 
     pub fn from_members_aligned(
@@ -782,7 +750,15 @@ impl StructDef {
         struct_defs: &std::collections::HashMap<String, StructDef>,
         alignment: std::num::NonZeroUsize,
     ) -> Result<Self, String> {
-        Self::from_members_ex(tag, members, struct_defs, false, false, Some(alignment))
+        Self::from_members_ex(
+            tag,
+            members,
+            struct_defs,
+            false,
+            false,
+            Some(alignment),
+            false,
+        )
     }
 
     pub fn from_members_packed_aligned(
@@ -791,7 +767,15 @@ impl StructDef {
         struct_defs: &std::collections::HashMap<String, StructDef>,
         alignment: std::num::NonZeroUsize,
     ) -> Result<Self, String> {
-        Self::from_members_ex(tag, members, struct_defs, false, true, Some(alignment))
+        Self::from_members_ex(
+            tag,
+            members,
+            struct_defs,
+            false,
+            true,
+            Some(alignment),
+            false,
+        )
     }
 
     pub fn from_members_union(
@@ -799,7 +783,7 @@ impl StructDef {
         members: &[MemberDeclaration],
         struct_defs: &std::collections::HashMap<String, StructDef>,
     ) -> Result<Self, String> {
-        Self::from_members_ex(tag, members, struct_defs, true, false, None)
+        Self::from_members_ex(tag, members, struct_defs, true, false, None, false)
     }
 
     pub fn from_members_union_packed(
@@ -807,7 +791,7 @@ impl StructDef {
         members: &[MemberDeclaration],
         struct_defs: &std::collections::HashMap<String, StructDef>,
     ) -> Result<Self, String> {
-        Self::from_members_ex(tag, members, struct_defs, true, true, None)
+        Self::from_members_ex(tag, members, struct_defs, true, true, None, false)
     }
 
     pub fn from_members_union_aligned(
@@ -816,7 +800,15 @@ impl StructDef {
         struct_defs: &std::collections::HashMap<String, StructDef>,
         alignment: std::num::NonZeroUsize,
     ) -> Result<Self, String> {
-        Self::from_members_ex(tag, members, struct_defs, true, false, Some(alignment))
+        Self::from_members_ex(
+            tag,
+            members,
+            struct_defs,
+            true,
+            false,
+            Some(alignment),
+            false,
+        )
     }
 
     pub fn from_members_union_packed_aligned(
@@ -825,7 +817,15 @@ impl StructDef {
         struct_defs: &std::collections::HashMap<String, StructDef>,
         alignment: std::num::NonZeroUsize,
     ) -> Result<Self, String> {
-        Self::from_members_ex(tag, members, struct_defs, true, true, Some(alignment))
+        Self::from_members_ex(
+            tag,
+            members,
+            struct_defs,
+            true,
+            true,
+            Some(alignment),
+            false,
+        )
     }
 
     fn from_members_ex(
@@ -835,6 +835,7 @@ impl StructDef {
         is_union: bool,
         packed: bool,
         aggregate_alignment: Option<std::num::NonZeroUsize>,
+        reverse_storage_order: bool,
     ) -> Result<Self, String> {
         let mut offset = 0usize;
         let mut max_align = 1usize;
@@ -924,6 +925,7 @@ impl StructDef {
                             size: storage_size,
                             bit_width: Some(width),
                             bit_offset: 0,
+                            reverse_storage_order,
                         });
                     }
                     let occupied_size = if member_packed {
@@ -958,7 +960,12 @@ impl StructDef {
                         offset: bit_unit_offset,
                         size: storage_size,
                         bit_width: Some(width),
-                        bit_offset: next_bit_offset as u8,
+                        bit_offset: if reverse_storage_order {
+                            (storage_bits - next_bit_offset - width as usize) as u8
+                        } else {
+                            next_bit_offset as u8
+                        },
+                        reverse_storage_order,
                     });
                 }
                 next_bit_offset += width as usize;
@@ -990,6 +997,7 @@ impl StructDef {
                         size: m_size,
                         bit_width: None,
                         bit_offset: 0,
+                        reverse_storage_order: false,
                     });
                 }
                 if m_size > max_size {
@@ -1020,6 +1028,7 @@ impl StructDef {
                         size: m_size,
                         bit_width: None,
                         bit_offset: 0,
+                        reverse_storage_order: false,
                     });
                 }
                 offset = offset
@@ -1200,6 +1209,7 @@ pub enum Token {
     AttributeAlias(String),
     AttributeMode(String),
     AttributeVectorSize(String),
+    AttributeScalarStorageOrderReverse,
     Skip,
     Ellipsis, // ...
 
@@ -1526,6 +1536,8 @@ pub struct FunctionDeclaration {
     pub noreturn: bool,
     /// True if function instrumentation hooks must not be emitted.
     pub no_instrument_function: bool,
+    /// True if the declaration used an inline spelling.
+    pub is_inline: bool,
     pub body: Option<Block>,
     pub storage_class: Option<StorageClass>,
 }
@@ -1549,6 +1561,7 @@ pub struct StructDeclaration {
     pub transparent_union: bool,
     pub packed: bool,
     pub alignment: Option<std::num::NonZeroUsize>,
+    pub reverse_storage_order: bool,
 }
 
 #[allow(clippy::enum_variant_names)]

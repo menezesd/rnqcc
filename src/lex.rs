@@ -332,6 +332,10 @@ impl Lexer {
         Self::contains_named_attribute(text, &["packed", "__packed__"])
     }
 
+    fn contains_transparent_union_attribute(text: &str) -> bool {
+        Self::contains_named_attribute(text, &["transparent_union", "__transparent_union__"])
+    }
+
     fn contains_named_attribute(text: &str, names: &[&str]) -> bool {
         let chars: Vec<char> = text.chars().collect();
         let mut pos = 0;
@@ -950,6 +954,7 @@ impl Lexer {
                 let noreturn = Self::contains_noreturn_attribute(&text);
                 let no_instrument_function = Self::contains_no_instrument_function_attribute(&text);
                 let packed = Self::contains_packed_attribute(&text);
+                let transparent_union = Self::contains_transparent_union_attribute(&text);
                 if let Some(alignment) = alignment {
                     return Ok(if packed && noreturn {
                         Token::AttributePackedAlignedNoreturn(alignment)
@@ -963,6 +968,9 @@ impl Lexer {
                 }
                 if packed {
                     return Ok(Token::AttributePacked);
+                }
+                if transparent_union {
+                    return Ok(Token::AttributeTransparentUnion);
                 }
                 if noreturn {
                     return Ok(Token::AttributeNoreturn);

@@ -1192,6 +1192,7 @@ pub enum Token {
     AttributePacked,
     AttributePackedAligned(String),
     AttributePackedAlignedNoreturn(String),
+    AttributeTransparentUnion,
     AttributeNoreturn,
     AttributeNoInstrumentFunction,
     AttributeAlias(String),
@@ -1534,6 +1535,7 @@ pub struct StructDeclaration {
     pub tag: String,
     pub members: Vec<MemberDeclaration>, // empty = incomplete type
     pub is_union: bool,
+    pub transparent_union: bool,
     pub packed: bool,
     pub alignment: Option<std::num::NonZeroUsize>,
 }

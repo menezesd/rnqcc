@@ -72,10 +72,47 @@ impl FunctionSignature {
             && self.default_promoted_params() == other.param_full_types
     }
 
-    fn compatible_with(&self, other: &Self) -> bool {
+    fn transparent_equivalent_type(
+        ft: &FullType,
+        transparent_unions: &HashMap<String, FullType>,
+    ) -> FullType {
+        if let FullType::Struct(tag) = ft {
+            if let Some(member_ft) = transparent_unions.get(tag) {
+                return member_ft.clone();
+            }
+        }
+        ft.clone()
+    }
+
+    fn transparent_equivalent_params(
+        params: &[FullType],
+        transparent_unions: &HashMap<String, FullType>,
+    ) -> Vec<FullType> {
+        params
+            .iter()
+            .map(|ft| Self::transparent_equivalent_type(ft, transparent_unions))
+            .collect()
+    }
+
+    fn param_full_types_compatible_with(
+        &self,
+        other: &Self,
+        transparent_unions: &HashMap<String, FullType>,
+    ) -> bool {
+        self.param_full_types == other.param_full_types
+            || Self::transparent_equivalent_params(&self.param_full_types, transparent_unions)
+                == Self::transparent_equivalent_params(&other.param_full_types, transparent_unions)
+    }
+
+    fn compatible_with(
+        &self,
+        other: &Self,
+        transparent_unions: &HashMap<String, FullType>,
+    ) -> bool {
         self.return_type == other.return_type
             && self.return_full_type == other.return_full_type
-            && (self == other
+            && ((self.variadic == other.variadic
+                && self.param_full_types_compatible_with(other, transparent_unions))
                 || self.is_old_style_empty()
                 || other.is_old_style_empty()
                 || self.old_style_compatible_with_prototype(other)
@@ -92,6 +129,7 @@ struct Resolver {
     break_labels: Vec<String>,
     continue_labels: Vec<String>,
     functions: HashMap<String, FunctionSignature>,
+    transparent_unions: HashMap<String, FullType>,
     implicit_functions: HashMap<String, FunctionSignature>,
     defined_labels: Vec<String>,
     goto_targets: Vec<String>,
@@ -138,6 +176,7 @@ impl Resolver {
             break_labels: Vec::new(),
             continue_labels: Vec::new(),
             functions: HashMap::new(),
+            transparent_unions: HashMap::new(),
             implicit_functions: HashMap::new(),
             defined_labels: Vec::new(),
             goto_targets: Vec::new(),
@@ -283,6 +322,13 @@ impl Resolver {
         self.implicit_functions
             .entry(name.to_string())
             .or_insert(signature);
+    }
+
+    fn record_transparent_union(&mut self, tag: String, members: &[MemberDeclaration]) {
+        if let Some(member) = members.first() {
+            self.transparent_unions
+                .insert(tag, member.member_full_type.clone());
+        }
     }
 
     fn implicit_function_declarations(&self) -> Vec<Declaration> {
@@ -731,7 +777,7 @@ impl Resolver {
                     if fd.body.is_none() {
                         let signature = FunctionSignature::from_decl(&fd);
                         if let Some(existing) = self.functions.get(&original_name) {
-                            if !existing.compatible_with(&signature) {
+                            if !existing.compatible_with(&signature, &self.transparent_unions) {
                                 return Err(Diagnostic::resolve(
                                     DiagnosticKind::ConflictingFunctionParameterCount {
                                         name: original_name,
@@ -747,7 +793,7 @@ impl Resolver {
                         fd.name = unique_name.clone();
                         let signature = FunctionSignature::from_decl(&fd);
                         if let Some(existing) = self.functions.get(&unique_name) {
-                            if !existing.compatible_with(&signature) {
+                            if !existing.compatible_with(&signature, &self.transparent_unions) {
                                 return Err(Diagnostic::resolve(
                                     DiagnosticKind::ConflictingFunctionParameterCount {
                                         name: original_name,
@@ -767,6 +813,10 @@ impl Resolver {
                 }
                 BlockItem::Declaration(Declaration::StructDecl(sd)) => {
                     let unique_tag = self.declare_tag(&sd.tag)?;
+                    if sd.is_union && sd.transparent_union {
+                        self.record_transparent_union(sd.tag.clone(), &sd.members);
+                        self.record_transparent_union(unique_tag.clone(), &sd.members);
+                    }
                     let resolved_members: Vec<MemberDeclaration> = sd
                         .members
                         .into_iter()
@@ -787,6 +837,7 @@ impl Resolver {
                         tag: unique_tag,
                         members: resolved_members,
                         is_union: sd.is_union,
+                        transparent_union: sd.transparent_union,
                         packed: sd.packed,
                         alignment: sd.alignment,
                     }))
@@ -1062,7 +1113,7 @@ pub fn resolve(program: Program) -> ResolveResult<ResolveOutput> {
             Declaration::FunDecl(fd) => {
                 let signature = FunctionSignature::from_decl(fd);
                 if let Some(existing) = resolver.functions.get(&fd.name) {
-                    if !existing.compatible_with(&signature) {
+                    if !existing.compatible_with(&signature, &resolver.transparent_unions) {
                         return Err(Diagnostic::resolve(
                             DiagnosticKind::ConflictingFunctionParameterCount {
                                 name: fd.name.clone(),
@@ -1082,7 +1133,11 @@ pub fn resolve(program: Program) -> ResolveResult<ResolveOutput> {
                 resolver.declare_global_var(&vd.name)?;
             }
             Declaration::StructDecl(sd) => {
-                resolver.declare_tag(&sd.tag)?;
+                let unique_tag = resolver.declare_tag(&sd.tag)?;
+                if sd.is_union && sd.transparent_union {
+                    resolver.record_transparent_union(sd.tag.clone(), &sd.members);
+                    resolver.record_transparent_union(unique_tag, &sd.members);
+                }
             }
             Declaration::TypedefDecl => {}
         }
@@ -1134,6 +1189,7 @@ pub fn resolve(program: Program) -> ResolveResult<ResolveOutput> {
                         tag: unique_tag,
                         members: resolved_members,
                         is_union: sd.is_union,
+                        transparent_union: sd.transparent_union,
                         packed: sd.packed,
                         alignment: sd.alignment,
                     })

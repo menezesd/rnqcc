@@ -202,6 +202,7 @@ struct TackyGen {
     array_sizes: HashMap<String, usize>,
     /// Struct definitions
     struct_defs: HashMap<String, StructDef>,
+    transparent_unions: HashMap<String, FullType>,
     nested_functions: Vec<TackyFunction>,
     instrument_functions: bool,
     no_instrument_functions: std::collections::HashSet<String>,
@@ -235,6 +236,7 @@ impl TackyGen {
             bit_precisions: HashMap::new(),
             array_sizes: HashMap::new(),
             struct_defs: HashMap::new(),
+            transparent_unions: HashMap::new(),
             nested_functions: Vec::new(),
             instrument_functions: false,
             no_instrument_functions: std::collections::HashSet::new(),
@@ -1176,6 +1178,26 @@ impl TackyGen {
         }
     }
 
+    fn has_unspecified_function_params(params: &[FullType], variadic: bool) -> bool {
+        params.is_empty() && variadic
+    }
+
+    fn canonical_param_full_type(&self, ft: &FullType) -> FullType {
+        if let FullType::Struct(tag) = ft {
+            if let Some(member_ft) = self.transparent_unions.get(tag) {
+                return member_ft.clone();
+            }
+        }
+        ft.clone()
+    }
+
+    fn canonical_param_full_types(&self, param_full_types: &[FullType]) -> Vec<FullType> {
+        param_full_types
+            .iter()
+            .map(|ft| self.canonical_param_full_type(ft))
+            .collect()
+    }
+
     fn compatible_full_types(&self, dst: &FullType, src: &FullType) -> bool {
         if dst == src {
             return true;
@@ -1244,6 +1266,25 @@ impl TackyGen {
             ) => self.compatible_full_types(dst_elem, src_elem),
             (FullType::Pointer(_), FullType::Scalar(CType::Pointer))
             | (FullType::Scalar(CType::Pointer), FullType::Pointer(_)) => true,
+            (FullType::Pointer(dst_inner), FullType::Function { .. }) => {
+                self.compatible_pointer_pointees(dst_inner, src)
+            }
+            (
+                FullType::Function {
+                    return_type: dst_ret,
+                    params: dst_params,
+                    variadic: dst_variadic,
+                },
+                FullType::Function {
+                    return_type: src_ret,
+                    params: src_params,
+                    variadic: src_variadic,
+                },
+            ) => {
+                self.compatible_full_types(dst_ret, src_ret)
+                    && (Self::has_unspecified_function_params(dst_params, *dst_variadic)
+                        || Self::has_unspecified_function_params(src_params, *src_variadic))
+            }
             (FullType::Pointer(dst_inner), FullType::Pointer(src_inner)) => {
                 Self::is_void_pointer(dst)
                     || Self::is_void_pointer(src)
@@ -3143,6 +3184,15 @@ impl TackyGen {
             });
             return Ok((ptr, decayed.to_ctype()));
         }
+        if matches!(ft, FullType::Function { .. }) {
+            let ptr_ft = FullType::Pointer(Box::new(ft));
+            let ptr = self.fresh_tmp_full(&ptr_ft);
+            self.emit(TackyInstr::GetAddress {
+                src: TackyVal::Var(name),
+                dst: ptr.clone(),
+            });
+            return Ok((ptr, CType::Pointer));
+        }
         let t = ft.to_ctype();
         Ok((TackyVal::Var(name), t))
     }
@@ -4685,6 +4735,15 @@ impl TackyGen {
                 })
                 .unwrap_or_default()
         };
+        let param_full_types = self.canonical_param_full_types(&param_full_types);
+        let param_types = if param_full_types.is_empty() {
+            param_types
+        } else {
+            param_full_types
+                .iter()
+                .map(FullType::to_ctype)
+                .collect::<Vec<_>>()
+        };
 
         let mut tacky_args = Vec::new();
         let stack_arg_indices = std::collections::HashSet::new();
@@ -5034,6 +5093,15 @@ impl TackyGen {
             .as_ref()
             .map(|(_, param_fts, _)| param_fts.clone())
             .unwrap_or_default();
+        let param_full_types = self.canonical_param_full_types(&param_full_types);
+        let param_types = if param_full_types.is_empty() {
+            param_types
+        } else {
+            param_full_types
+                .iter()
+                .map(FullType::to_ctype)
+                .collect::<Vec<_>>()
+        };
         let has_prototype = pointer_sig.is_some();
         if has_prototype && !variadic && args.len() != param_types.len() {
             return Err(format!(
@@ -10375,6 +10443,12 @@ impl TackyGen {
                     }
                 }
                 BlockItem::Declaration(Declaration::StructDecl(sd)) => {
+                    if sd.is_union && sd.transparent_union {
+                        if let Some(member) = sd.members.first() {
+                            self.transparent_unions
+                                .insert(sd.tag.clone(), member.member_full_type.clone());
+                        }
+                    }
                     let def = StructDef::from_declaration(&sd, &self.struct_defs)?;
                     self.struct_defs.insert(sd.tag.clone(), def);
                 }
@@ -11635,6 +11709,12 @@ pub fn generate_with_options(
                 global_vars.insert(vd.name.clone());
             }
             Declaration::StructDecl(sd) => {
+                if sd.is_union && sd.transparent_union {
+                    if let Some(member) = sd.members.first() {
+                        gen.transparent_unions
+                            .insert(sd.tag.clone(), member.member_full_type.clone());
+                    }
+                }
                 let def = StructDef::from_declaration(sd, &gen.struct_defs)?;
                 gen.struct_defs.insert(sd.tag.clone(), def);
             }

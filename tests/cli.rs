@@ -825,6 +825,160 @@ fn compiles_old_style_function_definition_after_promoted_prototype() {
 }
 
 #[test]
+fn compiles_old_style_unspecified_function_pointer_assignment() {
+    let src = temp_file("old-style-unspecified-function-pointer-assignment", "c");
+    std::fs::write(
+        &src,
+        "bar(foo, a)\n\
+              int (**foo)();\n\
+         {\n\
+           foo[1] = bar;\n\
+           foo[a](1);\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn compiles_call_through_function_pointer_return_value() {
+    let src = temp_file("function-pointer-return-call", "c");
+    std::fs::write(
+        &src,
+        "int n;\n\
+         typedef void (*fnptr)();\n\
+         fnptr get_me();\n\
+         inline void test(void) {\n\
+           if (n < 10) (get_me())();\n\
+           n++;\n\
+         }\n\
+         fnptr get_me() { return test; }\n\
+         void foo() { test(); }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn compiles_function_typedef_declarator_attributes() {
+    let src = temp_file("function-typedef-declarator-attributes", "c");
+    std::fs::write(
+        &src,
+        "typedef void ft(int);\n\
+         void f(int args)__attribute__((noreturn));\n\
+         void f2(ft *p __attribute__((noreturn))) { p = f; }\n\
+         volatile ft g;\n\
+         void f3(ft *p __attribute__((const))) { p = g; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn compiles_pointer_declarator_alignment_attribute() {
+    let src = temp_file("pointer-declarator-alignment-attribute", "c");
+    std::fs::write(
+        &src,
+        "int *__attribute__((__aligned__(16))) *p;\n\
+         int main(void) { return **p; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn compiles_transparent_union_function_redeclaration() {
+    let src = temp_file("transparent-union-function-redeclaration", "c");
+    std::fs::write(
+        &src,
+        "typedef union { const struct sockaddr *__restrict __sockaddr__; } \
+         __CONST_SOCKADDR_ARG __attribute__((__transparent_union__));\n\
+         extern int _pure_socketcall(const struct sockaddr *);\n\
+         extern int sendto(__CONST_SOCKADDR_ARG __addr);\n\
+         int send(void) { return sendto((void *)0); }\n\
+         int sendto(const struct sockaddr *to) { return _pure_socketcall(to); }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn compiles_transparent_union_typeof_redeclaration() {
+    let src = temp_file("transparent-union-typeof-redeclaration", "c");
+    std::fs::write(
+        &src,
+        "extern void *malloc(__SIZE_TYPE__);\n\
+         typedef struct T T;\n\
+         struct T { void (*destroy)(void *); };\n\
+         void destroy(union { void *this; } __attribute__((transparent_union)));\n\
+         static const typeof(destroy) *_destroy = (const typeof(destroy)*)destroy;\n\
+         void destroy(void *this);\n\
+         static T *create_empty(void) {\n\
+           T *this = malloc(sizeof(*this));\n\
+           *this = (typeof(*this)){ _destroy };\n\
+           return this;\n\
+         }\n\
+         void openssl_crl_load(void) { T *this = create_empty(); destroy(this); }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn compiles_gnu_qualified_old_style_parameter_declarations() {
     let src = temp_file("gnu-qualified-old-style-params", "c");
     let out = temp_file("gnu-qualified-old-style-params", "s");

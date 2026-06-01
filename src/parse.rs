@@ -11,6 +11,7 @@ const VLA_STATIC_SCALE_FALLBACK: usize = 16;
 #[derive(Debug, Clone, Copy, Default)]
 struct AggregateAttributes {
     packed: bool,
+    transparent_union: bool,
     alignment: Option<std::num::NonZeroUsize>,
 }
 
@@ -132,6 +133,8 @@ pub struct Parser {
     pending_noreturn: bool,
     /// True when declaration attributes disable function instrumentation.
     pending_no_instrument_function: bool,
+    /// True when declaration attributes mark the current union typedef transparent.
+    pending_transparent_union: bool,
     /// GNU alias attribute collected for the next object declaration.
     pending_alias: Option<String>,
     /// True when declaration specifiers include inline.
@@ -155,6 +158,7 @@ impl Parser {
     ) -> AggregateAttributes {
         AggregateAttributes {
             packed: prefix.packed || suffix.packed,
+            transparent_union: prefix.transparent_union || suffix.transparent_union,
             alignment: match (prefix.alignment, suffix.alignment) {
                 (Some(prefix), Some(suffix)) => Some(prefix.max(suffix)),
                 (Some(prefix), None) => Some(prefix),
@@ -176,6 +180,15 @@ impl Parser {
                 (None, Some(suffix)) => Some(suffix),
                 (None, None) => None,
             },
+        }
+    }
+
+    fn mark_pending_transparent_union(&mut self, tag: &str) {
+        for declaration in self.pending_struct_decls.iter_mut().rev() {
+            if declaration.tag == tag && declaration.is_union {
+                declaration.transparent_union = true;
+                break;
+            }
         }
     }
 
@@ -251,6 +264,7 @@ impl Parser {
             pending_auto_type: false,
             pending_noreturn: false,
             pending_no_instrument_function: false,
+            pending_transparent_union: false,
             pending_alias: None,
             pending_inline: false,
             last_type_was_enum: false,
@@ -371,6 +385,15 @@ impl Parser {
                 | Some(Token::KWVolatile)
                 | Some(Token::KWRestrict)
                 | Some(Token::KWAtomic)
+                | Some(Token::AttributeAligned(_))
+                | Some(Token::AttributeAlignedNoreturn(_))
+                | Some(Token::AttributeNoreturn)
+                | Some(Token::AttributeNoInstrumentFunction)
+                | Some(Token::AttributePacked)
+                | Some(Token::AttributePackedAligned(_))
+                | Some(Token::AttributePackedAlignedNoreturn(_))
+                | Some(Token::AttributeTransparentUnion)
+                | Some(Token::AttributeMode(_))
         ) || matches!(
             self.peek(),
             Some(Token::Identifier(name)) if Self::is_gnu_qualifier_name(name)
@@ -379,6 +402,9 @@ impl Parser {
 
     fn consume_declarator_qualifiers(&mut self) -> ParseResult<()> {
         while self.is_declarator_qualifier() {
+            if self.at(&Token::AttributeTransparentUnion) {
+                self.pending_transparent_union = true;
+            }
             self.advance()?;
         }
         Ok(())
@@ -1202,6 +1228,9 @@ impl Parser {
                     self.advance()?;
                     attrs.packed = true;
                 }
+                Some(Token::AttributeTransparentUnion) => {
+                    self.advance()?;
+                }
                 Some(Token::AttributePackedAligned(expression)) => {
                     let value = self.parse_attribute_alignment(&expression)?;
                     self.advance()?;
@@ -1266,6 +1295,10 @@ impl Parser {
                 Some(Token::AttributePacked) => {
                     self.advance()?;
                 }
+                Some(Token::AttributeTransparentUnion) => {
+                    self.advance()?;
+                    self.pending_transparent_union = true;
+                }
                 Some(Token::AttributePackedAligned(expression)) => {
                     let value = self.parse_attribute_alignment(&expression)?;
                     self.advance()?;
@@ -1313,6 +1346,10 @@ impl Parser {
                 Some(Token::AttributePacked) => {
                     self.advance()?;
                     attrs.packed = true;
+                }
+                Some(Token::AttributeTransparentUnion) => {
+                    self.advance()?;
+                    attrs.transparent_union = true;
                 }
                 Some(Token::AttributeAligned(expression)) => {
                     let value = self.parse_attribute_alignment(&expression)?;
@@ -2418,6 +2455,7 @@ impl Parser {
             | Token::AttributePacked
             | Token::AttributePackedAligned(_)
             | Token::AttributePackedAlignedNoreturn(_)
+            | Token::AttributeTransparentUnion
             | Token::AttributeAlignedNoreturn(_)
             | Token::AttributeNoreturn
             | Token::AttributeNoInstrumentFunction
@@ -3044,6 +3082,7 @@ impl Parser {
                 tag: tag.clone(),
                 members,
                 is_union,
+                transparent_union: attrs.transparent_union,
                 packed: attrs.packed,
                 alignment: attrs.alignment,
             };
@@ -3132,6 +3171,7 @@ impl Parser {
                             tag: tag.clone(),
                             members,
                             is_union,
+                            transparent_union: attrs.transparent_union,
                             packed: attrs.packed,
                             alignment: attrs.alignment,
                         };
@@ -3146,6 +3186,7 @@ impl Parser {
                             tag: tag.clone(),
                             members,
                             is_union,
+                            transparent_union: attrs.transparent_union,
                             packed: attrs.packed,
                             alignment: attrs.alignment,
                         };
@@ -3159,6 +3200,7 @@ impl Parser {
                         tag,
                         members: vec![],
                         is_union,
+                        transparent_union: prefix_attrs.transparent_union,
                         packed: prefix_attrs.packed,
                         alignment: prefix_attrs.alignment,
                     }));
@@ -3256,6 +3298,7 @@ impl Parser {
         let first_noreturn = spec_noreturn || pre_noreturn || post_noreturn;
         let first_no_instrument =
             spec_no_instrument || std::mem::take(&mut self.pending_no_instrument_function);
+        let decl_transparent_union = std::mem::take(&mut self.pending_transparent_union);
         let td_ft = base_typedef_full_type;
         self.last_typedef_full_type = None;
         let (name, full_type, decl_params) =
@@ -3266,6 +3309,9 @@ impl Parser {
         // Replace Scalar(Struct) with FullType::Struct(tag) if applicable
         let full_type = if base_type == CType::Struct {
             if let Some(ref tag) = saved_struct_tag {
+                if decl_transparent_union {
+                    self.mark_pending_transparent_union(tag);
+                }
                 Self::replace_scalar_struct(&full_type, tag)
             } else {
                 full_type
@@ -3765,6 +3811,7 @@ impl Parser {
             let base = s.parse_type()?;
             // Use abstract declarator parsing (name optional) for params
             let tree = s.parse_declarator_tree_inner(true)?;
+            s.consume_declarator_qualifiers()?;
             s.param_parse_depth -= 1;
             let td_ft = s.last_typedef_full_type.take();
             let (name, full_type, decl_params) =
@@ -4073,6 +4120,7 @@ impl Parser {
             | Some(Token::AttributePacked)
             | Some(Token::AttributePackedAligned(_))
             | Some(Token::AttributePackedAlignedNoreturn(_))
+            | Some(Token::AttributeTransparentUnion)
             | Some(Token::AttributeNoreturn)
             | Some(Token::AttributeNoInstrumentFunction)
             | Some(Token::AttributeMode(_))
@@ -4140,6 +4188,7 @@ impl Parser {
                                 tag: tag.clone(),
                                 members,
                                 is_union,
+                                transparent_union: attrs.transparent_union,
                                 packed: attrs.packed,
                                 alignment: attrs.alignment,
                             };
@@ -4156,6 +4205,7 @@ impl Parser {
                                 tag,
                                 members: vec![],
                                 is_union,
+                                transparent_union: prefix_attrs.transparent_union,
                                 packed: prefix_attrs.packed,
                                 alignment: prefix_attrs.alignment,
                             },
@@ -4195,9 +4245,13 @@ impl Parser {
             let decl_noreturn = spec_noreturn || pre_noreturn || post_noreturn;
             let decl_no_instrument =
                 spec_no_instrument || std::mem::take(&mut self.pending_no_instrument_function);
+            let decl_transparent_union = std::mem::take(&mut self.pending_transparent_union);
             // Replace Scalar(Struct) with FullType::Struct(tag)
             let full_type = if base_type == CType::Struct {
                 if let Some(ref tag) = saved_struct_tag {
+                    if decl_transparent_union {
+                        self.mark_pending_transparent_union(tag);
+                    }
                     Self::replace_scalar_struct(&full_type, tag)
                 } else {
                     full_type
@@ -5043,9 +5097,7 @@ impl Parser {
                     let member = self.parse_identifier()?;
                     expr = Exp::Arrow(Box::new(expr), member);
                 }
-                Some(Token::OpenParen)
-                    if !matches!(expr, Exp::Var(_) | Exp::FunctionCall(_, _)) =>
-                {
+                Some(Token::OpenParen) if !matches!(expr, Exp::Var(_)) => {
                     // Indirect call through expression: expr(args)
                     // e.g., ops[0](1,2) or get_func()(args)
                     self.advance()?;

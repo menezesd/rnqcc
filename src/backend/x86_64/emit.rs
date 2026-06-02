@@ -578,6 +578,31 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                 show_operand(dst, AsmType::LongDouble, platform)?
             )
         }
+        AsmInstr::X87StoreInt(t, dst) => {
+            let mnemonic = match t {
+                AsmType::Word => "fisttps",
+                AsmType::Longword => "fisttpl",
+                AsmType::Quadword => "fisttpq",
+                other => {
+                    return invalid_input(format!(
+                        "unsupported x87 integer store type in x86-64 emitter: {:?}",
+                        other
+                    ))
+                }
+            };
+            if matches!(dst, AsmOperand::Reg(_)) {
+                writeln!(w, "\tsubq $16, %rsp")?;
+                writeln!(w, "\t{} (%rsp)", mnemonic)?;
+                writeln!(
+                    w,
+                    "\tmov{} (%rsp), {}",
+                    suffix(*t),
+                    show_operand(dst, *t, platform)?
+                )?;
+                return writeln!(w, "\taddq $16, %rsp");
+            }
+            writeln!(w, "\t{} {}", mnemonic, show_operand(dst, *t, platform)?)
+        }
         AsmInstr::X87LoadIndirect(t, reg) => {
             let mnemonic = match t {
                 AsmType::Float => "flds",

@@ -1142,7 +1142,22 @@ fn convert_instruction(
         }
         TackyInstr::DoubleToInt { src, dst } => {
             let dst_t = val_type(dst, types);
-            if matches!(dst_t, AsmType::Byte | AsmType::Word) {
+            if val_type(src, types) == AsmType::LongDouble {
+                x87_load_val(out, src, types, static_doubles);
+                if matches!(dst_t, AsmType::Byte | AsmType::Word) {
+                    out.push(AsmInstr::X87StoreInt(
+                        AsmType::Longword,
+                        AsmOperand::Reg(Reg::R10),
+                    ));
+                    out.push(AsmInstr::Mov(
+                        dst_t,
+                        AsmOperand::Reg(Reg::R10),
+                        convert_val(dst),
+                    ));
+                } else {
+                    out.push(AsmInstr::X87StoreInt(dst_t, convert_val(dst)));
+                }
+            } else if matches!(dst_t, AsmType::Byte | AsmType::Word) {
                 // double→narrow integer: cvttsd2si to int, then truncate
                 out.push(AsmInstr::Cvttsd2si(
                     AsmType::Longword,
@@ -1515,7 +1530,32 @@ fn convert_instruction(
         }
         TackyInstr::DoubleToUInt { src, dst } => {
             let dst_t = val_type(dst, types);
-            if matches!(dst_t, AsmType::Byte | AsmType::Word) {
+            if val_type(src, types) == AsmType::LongDouble {
+                x87_load_val(out, src, types, static_doubles);
+                if matches!(dst_t, AsmType::Byte | AsmType::Word) {
+                    out.push(AsmInstr::X87StoreInt(
+                        AsmType::Longword,
+                        AsmOperand::Reg(Reg::R10),
+                    ));
+                    out.push(AsmInstr::Mov(
+                        dst_t,
+                        AsmOperand::Reg(Reg::R10),
+                        convert_val(dst),
+                    ));
+                } else if dst_t == AsmType::Longword {
+                    out.push(AsmInstr::X87StoreInt(
+                        AsmType::Quadword,
+                        AsmOperand::Reg(Reg::R10),
+                    ));
+                    out.push(AsmInstr::Mov(
+                        AsmType::Longword,
+                        AsmOperand::Reg(Reg::R10),
+                        convert_val(dst),
+                    ));
+                } else {
+                    out.push(AsmInstr::X87StoreInt(dst_t, convert_val(dst)));
+                }
+            } else if matches!(dst_t, AsmType::Byte | AsmType::Word) {
                 // double→narrow unsigned integer: cvttsd2si to int, truncate
                 out.push(AsmInstr::Cvttsd2si(
                     AsmType::Longword,
@@ -3000,6 +3040,9 @@ fn replace_pseudos(
             AsmInstr::X87Store(dst) => {
                 replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
             }
+            AsmInstr::X87StoreInt(_, dst) => {
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
+            }
             AsmInstr::X87LoadIndirect(_, _) | AsmInstr::X87StoreIndirect(_) => {}
             AsmInstr::Lea(src, dst) => {
                 replace_operand(src, &mut pseudo_map, &mut stack_offset, &ctx);
@@ -3525,6 +3568,9 @@ fn verify_final_function(func: &AsmFunction) -> Result<(), String> {
             }
             AsmInstr::X87Load(_, src) | AsmInstr::X87Store(src) => {
                 assert_no_pseudo_operand(src, instr)?;
+            }
+            AsmInstr::X87StoreInt(_, dst) => {
+                assert_no_pseudo_operand(dst, instr)?;
             }
             AsmInstr::X87LoadIndirect(_, _) | AsmInstr::X87StoreIndirect(_) => {}
             _ => {}

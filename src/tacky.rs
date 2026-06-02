@@ -2044,6 +2044,48 @@ impl TackyGen {
             }
             return dst;
         }
+        if from == CType::LongDouble && matches!(to, CType::Int128 | CType::UInt128) {
+            let intermediate_type = if to.is_signed() {
+                CType::Long
+            } else {
+                CType::ULong
+            };
+            let intermediate = self.fresh_tmp(intermediate_type);
+            if to.is_signed() {
+                self.emit(TackyInstr::DoubleToInt {
+                    src: val,
+                    dst: intermediate.clone(),
+                });
+                self.emit(TackyInstr::SignExtend {
+                    src: intermediate,
+                    dst: dst.clone(),
+                });
+            } else {
+                self.emit(TackyInstr::DoubleToUInt {
+                    src: val,
+                    dst: intermediate.clone(),
+                });
+                self.emit(TackyInstr::ZeroExtend {
+                    src: intermediate,
+                    dst: dst.clone(),
+                });
+            }
+            return dst;
+        }
+        if from == CType::LongDouble && !to.is_floating() {
+            if to.is_signed() {
+                self.emit(TackyInstr::DoubleToInt {
+                    src: val,
+                    dst: dst.clone(),
+                });
+            } else {
+                self.emit(TackyInstr::DoubleToUInt {
+                    src: val,
+                    dst: dst.clone(),
+                });
+            }
+            return dst;
+        }
         if from == CType::Double && !to.is_floating() {
             if to.is_signed() {
                 self.emit(TackyInstr::DoubleToInt {

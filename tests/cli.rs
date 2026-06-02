@@ -769,6 +769,13 @@ fn x86_64_long_double_va_arg_uses_x87_loads_and_conversions() {
              long double x = va_arg(ap, long double);\n\
              va_end(ap);\n\
              return x != 131;\n\
+         }\n\
+         int add_to_int(int n, ...) {\n\
+             va_list ap;\n\
+             va_start(ap, n);\n\
+             n += va_arg(ap, long double);\n\
+             va_end(ap);\n\
+             return n;\n\
          }\n",
     )
     .expect("failed to write input");
@@ -786,6 +793,7 @@ fn x86_64_long_double_va_arg_uses_x87_loads_and_conversions() {
     assert!(asm.contains("fldt (%r11)"), "{asm}");
     assert!(asm.contains("fstpt"), "{asm}");
     assert!(asm.contains("fildl"), "{asm}");
+    assert!(asm.contains("fisttpl"), "{asm}");
     assert!(asm.contains("fucomip %st(1), %st"), "{asm}");
     assert!(!asm.contains("movt"), "{asm}");
     assert!(!asm.contains("movl %xmm"), "{asm}");

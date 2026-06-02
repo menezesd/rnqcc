@@ -21,6 +21,7 @@ execute/bf64-1.c | exit status -11
 execute/bitfld-5.c | exit status -6
 execute/complex-6.c | exit status -6
 execute/pr109040.c | exit status -6
+execute/pr117432.c | rnqcc: command failed
 execute/pr23324.c | exit status -6
 execute/pr39228.c | exit status -6
 execute/pr42833.c | exit status -6

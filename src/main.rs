@@ -1847,7 +1847,7 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                     "va_start",
                     vec!["ap"],
                     true,
-                    "__builtin_va_start(ap, ##__VA_ARGS__)",
+                    "__builtin_va_start(ap, ## __VA_ARGS__)",
                 ),
                 ("va_end", vec!["ap"], false, "((void)0)"),
                 ("va_copy", vec!["dst", "src"], false, "((dst) = (src))"),

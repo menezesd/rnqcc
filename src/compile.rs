@@ -169,7 +169,7 @@ pub fn validate_tacky_program(program: &TackyProgram) -> Result<(), String> {
                         }
                     }
                     for (index, size, align) in memory_arg_blocks {
-                        if *index >= args.len() || *size == 0 || *align == 0 {
+                        if *index >= args.len() || *align == 0 {
                             return Err(format!(
                                 "function '{}' has invalid memory argument block {:?}",
                                 function.name,

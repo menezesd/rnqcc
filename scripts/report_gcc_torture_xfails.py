@@ -38,6 +38,10 @@ def parse_failures(path: Path) -> tuple[dict[str, str], dict[str, str], dict[str
             xfail[test] = status.removeprefix("XFAIL:").strip()
         elif status.startswith("FAIL:"):
             fail[test] = status.removeprefix("FAIL:").strip()
+        elif status.startswith("SKIP:"):
+            continue
+        else:
+            fail[test] = status.strip()
     return stale, xfail, fail
 
 

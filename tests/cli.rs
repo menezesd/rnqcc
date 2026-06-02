@@ -18343,3 +18343,100 @@ int main(void)
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(exe);
 }
+
+#[test]
+fn internal_cpp_expands_single_argument_va_start_macro() {
+    let src = temp_file("single-arg-va-start-macro", "c");
+    let exe = temp_file("single-arg-va-start-macro", "bin");
+    std::fs::write(
+        &src,
+        r#"
+#include <stdarg.h>
+
+long long r;
+
+void qux(...)
+{
+    va_list ap;
+    va_start(ap);
+    if (!r)
+        r = va_arg(ap, long long);
+    else
+        r = va_arg(ap, int);
+    va_end(ap);
+}
+
+int main(void)
+{
+    qux(-2LL, 0);
+    if (r != -2LL)
+        return 1;
+    qux(-2, 0);
+    return r == -2 ? 42 : 2;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn x86_linux_allows_zero_sized_variadic_memory_arg_block() {
+    let src = temp_file("x86-linux-zero-vararg-struct", "c");
+    let asm = temp_file("x86-linux-zero-vararg-struct", "s");
+    std::fs::write(
+        &src,
+        r#"
+#include <stdarg.h>
+
+typedef struct { char x[0]; } A0;
+typedef struct { char x[1]; } A1;
+
+void foo(int size, ...)
+{
+    va_list ap;
+    A0 a0;
+    A1 a1;
+    va_start(ap, size);
+    a0 = va_arg(ap, A0);
+    a1 = va_arg(ap, A1);
+    va_end(ap);
+}
+
+void call(void)
+{
+    A0 a0;
+    A1 a1 = { { 7 } };
+    foo(2, a0, a1);
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&asm)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(asm);
+}

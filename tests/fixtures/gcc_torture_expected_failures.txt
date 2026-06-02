@@ -30,6 +30,7 @@ execute/fprintf-chk-1.c | exit status -11
 execute/pr109040.c | exit status -6
 execute/pr117432.c | command failed (exit status 1)
 execute/pr23324.c | exit status -6
+execute/pr39228.c | exit status -6
 execute/pr43560.c | exit status -11
 execute/pr44942.c | exit status -6
 execute/pr53645-2.c | timed out after

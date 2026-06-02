@@ -15,6 +15,7 @@ execute/20040709-1.c | command failed (exit status 1)
 execute/20040709-2.c | command failed (exit status 1)
 execute/20040709-3.c | command failed (exit status 1)
 execute/20041124-1.c | exit status -6
+execute/20041201-1.c | exit status 1
 execute/20050121-1.c | command failed (exit status 1)
 execute/20050215-1.c | exit status -6
 execute/920501-3.c | exit status -11

@@ -18,11 +18,9 @@ execute/align-2.c | exit status -6
 execute/bf64-1.c | exit status -11
 execute/bitfld-5.c | exit status -6
 execute/complex-6.c | exit status -6
-execute/pr117432.c | rnqcc: command failed
 execute/pr23324.c | exit status -6
+execute/pr42833.c | exit status -6
 execute/pr43560.c | exit status -11
-execute/pr44942.c | exit status -6
-execute/pr53645-2.c | timed out after 10.0s
 execute/pr65369.c | exit status -11
 execute/pr92904.c | timed out after 10.0s
 execute/regstack-1.c | exit status -6

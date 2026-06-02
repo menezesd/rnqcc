@@ -58,6 +58,11 @@ def main() -> int:
         default=DEFAULT_EXPECTED,
         help=f"expected-failure fixture (default: {DEFAULT_EXPECTED})",
     )
+    parser.add_argument(
+        "--fail-on-stale",
+        action="store_true",
+        help="exit non-zero when expected failures are stale",
+    )
     args = parser.parse_args()
 
     expected = load_expected(args.expected)
@@ -93,7 +98,7 @@ def main() -> int:
         for test in sorted(absent_expected):
             print(f"  {test} | {absent_expected[test]}")
 
-    return 1 if missing else 0
+    return 1 if missing or (args.fail_on_stale and stale_expected) else 0
 
 
 if __name__ == "__main__":

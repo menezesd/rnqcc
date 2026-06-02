@@ -294,10 +294,11 @@ def save_failure_artifact(
     src: Path,
     cmd: list[str],
     result: subprocess.CompletedProcess[str],
+    kind: str = "failures",
 ) -> None:
     if artifact_dir is None:
         return
-    dest = artifact_dir / "gcc_torture" / f"{index:04d}-{src.stem}"
+    dest = artifact_dir / "gcc_torture" / kind / f"{index:04d}-{src.stem}"
     dest.mkdir(parents=True, exist_ok=True)
     (dest / "command.txt").write_text(
         " ".join(shlex.quote(part) for part in cmd) + "\n",
@@ -443,6 +444,9 @@ def main() -> int:
                     expected = expected_failures.get(rel)
                     if expected is not None and expected in failure:
                         expected_failed.append((src, failure))
+                        save_failure_artifact(
+                            args.artifact_dir, suite, idx, src, cmd, result, "xfail"
+                        )
                     else:
                         failures.append((src, failure))
                         save_failure_artifact(args.artifact_dir, suite, idx, src, cmd, result)
@@ -460,6 +464,9 @@ def main() -> int:
                     expected = expected_failures.get(rel)
                     if expected is not None and expected in failure:
                         expected_failed.append((src, failure))
+                        save_failure_artifact(
+                            args.artifact_dir, suite, idx, src, cmd, result, "xfail"
+                        )
                     else:
                         failures.append((src, failure))
                         save_failure_artifact(args.artifact_dir, suite, idx, src, cmd, result)

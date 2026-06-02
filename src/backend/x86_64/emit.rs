@@ -549,20 +549,15 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                     ))
                 }
             };
-            if matches!(src, AsmOperand::Reg(_) | AsmOperand::Xmm(_) | AsmOperand::Imm(_)) {
+            if matches!(
+                src,
+                AsmOperand::Reg(_) | AsmOperand::Xmm(_) | AsmOperand::Imm(_)
+            ) {
                 writeln!(w, "\tsubq $16, %rsp")?;
                 if *t == AsmType::Double {
-                    writeln!(
-                        w,
-                        "\tmovsd {}, (%rsp)",
-                        show_operand(src, *t, platform)?
-                    )?;
+                    writeln!(w, "\tmovsd {}, (%rsp)", show_operand(src, *t, platform)?)?;
                 } else if *t == AsmType::Float {
-                    writeln!(
-                        w,
-                        "\tmovss {}, (%rsp)",
-                        show_operand(src, *t, platform)?
-                    )?;
+                    writeln!(w, "\tmovss {}, (%rsp)", show_operand(src, *t, platform)?)?;
                 } else {
                     writeln!(
                         w,

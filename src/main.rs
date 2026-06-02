@@ -5343,6 +5343,19 @@ fn internal_preprocess_source(
                             include_level,
                             state,
                         )?;
+                        if !include_next
+                            && matches!(virtual_compat_header_name(&spec), Some("stdarg.h"))
+                        {
+                            let included = include_virtual_compat_header("stdarg.h", macros);
+                            out.push_str(&included);
+                            if !included.is_empty() && !included.ends_with('\n') {
+                                out.push('\n');
+                            }
+                            if context.line_markers && !context.suppress_preprocessed_output {
+                                push_line_marker(&mut out, next_logical_line, &logical_file);
+                            }
+                            continue;
+                        }
                         let Some(include_path) = resolve_include_path(
                             &spec,
                             base_dir,

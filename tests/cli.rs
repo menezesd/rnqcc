@@ -18547,6 +18547,61 @@ int main(void)
 }
 
 #[test]
+fn internal_cpp_uses_virtual_stdarg_before_host_system_header() {
+    let dir = TempPath::new("fake-system-stdarg", "d");
+    let src = TempPath::new("virtual-stdarg-before-system", "c");
+    let exe = TempPath::new("virtual-stdarg-before-system", "bin");
+    std::fs::create_dir(dir.path()).expect("failed to create fake system include dir");
+    std::fs::write(
+        dir.path().join("stdarg.h"),
+        "typedef __builtin_va_list va_list;\n\
+         void va_start(va_list, ...);\n\
+         #define va_arg(ap, type) __builtin_va_arg(ap, type)\n\
+         #define va_end(ap) ((void)0)\n",
+    )
+    .expect("failed to write fake stdarg");
+    std::fs::write(
+        src.path(),
+        r#"
+#include <stdarg.h>
+
+long long r;
+
+void qux(...)
+{
+    va_list ap;
+    va_start(ap);
+    r = va_arg(ap, long long);
+    va_end(ap);
+}
+
+int main(void)
+{
+    qux(-2LL, 0);
+    return r == -2LL ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("--isystem")
+        .arg(dir.path())
+        .arg("-o")
+        .arg(exe.path())
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(exe.path())
+        .status()
+        .expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+}
+
+#[test]
 fn x86_linux_allows_zero_sized_variadic_memory_arg_block() {
     let src = temp_file("x86-linux-zero-vararg-struct", "c");
     let asm = temp_file("x86-linux-zero-vararg-struct", "s");

@@ -30,6 +30,17 @@ pub struct CompatibilityOptions {
     pub permissive: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct CompileOptions<'a> {
+    pub target: &'a Target,
+    pub opt_flags: &'a optimize::OptimizationFlags,
+    pub no_coalescing: bool,
+    pub instrument_functions: bool,
+    pub compatibility: CompatibilityOptions,
+    pub dumps: DumpOptions,
+    pub warnings: WarningOptions,
+}
+
 impl Default for WarningOptions {
     fn default() -> Self {
         Self {
@@ -300,18 +311,15 @@ pub fn validate_asm_program(program: &AsmProgram) -> Result<(), String> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn compile(
-    stage: &Stage,
-    src_file: &str,
-    target: &Target,
-    opt_flags: &optimize::OptimizationFlags,
-    no_coalescing: bool,
-    instrument_functions: bool,
-    compatibility: CompatibilityOptions,
-    dumps: DumpOptions,
-    warnings: WarningOptions,
-) -> Result<(), String> {
+pub fn compile(stage: &Stage, src_file: &str, options: CompileOptions<'_>) -> Result<(), String> {
+    let target = options.target;
+    let opt_flags = options.opt_flags;
+    let no_coalescing = options.no_coalescing;
+    let instrument_functions = options.instrument_functions;
+    let compatibility = options.compatibility;
+    let dumps = options.dumps;
+    let warnings = options.warnings;
+
     // C source is byte-oriented. External preprocessors can materialize string
     // escapes such as \377 as raw non-UTF-8 bytes in .i output, so preserve
     // each input byte as a single scalar value for the lexer.

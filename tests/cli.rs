@@ -13669,6 +13669,143 @@ fn internal_cpp_handles_macro_generated_include_next_and_has_include_next() {
 }
 
 #[test]
+fn internal_cpp_include_next_stdarg_uses_next_filesystem_header() {
+    let first_dir = temp_file("internal-cpp-include-next-stdarg-first", "d");
+    let second_dir = temp_file("internal-cpp-include-next-stdarg-second", "d");
+    let src = temp_file("internal-cpp-include-next-stdarg", "c");
+    std::fs::create_dir(&first_dir).expect("failed to create first include dir");
+    std::fs::create_dir(&second_dir).expect("failed to create second include dir");
+    let wrapper = first_dir.join("wrapper.h");
+    let next_stdarg = second_dir.join("stdarg.h");
+    std::fs::write(
+        &wrapper,
+        "#if __has_include_next(<stdarg.h>)\n\
+         #define HAS_NEXT_STDARG 1\n\
+         #else\n\
+         #define HAS_NEXT_STDARG 0\n\
+         #endif\n\
+         #include_next <stdarg.h>\n",
+    )
+    .expect("failed to write wrapper header");
+    std::fs::write(&next_stdarg, "#define NEXT_STDARG_VALUE 41\n")
+        .expect("failed to write next stdarg header");
+    std::fs::write(
+        &src,
+        "#include <wrapper.h>\n\
+         int main(void) { return NEXT_STDARG_VALUE + HAS_NEXT_STDARG; }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-I")
+        .arg(&first_dir)
+        .arg("-I")
+        .arg(&second_dir)
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(
+        stdout.contains("int main(void) { return 41 + 1; }"),
+        "{stdout}"
+    );
+
+    let _ = std::fs::remove_file(wrapper);
+    let _ = std::fs::remove_file(next_stdarg);
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_dir(first_dir);
+    let _ = std::fs::remove_dir(second_dir);
+}
+
+#[test]
+fn internal_cpp_has_include_next_stdarg_ignores_virtual_header() {
+    let include_dir = temp_file("internal-cpp-has-include-next-stdarg", "d");
+    let src = temp_file("internal-cpp-has-include-next-stdarg", "c");
+    std::fs::create_dir(&include_dir).expect("failed to create include dir");
+    let wrapper = include_dir.join("wrapper.h");
+    std::fs::write(
+        &wrapper,
+        "#if __has_include_next(<stdarg.h>)\n\
+         #define HAS_NEXT_STDARG 1\n\
+         #else\n\
+         #define HAS_NEXT_STDARG 0\n\
+         #endif\n",
+    )
+    .expect("failed to write wrapper header");
+    std::fs::write(
+        &src,
+        "#include <wrapper.h>\n\
+         int main(void) { return HAS_NEXT_STDARG; }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-I")
+        .arg(&include_dir)
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("int main(void) { return 0; }"), "{stdout}");
+
+    let _ = std::fs::remove_file(wrapper);
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_dir(include_dir);
+}
+
+#[test]
+fn internal_cpp_handles_macro_generated_virtual_header_includes() {
+    let src = temp_file("internal-cpp-macro-virtual-includes", "c");
+    let exe = temp_file("internal-cpp-macro-virtual-includes", "bin");
+    std::fs::write(
+        &src,
+        "#define RNQCC_STDARG <stdarg.h>\n\
+         #define RNQCC_STDINT <stdint.h>\n\
+         #define RNQCC_TYPES <sys/types.h>\n\
+         #include RNQCC_STDARG\n\
+         #include RNQCC_STDINT\n\
+         #include RNQCC_TYPES\n\
+         int take(int x, ...) {\n\
+             va_list ap;\n\
+             va_start(ap, x);\n\
+             int y = va_arg(ap, int);\n\
+             va_end(ap);\n\
+             return y;\n\
+         }\n\
+         int main(void) {\n\
+             uint32_t u = 40;\n\
+             size_t s = 1;\n\
+             ssize_t ss = 1;\n\
+             return (int)u + (int)s + (int)ss == take(0, 42) ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg(&src)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn internal_cpp_allows_guarded_recursive_include() {
     let include_dir = temp_file("internal-cpp-guarded-recursive-include", "d");
     let src = temp_file("internal-cpp-guarded-recursive-include", "c");
@@ -17834,9 +17971,8 @@ void test(float *fp) {
     let _ = std::fs::remove_file(out);
 }
 
-#[test]
-fn emits_x86_64_linux_assembly_for_ci_regression_cases() {
-    for (name, source) in [
+fn x86_64_linux_assembly_regression_cases() -> &'static [(&'static str, &'static str)] {
+    &[
         (
             "x86-linux-int128-cross-half-shift",
             r#"
@@ -18248,125 +18384,249 @@ int main(void) {
 }
 "#,
         ),
-    ] {
-        let src = TempPath::new(name, "c");
-        let out = TempPath::new(name, "s");
-        std::fs::write(src.path(), source).expect("failed to write input");
+    ]
+}
 
-        let output = Command::new(rnqcc())
-            .args(["--target", "x86_64-linux", "-S", "-o"])
-            .arg(out.path())
-            .arg(src.path())
-            .output()
-            .expect("failed to run rnqcc");
+#[track_caller]
+fn assert_x86_64_linux_assembly_regression_case(name: &str, source: &str) {
+    let src = TempPath::new(name, "c");
+    let out = TempPath::new(name, "s");
+    std::fs::write(src.path(), source).expect("failed to write input");
 
-        assert!(output.status.success(), "{name}: {}", stderr(output));
-        let asm = std::fs::read_to_string(out.path()).expect("failed to read assembly output");
-        assert!(!asm.contains("Pseudo-register"), "{name}: {asm}");
-        assert!(!asm.contains("Octword"), "{name}: {asm}");
-        if name == "x86-linux-int128-va-arg" {
-            assert!(asm.contains("subq $32, %rsp"), "{name}: {asm}");
-            assert!(asm.contains("16(%rsp)"), "{name}: {asm}");
-            assert!(asm.contains("24(%rsp)"), "{name}: {asm}");
-            assert!(asm.contains("addq $32, %rsp"), "{name}: {asm}");
-        }
-        if name == "x86-linux-vector-uint128-mask" || name == "x86-linux-i128-eq-low-half" {
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(out.path())
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{name}: {}", stderr(output));
+    let asm = std::fs::read_to_string(out.path()).expect("failed to read assembly output");
+    assert!(!asm.contains("Pseudo-register"), "{name}: {asm}");
+    assert!(!asm.contains("Octword"), "{name}: {asm}");
+    if name == "x86-linux-int128-va-arg" {
+        assert!(asm.contains("subq $32, %rsp"), "{name}: {asm}");
+        assert!(asm.contains("16(%rsp)"), "{name}: {asm}");
+        assert!(asm.contains("24(%rsp)"), "{name}: {asm}");
+        assert!(asm.contains("addq $32, %rsp"), "{name}: {asm}");
+    }
+    if name == "x86-linux-vector-uint128-mask" || name == "x86-linux-i128-eq-low-half" {
+        assert!(
+            !asm.contains("\tje .Li128_cmp_end") || !asm.contains(".Li128_cmp_low"),
+            "{name}: equality compare skipped low-half comparison: {asm}"
+        );
+    }
+    if name == "x86-linux-stack-copy-regalloc" {
+        assert!(asm.contains("rep movsb"), "{name}: {asm}");
+        assert!(
+            !asm.contains("movq -88(%rbp), %rsi"),
+            "{name}: stack copy used stale spill slot instead of computed source pointer: {asm}"
+        );
+    }
+    if name == "x86-linux-word-to-ulong-zero-extend" {
+        assert!(!asm.contains("movzwq %si, %eax"), "{name}: {asm}");
+    }
+    if name == "x86-linux-byte-to-word-sign-extend" {
+        assert!(asm.contains("movsbw"), "{name}: {asm}");
+        assert!(!asm.contains("movslq"), "{name}: {asm}");
+    }
+    if name == "x86-linux-label-address-arithmetic" {
+        assert!(asm.contains("jmp *"), "{name}: {asm}");
+        assert!(
+            !asm.contains("cmpl $4, %eax\n\tmovl $0, %eax")
+                && !asm.contains("cmpl $4, %ecx\n\tmovl $0, %ecx")
+                && !asm.contains("cmpl $4, %edi\n\tmovl $0, %edi"),
+            "{name}: comparison result clobbered the computed-goto loop counter: {asm}"
+        );
+    }
+    if name == "x86-linux-label-address-table-walk" {
+        assert!(asm.contains("jmp *"), "{name}: {asm}");
+    }
+    if name == "x86-linux-struct-return-copy-abi" {
+        assert!(asm.contains("call make"), "{name}: {asm}");
+        assert!(!asm.contains("PseudoMem"), "{name}: {asm}");
+    }
+    if name == "x86-linux-vector-u16-divmod" {
+        assert!(!asm.contains("Nand"), "{name}: {asm}");
+    }
+    if name == "x86-linux-vprintf-shadow-va-list-bridge" {
+        assert!(asm.contains("subq $32, %rsp"), "{name}: {asm}");
+        assert!(asm.contains("movl $48, 0(%rsp)"), "{name}: {asm}");
+        assert!(asm.contains("movl $304, 4(%rsp)"), "{name}: {asm}");
+        assert!(asm.contains("8(%rsp)"), "{name}: {asm}");
+        assert!(asm.contains("movq $0, 16(%rsp)"), "{name}: {asm}");
+        assert!(asm.contains("leaq 0(%rsp), %rsi"), "{name}: {asm}");
+        assert!(asm.contains("call vprintf"), "{name}: {asm}");
+        assert!(asm.contains("addq $32, %rsp"), "{name}: {asm}");
+    }
+    if name == "x86-linux-vfprintf-shadow-va-list-bridge" {
+        assert!(asm.contains("movl $48, 0(%rsp)"), "{name}: {asm}");
+        assert!(asm.contains("movl $304, 4(%rsp)"), "{name}: {asm}");
+        assert!(asm.contains("leaq 0(%rsp), %rdx"), "{name}: {asm}");
+        assert!(asm.contains("call vfprintf"), "{name}: {asm}");
+    }
+    if name == "x86-linux-vprintf-chk-shadow-va-list-bridge" {
+        assert!(asm.contains("movl $48, 0(%rsp)"), "{name}: {asm}");
+        assert!(asm.contains("movl $304, 4(%rsp)"), "{name}: {asm}");
+        assert!(asm.contains("leaq 0(%rsp), %rdx"), "{name}: {asm}");
+        assert!(asm.contains("call __vprintf_chk"), "{name}: {asm}");
+    }
+    if name == "x86-linux-complex-long-double-raw-copies" {
+        assert!(!asm.contains("movt"), "{name}: {asm}");
+        assert!(asm.contains("movups"), "{name}: {asm}");
+    }
+    if name == "x86-linux-local-vprintf-chk-keeps-shadow-va-list" {
+        assert!(asm.contains("call __vprintf_chk"), "{name}: {asm}");
+        assert!(asm.contains("call vprintf"), "{name}: {asm}");
+        assert_eq!(
+            asm.matches("movl $48, 0(%rsp)").count(),
+            1,
+            "{name}: local __vprintf_chk call should not be bridged: {asm}"
+        );
+    }
+    if name == "x86-linux-aligned-struct-shadow-va-arg" {
+        assert!(asm.contains("subq $32, %rsp"), "{name}: {asm}");
+        assert!(asm.contains("leaq 16(%rsp), %rdi"), "{name}: {asm}");
+        assert!(asm.contains("rep movsb"), "{name}: {asm}");
+    }
+    if name == "x86-linux-complex-char-struct-arg-compare" {
+        let narrow_extends = asm.matches("movsbl").count() + asm.matches("movzbl").count();
+        assert!(
+            narrow_extends >= 4,
+            "{name}: narrow compare operands were not explicitly extended: {asm}"
+        );
+    }
+    let mut labels = std::collections::HashSet::new();
+    for line in asm.lines() {
+        let trimmed = line.trim();
+        if let Some(label) = trimmed.strip_suffix(':') {
             assert!(
-                !asm.contains("\tje .Li128_cmp_end") || !asm.contains(".Li128_cmp_low"),
-                "{name}: equality compare skipped low-half comparison: {asm}"
+                labels.insert(label.to_string()),
+                "{name}: duplicate {label}"
             );
-        }
-        if name == "x86-linux-stack-copy-regalloc" {
-            assert!(asm.contains("rep movsb"), "{name}: {asm}");
-            assert!(
-                !asm.contains("movq -88(%rbp), %rsi"),
-                "{name}: stack copy used stale spill slot instead of computed source pointer: {asm}"
-            );
-        }
-        if name == "x86-linux-word-to-ulong-zero-extend" {
-            assert!(!asm.contains("movzwq %si, %eax"), "{name}: {asm}");
-        }
-        if name == "x86-linux-byte-to-word-sign-extend" {
-            assert!(asm.contains("movsbw"), "{name}: {asm}");
-            assert!(!asm.contains("movslq"), "{name}: {asm}");
-        }
-        if name == "x86-linux-label-address-arithmetic" {
-            assert!(asm.contains("jmp *"), "{name}: {asm}");
-            assert!(
-                !asm.contains("cmpl $4, %eax\n\tmovl $0, %eax")
-                    && !asm.contains("cmpl $4, %ecx\n\tmovl $0, %ecx")
-                    && !asm.contains("cmpl $4, %edi\n\tmovl $0, %edi"),
-                "{name}: comparison result clobbered the computed-goto loop counter: {asm}"
-            );
-        }
-        if name == "x86-linux-label-address-table-walk" {
-            assert!(asm.contains("jmp *"), "{name}: {asm}");
-        }
-        if name == "x86-linux-struct-return-copy-abi" {
-            assert!(asm.contains("call make"), "{name}: {asm}");
-            assert!(!asm.contains("PseudoMem"), "{name}: {asm}");
-        }
-        if name == "x86-linux-vector-u16-divmod" {
-            assert!(!asm.contains("Nand"), "{name}: {asm}");
-        }
-        if name == "x86-linux-vprintf-shadow-va-list-bridge" {
-            assert!(asm.contains("subq $32, %rsp"), "{name}: {asm}");
-            assert!(asm.contains("movl $48, 0(%rsp)"), "{name}: {asm}");
-            assert!(asm.contains("movl $304, 4(%rsp)"), "{name}: {asm}");
-            assert!(asm.contains("8(%rsp)"), "{name}: {asm}");
-            assert!(asm.contains("movq $0, 16(%rsp)"), "{name}: {asm}");
-            assert!(asm.contains("leaq 0(%rsp), %rsi"), "{name}: {asm}");
-            assert!(asm.contains("call vprintf"), "{name}: {asm}");
-            assert!(asm.contains("addq $32, %rsp"), "{name}: {asm}");
-        }
-        if name == "x86-linux-vfprintf-shadow-va-list-bridge" {
-            assert!(asm.contains("movl $48, 0(%rsp)"), "{name}: {asm}");
-            assert!(asm.contains("movl $304, 4(%rsp)"), "{name}: {asm}");
-            assert!(asm.contains("leaq 0(%rsp), %rdx"), "{name}: {asm}");
-            assert!(asm.contains("call vfprintf"), "{name}: {asm}");
-        }
-        if name == "x86-linux-vprintf-chk-shadow-va-list-bridge" {
-            assert!(asm.contains("movl $48, 0(%rsp)"), "{name}: {asm}");
-            assert!(asm.contains("movl $304, 4(%rsp)"), "{name}: {asm}");
-            assert!(asm.contains("leaq 0(%rsp), %rdx"), "{name}: {asm}");
-            assert!(asm.contains("call __vprintf_chk"), "{name}: {asm}");
-        }
-        if name == "x86-linux-complex-long-double-raw-copies" {
-            assert!(!asm.contains("movt"), "{name}: {asm}");
-            assert!(asm.contains("movups"), "{name}: {asm}");
-        }
-        if name == "x86-linux-local-vprintf-chk-keeps-shadow-va-list" {
-            assert!(asm.contains("call __vprintf_chk"), "{name}: {asm}");
-            assert!(asm.contains("call vprintf"), "{name}: {asm}");
-            assert_eq!(
-                asm.matches("movl $48, 0(%rsp)").count(),
-                1,
-                "{name}: local __vprintf_chk call should not be bridged: {asm}"
-            );
-        }
-        if name == "x86-linux-aligned-struct-shadow-va-arg" {
-            assert!(asm.contains("subq $32, %rsp"), "{name}: {asm}");
-            assert!(asm.contains("leaq 16(%rsp), %rdi"), "{name}: {asm}");
-            assert!(asm.contains("rep movsb"), "{name}: {asm}");
-        }
-        if name == "x86-linux-complex-char-struct-arg-compare" {
-            let narrow_extends = asm.matches("movsbl").count() + asm.matches("movzbl").count();
-            assert!(
-                narrow_extends >= 4,
-                "{name}: narrow compare operands were not explicitly extended: {asm}"
-            );
-        }
-        let mut labels = std::collections::HashSet::new();
-        for line in asm.lines() {
-            let trimmed = line.trim();
-            if let Some(label) = trimmed.strip_suffix(':') {
-                assert!(
-                    labels.insert(label.to_string()),
-                    "{name}: duplicate {label}"
-                );
-            }
         }
     }
+}
+
+fn assert_x86_64_linux_assembly_regression_bucket(names: &[&str]) {
+    let mut matched = 0usize;
+    for &(name, source) in x86_64_linux_assembly_regression_cases() {
+        if names.contains(&name) {
+            matched += 1;
+            assert_x86_64_linux_assembly_regression_case(name, source);
+        }
+    }
+    assert_eq!(matched, names.len(), "unknown x86_64-linux regression case");
+}
+
+fn x86_64_linux_assembly_regression_buckets() -> &'static [(&'static str, &'static [&'static str])]
+{
+    &[
+        (
+            "int128-vector",
+            &[
+                "x86-linux-int128-cross-half-shift",
+                "x86-linux-int128-va-arg",
+                "x86-linux-vector-uint128-mask",
+                "x86-linux-i128-eq-low-half",
+                "x86-linux-i128-signed-unsigned-stress",
+                "x86-linux-i128-vector-lane-stress",
+                "x86-linux-vector-u16-divmod",
+            ],
+        ),
+        (
+            "computed-goto-struct",
+            &[
+                "x86-linux-stack-copy-regalloc",
+                "x86-linux-nested-local-label",
+                "x86-linux-i128-label-uniqueness",
+                "x86-linux-label-address-arithmetic",
+                "x86-linux-label-address-table-walk",
+                "x86-linux-struct-return-copy-abi",
+                "x86-linux-complex-char-struct-arg-compare",
+            ],
+        ),
+        (
+            "varargs-long-double",
+            &[
+                "x86-linux-vprintf-shadow-va-list-bridge",
+                "x86-linux-vfprintf-shadow-va-list-bridge",
+                "x86-linux-vprintf-chk-shadow-va-list-bridge",
+                "x86-linux-complex-long-double-raw-copies",
+                "x86-linux-local-vprintf-chk-keeps-shadow-va-list",
+                "x86-linux-aligned-struct-shadow-va-arg",
+            ],
+        ),
+        (
+            "scalar-conversion",
+            &[
+                "x86-linux-word-to-ulong-zero-extend",
+                "x86-linux-byte-to-word-sign-extend",
+                "x86-linux-signed-long-mul-overflow",
+            ],
+        ),
+    ]
+}
+
+fn x86_64_linux_assembly_regression_bucket(name: &str) -> &'static [&'static str] {
+    x86_64_linux_assembly_regression_buckets()
+        .iter()
+        .find_map(|(bucket_name, cases)| (*bucket_name == name).then_some(*cases))
+        .expect("unknown x86_64-linux regression bucket")
+}
+
+#[test]
+fn x86_64_linux_assembly_regression_buckets_cover_each_case_once() {
+    let case_names: std::collections::HashSet<_> = x86_64_linux_assembly_regression_cases()
+        .iter()
+        .map(|(name, _)| *name)
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    for &(bucket_name, cases) in x86_64_linux_assembly_regression_buckets() {
+        for &case_name in cases {
+            assert!(
+                case_names.contains(case_name),
+                "{bucket_name}: unknown x86_64-linux regression case {case_name}"
+            );
+            assert!(
+                seen.insert(case_name),
+                "{bucket_name}: duplicate x86_64-linux regression case {case_name}"
+            );
+        }
+    }
+    assert_eq!(
+        seen.len(),
+        case_names.len(),
+        "x86_64-linux regression case missing from buckets"
+    );
+}
+
+#[test]
+fn emits_x86_64_linux_int128_and_vector_regression_assembly() {
+    assert_x86_64_linux_assembly_regression_bucket(x86_64_linux_assembly_regression_bucket(
+        "int128-vector",
+    ));
+}
+
+#[test]
+fn emits_x86_64_linux_computed_goto_and_struct_regression_assembly() {
+    assert_x86_64_linux_assembly_regression_bucket(x86_64_linux_assembly_regression_bucket(
+        "computed-goto-struct",
+    ));
+}
+
+#[test]
+fn emits_x86_64_linux_varargs_and_long_double_regression_assembly() {
+    assert_x86_64_linux_assembly_regression_bucket(x86_64_linux_assembly_regression_bucket(
+        "varargs-long-double",
+    ));
+}
+
+#[test]
+fn emits_x86_64_linux_scalar_conversion_regression_assembly() {
+    assert_x86_64_linux_assembly_regression_bucket(x86_64_linux_assembly_regression_bucket(
+        "scalar-conversion",
+    ));
 }
 
 #[test]
@@ -18593,6 +18853,37 @@ int main(void)
         .status()
         .expect("failed to run output");
     assert_eq!(run.code(), Some(42));
+}
+
+#[test]
+fn internal_cpp_uses_filesystem_header_before_fallback_virtual_header() {
+    let dir = TempPath::new("fake-system-stdint", "d");
+    let src = TempPath::new("fallback-virtual-stdint-after-system", "c");
+    std::fs::create_dir(dir.path()).expect("failed to create fake system include dir");
+    std::fs::write(
+        dir.path().join("stdint.h"),
+        "#define RNQCC_FAKE_STDINT_VALUE 42\n",
+    )
+    .expect("failed to write fake stdint");
+    std::fs::write(
+        src.path(),
+        "#include <stdint.h>\n\
+         int main(void) { return RNQCC_FAKE_STDINT_VALUE; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("--isystem")
+        .arg(dir.path())
+        .arg("-E")
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("int main(void) { return 42; }"), "{stdout}");
 }
 
 #[test]

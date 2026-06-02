@@ -216,22 +216,26 @@ fn emit_i128_zero_cmp(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+struct Aarch64I128Context<'a> {
+    function_name: &'a str,
+    types: &'a HashMap<String, CType>,
+    stack_slots: &'a HashMap<String, i32>,
+    global_vars: &'a HashSet<String>,
+}
+
 fn emit_i128_signed_cmp(
     instructions: &mut Vec<AsmInstr>,
     left: &TackyVal,
     right: &TackyVal,
     op: &TackyBinaryOp,
     dst: AsmOperand,
-    function_name: &str,
-    stack_slots: &HashMap<String, i32>,
-    global_vars: &HashSet<String>,
+    ctx: &Aarch64I128Context<'_>,
 ) -> Result<(), String> {
-    let (left_low, left_high) = i128_part_operands(left, stack_slots, global_vars)?;
-    let (right_low, right_high) = i128_part_operands(right, stack_slots, global_vars)?;
+    let (left_low, left_high) = i128_part_operands(left, ctx.stack_slots, ctx.global_vars)?;
+    let (right_low, right_high) = i128_part_operands(right, ctx.stack_slots, ctx.global_vars)?;
     let id = instructions.len();
-    let true_label = format!("i128_cmp_true.{}.{}", function_name, id);
-    let end_label = format!("i128_cmp_end.{}.{}", function_name, id);
+    let true_label = format!("i128_cmp_true.{}.{}", ctx.function_name, id);
+    let end_label = format!("i128_cmp_end.{}.{}", ctx.function_name, id);
     let (high_true, high_false, low_true) = match op {
         TackyBinaryOp::GreaterThan => (CondCode::G, CondCode::L, CondCode::A),
         TackyBinaryOp::GreaterEqual => (CondCode::G, CondCode::L, CondCode::AE),
@@ -307,31 +311,27 @@ fn emit_i128_return(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn emit_i128_variable_shift(
     instructions: &mut Vec<AsmInstr>,
-    function_name: &str,
     op: &TackyBinaryOp,
     left: &TackyVal,
     right: &TackyVal,
     dst: &TackyVal,
-    types: &HashMap<String, CType>,
-    stack_slots: &HashMap<String, i32>,
-    global_vars: &HashSet<String>,
+    ctx: &Aarch64I128Context<'_>,
 ) -> Result<(), String> {
-    let (left_low, left_high) = i128_part_operands(left, stack_slots, global_vars)?;
-    let dst_op = val_operand(dst, stack_slots, global_vars)?;
+    let (left_low, left_high) = i128_part_operands(left, ctx.stack_slots, ctx.global_vars)?;
+    let dst_op = val_operand(dst, ctx.stack_slots, ctx.global_vars)?;
     let dst_low = low64_operand(&dst_op)?;
     let dst_high = high64_operand(&dst_op)?;
-    let right_ty = asm_type_for_val(right, types)?;
+    let right_ty = asm_type_for_val(right, ctx.types)?;
     let amount_src = if right_ty == AsmType::Octword {
-        low64_operand(&val_operand(right, stack_slots, global_vars)?)?
+        low64_operand(&val_operand(right, ctx.stack_slots, ctx.global_vars)?)?
     } else {
-        val_operand(right, stack_slots, global_vars)?
+        val_operand(right, ctx.stack_slots, ctx.global_vars)?
     };
     let id = instructions.len();
-    let loop_label = format!("i128_shift_loop.{}.{}", function_name, id);
-    let end_label = format!("i128_shift_end.{}.{}", function_name, id);
+    let loop_label = format!("i128_shift_loop.{}.{}", ctx.function_name, id);
+    let end_label = format!("i128_shift_end.{}.{}", ctx.function_name, id);
 
     instructions.push(AsmInstr::Mov(
         AsmType::Quadword,
@@ -389,7 +389,7 @@ fn emit_i128_variable_shift(
             ));
         }
         TackyBinaryOp::ShiftRight => {
-            let high_shift = if is_unsigned_val(left, types) {
+            let high_shift = if is_unsigned_val(left, ctx.types) {
                 AsmBinaryOp::Shr
             } else {
                 AsmBinaryOp::Sar
@@ -1429,6 +1429,12 @@ fn convert_function(
         param_index += 1;
     }
     let va_start_stack_offset = stack_arg_offset(frame_size, stack_param_count);
+    let i128_ctx = Aarch64I128Context {
+        function_name: &function.name,
+        types,
+        stack_slots: &stack_slots,
+        global_vars,
+    };
 
     for instr in &function.body {
         match instr {
@@ -2539,16 +2545,7 @@ fn convert_function(
                 ) && (asm_type_for_val(left, types)? == AsmType::Octword
                     || asm_type_for_val(right, types)? == AsmType::Octword)
                 {
-                    emit_i128_signed_cmp(
-                        &mut instructions,
-                        left,
-                        right,
-                        op,
-                        dst_op,
-                        &function.name,
-                        &stack_slots,
-                        global_vars,
-                    )?;
+                    emit_i128_signed_cmp(&mut instructions, left, right, op, dst_op, &i128_ctx)?;
                     continue;
                 }
                 if ty == AsmType::Octword {
@@ -2574,14 +2571,11 @@ fn convert_function(
                                 let TackyVal::Constant(amount) = right else {
                                     emit_i128_variable_shift(
                                         &mut instructions,
-                                        &function.name,
                                         op,
                                         left,
                                         right,
                                         dst,
-                                        types,
-                                        &stack_slots,
-                                        global_vars,
+                                        &i128_ctx,
                                     )?;
                                     continue;
                                 };
@@ -2635,14 +2629,11 @@ fn convert_function(
                                 }
                                 emit_i128_variable_shift(
                                     &mut instructions,
-                                    &function.name,
                                     op,
                                     left,
                                     right,
                                     dst,
-                                    types,
-                                    &stack_slots,
-                                    global_vars,
+                                    &i128_ctx,
                                 )?;
                                 continue;
                             }
@@ -2650,14 +2641,11 @@ fn convert_function(
                                 let TackyVal::Constant(amount) = right else {
                                     emit_i128_variable_shift(
                                         &mut instructions,
-                                        &function.name,
                                         op,
                                         left,
                                         right,
                                         dst,
-                                        types,
-                                        &stack_slots,
-                                        global_vars,
+                                        &i128_ctx,
                                     )?;
                                     continue;
                                 };
@@ -2725,14 +2713,11 @@ fn convert_function(
                                 }
                                 emit_i128_variable_shift(
                                     &mut instructions,
-                                    &function.name,
                                     op,
                                     left,
                                     right,
                                     dst,
-                                    types,
-                                    &stack_slots,
-                                    global_vars,
+                                    &i128_ctx,
                                 )?;
                                 continue;
                             }

@@ -278,11 +278,14 @@ fn is_unsigned_val(val: &TackyVal, types: &HashMap<String, CType>) -> bool {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct LabelContext<'a> {
+    function_name: &'a str,
+    counter: &'a mut usize,
+}
+
 fn emit_i128_variable_shift(
     out: &mut Vec<AsmInstr>,
-    function_name: &str,
-    label_counter: &mut usize,
+    labels: &mut LabelContext<'_>,
     op: &TackyBinaryOp,
     left: &TackyVal,
     right: &TackyVal,
@@ -297,10 +300,10 @@ fn emit_i128_variable_shift(
     } else {
         convert_val(right)
     };
-    let id = *label_counter;
-    *label_counter += 1;
-    let loop_label = format!("i128_shift_loop.{}.{}", function_name, id);
-    let end_label = format!("i128_shift_end.{}.{}", function_name, id);
+    let id = *labels.counter;
+    *labels.counter += 1;
+    let loop_label = format!("i128_shift_loop.{}.{}", labels.function_name, id);
+    let end_label = format!("i128_shift_end.{}.{}", labels.function_name, id);
 
     out.push(AsmInstr::Mov(
         AsmType::Quadword,
@@ -499,28 +502,59 @@ fn get_struct_classes(
     None
 }
 
-fn stack_arg_align_size(t: AsmType) -> (usize, usize) {
-    match t {
-        AsmType::LongDouble | AsmType::Octword => (16, 16),
-        _ => (8, 8),
+#[derive(Clone, Copy)]
+struct StackArgLayout {
+    align: usize,
+    size: usize,
+}
+
+impl StackArgLayout {
+    fn for_scalar(t: AsmType) -> Self {
+        match t {
+            AsmType::LongDouble | AsmType::Octword => Self {
+                align: 16,
+                size: 16,
+            },
+            _ => Self { align: 8, size: 8 },
+        }
+    }
+
+    fn for_memory_block(size: usize, align: usize) -> Self {
+        Self {
+            align: align.clamp(1, 16),
+            size: size.next_multiple_of(8),
+        }
+    }
+
+    fn place_at(self, offset: usize) -> usize {
+        offset.next_multiple_of(self.align)
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn convert_instruction(
-    function_name: &str,
-    target: &Target,
-    instr: &TackyInstr,
-    types: &HashMap<String, CType>,
-    _arr_sizes: &HashMap<String, usize>,
-    out: &mut Vec<AsmInstr>,
-    static_doubles: &mut Vec<(String, f64)>,
-    label_counter: &mut usize,
-    var_struct_tags: &HashMap<String, String>,
-    struct_defs: &HashMap<String, StructDef>,
-    local_function_names: &std::collections::HashSet<String>,
+struct InstructionContext<'a> {
+    function_name: &'a str,
+    target: &'a Target,
+    types: &'a HashMap<String, CType>,
+    out: &'a mut Vec<AsmInstr>,
+    static_doubles: &'a mut Vec<(String, f64)>,
+    label_counter: &'a mut usize,
+    var_struct_tags: &'a HashMap<String, String>,
+    struct_defs: &'a HashMap<String, StructDef>,
+    local_function_names: &'a std::collections::HashSet<String>,
     va_start_stack_offset: i32,
-) -> Result<(), String> {
+}
+
+fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> Result<(), String> {
+    let function_name = ctx.function_name;
+    let target = ctx.target;
+    let types = ctx.types;
+    let out = &mut *ctx.out;
+    let static_doubles = &mut *ctx.static_doubles;
+    let label_counter = &mut *ctx.label_counter;
+    let var_struct_tags = ctx.var_struct_tags;
+    let struct_defs = ctx.struct_defs;
+    let local_function_names = ctx.local_function_names;
+    let va_start_stack_offset = ctx.va_start_stack_offset;
     match instr {
         TackyInstr::Nop => { /* skip */ }
         TackyInstr::Unreachable => {
@@ -1109,17 +1143,14 @@ fn convert_instruction(
         } => {
             let t = val_type(dst, types);
             if t == AsmType::Octword {
-                convert_binary(
-                    op,
-                    left,
-                    right,
-                    dst,
+                let mut binary_ctx = BinaryContext {
                     types,
                     out,
                     static_doubles,
                     label_counter,
                     function_name,
-                )?;
+                };
+                convert_binary(op, left, right, dst, &mut binary_ctx)?;
                 return Ok(());
             }
             let dst_ctype = match dst {
@@ -1156,17 +1187,14 @@ fn convert_instruction(
             right,
             dst,
         } => {
-            convert_binary(
-                op,
-                left,
-                right,
-                dst,
+            let mut binary_ctx = BinaryContext {
                 types,
                 out,
                 static_doubles,
                 label_counter,
                 function_name,
-            )?;
+            };
+            convert_binary(op, left, right, dst, &mut binary_ctx)?;
         }
         TackyInstr::Copy { src, dst } => {
             let t = val_type(dst, types);
@@ -1824,16 +1852,16 @@ fn convert_instruction(
                 fixed_flat_arg_count: *fixed_flat_arg_count,
                 hidden_return: *hidden_return,
             };
-            convert_funcall(
+            let call = FuncallArgs {
                 name,
                 args,
                 dst,
                 stack_arg_indices,
                 memory_arg_blocks,
                 struct_arg_groups,
-                *indirect,
-                &mut ctx,
-            )?;
+                indirect: *indirect,
+            };
+            convert_funcall(&call, &mut ctx)?;
         }
     };
     Ok(())
@@ -1852,6 +1880,16 @@ struct FuncallContext<'a> {
     hidden_return: bool,
 }
 
+struct FuncallArgs<'a> {
+    name: &'a str,
+    args: &'a [TackyVal],
+    dst: &'a TackyVal,
+    stack_arg_indices: &'a std::collections::HashSet<usize>,
+    memory_arg_blocks: &'a [(usize, usize, usize)],
+    struct_arg_groups: &'a [(usize, usize, Vec<bool>)],
+    indirect: bool,
+}
+
 fn x86_64_linux_libc_va_list_arg(name: &str) -> Option<usize> {
     match name {
         "vprintf" => Some(1),
@@ -1865,17 +1903,14 @@ fn x86_64_linux_libc_va_list_arg(name: &str) -> Option<usize> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn convert_funcall(
-    name: &str,
-    args: &[TackyVal],
-    dst: &TackyVal,
-    stack_arg_indices: &std::collections::HashSet<usize>,
-    memory_arg_blocks: &[(usize, usize, usize)],
-    struct_arg_groups: &[(usize, usize, Vec<bool>)],
-    indirect: bool,
-    ctx: &mut FuncallContext<'_>,
-) -> Result<(), String> {
+fn convert_funcall(call: &FuncallArgs<'_>, ctx: &mut FuncallContext<'_>) -> Result<(), String> {
+    let name = call.name;
+    let args = call.args;
+    let dst = call.dst;
+    let stack_arg_indices = call.stack_arg_indices;
+    let memory_arg_blocks = call.memory_arg_blocks;
+    let struct_arg_groups = call.struct_arg_groups;
+    let indirect = call.indirect;
     let types = ctx.types;
     let out = &mut *ctx.out;
     let static_doubles = &mut *ctx.static_doubles;
@@ -1956,19 +1991,14 @@ fn convert_funcall(
         }
 
         impl StackArg<'_> {
-            fn size(&self) -> usize {
+            fn layout(&self) -> StackArgLayout {
                 match self {
-                    StackArg::Scalar(_) => 8,
-                    StackArg::WideScalar(_) | StackArg::LongDouble(_) => 16,
-                    StackArg::MemoryBlock { size, .. } => size.next_multiple_of(8),
-                }
-            }
-
-            fn alignment(&self) -> usize {
-                match self {
-                    StackArg::WideScalar(_) | StackArg::LongDouble(_) => 16,
-                    StackArg::MemoryBlock { align, .. } => (*align).clamp(1, 16),
-                    _ => 8,
+                    StackArg::Scalar(_) => StackArgLayout::for_scalar(AsmType::Quadword),
+                    StackArg::WideScalar(_) => StackArgLayout::for_scalar(AsmType::Octword),
+                    StackArg::LongDouble(_) => StackArgLayout::for_scalar(AsmType::LongDouble),
+                    StackArg::MemoryBlock { size, align, .. } => {
+                        StackArgLayout::for_memory_block(*size, *align)
+                    }
                 }
             }
         }
@@ -2039,7 +2069,8 @@ fn convert_funcall(
         }
 
         let stack_bytes = stack_args_list.iter().fold(0usize, |offset, item| {
-            offset.next_multiple_of(item.alignment()) + item.size()
+            let layout = item.layout();
+            layout.place_at(offset) + layout.size
         });
         let libc_va_list_bridge = libc_va_list_arg.and_then(|arg_idx| {
             int_reg_args
@@ -2062,8 +2093,9 @@ fn convert_funcall(
             out.push(AsmInstr::AllocateStack(outgoing_bytes as i32));
             let mut stack_offset = 0i32;
             for item in &stack_args_list {
-                stack_offset = (stack_offset as usize)
-                    .next_multiple_of(item.alignment())
+                let layout = item.layout();
+                stack_offset = layout
+                    .place_at(stack_offset as usize)
                     .try_into()
                     .map_err(|_| "x86-64 stack argument offset overflow".to_string())?;
                 match item {
@@ -2079,7 +2111,7 @@ fn convert_funcall(
                                 AsmOperand::StackArg(stack_offset),
                             ));
                         }
-                        stack_offset += item.size() as i32;
+                        stack_offset += layout.size as i32;
                     }
                     StackArg::WideScalar(arg) => {
                         let (low, high) = i128_part_operands(arg)?;
@@ -2090,12 +2122,12 @@ fn convert_funcall(
                             AsmOperand::StackArg(stack_offset),
                             AsmOperand::StackArg(stack_offset + 8),
                         );
-                        stack_offset += item.size() as i32;
+                        stack_offset += layout.size as i32;
                     }
                     StackArg::LongDouble(arg) => {
                         x87_load_val(out, arg, types, static_doubles);
                         out.push(AsmInstr::X87Store(AsmOperand::StackArg(stack_offset)));
-                        stack_offset += item.size() as i32;
+                        stack_offset += layout.size as i32;
                     }
                     StackArg::MemoryBlock { src_ptr, size, .. } => {
                         out.push(AsmInstr::CopyToStackArg {
@@ -2103,7 +2135,7 @@ fn convert_funcall(
                             dst_offset: stack_offset,
                             size: *size,
                         });
-                        stack_offset += item.size() as i32;
+                        stack_offset += layout.size as i32;
                     }
                 }
             }
@@ -2270,18 +2302,24 @@ fn convert_funcall(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+struct BinaryContext<'a> {
+    types: &'a HashMap<String, CType>,
+    out: &'a mut Vec<AsmInstr>,
+    static_doubles: &'a mut Vec<(String, f64)>,
+    label_counter: &'a mut usize,
+    function_name: &'a str,
+}
+
 fn convert_binary(
     op: &TackyBinaryOp,
     left: &TackyVal,
     right: &TackyVal,
     dst: &TackyVal,
-    types: &HashMap<String, CType>,
-    out: &mut Vec<AsmInstr>,
-    static_doubles: &mut Vec<(String, f64)>,
-    label_counter: &mut usize,
-    function_name: &str,
+    ctx: &mut BinaryContext<'_>,
 ) -> Result<(), String> {
+    let types = ctx.types;
+    let out = &mut *ctx.out;
+    let static_doubles = &mut *ctx.static_doubles;
     let left_ctype = match left {
         TackyVal::Var(n) => types.get(n).copied().unwrap_or(CType::Int),
         TackyVal::Constant(_) => CType::Int,
@@ -2340,11 +2378,11 @@ fn convert_binary(
             let (left_low, left_high) = i128_part_operands(left)?;
             let (right_low, right_high) = i128_part_operands(right)?;
             let dst_op = convert_val(dst);
-            let base = *label_counter;
-            *label_counter += 1;
-            let true_label = format!("i128_cmp_true.{}.{}", function_name, base);
-            let low_label = format!("i128_cmp_low.{}.{}", function_name, base);
-            let end_label = format!("i128_cmp_end.{}.{}", function_name, base);
+            let base = *ctx.label_counter;
+            *ctx.label_counter += 1;
+            let true_label = format!("i128_cmp_true.{}.{}", ctx.function_name, base);
+            let low_label = format!("i128_cmp_low.{}.{}", ctx.function_name, base);
+            let end_label = format!("i128_cmp_end.{}.{}", ctx.function_name, base);
             out.push(AsmInstr::Mov(
                 AsmType::Longword,
                 AsmOperand::Imm(0),
@@ -2469,10 +2507,13 @@ fn convert_binary(
                     let dst_op = convert_val(dst);
                     if matches!(op, TackyBinaryOp::ShiftLeft) {
                         let TackyVal::Constant(amount) = right else {
+                            let mut labels = LabelContext {
+                                function_name: ctx.function_name,
+                                counter: ctx.label_counter,
+                            };
                             emit_i128_variable_shift(
                                 out,
-                                function_name,
-                                label_counter,
+                                &mut labels,
                                 op,
                                 left,
                                 right,
@@ -2557,10 +2598,13 @@ fn convert_binary(
                     }
                     if matches!(op, TackyBinaryOp::ShiftRight) {
                         let TackyVal::Constant(amount) = right else {
+                            let mut labels = LabelContext {
+                                function_name: ctx.function_name,
+                                counter: ctx.label_counter,
+                            };
                             emit_i128_variable_shift(
                                 out,
-                                function_name,
-                                label_counter,
+                                &mut labels,
                                 op,
                                 left,
                                 right,
@@ -2823,16 +2867,18 @@ const XMM_ARG_REGISTERS: [XmmReg; 8] = [
     XmmReg::XMM7,
 ];
 
-#[allow(clippy::too_many_arguments)]
+struct X86FunctionContext<'a> {
+    target: &'a Target,
+    types: &'a HashMap<String, CType>,
+    var_struct_tags: &'a HashMap<String, String>,
+    struct_defs: &'a HashMap<String, StructDef>,
+    local_function_names: &'a std::collections::HashSet<String>,
+}
+
 fn convert_function(
     func: &TackyFunction,
-    target: &Target,
-    types: &HashMap<String, CType>,
-    arr_sizes: &HashMap<String, usize>,
+    ctx: &X86FunctionContext<'_>,
     static_doubles: &mut Vec<(String, f64)>,
-    var_struct_tags: &HashMap<String, String>,
-    struct_defs: &HashMap<String, StructDef>,
-    local_function_names: &std::collections::HashSet<String>,
 ) -> Result<AsmFunction, String> {
     let mut instructions = Vec::new();
     static I128_LABEL_BASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -2887,7 +2933,7 @@ fn convert_function(
                 continue;
             }
             // Regular param
-            let t: AsmType = types.get(param).copied().unwrap_or(CType::Int).into();
+            let t: AsmType = ctx.types.get(param).copied().unwrap_or(CType::Int).into();
             if t == AsmType::LongDouble {
                 force_stack.insert(i);
             } else if matches!(t, AsmType::Float | AsmType::Double) {
@@ -2905,23 +2951,24 @@ fn convert_function(
 
     for (i, param) in func.params.iter().enumerate() {
         if let Some((dst_name, size)) = memory_param_blocks.get(&i).copied() {
-            let align = get_struct_def(dst_name, var_struct_tags, struct_defs)
+            let align = get_struct_def(dst_name, ctx.var_struct_tags, ctx.struct_defs)
                 .map(|def| def.alignment.clamp(1, 16))
                 .unwrap_or(8);
-            stack_arg_offset = stack_arg_offset.next_multiple_of(align);
+            let layout = StackArgLayout::for_memory_block(size, align);
+            stack_arg_offset = layout.place_at(stack_arg_offset);
             let offset = 16 + stack_arg_offset as i32;
             instructions.push(AsmInstr::CopyFromStackArg {
                 src_offset: offset,
                 dst: AsmOperand::PseudoMem(dst_name.clone(), 0),
                 size,
             });
-            stack_arg_offset += size.next_multiple_of(8);
+            stack_arg_offset += layout.size;
             continue;
         }
         if force_stack.contains(&i) || func.stack_params.contains(param) {
-            let t: AsmType = types.get(param).copied().unwrap_or(CType::Long).into();
-            let (align, size) = stack_arg_align_size(t);
-            stack_arg_offset = stack_arg_offset.next_multiple_of(align);
+            let t: AsmType = ctx.types.get(param).copied().unwrap_or(CType::Long).into();
+            let layout = StackArgLayout::for_scalar(t);
+            stack_arg_offset = layout.place_at(stack_arg_offset);
             let offset = 16 + stack_arg_offset as i32;
             if t == AsmType::LongDouble {
                 instructions.push(AsmInstr::X87Load(
@@ -2947,20 +2994,20 @@ fn convert_function(
                     AsmOperand::Pseudo(param.clone()),
                 ));
             }
-            stack_arg_offset += size;
+            stack_arg_offset += layout.size;
             continue;
         }
-        let t: AsmType = types.get(param).copied().unwrap_or(CType::Int).into();
+        let t: AsmType = ctx.types.get(param).copied().unwrap_or(CType::Int).into();
         if t == AsmType::LongDouble {
-            let (align, size) = stack_arg_align_size(t);
-            stack_arg_offset = stack_arg_offset.next_multiple_of(align);
+            let layout = StackArgLayout::for_scalar(t);
+            stack_arg_offset = layout.place_at(stack_arg_offset);
             let offset = 16 + stack_arg_offset as i32;
             instructions.push(AsmInstr::X87Load(
                 AsmType::LongDouble,
                 AsmOperand::Stack(offset),
             ));
             instructions.push(AsmInstr::X87Store(AsmOperand::Pseudo(param.clone())));
-            stack_arg_offset += size;
+            stack_arg_offset += layout.size;
         } else if matches!(t, AsmType::Float | AsmType::Double) {
             if xmm_reg_idx < 8 {
                 instructions.push(AsmInstr::Mov(
@@ -2970,15 +3017,15 @@ fn convert_function(
                 ));
                 xmm_reg_idx += 1;
             } else {
-                let (align, size) = stack_arg_align_size(t);
-                stack_arg_offset = stack_arg_offset.next_multiple_of(align);
+                let layout = StackArgLayout::for_scalar(t);
+                stack_arg_offset = layout.place_at(stack_arg_offset);
                 let offset = 16 + stack_arg_offset as i32;
                 instructions.push(AsmInstr::Mov(
                     t,
                     AsmOperand::Stack(offset),
                     AsmOperand::Pseudo(param.clone()),
                 ));
-                stack_arg_offset += size;
+                stack_arg_offset += layout.size;
             }
         } else if t == AsmType::Octword {
             if int_reg_idx + 1 < 6 {
@@ -2994,8 +3041,8 @@ fn convert_function(
                 ));
                 int_reg_idx += 2;
             } else {
-                let (align, size) = stack_arg_align_size(t);
-                stack_arg_offset = stack_arg_offset.next_multiple_of(align);
+                let layout = StackArgLayout::for_scalar(t);
+                stack_arg_offset = layout.place_at(stack_arg_offset);
                 let offset = 16 + stack_arg_offset as i32;
                 instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
@@ -3007,7 +3054,7 @@ fn convert_function(
                     AsmOperand::Stack(offset + 8),
                     AsmOperand::PseudoMem(param.clone(), 8),
                 ));
-                stack_arg_offset += size;
+                stack_arg_offset += layout.size;
             }
         } else {
             if int_reg_idx < 6 {
@@ -3018,35 +3065,34 @@ fn convert_function(
                 ));
                 int_reg_idx += 1;
             } else {
-                let (align, size) = stack_arg_align_size(t);
-                stack_arg_offset = stack_arg_offset.next_multiple_of(align);
+                let layout = StackArgLayout::for_scalar(t);
+                stack_arg_offset = layout.place_at(stack_arg_offset);
                 let offset = 16 + stack_arg_offset as i32;
                 instructions.push(AsmInstr::Mov(
                     t,
                     AsmOperand::Stack(offset),
                     AsmOperand::Pseudo(param.clone()),
                 ));
-                stack_arg_offset += size;
+                stack_arg_offset += layout.size;
             }
         }
     }
 
     for instr in &func.body {
         let va_start_stack_offset = 16 + stack_arg_offset as i32;
-        convert_instruction(
-            &func.name,
-            target,
-            instr,
-            types,
-            arr_sizes,
-            &mut instructions,
+        let mut instruction_ctx = InstructionContext {
+            function_name: &func.name,
+            target: ctx.target,
+            types: ctx.types,
+            out: &mut instructions,
             static_doubles,
-            &mut label_counter,
-            var_struct_tags,
-            struct_defs,
-            local_function_names,
+            label_counter: &mut label_counter,
+            var_struct_tags: ctx.var_struct_tags,
+            struct_defs: ctx.struct_defs,
+            local_function_names: ctx.local_function_names,
             va_start_stack_offset,
-        )?;
+        };
+        convert_instruction(instr, &mut instruction_ctx)?;
     }
     Ok(AsmFunction {
         name: func.name.clone(),
@@ -3059,43 +3105,25 @@ fn convert_function(
 // Phase 2: Replace pseudo-registers with stack slots
 // ============================================================
 
-#[allow(clippy::too_many_arguments)]
-fn replace_pseudos(
-    func: &mut AsmFunction,
-    static_vars: &std::collections::HashSet<String>,
-    thread_local_vars: &std::collections::HashSet<String>,
-    types: &HashMap<String, CType>,
-    arr_sizes: &HashMap<String, usize>,
-    alignments: &HashMap<String, usize>,
-    var_struct_tags: &HashMap<String, String>,
-    struct_defs: &HashMap<String, StructDef>,
-) -> i32 {
+struct ReplacePseudoContext<'a> {
+    statics: &'a std::collections::HashSet<String>,
+    tls_vars: &'a std::collections::HashSet<String>,
+    types: &'a HashMap<String, CType>,
+    arr_sizes: &'a HashMap<String, usize>,
+    alignments: &'a HashMap<String, usize>,
+    var_struct_tags: &'a HashMap<String, String>,
+    struct_defs: &'a HashMap<String, StructDef>,
+}
+
+fn replace_pseudos(func: &mut AsmFunction, ctx: &ReplacePseudoContext<'_>) -> i32 {
     let mut pseudo_map: HashMap<String, i32> = HashMap::new();
     let mut stack_offset: i32 = 0;
-    struct ReplaceCtx<'a> {
-        statics: &'a std::collections::HashSet<String>,
-        tls_vars: &'a std::collections::HashSet<String>,
-        types: &'a HashMap<String, CType>,
-        arr_sizes: &'a HashMap<String, usize>,
-        alignments: &'a HashMap<String, usize>,
-        var_struct_tags: &'a HashMap<String, String>,
-        struct_defs: &'a HashMap<String, StructDef>,
-    }
-    let ctx = ReplaceCtx {
-        statics: static_vars,
-        tls_vars: thread_local_vars,
-        types,
-        arr_sizes,
-        alignments,
-        var_struct_tags,
-        struct_defs,
-    };
 
     fn replace_operand(
         op: &mut AsmOperand,
         map: &mut HashMap<String, i32>,
         offset: &mut i32,
-        ctx: &ReplaceCtx,
+        ctx: &ReplacePseudoContext<'_>,
     ) {
         match op {
             AsmOperand::Pseudo(name) => {
@@ -3196,85 +3224,80 @@ fn replace_pseudos(
         }
     }
 
-    let r = |op: &mut AsmOperand, map: &mut HashMap<String, i32>, off: &mut i32| {
-        replace_operand(op, map, off, &ctx);
-    };
-    let _ = r; // suppress unused — we use the closure pattern below
-
     for instr in &mut func.instructions {
         match instr {
             AsmInstr::Mov(_, src, dst) | AsmInstr::Cmp(_, src, dst) => {
-                replace_operand(src, &mut pseudo_map, &mut stack_offset, &ctx);
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
             }
             AsmInstr::Movsx(_, _, src, dst) | AsmInstr::MovZeroExtend(_, _, src, dst) => {
-                replace_operand(src, &mut pseudo_map, &mut stack_offset, &ctx);
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
             }
             AsmInstr::Binary(_, _, src, dst) => {
-                replace_operand(src, &mut pseudo_map, &mut stack_offset, &ctx);
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
             }
             AsmInstr::Unary(_, _, op) => {
-                replace_operand(op, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(op, &mut pseudo_map, &mut stack_offset, ctx);
             }
             AsmInstr::MulFull(_, op) | AsmInstr::Idiv(_, op) | AsmInstr::Div(_, op) => {
-                replace_operand(op, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(op, &mut pseudo_map, &mut stack_offset, ctx);
             }
             AsmInstr::SetCC(_, op) => {
-                replace_operand(op, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(op, &mut pseudo_map, &mut stack_offset, ctx);
             }
             AsmInstr::Push(op) => {
-                replace_operand(op, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(op, &mut pseudo_map, &mut stack_offset, ctx);
             }
             AsmInstr::JmpIndirect(target) => {
-                replace_operand(target, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(target, &mut pseudo_map, &mut stack_offset, ctx);
             }
             AsmInstr::Cvtsi2sd(_, src, dst)
             | AsmInstr::Cvtsi2ss(_, src, dst)
             | AsmInstr::Cvttsd2si(_, src, dst)
             | AsmInstr::Cvttss2si(_, src, dst) => {
-                replace_operand(src, &mut pseudo_map, &mut stack_offset, &ctx);
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
             }
             AsmInstr::Cvtss2sd(src, dst) | AsmInstr::Cvtsd2ss(src, dst) => {
-                replace_operand(src, &mut pseudo_map, &mut stack_offset, &ctx);
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
             }
             AsmInstr::X87Load(_, src) => {
-                replace_operand(src, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx);
             }
             AsmInstr::X87Store(dst) => {
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
             }
             AsmInstr::X87StoreInt(_, dst) => {
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
             }
             AsmInstr::X87LoadIndirect(_, _) | AsmInstr::X87StoreIndirect(_) => {}
             AsmInstr::Lea(src, dst) => {
-                replace_operand(src, &mut pseudo_map, &mut stack_offset, &ctx);
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
             }
             AsmInstr::LoadLabelAddress(_, dst) => {
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
             }
             AsmInstr::AtomicRmw(_, _, _, dst)
             | AsmInstr::AtomicExchange(_, dst)
             | AsmInstr::AtomicCompareExchange(_, dst)
             | AsmInstr::AtomicCompareSwap(_, _, dst) => {
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
             }
             AsmInstr::LoadIndirect(_, _, dst) => {
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
             }
             AsmInstr::CopyToStackArg { src_ptr, .. } => {
-                replace_operand(src_ptr, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(src_ptr, &mut pseudo_map, &mut stack_offset, ctx);
             }
             AsmInstr::CopyFromStackArg { dst, .. } => {
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
             }
             AsmInstr::StoreIndirect(_, src, _) => {
-                replace_operand(src, &mut pseudo_map, &mut stack_offset, &ctx);
+                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx);
             }
             _ => {}
         }
@@ -3926,20 +3949,18 @@ pub fn gen(
         .collect();
     let mut top_level = Vec::new();
     let mut static_doubles = Vec::new();
+    let function_ctx = X86FunctionContext {
+        target,
+        types,
+        var_struct_tags: &program.var_struct_tags,
+        struct_defs: &program.struct_defs,
+        local_function_names: &local_function_names,
+    };
 
     for tl in &program.top_level {
         match tl {
             TackyTopLevel::Function(tf) => {
-                let mut asm_func = convert_function(
-                    tf,
-                    target,
-                    types,
-                    array_sizes,
-                    &mut static_doubles,
-                    &program.var_struct_tags,
-                    &program.struct_defs,
-                    &local_function_names,
-                )?;
+                let mut asm_func = convert_function(tf, &function_ctx, &mut static_doubles)?;
 
                 // Compute aliased variables (address-taken + static)
                 let aliased = compute_aliased(&tf.body, static_vars);
@@ -3963,16 +3984,16 @@ pub fn gen(
                 );
 
                 // Phase 2: replace remaining pseudos with stack slots
-                let stack_size = replace_pseudos(
-                    &mut asm_func,
-                    static_vars,
-                    &program.thread_local_vars,
+                let replace_ctx = ReplacePseudoContext {
+                    statics: static_vars,
+                    tls_vars: &program.thread_local_vars,
                     types,
-                    array_sizes,
+                    arr_sizes: array_sizes,
                     alignments,
-                    &program.var_struct_tags,
-                    &program.struct_defs,
-                );
+                    var_struct_tags: &program.var_struct_tags,
+                    struct_defs: &program.struct_defs,
+                };
+                let stack_size = replace_pseudos(&mut asm_func, &replace_ctx);
 
                 // Phase 3: fix up instructions + callee-saved register handling
                 fixup_instructions(&mut asm_func, stack_size, &allocation.callee_saved);

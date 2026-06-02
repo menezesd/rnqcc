@@ -1407,309 +1407,110 @@ fn include_not_found(spec: &IncludeSpec) -> String {
 struct VirtualHeaderInfo {
     name: &'static str,
     guard: Option<&'static str>,
+    policy: VirtualHeaderPolicy,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VirtualHeaderPolicy {
+    Fallback,
+    PreferVirtual,
+}
+
+const fn virtual_header(name: &'static str, guard: Option<&'static str>) -> VirtualHeaderInfo {
+    VirtualHeaderInfo {
+        name,
+        guard,
+        policy: VirtualHeaderPolicy::Fallback,
+    }
+}
+
+const fn preferred_virtual_header(
+    name: &'static str,
+    guard: Option<&'static str>,
+) -> VirtualHeaderInfo {
+    VirtualHeaderInfo {
+        name,
+        guard,
+        policy: VirtualHeaderPolicy::PreferVirtual,
+    }
 }
 
 const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
-    VirtualHeaderInfo {
-        name: "assert.h",
-        guard: None,
-    },
-    VirtualHeaderInfo {
-        name: "stdbool.h",
-        guard: None,
-    },
-    VirtualHeaderInfo {
-        name: "stddef.h",
-        guard: Some("__rnqcc_stddef_h"),
-    },
-    VirtualHeaderInfo {
-        name: "stdarg.h",
-        guard: Some("__rnqcc_stdarg_h"),
-    },
-    VirtualHeaderInfo {
-        name: "stdatomic.h",
-        guard: Some("__rnqcc_stdatomic_h"),
-    },
-    VirtualHeaderInfo {
-        name: "limits.h",
-        guard: Some("__rnqcc_limits_h"),
-    },
-    VirtualHeaderInfo {
-        name: "stdint.h",
-        guard: Some("__rnqcc_stdint_h"),
-    },
-    VirtualHeaderInfo {
-        name: "inttypes.h",
-        guard: Some("__rnqcc_inttypes_h"),
-    },
-    VirtualHeaderInfo {
-        name: "float.h",
-        guard: Some("__rnqcc_float_h"),
-    },
-    VirtualHeaderInfo {
-        name: "iso646.h",
-        guard: None,
-    },
-    VirtualHeaderInfo {
-        name: "ctype.h",
-        guard: Some("__rnqcc_ctype_h"),
-    },
-    VirtualHeaderInfo {
-        name: "dirent.h",
-        guard: Some("__rnqcc_dirent_h"),
-    },
-    VirtualHeaderInfo {
-        name: "errno.h",
-        guard: None,
-    },
-    VirtualHeaderInfo {
-        name: "memory.h",
-        guard: Some("__rnqcc_memory_h"),
-    },
-    VirtualHeaderInfo {
-        name: "malloc.h",
-        guard: Some("__rnqcc_malloc_h"),
-    },
-    VirtualHeaderInfo {
-        name: "alloca.h",
-        guard: Some("__rnqcc_alloca_h"),
-    },
-    VirtualHeaderInfo {
-        name: "locale.h",
-        guard: Some("__rnqcc_locale_h"),
-    },
-    VirtualHeaderInfo {
-        name: "math.h",
-        guard: Some("__rnqcc_math_h"),
-    },
-    VirtualHeaderInfo {
-        name: "regex.h",
-        guard: Some("__rnqcc_regex_h"),
-    },
-    VirtualHeaderInfo {
-        name: "glob.h",
-        guard: Some("__rnqcc_glob_h"),
-    },
-    VirtualHeaderInfo {
-        name: "fnmatch.h",
-        guard: Some("__rnqcc_fnmatch_h"),
-    },
-    VirtualHeaderInfo {
-        name: "features.h",
-        guard: Some("__rnqcc_features_h"),
-    },
-    VirtualHeaderInfo {
-        name: "dlfcn.h",
-        guard: Some("__rnqcc_dlfcn_h"),
-    },
-    VirtualHeaderInfo {
-        name: "syslog.h",
-        guard: Some("__rnqcc_syslog_h"),
-    },
-    VirtualHeaderInfo {
-        name: "utime.h",
-        guard: Some("__rnqcc_utime_h"),
-    },
-    VirtualHeaderInfo {
-        name: "libgen.h",
-        guard: Some("__rnqcc_libgen_h"),
-    },
-    VirtualHeaderInfo {
-        name: "getopt.h",
-        guard: Some("__rnqcc_getopt_h"),
-    },
-    VirtualHeaderInfo {
-        name: "paths.h",
-        guard: None,
-    },
-    VirtualHeaderInfo {
-        name: "sysexits.h",
-        guard: None,
-    },
-    VirtualHeaderInfo {
-        name: "fcntl.h",
-        guard: Some("__rnqcc_fcntl_h"),
-    },
-    VirtualHeaderInfo {
-        name: "poll.h",
-        guard: Some("__rnqcc_poll_h"),
-    },
-    VirtualHeaderInfo {
-        name: "sys/poll.h",
-        guard: Some("__rnqcc_sys_poll_h"),
-    },
-    VirtualHeaderInfo {
-        name: "setjmp.h",
-        guard: Some("__rnqcc_setjmp_h"),
-    },
-    VirtualHeaderInfo {
-        name: "signal.h",
-        guard: Some("__rnqcc_signal_h"),
-    },
-    VirtualHeaderInfo {
-        name: "stdio.h",
-        guard: Some("__rnqcc_stdio_h"),
-    },
-    VirtualHeaderInfo {
-        name: "stdlib.h",
-        guard: Some("__rnqcc_stdlib_h"),
-    },
-    VirtualHeaderInfo {
-        name: "string.h",
-        guard: Some("__rnqcc_string_h"),
-    },
-    VirtualHeaderInfo {
-        name: "strings.h",
-        guard: Some("__rnqcc_strings_h"),
-    },
-    VirtualHeaderInfo {
-        name: "stdalign.h",
-        guard: None,
-    },
-    VirtualHeaderInfo {
-        name: "stdnoreturn.h",
-        guard: None,
-    },
-    VirtualHeaderInfo {
-        name: "sys/stat.h",
-        guard: Some("__rnqcc_sys_stat_h"),
-    },
-    VirtualHeaderInfo {
-        name: "sys/cdefs.h",
-        guard: Some("__rnqcc_sys_cdefs_h"),
-    },
-    VirtualHeaderInfo {
-        name: "sys/errno.h",
-        guard: None,
-    },
-    VirtualHeaderInfo {
-        name: "sys/select.h",
-        guard: Some("__rnqcc_sys_select_h"),
-    },
-    VirtualHeaderInfo {
-        name: "sys/socket.h",
-        guard: Some("__rnqcc_sys_socket_h"),
-    },
-    VirtualHeaderInfo {
-        name: "sys/un.h",
-        guard: Some("__rnqcc_sys_un_h"),
-    },
-    VirtualHeaderInfo {
-        name: "sys/ioctl.h",
-        guard: Some("__rnqcc_sys_ioctl_h"),
-    },
-    VirtualHeaderInfo {
-        name: "sys/file.h",
-        guard: Some("__rnqcc_sys_file_h"),
-    },
-    VirtualHeaderInfo {
-        name: "sys/mman.h",
-        guard: Some("__rnqcc_sys_mman_h"),
-    },
-    VirtualHeaderInfo {
-        name: "sys/param.h",
-        guard: Some("__rnqcc_sys_param_h"),
-    },
-    VirtualHeaderInfo {
-        name: "sys/resource.h",
-        guard: Some("__rnqcc_sys_resource_h"),
-    },
-    VirtualHeaderInfo {
-        name: "sys/time.h",
-        guard: Some("__rnqcc_sys_time_h"),
-    },
-    VirtualHeaderInfo {
-        name: "sys/types.h",
-        guard: Some("__rnqcc_sys_types_defined"),
-    },
-    VirtualHeaderInfo {
-        name: "sys/uio.h",
-        guard: Some("__rnqcc_sys_uio_h"),
-    },
-    VirtualHeaderInfo {
-        name: "sys/sysmacros.h",
-        guard: None,
-    },
-    VirtualHeaderInfo {
-        name: "sys/utsname.h",
-        guard: Some("__rnqcc_sys_utsname_h"),
-    },
-    VirtualHeaderInfo {
-        name: "sys/wait.h",
-        guard: Some("__rnqcc_sys_wait_h"),
-    },
-    VirtualHeaderInfo {
-        name: "arpa/inet.h",
-        guard: Some("__rnqcc_arpa_inet_h"),
-    },
-    VirtualHeaderInfo {
-        name: "netinet/in.h",
-        guard: Some("__rnqcc_netinet_in_h"),
-    },
-    VirtualHeaderInfo {
-        name: "netinet/tcp.h",
-        guard: Some("__rnqcc_netinet_tcp_h"),
-    },
-    VirtualHeaderInfo {
-        name: "netinet/ip.h",
-        guard: Some("__rnqcc_netinet_ip_h"),
-    },
-    VirtualHeaderInfo {
-        name: "netinet/udp.h",
-        guard: Some("__rnqcc_netinet_udp_h"),
-    },
-    VirtualHeaderInfo {
-        name: "net/if.h",
-        guard: Some("__rnqcc_net_if_h"),
-    },
-    VirtualHeaderInfo {
-        name: "ifaddrs.h",
-        guard: Some("__rnqcc_ifaddrs_h"),
-    },
-    VirtualHeaderInfo {
-        name: "netdb.h",
-        guard: Some("__rnqcc_netdb_h"),
-    },
-    VirtualHeaderInfo {
-        name: "resolv.h",
-        guard: Some("__rnqcc_resolv_h"),
-    },
-    VirtualHeaderInfo {
-        name: "linux/limits.h",
-        guard: Some("__rnqcc_linux_limits_h"),
-    },
-    VirtualHeaderInfo {
-        name: "time.h",
-        guard: Some("__rnqcc_time_h"),
-    },
-    VirtualHeaderInfo {
-        name: "pthread.h",
-        guard: Some("__rnqcc_pthread_h"),
-    },
-    VirtualHeaderInfo {
-        name: "grp.h",
-        guard: Some("__rnqcc_grp_h"),
-    },
-    VirtualHeaderInfo {
-        name: "pwd.h",
-        guard: Some("__rnqcc_pwd_h"),
-    },
-    VirtualHeaderInfo {
-        name: "termios.h",
-        guard: Some("__rnqcc_termios_h"),
-    },
-    VirtualHeaderInfo {
-        name: "unistd.h",
-        guard: Some("__rnqcc_unistd_h"),
-    },
-    VirtualHeaderInfo {
-        name: "wchar.h",
-        guard: Some("__rnqcc_wchar_h"),
-    },
-    VirtualHeaderInfo {
-        name: "wctype.h",
-        guard: Some("__rnqcc_wctype_h"),
-    },
+    virtual_header("assert.h", None),
+    virtual_header("stdbool.h", None),
+    virtual_header("stddef.h", Some("__rnqcc_stddef_h")),
+    preferred_virtual_header("stdarg.h", Some("__rnqcc_stdarg_h")),
+    virtual_header("stdatomic.h", Some("__rnqcc_stdatomic_h")),
+    virtual_header("limits.h", Some("__rnqcc_limits_h")),
+    virtual_header("stdint.h", Some("__rnqcc_stdint_h")),
+    virtual_header("inttypes.h", Some("__rnqcc_inttypes_h")),
+    virtual_header("float.h", Some("__rnqcc_float_h")),
+    virtual_header("iso646.h", None),
+    virtual_header("ctype.h", Some("__rnqcc_ctype_h")),
+    virtual_header("dirent.h", Some("__rnqcc_dirent_h")),
+    virtual_header("errno.h", None),
+    virtual_header("memory.h", Some("__rnqcc_memory_h")),
+    virtual_header("malloc.h", Some("__rnqcc_malloc_h")),
+    virtual_header("alloca.h", Some("__rnqcc_alloca_h")),
+    virtual_header("locale.h", Some("__rnqcc_locale_h")),
+    virtual_header("math.h", Some("__rnqcc_math_h")),
+    virtual_header("regex.h", Some("__rnqcc_regex_h")),
+    virtual_header("glob.h", Some("__rnqcc_glob_h")),
+    virtual_header("fnmatch.h", Some("__rnqcc_fnmatch_h")),
+    virtual_header("features.h", Some("__rnqcc_features_h")),
+    virtual_header("dlfcn.h", Some("__rnqcc_dlfcn_h")),
+    virtual_header("syslog.h", Some("__rnqcc_syslog_h")),
+    virtual_header("utime.h", Some("__rnqcc_utime_h")),
+    virtual_header("libgen.h", Some("__rnqcc_libgen_h")),
+    virtual_header("getopt.h", Some("__rnqcc_getopt_h")),
+    virtual_header("paths.h", None),
+    virtual_header("sysexits.h", None),
+    virtual_header("fcntl.h", Some("__rnqcc_fcntl_h")),
+    virtual_header("poll.h", Some("__rnqcc_poll_h")),
+    virtual_header("sys/poll.h", Some("__rnqcc_sys_poll_h")),
+    virtual_header("setjmp.h", Some("__rnqcc_setjmp_h")),
+    virtual_header("signal.h", Some("__rnqcc_signal_h")),
+    virtual_header("stdio.h", Some("__rnqcc_stdio_h")),
+    virtual_header("stdlib.h", Some("__rnqcc_stdlib_h")),
+    virtual_header("string.h", Some("__rnqcc_string_h")),
+    virtual_header("strings.h", Some("__rnqcc_strings_h")),
+    virtual_header("stdalign.h", None),
+    virtual_header("stdnoreturn.h", None),
+    virtual_header("sys/stat.h", Some("__rnqcc_sys_stat_h")),
+    virtual_header("sys/cdefs.h", Some("__rnqcc_sys_cdefs_h")),
+    virtual_header("sys/errno.h", None),
+    virtual_header("sys/select.h", Some("__rnqcc_sys_select_h")),
+    virtual_header("sys/socket.h", Some("__rnqcc_sys_socket_h")),
+    virtual_header("sys/un.h", Some("__rnqcc_sys_un_h")),
+    virtual_header("sys/ioctl.h", Some("__rnqcc_sys_ioctl_h")),
+    virtual_header("sys/file.h", Some("__rnqcc_sys_file_h")),
+    virtual_header("sys/mman.h", Some("__rnqcc_sys_mman_h")),
+    virtual_header("sys/param.h", Some("__rnqcc_sys_param_h")),
+    virtual_header("sys/resource.h", Some("__rnqcc_sys_resource_h")),
+    virtual_header("sys/time.h", Some("__rnqcc_sys_time_h")),
+    virtual_header("sys/types.h", Some("__rnqcc_sys_types_defined")),
+    virtual_header("sys/uio.h", Some("__rnqcc_sys_uio_h")),
+    virtual_header("sys/sysmacros.h", None),
+    virtual_header("sys/utsname.h", Some("__rnqcc_sys_utsname_h")),
+    virtual_header("sys/wait.h", Some("__rnqcc_sys_wait_h")),
+    virtual_header("arpa/inet.h", Some("__rnqcc_arpa_inet_h")),
+    virtual_header("netinet/in.h", Some("__rnqcc_netinet_in_h")),
+    virtual_header("netinet/tcp.h", Some("__rnqcc_netinet_tcp_h")),
+    virtual_header("netinet/ip.h", Some("__rnqcc_netinet_ip_h")),
+    virtual_header("netinet/udp.h", Some("__rnqcc_netinet_udp_h")),
+    virtual_header("net/if.h", Some("__rnqcc_net_if_h")),
+    virtual_header("ifaddrs.h", Some("__rnqcc_ifaddrs_h")),
+    virtual_header("netdb.h", Some("__rnqcc_netdb_h")),
+    virtual_header("resolv.h", Some("__rnqcc_resolv_h")),
+    virtual_header("linux/limits.h", Some("__rnqcc_linux_limits_h")),
+    virtual_header("time.h", Some("__rnqcc_time_h")),
+    virtual_header("pthread.h", Some("__rnqcc_pthread_h")),
+    virtual_header("grp.h", Some("__rnqcc_grp_h")),
+    virtual_header("pwd.h", Some("__rnqcc_pwd_h")),
+    virtual_header("termios.h", Some("__rnqcc_termios_h")),
+    virtual_header("unistd.h", Some("__rnqcc_unistd_h")),
+    virtual_header("wchar.h", Some("__rnqcc_wchar_h")),
+    virtual_header("wctype.h", Some("__rnqcc_wctype_h")),
 ];
 
 fn virtual_header_info(name: &str) -> Option<VirtualHeaderInfo> {
@@ -1719,10 +1520,45 @@ fn virtual_header_info(name: &str) -> Option<VirtualHeaderInfo> {
         .find(|header| header.name == name)
 }
 
-fn virtual_compat_header_name(spec: &IncludeSpec) -> Option<&str> {
+fn virtual_header_for_include(spec: &IncludeSpec) -> Option<VirtualHeaderInfo> {
     match spec {
-        IncludeSpec::Angled(name) if virtual_header_info(name).is_some() => Some(name),
+        IncludeSpec::Angled(name) => virtual_header_info(name),
         _ => None,
+    }
+}
+
+fn virtual_compat_header_name(spec: &IncludeSpec) -> Option<&str> {
+    virtual_header_for_include(spec).map(|header| header.name)
+}
+
+fn forced_virtual_header_name(spec: &IncludeSpec, include_next: bool) -> Option<&str> {
+    if include_next {
+        return None;
+    }
+    virtual_header_for_include(spec).and_then(|header| {
+        (header.policy == VirtualHeaderPolicy::PreferVirtual).then_some(header.name)
+    })
+}
+
+fn virtual_header_is_available(spec: &IncludeSpec, include_next: bool) -> bool {
+    !include_next && virtual_header_for_include(spec).is_some()
+}
+
+fn emit_virtual_include(
+    out: &mut String,
+    name: &str,
+    macros: &mut HashMap<String, MacroDef>,
+    next_logical_line: usize,
+    logical_file: &str,
+    context: &InternalPreprocessContext<'_>,
+) {
+    let included = include_virtual_compat_header(name, macros);
+    out.push_str(&included);
+    if !included.is_empty() && !included.ends_with('\n') {
+        out.push('\n');
+    }
+    if context.line_markers && !context.suppress_preprocessed_output {
+        push_line_marker(out, next_logical_line, logical_file);
     }
 }
 
@@ -4580,8 +4416,7 @@ fn replace_preprocessor_predicates(
                         include_next,
                     )
                     .is_some();
-                    let found =
-                        found || (!include_next && virtual_compat_header_name(&spec).is_some());
+                    let found = found || virtual_header_is_available(&spec, include_next);
                     out.push(tokens[index].clone_with_text(
                         preprocess::token::PpTokenKind::Number(
                             if found { "1" } else { "0" }.to_string(),
@@ -5343,17 +5178,15 @@ fn internal_preprocess_source(
                             include_level,
                             state,
                         )?;
-                        if !include_next
-                            && matches!(virtual_compat_header_name(&spec), Some("stdarg.h"))
-                        {
-                            let included = include_virtual_compat_header("stdarg.h", macros);
-                            out.push_str(&included);
-                            if !included.is_empty() && !included.ends_with('\n') {
-                                out.push('\n');
-                            }
-                            if context.line_markers && !context.suppress_preprocessed_output {
-                                push_line_marker(&mut out, next_logical_line, &logical_file);
-                            }
+                        if let Some(name) = forced_virtual_header_name(&spec, include_next) {
+                            emit_virtual_include(
+                                &mut out,
+                                name,
+                                macros,
+                                next_logical_line,
+                                &logical_file,
+                                context,
+                            );
                             continue;
                         }
                         let Some(include_path) = resolve_include_path(
@@ -5364,19 +5197,14 @@ fn internal_preprocess_source(
                         ) else {
                             if !include_next {
                                 if let Some(name) = virtual_compat_header_name(&spec) {
-                                    let included = include_virtual_compat_header(name, macros);
-                                    out.push_str(&included);
-                                    if !included.is_empty() && !included.ends_with('\n') {
-                                        out.push('\n');
-                                    }
-                                    if context.line_markers && !context.suppress_preprocessed_output
-                                    {
-                                        push_line_marker(
-                                            &mut out,
-                                            next_logical_line,
-                                            &logical_file,
-                                        );
-                                    }
+                                    emit_virtual_include(
+                                        &mut out,
+                                        name,
+                                        macros,
+                                        next_logical_line,
+                                        &logical_file,
+                                        context,
+                                    );
                                     continue;
                                 }
                             }
@@ -5886,15 +5714,17 @@ fn do_compile(invocation: CompileInvocation<'_>) -> Result<String, String> {
     let compile_outcome = compile::compile(
         invocation.stage,
         invocation.preprocessed_src,
-        invocation.target,
-        invocation.opt_flags,
-        invocation.no_coalescing,
-        invocation.instrument_functions,
-        compile::CompatibilityOptions {
-            permissive: invocation.permissive,
+        compile::CompileOptions {
+            target: invocation.target,
+            opt_flags: invocation.opt_flags,
+            no_coalescing: invocation.no_coalescing,
+            instrument_functions: invocation.instrument_functions,
+            compatibility: compile::CompatibilityOptions {
+                permissive: invocation.permissive,
+            },
+            dumps: invocation.dumps,
+            warnings: invocation.warnings,
         },
-        invocation.dumps,
-        invocation.warnings,
     );
     if invocation.cleanup_preprocessed && !invocation.keep_temps {
         let _ = std::fs::remove_file(invocation.preprocessed_src);

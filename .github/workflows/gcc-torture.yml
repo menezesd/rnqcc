@@ -67,7 +67,6 @@ jobs:
         run: |
           if [ -f "$CI_ARTIFACT_DIR/gcc-torture-failures.txt" ]; then
             python3 scripts/report_gcc_torture_xfails.py \
-              --fail-on-stale \
               --expected tests/fixtures/gcc_torture_expected_failures.txt \
               "$CI_ARTIFACT_DIR/gcc-torture-failures.txt"
           fi

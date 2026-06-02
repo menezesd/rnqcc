@@ -13745,6 +13745,7 @@ fn internal_cpp_has_include_next_stdarg_ignores_virtual_header() {
 
     let output = Command::new(rnqcc())
         .arg("--internal-cpp")
+        .arg("-nostdinc")
         .arg("-I")
         .arg(&include_dir)
         .arg("-E")

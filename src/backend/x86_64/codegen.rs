@@ -2823,6 +2823,7 @@ const XMM_ARG_REGISTERS: [XmmReg; 8] = [
     XmmReg::XMM7,
 ];
 
+#[allow(clippy::too_many_arguments)]
 fn convert_function(
     func: &TackyFunction,
     target: &Target,

@@ -18156,6 +18156,22 @@ int main(void) {
 }
 "#,
         ),
+        (
+            "x86-linux-complex-char-struct-arg-compare",
+            r#"
+typedef struct { _Complex char a; _Complex char b; } Scc2;
+
+Scc2 s = { 1+2i, 3+4i };
+
+int checkScc2(Scc2 s) {
+    return s.a != 1+2i || s.b != 3+4i;
+}
+
+int main(void) {
+    return checkScc2(s);
+}
+"#,
+        ),
     ] {
         let src = TempPath::new(name, "c");
         let out = TempPath::new(name, "s");
@@ -18262,6 +18278,13 @@ int main(void) {
             assert!(asm.contains("subq $32, %rsp"), "{name}: {asm}");
             assert!(asm.contains("leaq 16(%rsp), %rdi"), "{name}: {asm}");
             assert!(asm.contains("rep movsb"), "{name}: {asm}");
+        }
+        if name == "x86-linux-complex-char-struct-arg-compare" {
+            let narrow_extends = asm.matches("movsbl").count() + asm.matches("movzbl").count();
+            assert!(
+                narrow_extends >= 4,
+                "{name}: narrow compare operands were not explicitly extended: {asm}"
+            );
         }
         let mut labels = std::collections::HashSet::new();
         for line in asm.lines() {

@@ -38,6 +38,45 @@ fn val_type(val: &TackyVal, types: &HashMap<String, CType>) -> AsmType {
     }
 }
 
+fn promoted_cmp_operand(
+    out: &mut Vec<AsmInstr>,
+    val: &TackyVal,
+    cmp_type: AsmType,
+    scratch: Reg,
+    types: &HashMap<String, CType>,
+) -> AsmOperand {
+    if !matches!(cmp_type, AsmType::Longword | AsmType::Quadword) {
+        return convert_val(val);
+    }
+    let TackyVal::Var(name) = val else {
+        return convert_val(val);
+    };
+    let Some(ctype) = types.get(name).copied() else {
+        return convert_val(val);
+    };
+    let src_t: AsmType = ctype.into();
+    if !matches!(src_t, AsmType::Byte | AsmType::Word) {
+        return convert_val(val);
+    }
+    let dst = AsmOperand::Reg(scratch);
+    if ctype.is_signed() {
+        out.push(AsmInstr::Movsx(
+            src_t,
+            cmp_type,
+            convert_val(val),
+            dst.clone(),
+        ));
+    } else {
+        out.push(AsmInstr::MovZeroExtend(
+            src_t,
+            cmp_type,
+            convert_val(val),
+            dst.clone(),
+        ));
+    }
+    dst
+}
+
 /// For doubles, we use unsigned condition codes (above/below) because
 /// comisd sets CF/ZF like unsigned comparisons
 fn is_comparison(op: &TackyBinaryOp, is_unsigned: bool) -> Option<CondCode> {
@@ -2370,11 +2409,9 @@ fn convert_binary(
             let r = convert_double_val(right, static_doubles);
             out.push(AsmInstr::Cmp(cmp_type, r, l));
         } else {
-            out.push(AsmInstr::Cmp(
-                cmp_type,
-                convert_val(right),
-                convert_val(left),
-            ));
+            let r = promoted_cmp_operand(out, right, cmp_type, Reg::R10, types);
+            let l = promoted_cmp_operand(out, left, cmp_type, Reg::R11, types);
+            out.push(AsmInstr::Cmp(cmp_type, r, l));
         }
         out.push(AsmInstr::Mov(
             AsmType::Longword,

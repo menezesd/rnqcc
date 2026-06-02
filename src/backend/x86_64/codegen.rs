@@ -499,6 +499,13 @@ fn get_struct_classes(
     None
 }
 
+fn stack_arg_align_size(t: AsmType) -> (usize, usize) {
+    match t {
+        AsmType::LongDouble | AsmType::Octword => (16, 16),
+        _ => (8, 8),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn convert_instruction(
     function_name: &str,
@@ -1996,7 +2003,9 @@ fn convert_funcall(
             if is_variadic_extra {
                 // rnqcc-defined variadic callees read unnamed arguments from
                 // this ordered shadow area instead of the platform va_list ABI.
-                if t == AsmType::Octword {
+                if t == AsmType::LongDouble {
+                    stack_args_list.push(StackArg::LongDouble(arg));
+                } else if t == AsmType::Octword {
                     stack_args_list.push(StackArg::WideScalar(arg));
                 } else {
                     stack_args_list.push(StackArg::Scalar(arg));
@@ -2831,7 +2840,7 @@ fn convert_function(
     // System V ABI: integer args in DI,SI,DX,CX,R8,R9; double args in XMM0-XMM7
     let mut int_reg_idx = 0usize;
     let mut xmm_reg_idx = 0usize;
-    let mut stack_arg_idx = 0usize;
+    let mut stack_arg_offset = 0usize;
     let memory_param_blocks: HashMap<usize, (&String, usize)> = func
         .memory_param_blocks
         .iter()
@@ -2895,25 +2904,30 @@ fn convert_function(
 
     for (i, param) in func.params.iter().enumerate() {
         if let Some((dst_name, size)) = memory_param_blocks.get(&i).copied() {
-            let offset = 16 + (stack_arg_idx * 8) as i32;
+            let align = get_struct_def(dst_name, var_struct_tags, struct_defs)
+                .map(|def| def.alignment.clamp(1, 16))
+                .unwrap_or(8);
+            stack_arg_offset = stack_arg_offset.next_multiple_of(align);
+            let offset = 16 + stack_arg_offset as i32;
             instructions.push(AsmInstr::CopyFromStackArg {
                 src_offset: offset,
                 dst: AsmOperand::PseudoMem(dst_name.clone(), 0),
                 size,
             });
-            stack_arg_idx += size.div_ceil(8);
+            stack_arg_offset += size.next_multiple_of(8);
             continue;
         }
         if force_stack.contains(&i) || func.stack_params.contains(param) {
-            let offset = 16 + (stack_arg_idx * 8) as i32;
             let t: AsmType = types.get(param).copied().unwrap_or(CType::Long).into();
+            let (align, size) = stack_arg_align_size(t);
+            stack_arg_offset = stack_arg_offset.next_multiple_of(align);
+            let offset = 16 + stack_arg_offset as i32;
             if t == AsmType::LongDouble {
                 instructions.push(AsmInstr::X87Load(
                     AsmType::LongDouble,
                     AsmOperand::Stack(offset),
                 ));
                 instructions.push(AsmInstr::X87Store(AsmOperand::Pseudo(param.clone())));
-                stack_arg_idx += 2;
             } else if t == AsmType::Octword {
                 instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
@@ -2925,26 +2939,27 @@ fn convert_function(
                     AsmOperand::Stack(offset + 8),
                     AsmOperand::PseudoMem(param.clone(), 8),
                 ));
-                stack_arg_idx += 2;
             } else {
                 instructions.push(AsmInstr::Mov(
                     t,
                     AsmOperand::Stack(offset),
                     AsmOperand::Pseudo(param.clone()),
                 ));
-                stack_arg_idx += 1;
             }
+            stack_arg_offset += size;
             continue;
         }
         let t: AsmType = types.get(param).copied().unwrap_or(CType::Int).into();
         if t == AsmType::LongDouble {
-            let offset = 16 + (stack_arg_idx * 8) as i32;
+            let (align, size) = stack_arg_align_size(t);
+            stack_arg_offset = stack_arg_offset.next_multiple_of(align);
+            let offset = 16 + stack_arg_offset as i32;
             instructions.push(AsmInstr::X87Load(
                 AsmType::LongDouble,
                 AsmOperand::Stack(offset),
             ));
             instructions.push(AsmInstr::X87Store(AsmOperand::Pseudo(param.clone())));
-            stack_arg_idx += 2;
+            stack_arg_offset += size;
         } else if matches!(t, AsmType::Float | AsmType::Double) {
             if xmm_reg_idx < 8 {
                 instructions.push(AsmInstr::Mov(
@@ -2954,13 +2969,15 @@ fn convert_function(
                 ));
                 xmm_reg_idx += 1;
             } else {
-                let offset = 16 + (stack_arg_idx * 8) as i32;
+                let (align, size) = stack_arg_align_size(t);
+                stack_arg_offset = stack_arg_offset.next_multiple_of(align);
+                let offset = 16 + stack_arg_offset as i32;
                 instructions.push(AsmInstr::Mov(
                     t,
                     AsmOperand::Stack(offset),
                     AsmOperand::Pseudo(param.clone()),
                 ));
-                stack_arg_idx += 1;
+                stack_arg_offset += size;
             }
         } else if t == AsmType::Octword {
             if int_reg_idx + 1 < 6 {
@@ -2976,7 +2993,9 @@ fn convert_function(
                 ));
                 int_reg_idx += 2;
             } else {
-                let offset = 16 + (stack_arg_idx * 8) as i32;
+                let (align, size) = stack_arg_align_size(t);
+                stack_arg_offset = stack_arg_offset.next_multiple_of(align);
+                let offset = 16 + stack_arg_offset as i32;
                 instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     AsmOperand::Stack(offset),
@@ -2987,7 +3006,7 @@ fn convert_function(
                     AsmOperand::Stack(offset + 8),
                     AsmOperand::PseudoMem(param.clone(), 8),
                 ));
-                stack_arg_idx += 2;
+                stack_arg_offset += size;
             }
         } else {
             if int_reg_idx < 6 {
@@ -2998,19 +3017,21 @@ fn convert_function(
                 ));
                 int_reg_idx += 1;
             } else {
-                let offset = 16 + (stack_arg_idx * 8) as i32;
+                let (align, size) = stack_arg_align_size(t);
+                stack_arg_offset = stack_arg_offset.next_multiple_of(align);
+                let offset = 16 + stack_arg_offset as i32;
                 instructions.push(AsmInstr::Mov(
                     t,
                     AsmOperand::Stack(offset),
                     AsmOperand::Pseudo(param.clone()),
                 ));
-                stack_arg_idx += 1;
+                stack_arg_offset += size;
             }
         }
     }
 
     for instr in &func.body {
-        let va_start_stack_offset = 16 + (stack_arg_idx * 8) as i32;
+        let va_start_stack_offset = 16 + stack_arg_offset as i32;
         convert_instruction(
             &func.name,
             target,

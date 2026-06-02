@@ -6247,6 +6247,82 @@ fn x86_va_start_skips_fixed_sse_stack_parameters() {
 }
 
 #[test]
+fn x86_va_start_accounts_for_aligned_fixed_long_double_stack_parameters() {
+    let src = temp_file("x86-va-start-fixed-long-double-stack", "c");
+    let out = temp_file("x86-va-start-fixed-long-double-stack", "s");
+    std::fs::write(
+        &src,
+        "#include <stdarg.h>\n\
+         int take(int a, int b, int c, int d, int e, int f, int g, long double h, ...) {\n\
+             va_list ap;\n\
+             va_start(ap, h);\n\
+             return va_arg(ap, int);\n\
+         }\n\
+         double take_double(double a, double b, double c, double d, double e, double f,\n\
+                            double g, long double h, ...) {\n\
+             va_list ap;\n\
+             va_start(ap, h);\n\
+             return va_arg(ap, double);\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("fldt 32(%rbp)"), "{asm}");
+    assert!(asm.contains("leaq 48(%rbp)"), "{asm}");
+    assert!(asm.contains("fldt 16(%rbp)"), "{asm}");
+    assert!(asm.contains("leaq 32(%rbp)"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn x86_shadow_varargs_store_unnamed_long_double_with_x87() {
+    let src = temp_file("x86-shadow-varargs-long-double", "c");
+    let out = temp_file("x86-shadow-varargs-long-double", "s");
+    std::fs::write(
+        &src,
+        "#include <stdarg.h>\n\
+         void sink(int n, ...) {\n\
+             va_list ap;\n\
+             va_start(ap, n);\n\
+             if (va_arg(ap, long double) != 3.14L) __builtin_abort();\n\
+         }\n\
+         int main(void) {\n\
+             long double x = 3.14L;\n\
+             sink(1, x);\n\
+             return 0;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("fldt"), "{asm}");
+    assert!(asm.contains("fstpt 0(%rsp)"), "{asm}");
+    assert!(!asm.contains("movt"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn x86_va_arg_struct_temporary_gets_real_stack_storage() {
     let src = temp_file("x86-va-arg-struct-storage", "c");
     let out = temp_file("x86-va-arg-struct-storage", "s");

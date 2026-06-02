@@ -495,6 +495,13 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                     show_operand(src, *t, platform)?,
                     show_operand(dst, *t, platform)?
                 )
+            } else if *t == AsmType::LongDouble {
+                writeln!(
+                    w,
+                    "\tmovups {}, {}",
+                    show_operand(src, *t, platform)?,
+                    show_operand(dst, *t, platform)?
+                )
             } else if *t == AsmType::Byte {
                 writeln!(
                     w,

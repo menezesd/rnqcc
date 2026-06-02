@@ -840,6 +840,27 @@ impl TackyGen {
         result
     }
 
+    fn emit_aligned_pointer(&mut self, ptr: TackyVal, align: usize) -> TackyVal {
+        if align <= 8 {
+            return ptr;
+        }
+        let added = self.fresh_tmp(CType::Pointer);
+        self.emit(TackyInstr::Binary {
+            op: TackyBinaryOp::Add,
+            left: ptr,
+            right: TackyVal::Constant((align - 1) as i64),
+            dst: added.clone(),
+        });
+        let aligned = self.fresh_tmp(CType::Pointer);
+        self.emit(TackyInstr::Binary {
+            op: TackyBinaryOp::BitwiseAnd,
+            left: added,
+            right: TackyVal::Constant(-(align as i64)),
+            dst: aligned.clone(),
+        });
+        aligned
+    }
+
     fn ptr_info_from_full(ft: &FullType) -> (CType, usize) {
         match ft {
             FullType::Scalar(t) => (*t, 1),
@@ -4814,6 +4835,8 @@ impl TackyGen {
                 }
             };
             let dst = self.fresh_tmp_full(&ft);
+            let slot_ptr =
+                self.emit_aligned_pointer(slot_ptr, ft.alignment_with(&self.struct_defs).min(16));
             if let TackyVal::Var(ref dst_name) = dst {
                 self.emit_struct_copy_to(slot_ptr.clone(), dst_name, struct_size);
             }
@@ -4862,6 +4885,8 @@ impl TackyGen {
                 }
             };
             let dst = self.fresh_tmp(arg_type);
+            let slot_ptr =
+                self.emit_aligned_pointer(slot_ptr, std::cmp::min(arg_type.size() as usize, 16));
             self.emit(TackyInstr::Load {
                 src_ptr: slot_ptr.clone(),
                 dst: dst.clone(),
@@ -5597,7 +5622,9 @@ impl TackyGen {
 
                 if let Some(def) = self.struct_defs.get(&tag).cloned() {
                     let classes = def.classify_with(&self.struct_defs);
-                    if classes.len() == 1 && classes[0] == ParamClass::Memory {
+                    let is_variadic_extra = variadic && i >= param_types.len();
+                    if is_variadic_extra || (classes.len() == 1 && classes[0] == ParamClass::Memory)
+                    {
                         let struct_addr = self.fresh_tmp(CType::Pointer);
                         if val_ft.is_struct() {
                             self.emit(TackyInstr::GetAddress {
@@ -5612,7 +5639,7 @@ impl TackyGen {
                         }
                         let arg_idx = tacky_args.len();
                         tacky_args.push(struct_addr);
-                        memory_arg_blocks.push((arg_idx, def.size));
+                        memory_arg_blocks.push((arg_idx, def.size, def.alignment));
                     } else {
                         let struct_var_name = if val_ft.is_struct() {
                             if let TackyVal::Var(ref n) = val {
@@ -5769,9 +5796,9 @@ impl TackyGen {
             });
             tacky_args.insert(0, ret_addr);
             let shifted_stack = stack_arg_indices.iter().map(|&i| i + 1).collect();
-            let shifted_memory_blocks: Vec<(usize, usize)> = memory_arg_blocks
+            let shifted_memory_blocks: Vec<(usize, usize, usize)> = memory_arg_blocks
                 .iter()
-                .map(|(index, size)| (index + 1, *size))
+                .map(|(index, size, align)| (index + 1, *size, *align))
                 .collect();
             let shifted_groups: Vec<(usize, usize, Vec<bool>)> = struct_arg_groups
                 .iter()
@@ -5991,7 +6018,9 @@ impl TackyGen {
 
                 if let Some(def) = self.struct_defs.get(&tag).cloned() {
                     let classes = def.classify_with(&self.struct_defs);
-                    if classes.len() == 1 && classes[0] == ParamClass::Memory {
+                    let is_variadic_extra = variadic && i >= param_types.len();
+                    if is_variadic_extra || (classes.len() == 1 && classes[0] == ParamClass::Memory)
+                    {
                         let struct_addr = self.fresh_tmp(CType::Pointer);
                         if val_ft.is_struct() {
                             self.emit(TackyInstr::GetAddress {
@@ -6006,7 +6035,7 @@ impl TackyGen {
                         }
                         let arg_idx = tacky_args.len();
                         tacky_args.push(struct_addr);
-                        memory_arg_blocks.push((arg_idx, def.size));
+                        memory_arg_blocks.push((arg_idx, def.size, def.alignment));
                     } else {
                         let struct_var_name = if val_ft.is_struct() {
                             if let TackyVal::Var(ref n) = val {
@@ -6146,9 +6175,9 @@ impl TackyGen {
             });
             tacky_args.insert(0, ret_addr);
             let shifted_stack = stack_arg_indices.iter().map(|&i| i + 1).collect();
-            let shifted_memory_blocks: Vec<(usize, usize)> = memory_arg_blocks
+            let shifted_memory_blocks: Vec<(usize, usize, usize)> = memory_arg_blocks
                 .iter()
-                .map(|(index, size)| (index + 1, *size))
+                .map(|(index, size, align)| (index + 1, *size, *align))
                 .collect();
             let shifted_groups: Vec<(usize, usize, Vec<bool>)> = struct_arg_groups
                 .iter()

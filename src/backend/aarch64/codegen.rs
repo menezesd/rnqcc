@@ -2183,21 +2183,49 @@ fn convert_function(
                     .iter()
                     .map(|(start, count, is_sse)| (*start, (*count, is_sse.clone())))
                     .collect();
-                let memory_blocks: HashMap<usize, usize> =
-                    memory_arg_blocks.iter().copied().collect();
+                let memory_blocks: HashMap<usize, (usize, usize)> = memory_arg_blocks
+                    .iter()
+                    .map(|(index, size, align)| (*index, (*size, *align)))
+                    .collect();
                 enum StackArg<'a> {
                     Scalar(AsmType, &'a TackyVal),
-                    MemoryBlock { src_ptr: &'a TackyVal, size: usize },
+                    MemoryBlock {
+                        src_ptr: &'a TackyVal,
+                        size: usize,
+                        align: usize,
+                    },
                 }
+
+                impl StackArg<'_> {
+                    fn slot_count(&self) -> usize {
+                        match self {
+                            StackArg::Scalar(AsmType::Octword | AsmType::LongDouble, _) => 2,
+                            StackArg::Scalar(_, _) => 1,
+                            StackArg::MemoryBlock { size, .. } => {
+                                size.div_ceil(STACK_SLOT_SIZE as usize)
+                            }
+                        }
+                    }
+
+                    fn slot_alignment(&self) -> usize {
+                        match self {
+                            StackArg::Scalar(AsmType::Octword | AsmType::LongDouble, _) => 2,
+                            StackArg::MemoryBlock { align, .. } if *align >= 16 => 2,
+                            _ => 1,
+                        }
+                    }
+                }
+
                 let mut gp_arg_count = 0usize;
                 let mut fp_arg_count = 0usize;
                 let mut stack_args = Vec::new();
                 let mut arg_index = 0usize;
                 while arg_index < args.len() {
-                    if let Some(size) = memory_blocks.get(&arg_index).copied() {
+                    if let Some((size, align)) = memory_blocks.get(&arg_index).copied() {
                         stack_args.push(StackArg::MemoryBlock {
                             src_ptr: &args[arg_index],
                             size,
+                            align,
                         });
                         arg_index += 1;
                         continue;
@@ -2281,21 +2309,15 @@ fn convert_function(
                     arg_index += 1;
                 }
 
-                let stack_arg_count: usize = stack_args
-                    .iter()
-                    .map(|arg| match arg {
-                        StackArg::Scalar(AsmType::Octword | AsmType::LongDouble, _) => 2,
-                        StackArg::Scalar(_, _) => 1,
-                        StackArg::MemoryBlock { size, .. } => {
-                            size.div_ceil(STACK_SLOT_SIZE as usize)
-                        }
-                    })
-                    .sum();
+                let stack_arg_count = stack_args.iter().fold(0usize, |index, arg| {
+                    index.next_multiple_of(arg.slot_alignment()) + arg.slot_count()
+                });
                 let outgoing_bytes = outgoing_stack_size(stack_arg_count);
                 if outgoing_bytes > 0 {
                     instructions.push(AsmInstr::AllocateStack(outgoing_bytes));
                     let mut stack_index = 0usize;
                     for arg in &stack_args {
+                        stack_index = stack_index.next_multiple_of(arg.slot_alignment());
                         match arg {
                             StackArg::Scalar(AsmType::Octword, val) => {
                                 let src = val_operand(val, &stack_slots, global_vars)?;
@@ -2311,7 +2333,7 @@ fn convert_function(
                                     stack_arg_offset(0, stack_index + 1),
                                     outgoing_bytes,
                                 ));
-                                stack_index += 2;
+                                stack_index += arg.slot_count();
                             }
                             StackArg::Scalar(AsmType::LongDouble, val) => {
                                 instructions.push(AsmInstr::AArch64StoreOutgoingArg(
@@ -2320,7 +2342,7 @@ fn convert_function(
                                     stack_arg_offset(0, stack_index),
                                     outgoing_bytes,
                                 ));
-                                stack_index += 2;
+                                stack_index += arg.slot_count();
                             }
                             StackArg::Scalar(ty, val) => {
                                 instructions.push(AsmInstr::AArch64StoreOutgoingArg(
@@ -2329,9 +2351,9 @@ fn convert_function(
                                     stack_arg_offset(0, stack_index),
                                     outgoing_bytes,
                                 ));
-                                stack_index += 1;
+                                stack_index += arg.slot_count();
                             }
-                            StackArg::MemoryBlock { src_ptr, size } => {
+                            StackArg::MemoryBlock { src_ptr, size, .. } => {
                                 emit_copy_pointer_to_outgoing_arg(
                                     &mut instructions,
                                     val_operand(src_ptr, &stack_slots, global_vars)?,
@@ -2339,7 +2361,7 @@ fn convert_function(
                                     stack_arg_offset(0, stack_index),
                                     outgoing_bytes,
                                 );
-                                stack_index += size.div_ceil(STACK_SLOT_SIZE as usize);
+                                stack_index += arg.slot_count();
                             }
                         }
                     }

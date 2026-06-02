@@ -9,7 +9,7 @@ pub fn codegen(
     no_coalescing: bool,
 ) -> Result<AsmProgram, String> {
     match target.arch {
-        Arch::X86_64 => x86_64::codegen::gen(program, no_coalescing),
+        Arch::X86_64 => x86_64::codegen::gen(program, target, no_coalescing),
         Arch::AArch64 => aarch64::codegen::gen(program, target),
     }
 }

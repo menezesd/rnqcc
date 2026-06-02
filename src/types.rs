@@ -1665,8 +1665,8 @@ pub enum TackyInstr {
         dst: TackyVal,
         /// Indices of args that must be passed on the stack (MEMORY-class struct eightbytes)
         stack_arg_indices: std::collections::HashSet<usize>,
-        /// Stack-passed aggregate blocks: (flattened arg index containing source address, byte size).
-        memory_arg_blocks: Vec<(usize, usize)>,
+        /// Stack-passed aggregate blocks: (flattened arg index containing source address, byte size, alignment).
+        memory_arg_blocks: Vec<(usize, usize, usize)>,
         /// Groups of consecutive args that form struct eightbytes (start_idx, count, is_sse_vec)
         struct_arg_groups: Vec<(usize, usize, Vec<bool>)>,
         /// True if the direct call target has a `...` prototype.

@@ -463,6 +463,7 @@ fn get_struct_classes(
 #[allow(clippy::too_many_arguments)]
 fn convert_instruction(
     function_name: &str,
+    target: &Target,
     instr: &TackyInstr,
     types: &HashMap<String, CType>,
     _arr_sizes: &HashMap<String, usize>,
@@ -472,6 +473,7 @@ fn convert_instruction(
     var_struct_tags: &HashMap<String, String>,
     struct_defs: &HashMap<String, StructDef>,
     local_function_names: &std::collections::HashSet<String>,
+    va_start_stack_offset: i32,
 ) -> Result<(), String> {
     match instr {
         TackyInstr::Nop => { /* skip */ }
@@ -981,6 +983,50 @@ fn convert_instruction(
                 .copied()
                 .unwrap_or(CType::Int);
             let is_unsigned = !dst_ctype.is_signed();
+            if t == AsmType::Octword {
+                let helper = match (op, is_unsigned) {
+                    (TackyBinaryOp::Div, true) => "__udivti3",
+                    (TackyBinaryOp::Div, false) => "__divti3",
+                    (TackyBinaryOp::Mod, true) => "__umodti3",
+                    (TackyBinaryOp::Mod, false) => "__modti3",
+                    _ => return Err("internal error: expected x86-64 i128 div/mod".to_string()),
+                };
+                let (left_low, left_high) = i128_part_operands(left)?;
+                let (right_low, right_high) = i128_part_operands(right)?;
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    left_low,
+                    AsmOperand::Reg(Reg::DI),
+                ));
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    left_high,
+                    AsmOperand::Reg(Reg::SI),
+                ));
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    right_low,
+                    AsmOperand::Reg(Reg::DX),
+                ));
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    right_high,
+                    AsmOperand::Reg(Reg::CX),
+                ));
+                out.push(AsmInstr::Call(helper.to_string(), 4, 0, false));
+                let dst_op = convert_val(dst);
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    AsmOperand::Reg(Reg::AX),
+                    low64_operand(dst_op.clone())?,
+                ));
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    AsmOperand::Reg(Reg::DX),
+                    high64_operand(dst_op)?,
+                ));
+                return Ok(());
+            }
             out.push(AsmInstr::Mov(
                 t,
                 convert_val(left),
@@ -1353,7 +1399,10 @@ fn convert_instruction(
             out.push(AsmInstr::Lea(convert_val(src), convert_val(dst)));
         }
         TackyInstr::VaStart { dst } => {
-            out.push(AsmInstr::Lea(AsmOperand::Stack(16), convert_val(dst)));
+            out.push(AsmInstr::Lea(
+                AsmOperand::Stack(va_start_stack_offset),
+                convert_val(dst),
+            ));
         }
         TackyInstr::Load { src_ptr, dst } => {
             let dst_t = val_type(dst, types);
@@ -1724,6 +1773,7 @@ fn convert_instruction(
                 var_struct_tags,
                 struct_defs,
                 local_function_names,
+                target,
                 variadic: *variadic,
                 fixed_flat_arg_count: *fixed_flat_arg_count,
                 hidden_return: *hidden_return,
@@ -1750,9 +1800,23 @@ struct FuncallContext<'a> {
     var_struct_tags: &'a HashMap<String, String>,
     struct_defs: &'a HashMap<String, StructDef>,
     local_function_names: &'a std::collections::HashSet<String>,
+    target: &'a Target,
     variadic: bool,
     fixed_flat_arg_count: usize,
     hidden_return: bool,
+}
+
+fn x86_64_linux_libc_va_list_arg(name: &str) -> Option<usize> {
+    match name {
+        "vprintf" => Some(1),
+        "vfprintf" => Some(2),
+        "vsnprintf" => Some(3),
+        "__vprintf_chk" => Some(2),
+        "__vfprintf_chk" => Some(3),
+        "__vsnprintf_chk" => Some(5),
+        "vsyslog" => Some(2),
+        _ => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1761,7 +1825,7 @@ fn convert_funcall(
     args: &[TackyVal],
     dst: &TackyVal,
     stack_arg_indices: &std::collections::HashSet<usize>,
-    memory_arg_blocks: &[(usize, usize)],
+    memory_arg_blocks: &[(usize, usize, usize)],
     struct_arg_groups: &[(usize, usize, Vec<bool>)],
     indirect: bool,
     ctx: &mut FuncallContext<'_>,
@@ -1772,8 +1836,18 @@ fn convert_funcall(
     let var_struct_tags = ctx.var_struct_tags;
     let struct_defs = ctx.struct_defs;
     let use_shadow_varargs = ctx.variadic && !indirect && ctx.local_function_names.contains(name);
-    let memory_blocks: std::collections::HashMap<usize, usize> =
-        memory_arg_blocks.iter().copied().collect();
+    let libc_va_list_arg = if !indirect
+        && ctx.target.os == TargetOs::Linux
+        && !ctx.local_function_names.contains(name)
+    {
+        x86_64_linux_libc_va_list_arg(name)
+    } else {
+        None
+    };
+    let memory_blocks: std::collections::HashMap<usize, (usize, usize)> = memory_arg_blocks
+        .iter()
+        .map(|(index, size, align)| (*index, (*size, *align)))
+        .collect();
 
     {
         // Pre-compute which args must go on stack due to struct group overflow
@@ -1828,7 +1902,29 @@ fn convert_funcall(
             Scalar(&'a TackyVal),
             WideScalar(&'a TackyVal),
             LongDouble(&'a TackyVal),
-            MemoryBlock { src_ptr: &'a TackyVal, size: usize },
+            MemoryBlock {
+                src_ptr: &'a TackyVal,
+                size: usize,
+                align: usize,
+            },
+        }
+
+        impl StackArg<'_> {
+            fn size(&self) -> usize {
+                match self {
+                    StackArg::Scalar(_) => 8,
+                    StackArg::WideScalar(_) | StackArg::LongDouble(_) => 16,
+                    StackArg::MemoryBlock { size, .. } => size.next_multiple_of(8),
+                }
+            }
+
+            fn alignment(&self) -> usize {
+                match self {
+                    StackArg::WideScalar(_) | StackArg::LongDouble(_) => 16,
+                    StackArg::MemoryBlock { align, .. } => (*align).clamp(1, 16),
+                    _ => 8,
+                }
+            }
         }
 
         // Classify args into int regs, xmm regs, and stack
@@ -1841,8 +1937,12 @@ fn convert_funcall(
 
         for (arg_idx, arg) in args.iter().enumerate() {
             let is_variadic_extra = use_shadow_varargs && arg_idx >= ctx.fixed_flat_arg_count;
-            if let Some(size) = memory_blocks.get(&arg_idx).copied() {
-                stack_args_list.push(StackArg::MemoryBlock { src_ptr: arg, size });
+            if let Some((size, align)) = memory_blocks.get(&arg_idx).copied() {
+                stack_args_list.push(StackArg::MemoryBlock {
+                    src_ptr: arg,
+                    size,
+                    align,
+                });
                 continue;
             }
             if force_stack_args.contains(&arg_idx) {
@@ -1882,7 +1982,7 @@ fn convert_funcall(
                 }
             } else {
                 if int_idx < 6 {
-                    int_reg_args.push((int_idx, arg));
+                    int_reg_args.push((int_idx, arg_idx, arg));
                     int_idx += 1;
                 } else {
                     stack_args_list.push(StackArg::Scalar(arg));
@@ -1890,25 +1990,34 @@ fn convert_funcall(
             }
         }
 
-        let stack_bytes: usize = stack_args_list
-            .iter()
-            .map(|item| match item {
-                StackArg::Scalar(_) => 8,
-                StackArg::WideScalar(_) => 16,
-                StackArg::LongDouble(_) => 16,
-                StackArg::MemoryBlock { size, .. } => size.next_multiple_of(8),
-            })
-            .sum();
-        let padding = if !stack_bytes.is_multiple_of(16) {
+        let stack_bytes = stack_args_list.iter().fold(0usize, |offset, item| {
+            offset.next_multiple_of(item.alignment()) + item.size()
+        });
+        let libc_va_list_bridge = libc_va_list_arg.and_then(|arg_idx| {
+            int_reg_args
+                .iter()
+                .find(|(_, actual_arg_idx, _)| *actual_arg_idx == arg_idx)
+                .map(|(reg_idx, _, arg)| (*reg_idx, *arg, stack_bytes as i32))
+        });
+        let stack_bytes_with_bridge = if libc_va_list_bridge.is_some() {
+            stack_bytes + 32
+        } else {
+            stack_bytes
+        };
+        let padding = if !stack_bytes_with_bridge.is_multiple_of(16) {
             8
         } else {
             0
         };
-        let outgoing_bytes = stack_bytes + padding;
+        let outgoing_bytes = stack_bytes_with_bridge + padding;
         if outgoing_bytes > 0 {
             out.push(AsmInstr::AllocateStack(outgoing_bytes as i32));
             let mut stack_offset = 0i32;
             for item in &stack_args_list {
+                stack_offset = (stack_offset as usize)
+                    .next_multiple_of(item.alignment())
+                    .try_into()
+                    .map_err(|_| "x86-64 stack argument offset overflow".to_string())?;
                 match item {
                     StackArg::Scalar(arg) => {
                         let t = val_type(arg, types);
@@ -1922,7 +2031,7 @@ fn convert_funcall(
                                 AsmOperand::StackArg(stack_offset),
                             ));
                         }
-                        stack_offset += 8;
+                        stack_offset += item.size() as i32;
                     }
                     StackArg::WideScalar(arg) => {
                         let (low, high) = i128_part_operands(arg)?;
@@ -1933,27 +2042,62 @@ fn convert_funcall(
                             AsmOperand::StackArg(stack_offset),
                             AsmOperand::StackArg(stack_offset + 8),
                         );
-                        stack_offset += 16;
+                        stack_offset += item.size() as i32;
                     }
                     StackArg::LongDouble(arg) => {
                         x87_load_val(out, arg, types, static_doubles);
                         out.push(AsmInstr::X87Store(AsmOperand::StackArg(stack_offset)));
-                        stack_offset += 16;
+                        stack_offset += item.size() as i32;
                     }
-                    StackArg::MemoryBlock { src_ptr, size } => {
+                    StackArg::MemoryBlock { src_ptr, size, .. } => {
                         out.push(AsmInstr::CopyToStackArg {
                             src_ptr: convert_val(src_ptr),
                             dst_offset: stack_offset,
                             size: *size,
                         });
-                        stack_offset += size.next_multiple_of(8) as i32;
+                        stack_offset += item.size() as i32;
                     }
                 }
             }
+            if let Some((_, va_list_arg, va_list_offset)) = libc_va_list_bridge {
+                // SysV x86-64 va_list is an array of one struct:
+                // { unsigned gp_offset; unsigned fp_offset; void *overflow; void *reg_save; }.
+                // rnqcc va_list values already point at the ordered shadow overflow area.
+                out.push(AsmInstr::Mov(
+                    AsmType::Longword,
+                    AsmOperand::Imm(48),
+                    AsmOperand::StackArg(va_list_offset),
+                ));
+                out.push(AsmInstr::Mov(
+                    AsmType::Longword,
+                    AsmOperand::Imm(304),
+                    AsmOperand::StackArg(va_list_offset + 4),
+                ));
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    convert_val(va_list_arg),
+                    AsmOperand::StackArg(va_list_offset + 8),
+                ));
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    AsmOperand::Imm(0),
+                    AsmOperand::StackArg(va_list_offset + 16),
+                ));
+            }
         }
         // Move int register args
-        for (i, arg) in &int_reg_args {
+        for (i, arg_idx, arg) in &int_reg_args {
             let t = val_type(arg, types);
+            if libc_va_list_bridge.is_some_and(|(bridge_reg_idx, _, _)| bridge_reg_idx == *i)
+                && Some(*arg_idx) == libc_va_list_arg
+            {
+                let (_, _, va_list_offset) = libc_va_list_bridge.unwrap();
+                out.push(AsmInstr::Lea(
+                    AsmOperand::StackArg(va_list_offset),
+                    AsmOperand::Reg(ARG_REGISTERS[*i]),
+                ));
+                continue;
+            }
             // For constants going into registers: use Quadword when value is negative
             // (movl zero-extends, which changes the meaning of negative values)
             let t = match arg {
@@ -2635,6 +2779,7 @@ const XMM_ARG_REGISTERS: [XmmReg; 8] = [
 
 fn convert_function(
     func: &TackyFunction,
+    target: &Target,
     types: &HashMap<String, CType>,
     arr_sizes: &HashMap<String, usize>,
     static_doubles: &mut Vec<(String, f64)>,
@@ -2828,8 +2973,10 @@ fn convert_function(
     }
 
     for instr in &func.body {
+        let va_start_stack_offset = 16 + (stack_arg_idx * 8) as i32;
         convert_instruction(
             &func.name,
+            target,
             instr,
             types,
             arr_sizes,
@@ -2839,6 +2986,7 @@ fn convert_function(
             var_struct_tags,
             struct_defs,
             local_function_names,
+            va_start_stack_offset,
         )?;
     }
     Ok(AsmFunction {
@@ -3118,6 +3266,20 @@ fn fixup_instructions(func: &mut AsmFunction, stack_size: i32, callee_saved: &[R
                 ));
                 new_instructions.push(AsmInstr::Mov(
                     t,
+                    AsmOperand::Xmm(XmmReg::XMM14),
+                    dst.clone(),
+                ));
+            }
+            AsmInstr::Mov(AsmType::LongDouble, ref src, ref dst)
+                if is_memory(src) && is_memory(dst) =>
+            {
+                new_instructions.push(AsmInstr::Mov(
+                    AsmType::LongDouble,
+                    src.clone(),
+                    AsmOperand::Xmm(XmmReg::XMM14),
+                ));
+                new_instructions.push(AsmInstr::Mov(
+                    AsmType::LongDouble,
                     AsmOperand::Xmm(XmmReg::XMM14),
                     dst.clone(),
                 ));
@@ -3686,7 +3848,11 @@ fn compute_ret_regs(
     vec![] // void function
 }
 
-pub fn gen(program: &TackyProgram, no_coalescing: bool) -> Result<AsmProgram, String> {
+pub fn gen(
+    program: &TackyProgram,
+    target: &Target,
+    no_coalescing: bool,
+) -> Result<AsmProgram, String> {
     let static_vars = &program.global_vars;
     let types = &program.symbol_types;
     let array_sizes = &program.array_sizes;
@@ -3707,6 +3873,7 @@ pub fn gen(program: &TackyProgram, no_coalescing: bool) -> Result<AsmProgram, St
             TackyTopLevel::Function(tf) => {
                 let mut asm_func = convert_function(
                     tf,
+                    target,
                     types,
                     array_sizes,
                     &mut static_doubles,

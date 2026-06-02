@@ -3755,6 +3755,34 @@ fn emits_aarch64_assembly_for_int128_division_helpers() {
 }
 
 #[test]
+fn emits_x86_64_assembly_for_int128_division_helpers() {
+    let src = temp_file("x86-int128-div", "i");
+    let out = temp_file("x86-int128-div", "s");
+    std::fs::write(
+        &src,
+        "unsigned __int128 f(unsigned __int128 a, unsigned __int128 b) { return a / b; }\n\
+         __int128 g(__int128 a, __int128 b) { return a % b; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
+    assert!(asm.contains("call __udivti3@PLT"), "{asm}");
+    assert!(asm.contains("call __modti3@PLT"), "{asm}");
+    assert!(!asm.contains("Octword"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn emits_aarch64_assembly_for_variable_int128_shifts() {
     let src = temp_file("aarch64-int128-variable-shift", "i");
     let out = temp_file("aarch64-int128-variable-shift", "s");
@@ -6145,6 +6173,74 @@ fn x86_local_variadic_shadow_arguments_are_not_duplicated() {
     );
     assert!(asm.contains("movl $15, 96(%rsp)"), "{asm}");
     assert!(!asm.contains("movl $7, 40(%rsp)"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn x86_va_start_skips_fixed_stack_parameters() {
+    let src = temp_file("x86-va-start-fixed-stack", "c");
+    let out = temp_file("x86-va-start-fixed-stack", "s");
+    std::fs::write(
+        &src,
+        "typedef unsigned long L;\n\
+         L take(L p0, L p1, L p2, L p3, L p4, L p5, L p6, L p7, L p8, ...) {\n\
+             __builtin_va_list ap;\n\
+             __builtin_va_start(ap, p8);\n\
+             return __builtin_va_arg(ap, L);\n\
+         }\n\
+         int main(void) {\n\
+             return take(1,2,3,4,5,6,7,8,9,42) == 42 ? 0 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("leaq 40(%rbp)"), "{asm}");
+    assert!(!asm.contains("leaq 16(%rbp)"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn x86_va_start_skips_fixed_sse_stack_parameters() {
+    let src = temp_file("x86-va-start-fixed-sse-stack", "c");
+    let out = temp_file("x86-va-start-fixed-sse-stack", "s");
+    std::fs::write(
+        &src,
+        "typedef double D;\n\
+         int take(D p0, D p1, D p2, D p3, D p4, D p5, D p6, D p7, D p8, ...) {\n\
+             __builtin_va_list ap;\n\
+             __builtin_va_start(ap, p8);\n\
+             return __builtin_va_arg(ap, int);\n\
+         }\n\
+         int main(void) {\n\
+             return take(1,2,3,4,5,6,7,8,9,42) == 42 ? 0 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("leaq 24(%rbp)"), "{asm}");
+    assert!(!asm.contains("leaq 16(%rbp)"), "{asm}");
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -17807,6 +17903,66 @@ int main(void) { return f(2) && g(5) ? 42 : 1; }
 "#,
         ),
         (
+            "x86-linux-label-address-arithmetic",
+            r#"
+int tab[4];
+
+void execute(unsigned short *base, unsigned short *ip) {
+    int x = 0;
+    int *out = tab;
+again:
+    x++;
+    if (x == 4) {
+        *out = 0;
+        return;
+    }
+    *out++ = ip - base;
+    goto *(&&again + *ip++);
+}
+
+int main(void) {
+    unsigned short ip[4] = {0, 0, 0, 0};
+    execute(ip, ip);
+    return tab[0] == 0 && tab[1] == 1 && tab[2] == 2 && tab[3] == 0 ? 42 : 1;
+}
+"#,
+        ),
+        (
+            "x86-linux-struct-return-copy-abi",
+            r#"
+struct box { int v[4]; };
+
+struct box make(void) {
+    struct box b = {{10, 20, 30, 40}};
+    return b;
+}
+
+int main(void) {
+    struct box b = make();
+    return b.v[0] == 10 && b.v[1] == 20 && b.v[2] == 30 && b.v[3] == 40 ? 42 : 1;
+}
+"#,
+        ),
+        (
+            "x86-linux-vector-u16-divmod",
+            r#"
+typedef unsigned short U __attribute__((vector_size(16)));
+typedef short S __attribute__((vector_size(16)));
+
+int main(void) {
+    U u = (U){73U, 65531U, 8U, 174U, 921U, 65535U, 17U, 178U};
+    U q = u / ((U){4U, 4U, 2U, 8U, 16U, 64U, 32U, 128U});
+    U r = u % ((U){4U, 4U, 2U, 8U, 16U, 64U, 32U, 128U});
+    S s = (S){73, -9123, 32761, 8191, 16371, 1201, 12701, 9999};
+    S sq = s / ((S){4, 4, 2, 8, 16, 64, 32, 128});
+    S sr = s % ((S){4, 4, 2, 8, 16, 64, 32, 128});
+    if (q[0] != 18 || r[1] != 3) return 1;
+    if (sq[2] != 16380 || sr[3] != 7) return 2;
+    return 42;
+}
+"#,
+        ),
+        (
             "x86-linux-word-to-ulong-zero-extend",
             r#"
 unsigned long f(unsigned long a, unsigned short b, unsigned long c) {
@@ -17855,6 +18011,113 @@ int main(void) {
 }
 "#,
         ),
+        (
+            "x86-linux-vprintf-shadow-va-list-bridge",
+            r#"
+#include <stdarg.h>
+
+int vprintf(const char *fmt, va_list ap);
+
+void forward(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+}
+"#,
+        ),
+        (
+            "x86-linux-vfprintf-shadow-va-list-bridge",
+            r#"
+#include <stdarg.h>
+
+typedef struct FILE FILE;
+int vfprintf(FILE *stream, const char *fmt, va_list ap);
+
+void forward(FILE *stream, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stream, fmt, ap);
+    va_end(ap);
+}
+"#,
+        ),
+        (
+            "x86-linux-vprintf-chk-shadow-va-list-bridge",
+            r#"
+#include <stdarg.h>
+
+int __vprintf_chk(int flag, const char *fmt, va_list ap);
+
+void forward(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    __vprintf_chk(1, fmt, ap);
+    va_end(ap);
+}
+"#,
+        ),
+        (
+            "x86-linux-complex-long-double-raw-copies",
+            r#"
+_Complex long double sink;
+
+_Complex long double id(_Complex long double x) {
+    sink = x;
+    return sink;
+}
+
+int main(void) {
+    _Complex long double z = 1.0L + 2.0iL;
+    return id(z) == z ? 42 : 1;
+}
+"#,
+        ),
+        (
+            "x86-linux-local-vprintf-chk-keeps-shadow-va-list",
+            r#"
+#include <stdarg.h>
+
+int vprintf(const char *fmt, va_list ap);
+
+int __vprintf_chk(int flag, const char *fmt, va_list ap) {
+    return vprintf(fmt, ap);
+}
+
+int inner(int x, ...) {
+    va_list ap;
+    va_start(ap, x);
+    int ret = __vprintf_chk(1, "%d", ap);
+    va_end(ap);
+    return ret;
+}
+"#,
+        ),
+        (
+            "x86-linux-aligned-struct-shadow-va-arg",
+            r#"
+#include <stdarg.h>
+
+struct __attribute__((aligned(16))) T { long long a, b; };
+
+struct T take(int skip, ...) {
+    va_list ap;
+    va_start(ap, skip);
+    while (skip--) {
+        va_arg(ap, int);
+    }
+    struct T value = va_arg(ap, struct T);
+    va_end(ap);
+    return value;
+}
+
+int main(void) {
+    struct T input = { 11, 22 };
+    struct T output = take(1, 0, input);
+    return output.a == 11 && output.b == 22 ? 42 : 1;
+}
+"#,
+        ),
     ] {
         let src = TempPath::new(name, "c");
         let out = TempPath::new(name, "s");
@@ -17873,8 +18136,8 @@ int main(void) {
         assert!(!asm.contains("Octword"), "{name}: {asm}");
         if name == "x86-linux-int128-va-arg" {
             assert!(asm.contains("subq $32, %rsp"), "{name}: {asm}");
-            assert!(asm.contains("8(%rsp)"), "{name}: {asm}");
             assert!(asm.contains("16(%rsp)"), "{name}: {asm}");
+            assert!(asm.contains("24(%rsp)"), "{name}: {asm}");
             assert!(asm.contains("addq $32, %rsp"), "{name}: {asm}");
         }
         if name == "x86-linux-vector-uint128-mask" || name == "x86-linux-i128-eq-low-half" {
@@ -17896,6 +18159,56 @@ int main(void) {
         if name == "x86-linux-byte-to-word-sign-extend" {
             assert!(asm.contains("movsbw"), "{name}: {asm}");
             assert!(!asm.contains("movslq"), "{name}: {asm}");
+        }
+        if name == "x86-linux-label-address-arithmetic" {
+            assert!(asm.contains("jmp *"), "{name}: {asm}");
+        }
+        if name == "x86-linux-struct-return-copy-abi" {
+            assert!(asm.contains("call make"), "{name}: {asm}");
+            assert!(!asm.contains("PseudoMem"), "{name}: {asm}");
+        }
+        if name == "x86-linux-vector-u16-divmod" {
+            assert!(!asm.contains("Nand"), "{name}: {asm}");
+        }
+        if name == "x86-linux-vprintf-shadow-va-list-bridge" {
+            assert!(asm.contains("subq $32, %rsp"), "{name}: {asm}");
+            assert!(asm.contains("movl $48, 0(%rsp)"), "{name}: {asm}");
+            assert!(asm.contains("movl $304, 4(%rsp)"), "{name}: {asm}");
+            assert!(asm.contains("8(%rsp)"), "{name}: {asm}");
+            assert!(asm.contains("movq $0, 16(%rsp)"), "{name}: {asm}");
+            assert!(asm.contains("leaq 0(%rsp), %rsi"), "{name}: {asm}");
+            assert!(asm.contains("call vprintf"), "{name}: {asm}");
+            assert!(asm.contains("addq $32, %rsp"), "{name}: {asm}");
+        }
+        if name == "x86-linux-vfprintf-shadow-va-list-bridge" {
+            assert!(asm.contains("movl $48, 0(%rsp)"), "{name}: {asm}");
+            assert!(asm.contains("movl $304, 4(%rsp)"), "{name}: {asm}");
+            assert!(asm.contains("leaq 0(%rsp), %rdx"), "{name}: {asm}");
+            assert!(asm.contains("call vfprintf"), "{name}: {asm}");
+        }
+        if name == "x86-linux-vprintf-chk-shadow-va-list-bridge" {
+            assert!(asm.contains("movl $48, 0(%rsp)"), "{name}: {asm}");
+            assert!(asm.contains("movl $304, 4(%rsp)"), "{name}: {asm}");
+            assert!(asm.contains("leaq 0(%rsp), %rdx"), "{name}: {asm}");
+            assert!(asm.contains("call __vprintf_chk"), "{name}: {asm}");
+        }
+        if name == "x86-linux-complex-long-double-raw-copies" {
+            assert!(!asm.contains("movt"), "{name}: {asm}");
+            assert!(asm.contains("movups"), "{name}: {asm}");
+        }
+        if name == "x86-linux-local-vprintf-chk-keeps-shadow-va-list" {
+            assert!(asm.contains("call __vprintf_chk"), "{name}: {asm}");
+            assert!(asm.contains("call vprintf"), "{name}: {asm}");
+            assert_eq!(
+                asm.matches("movl $48, 0(%rsp)").count(),
+                1,
+                "{name}: local __vprintf_chk call should not be bridged: {asm}"
+            );
+        }
+        if name == "x86-linux-aligned-struct-shadow-va-arg" {
+            assert!(asm.contains("subq $32, %rsp"), "{name}: {asm}");
+            assert!(asm.contains("leaq 16(%rsp), %rdi"), "{name}: {asm}");
+            assert!(asm.contains("rep movsb"), "{name}: {asm}");
         }
         let mut labels = std::collections::HashSet::new();
         for line in asm.lines() {

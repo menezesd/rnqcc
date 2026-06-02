@@ -13,8 +13,6 @@ execute/20010605-2.c | exit status -6
 execute/20030914-2.c | exit status -6
 execute/20041124-1.c | exit status -6
 execute/20050215-1.c | exit status -6
-execute/920302-1.c | exit status -11
-execute/920501-3.c | exit status -11
 execute/960215-1.c | exit status -6
 execute/990525-2.c | exit status -11
 execute/align-2.c | exit status -6

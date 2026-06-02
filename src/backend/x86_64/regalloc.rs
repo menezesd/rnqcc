@@ -124,6 +124,7 @@ fn build_asm_cfg(instrs: &[AsmInstr]) -> Vec<AsmBlock> {
             AsmInstr::Jmp(_)
             | AsmInstr::NonlocalJmp(_)
             | AsmInstr::JmpCC(_, _)
+            | AsmInstr::JmpIndirect(_)
             | AsmInstr::Ret
             | AsmInstr::Unreachable
                 if i + 1 < instrs.len() && !leaders.contains(&(i + 1)) =>
@@ -187,6 +188,12 @@ fn build_asm_cfg(instrs: &[AsmInstr]) -> Vec<AsmBlock> {
                 if bi + 1 < num {
                     blocks[bi].succs.push(bi + 1);
                     blocks[bi + 1].preds.push(bi);
+                }
+            }
+            AsmInstr::JmpIndirect(_) => {
+                for ti in label_to_block.values().copied() {
+                    blocks[bi].succs.push(ti);
+                    blocks[ti].preds.push(bi);
                 }
             }
             _ => {
@@ -1323,5 +1330,72 @@ fn visit_operands<F: FnMut(&AsmOperand)>(instr: &AsmInstr, mut f: F) {
             f(dst);
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indirect_jump_terminates_block_and_targets_all_labels() {
+        let instrs = vec![
+            AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Pseudo("base".to_string()),
+                AsmOperand::Pseudo("target".to_string()),
+            ),
+            AsmInstr::JmpIndirect(AsmOperand::Pseudo("target".to_string())),
+            AsmInstr::Mov(
+                AsmType::Longword,
+                AsmOperand::Imm(0),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            AsmInstr::Label("a".to_string()),
+            AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Pseudo("base".to_string()),
+                AsmOperand::Pseudo("target_a".to_string()),
+            ),
+            AsmInstr::JmpIndirect(AsmOperand::Pseudo("target_a".to_string())),
+            AsmInstr::Label("b".to_string()),
+            AsmInstr::Ret,
+        ];
+
+        let blocks = build_asm_cfg(&instrs);
+        assert_eq!(blocks[0].end, 2);
+
+        let label_blocks: HashSet<usize> = blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, block)| match &instrs[block.start] {
+                AsmInstr::Label(label) if label == "a" || label == "b" => Some(idx),
+                _ => None,
+            })
+            .collect();
+        let succs: HashSet<usize> = blocks[0].succs.iter().copied().collect();
+        assert!(label_blocks.is_subset(&succs));
+    }
+
+    #[test]
+    fn indirect_jump_keeps_label_base_live_at_computed_targets() {
+        let instrs = vec![
+            AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Pseudo("base".to_string()),
+                AsmOperand::Pseudo("target".to_string()),
+            ),
+            AsmInstr::JmpIndirect(AsmOperand::Pseudo("target".to_string())),
+            AsmInstr::Label("again".to_string()),
+            AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Pseudo("base".to_string()),
+                AsmOperand::Pseudo("next".to_string()),
+            ),
+            AsmInstr::JmpIndirect(AsmOperand::Pseudo("next".to_string())),
+        ];
+        let live_after = liveness_analysis(&instrs, &HashSet::new());
+
+        assert!(live_after[1].contains(&RegId::Pseudo("base".to_string())));
     }
 }

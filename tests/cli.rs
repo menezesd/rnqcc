@@ -17928,6 +17928,44 @@ int main(void) {
 "#,
         ),
         (
+            "x86-linux-label-address-table-walk",
+            r#"
+short optab[5];
+char buf[10];
+
+void execute(short *ip) {
+    void *base = &&x;
+    char *bp = buf;
+    static void *tab[] = {&&x, &&y, &&z};
+    if (ip == 0) {
+        for (int i = 0; i < 3; ++i)
+            optab[i] = (short)(tab[i] - base);
+        return;
+    }
+x:
+    *bp++ = 'x';
+    goto *(base + *ip++);
+y:
+    *bp++ = 'y';
+    goto *(base + *ip++);
+z:
+    *bp++ = 'z';
+    *bp = 0;
+}
+
+int main(void) {
+    short p[5];
+    execute((short *)0);
+    p[0] = optab[1];
+    p[1] = optab[0];
+    p[2] = optab[1];
+    p[3] = optab[2];
+    execute(p);
+    return __builtin_strcmp(buf, "xyxyz") == 0 ? 42 : 1;
+}
+"#,
+        ),
+        (
             "x86-linux-struct-return-copy-abi",
             r#"
 struct box { int v[4]; };
@@ -18162,6 +18200,21 @@ int main(void) {
         }
         if name == "x86-linux-label-address-arithmetic" {
             assert!(asm.contains("jmp *"), "{name}: {asm}");
+            assert!(
+                !asm.contains("cmpl $4, %eax\n\tmovl $0, %eax")
+                    && !asm.contains("cmpl $4, %ecx\n\tmovl $0, %ecx")
+                    && !asm.contains("cmpl $4, %edi\n\tmovl $0, %edi"),
+                "{name}: comparison result clobbered the computed-goto loop counter: {asm}"
+            );
+        }
+        if name == "x86-linux-label-address-table-walk" {
+            assert!(asm.contains("jmp *"), "{name}: {asm}");
+            assert!(
+                !asm.contains("addq %rax, %rdi\n\tjmp *%rdi")
+                    && !asm.contains("addq %rdx, %rdi\n\tjmp *%rdi")
+                    && !asm.contains("addq %rcx, %rdi\n\tjmp *%rdi"),
+                "{name}: indirect jump target reused and mutated the live label base: {asm}"
+            );
         }
         if name == "x86-linux-struct-return-copy-abi" {
             assert!(asm.contains("call make"), "{name}: {asm}");

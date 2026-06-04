@@ -4645,6 +4645,8 @@ fn internal_has_builtin(name: &str) -> bool {
             | "__builtin_extract_return_addr"
             | "__builtin_stack_save"
             | "__builtin_stack_restore"
+            | "__builtin_sqrtl"
+            | "__builtin_atan2l"
             | "__builtin___memcpy_chk"
             | "__builtin___memmove_chk"
             | "__builtin___memset_chk"

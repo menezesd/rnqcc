@@ -1198,6 +1198,26 @@ impl TackyGen {
                 vec![CType::Float, CType::Float],
                 None,
             )),
+            "__builtin_sqrtl" => {
+                let long_double = self.long_double_ctype();
+                Some((
+                    "sqrtl",
+                    long_double,
+                    FullType::Scalar(long_double),
+                    vec![long_double],
+                    None,
+                ))
+            }
+            "__builtin_atan2l" => {
+                let long_double = self.long_double_ctype();
+                Some((
+                    "atan2l",
+                    long_double,
+                    FullType::Scalar(long_double),
+                    vec![long_double, long_double],
+                    None,
+                ))
+            }
             "__builtin_conjf" => Some((
                 "conjf",
                 CType::Float,

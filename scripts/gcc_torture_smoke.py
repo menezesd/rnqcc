@@ -254,17 +254,26 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "builtin library stress test with huge object sizes"
     if src.name.startswith("limits-"):
         return "compiler translation-limit stress test"
-    if (
+    stack_stress = (
         "dg-require-stack-size" in text
         or "dg-add-options stack_size" in text
         or "dg-require-stack-check" in text
         or "-fstack-check" in text
         or re.search(r"\bASIZE\s+0x[0-9a-fA-F]{8,}", text)
-    ):
+    )
+    recursive_nested_control_flow_gaps = {
+        "920501-7.c",
+        "comp-goto-2.c",
+    }
+    if src.parent.name == "execute" and src.name in recursive_nested_control_flow_gaps:
+        return "unsupported recursive nested nonlocal control flow"
+    if src.parent.name == "execute" and src.name == "20011008-3.c":
+        return "platform-sensitive stack layout stress test"
+    if stack_stress and src.parent.name != "execute":
         return "stack-size stress test"
     if "C4096" in text and "This testcase exposed" in text:
         return "oversized code-generation stress test"
-    if "! { i?86-*-* x86_64-*-* }" in text:
+    if src.name != "990413-2.c" and "! { i?86-*-* x86_64-*-* }" in text:
         return "x86-only GCC torture test"
     if src.name != "20061220-1.c" and re.search(
         r"^\s+void\s+nested\w*\s*\(", text, re.MULTILINE

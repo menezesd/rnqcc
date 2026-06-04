@@ -12160,6 +12160,11 @@ fn internal_cpp_handles_has_builtin_predicates() {
          int has_search_builtins = 1;\n\
          #else\n\
          int has_search_builtins = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin_sqrtl) && __has_builtin(__builtin_atan2l)\n\
+         int has_x87_math_builtins = 1;\n\
+         #else\n\
+         int has_x87_math_builtins = 0;\n\
          #endif\n",
     )
     .expect("failed to write source");
@@ -12188,6 +12193,10 @@ fn internal_cpp_handles_has_builtin_predicates() {
         "{stdout}"
     );
     assert!(stdout.contains("int has_search_builtins = 1;"), "{stdout}");
+    assert!(
+        stdout.contains("int has_x87_math_builtins = 1;"),
+        "{stdout}"
+    );
 
     let _ = std::fs::remove_file(src);
 }
@@ -16063,6 +16072,56 @@ int main(void) {
         .arg("-o")
         .arg(&exe)
         .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn supports_x87_inline_asm_math_compatibility() {
+    let src = temp_file("inline-asm-x87-math-compat", "c");
+    let exe = temp_file("inline-asm-x87-math-compat", "bin");
+    std::fs::write(
+        &src,
+        r#"
+void abort(void);
+
+static long double atan_wrapper(long double y, long double x) {
+    register long double value;
+    __asm __volatile__ ("fpatan\n\t" : "=t" (value) : "0" (x), "u" (y) : "st(1)");
+    return value;
+}
+
+static long double sqrt_wrapper(long double x) {
+    register long double value;
+    __asm __volatile__ ("fsqrt" : "=t" (value) : "0" (x));
+    return value;
+}
+
+int main(void) {
+    long double x = sqrt_wrapper(1.0L);
+    long double y = atan_wrapper(0.0L, x);
+    if (x != 1.0L || y != 0.0L)
+        abort();
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .arg("-lm")
         .output()
         .expect("failed to run rnqcc");
 

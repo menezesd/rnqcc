@@ -940,6 +940,12 @@ impl Lexer {
                     }
                     let asm_end = self.pos.saturating_sub(1);
                     let text: String = self.chars[asm_start..asm_end].iter().collect();
+                    if let Some(tokens) = Self::asm_x87_math_tokens(&text) {
+                        let mut tokens = VecDeque::from(tokens);
+                        let first = tokens.pop_front().unwrap_or(Token::Skip);
+                        self.pending_tokens.extend(tokens);
+                        return Ok(first);
+                    }
                     if let Some(tokens) = Self::asm_tied_zero_assignment_tokens(&text) {
                         let mut tokens = VecDeque::from(tokens);
                         let first = tokens.pop_front().unwrap_or(Token::Skip);
@@ -1038,6 +1044,47 @@ impl Lexer {
             _ => Token::Identifier(word),
         };
         Ok(token)
+    }
+
+    fn asm_x87_math_tokens(text: &str) -> Option<Vec<Token>> {
+        let mut parts = text.split(':');
+        let template = parts.next()?.trim();
+        let outputs = parts.next()?.trim();
+        let inputs = parts.next()?.trim();
+        let output_name = Self::first_parenthesized_identifier(outputs)?;
+        let mut operands = Self::parenthesized_identifier_texts(inputs);
+        let (builtin, args) = match template {
+            "\"fsqrt\"" => {
+                let input = operands.next()?.to_string();
+                if operands.next().is_some() {
+                    return None;
+                }
+                ("__builtin_sqrtl", vec![input])
+            }
+            "\"fpatan\\n\\t\"" | "\"fpatan\"" => {
+                let x = operands.next()?.to_string();
+                let y = operands.next()?.to_string();
+                if operands.next().is_some() {
+                    return None;
+                }
+                ("__builtin_atan2l", vec![y, x])
+            }
+            _ => return None,
+        };
+        let mut tokens = vec![
+            Token::Identifier(output_name),
+            Token::Assign,
+            Token::Identifier(builtin.to_string()),
+            Token::OpenParen,
+        ];
+        for (index, arg) in args.into_iter().enumerate() {
+            if index > 0 {
+                tokens.push(Token::Comma);
+            }
+            tokens.push(Self::simple_asm_value_token(arg.trim())?);
+        }
+        tokens.push(Token::CloseParen);
+        Some(tokens)
     }
 
     fn asm_tied_zero_assignment_tokens(text: &str) -> Option<Vec<Token>> {
@@ -1151,6 +1198,22 @@ impl Lexer {
             }
         }
         None
+    }
+
+    fn parenthesized_identifier_texts(text: &str) -> impl Iterator<Item = &str> {
+        text.match_indices('(').filter_map(|(start, _)| {
+            let inner_start = start + 1;
+            let end = text[inner_start..].find(')')? + inner_start;
+            let inner = text[inner_start..end].trim();
+            let mut chars = inner.chars();
+            let first = chars.next()?;
+            if !(first.is_ascii_alphabetic() || first == '_') {
+                return None;
+            }
+            chars
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                .then_some(inner)
+        })
     }
 
     /// Try to match a second character; if it matches, consume it and return `yes`,

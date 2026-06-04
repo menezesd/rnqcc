@@ -21666,6 +21666,56 @@ int main(float f, double d) {
     let _ = std::fs::remove_file(src);
 }
 
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+#[test]
+fn debug_x86_64_linux_pr39228_branch_code() {
+    let src = temp_file("debug-pr39228-branch-code", "c");
+    let asm = temp_file("debug-pr39228-branch-code", "s");
+    std::fs::write(
+        &src,
+        r#"
+static inline int __attribute__((always_inline)) testf(float b) {
+    float c = 1.01f * b;
+    return __builtin_isinff(c);
+}
+
+static inline int __attribute__((always_inline)) test(double b) {
+    double c = 1.01 * b;
+    return __builtin_isinf(c);
+}
+
+static inline int __attribute__((always_inline)) testl(long double b) {
+    long double c = 1.01L * b;
+    return __builtin_isinfl(c);
+}
+
+int main(void) {
+    if (testf(__FLT_MAX__) < 1) return 1;
+    double d = 1.01 * __DBL_MAX__;
+    return __builtin_isinf(d) ? 42 : 2;
+    if (test(__DBL_MAX__) < 1) return 2;
+    if (testl(__LDBL_MAX__) < 1) return 3;
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&asm)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let assembly = std::fs::read_to_string(&asm).expect("failed to read assembly");
+    assert!(assembly.contains("__force_failure__"), "{assembly}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(asm);
+}
+
 #[test]
 fn builtin_isinfl_keeps_long_double_precision() {
     let src = temp_file("builtin-isinfl-long-double", "c");

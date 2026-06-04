@@ -206,6 +206,9 @@ def check_run(cmd: list[str], cwd: Path, timeout: float) -> None:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    if args.cases <= 0:
+        print("--cases must be positive", file=sys.stderr)
+        return 1
     if args.timeout <= 0:
         print("--timeout must be positive", file=sys.stderr)
         return 1

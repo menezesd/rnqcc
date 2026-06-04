@@ -283,6 +283,28 @@ fn fuzz_smoke_reports_timeouts_cleanly() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn fuzz_smoke_rejects_nonpositive_case_count() -> Result<(), String> {
+    let output = match Command::new("python3")
+        .arg("scripts/fuzz_smoke.py")
+        .arg("--seed")
+        .arg("17")
+        .arg("--cases")
+        .arg("0")
+        .arg("--emit-only")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run fuzz smoke script: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("--cases must be positive"), "{stderr}");
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn llvm_c_regression_smoke_reports_timeouts_cleanly() -> Result<(), String> {

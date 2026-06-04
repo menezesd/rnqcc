@@ -305,6 +305,45 @@ fn fuzz_smoke_rejects_nonpositive_case_count() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn smoke_scripts_reject_nonnumeric_timeout_env() -> Result<(), String> {
+    let cases: [(&str, &str, &[&str]); 3] = [
+        (
+            "REAL_PROJECT_TIMEOUT",
+            "scripts/real_project_corpus.py",
+            &[] as &[&str],
+        ),
+        ("LAYOUT_ORACLE_TIMEOUT", "scripts/layout_oracle.py", &[]),
+        (
+            "FUZZ_SMOKE_TIMEOUT",
+            "scripts/fuzz_smoke.py",
+            &["--seed", "17", "--emit-only"],
+        ),
+    ];
+
+    for (env_name, script, args) in cases {
+        let output = match Command::new("python3")
+            .arg(script)
+            .args(args)
+            .env(env_name, "not-a-number")
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(format!("failed to run {script}: {err}")),
+        };
+
+        assert!(!output.status.success(), "{script} unexpectedly succeeded");
+        let stderr = stderr(output);
+        assert!(
+            stderr.contains(&format!("{env_name} must be a number")),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("Traceback"), "{stderr}");
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn llvm_c_regression_smoke_reports_timeouts_cleanly() -> Result<(), String> {

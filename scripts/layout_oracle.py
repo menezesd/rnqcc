@@ -13,7 +13,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RNQCC = Path(os.environ.get("RNQCC", ROOT / "target" / "debug" / "rnqcc"))
 CC = os.environ.get("CC", "cc")
-DEFAULT_TIMEOUT = float(os.environ.get("LAYOUT_ORACLE_TIMEOUT", "30.0"))
+
+
+def env_timeout(name: str, default: str) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        raise SystemExit(f"{name} must be a number")
+
+
+DEFAULT_TIMEOUT = env_timeout("LAYOUT_ORACLE_TIMEOUT", "30.0")
 
 
 CASES: list[tuple[str, str]] = [

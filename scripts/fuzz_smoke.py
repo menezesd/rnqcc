@@ -131,10 +131,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--timeout",
         type=float,
-        default=float(os.environ.get("FUZZ_SMOKE_TIMEOUT", "10.0")),
+        default=env_timeout("FUZZ_SMOKE_TIMEOUT", "10.0"),
         help="seconds to allow each rnqcc invocation, or set FUZZ_SMOKE_TIMEOUT",
     )
     return parser.parse_args(argv)
+
+
+def env_timeout(name: str, default: str) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        raise SystemExit(f"{name} must be a number")
 
 
 def timeout_text(value: str | bytes | None) -> str:

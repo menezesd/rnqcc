@@ -26,7 +26,16 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "tests" / "fixtures" / "real_project" / "corpus.txt"
 RNQCC = Path(os.environ.get("RNQCC", ROOT / "target" / "debug" / "rnqcc"))
 ARTIFACT_DIR = os.environ.get("CI_ARTIFACT_DIR")
-DEFAULT_TIMEOUT = float(os.environ.get("REAL_PROJECT_TIMEOUT", "60.0"))
+
+
+def env_timeout(name: str, default: str) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        raise SystemExit(f"{name} must be a number")
+
+
+DEFAULT_TIMEOUT = env_timeout("REAL_PROJECT_TIMEOUT", "60.0")
 
 
 class Entry:

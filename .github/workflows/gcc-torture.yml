@@ -63,6 +63,7 @@ jobs:
             --allow-stale-expected-failures \
             --failure-log "$CI_ARTIFACT_DIR/gcc-torture-failures.txt" \
             --skip-log "$CI_ARTIFACT_DIR/gcc-torture-skips.txt" \
+            --print-skips \
             --artifact-dir "$CI_ARTIFACT_DIR"
 
       - name: Check GCC torture expected failures

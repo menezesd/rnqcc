@@ -268,6 +268,18 @@ fn emit_i128_return(
     global_vars: &HashSet<String>,
 ) -> Result<(), String> {
     match val {
+        TackyVal::Constant(value) => {
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Imm(*value),
+                AsmOperand::Reg(Reg::AX),
+            ));
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Imm(if *value < 0 { -1 } else { 0 }),
+                AsmOperand::Reg(Reg::DI),
+            ));
+        }
         TackyVal::Int128Constant(value) => {
             let (low, high) = i128_parts_signed(*value);
             instructions.push(AsmInstr::Mov(
@@ -1616,7 +1628,10 @@ fn convert_function(
                     emit_epilogue(&mut instructions, frame_size, link_register_offset);
                     continue;
                 }
-                let ty = asm_type_for_val(val, types)?;
+                let ty = match val {
+                    TackyVal::Var(_) => asm_type_for_val(val, types)?,
+                    _ => function.return_type.into(),
+                };
                 if ty == AsmType::Octword {
                     emit_i128_return(&mut instructions, val, &stack_slots, global_vars)?;
                     emit_epilogue(&mut instructions, frame_size, link_register_offset);

@@ -8638,6 +8638,78 @@ int main(void) {
 }
 
 #[test]
+fn optimizer_converges_when_folding_nan_result() {
+    let src = temp_file("optimization-fold-nan", "c");
+    let exe = temp_file("optimization-fold-nan", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    double value = 0.0 / 0.0;
+    return value != value ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--optimize")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn optimized_long_return_constants_keep_return_width() {
+    let src = temp_file("optimized-long-return-width", "c");
+    let exe = temp_file("optimized-long-return-width", "bin");
+    std::fs::write(
+        &src,
+        r#"
+long cast_to_long(void) {
+    return (long)18446744073709551615UL;
+}
+
+long implicit_to_long(void) {
+    return 18446744073709551615UL;
+}
+
+int main(void) {
+    long one = 1;
+    if (cast_to_long() != -one) return 1;
+    if (implicit_to_long() != -one) return 2;
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--optimize")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn compiles_alignof_type_expression() {
     let src = temp_file("alignof-src", "i");
     let exe = temp_file("alignof-exe", "bin");
@@ -19955,6 +20027,35 @@ double b(void) { return 3.5 + 3.5; }
         .filter(|line| line.starts_with("__double_const_"))
         .count();
     assert_eq!(labels, 1, "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn x86_64_linux_float_returns_do_not_use_sse_immediates() {
+    let src = temp_file("x86-float-return-immediates", "c");
+    let out = temp_file("x86-float-return-immediates", "s");
+    std::fs::write(
+        &src,
+        r#"
+float addf(float a, float b) { return a + b; }
+double absish(double x) { return x >= 0.0 ? x : -x; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(!asm.contains("\tmovss $"), "{asm}");
+    assert!(!asm.contains("\tmovsd $"), "{asm}");
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);

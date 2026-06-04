@@ -3,6 +3,7 @@ TackyProgram {
         Function(
             TackyFunction {
                 name: "main",
+                return_type: Int,
                 params: [],
                 global: true,
                 body: [

@@ -1585,13 +1585,26 @@ pub struct Program {
 // TACKY IR (Three-Address Code)
 // ============================================================
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum TackyVal {
     Constant(i64),
     Int128Constant(i128),
     UInt128Constant(u128),
     DoubleConstant(f64),
     Var(String),
+}
+
+impl PartialEq for TackyVal {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Constant(a), Self::Constant(b)) => a == b,
+            (Self::Int128Constant(a), Self::Int128Constant(b)) => a == b,
+            (Self::UInt128Constant(a), Self::UInt128Constant(b)) => a == b,
+            (Self::DoubleConstant(a), Self::DoubleConstant(b)) => a.to_bits() == b.to_bits(),
+            (Self::Var(a), Self::Var(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1803,6 +1816,7 @@ pub enum TackyInstr {
 #[derive(Debug)]
 pub struct TackyFunction {
     pub name: String,
+    pub return_type: CType,
     pub params: Vec<String>,
     pub global: bool,
     pub body: Vec<TackyInstr>,

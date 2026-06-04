@@ -13064,6 +13064,7 @@ impl TackyGen {
 
         Ok(Some(TackyFunction {
             name: func.name,
+            return_type: func.return_type,
             params: tacky_params,
             global: true, // overridden by linkage map in generate()
             body: std::mem::take(&mut self.instructions),

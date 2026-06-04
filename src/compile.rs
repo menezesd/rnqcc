@@ -566,6 +566,7 @@ mod tests {
         let program = TackyProgram {
             top_level: vec![TackyTopLevel::Function(TackyFunction {
                 name: "main".to_string(),
+                return_type: CType::Int,
                 params: Vec::new(),
                 global: true,
                 body: vec![TackyInstr::Jump("missing".to_string())],

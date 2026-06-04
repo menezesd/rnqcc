@@ -136,6 +136,10 @@ fn double_const_label(static_doubles: &[(String, f64)]) -> String {
     format!("__double_const_{}", static_doubles.len())
 }
 
+fn float_const_label(static_floats: &[(String, f32)]) -> String {
+    format!("__float_const_{}", static_floats.len())
+}
+
 fn intern_double_const(static_doubles: &mut Vec<(String, f64)>, value: f64) -> String {
     let bits = value.to_bits();
     if let Some((label, _)) = static_doubles
@@ -146,6 +150,19 @@ fn intern_double_const(static_doubles: &mut Vec<(String, f64)>, value: f64) -> S
     }
     let label = double_const_label(static_doubles);
     static_doubles.push((label.clone(), value));
+    label
+}
+
+fn intern_float_const(static_floats: &mut Vec<(String, f32)>, value: f32) -> String {
+    let bits = value.to_bits();
+    if let Some((label, _)) = static_floats
+        .iter()
+        .find(|(_, existing)| existing.to_bits() == bits)
+    {
+        return label.clone();
+    }
+    let label = float_const_label(static_floats);
+    static_floats.push((label.clone(), value));
     label
 }
 
@@ -160,6 +177,18 @@ fn convert_double_val(val: &TackyVal, static_doubles: &mut Vec<(String, f64)>) -
         TackyVal::Int128Constant(c) => AsmOperand::Imm(*c as i64),
         TackyVal::UInt128Constant(c) => AsmOperand::Imm(*c as i64),
         TackyVal::Var(name) => AsmOperand::Pseudo(name.clone()),
+    }
+}
+
+fn convert_float_return_val(val: &TackyVal, static_floats: &mut Vec<(String, f32)>) -> AsmOperand {
+    match val {
+        TackyVal::DoubleConstant(d) => {
+            AsmOperand::Data(intern_float_const(static_floats, *d as f32))
+        }
+        TackyVal::Constant(c) => AsmOperand::Data(intern_float_const(static_floats, *c as f32)),
+        TackyVal::Var(name) => AsmOperand::Pseudo(name.clone()),
+        TackyVal::Int128Constant(c) => AsmOperand::Imm(*c as i64),
+        TackyVal::UInt128Constant(c) => AsmOperand::Imm(*c as i64),
     }
 }
 
@@ -581,10 +610,12 @@ impl StackArgLayout {
 
 struct InstructionContext<'a> {
     function_name: &'a str,
+    return_type: CType,
     target: &'a Target,
     types: &'a HashMap<String, CType>,
     out: &'a mut Vec<AsmInstr>,
     static_doubles: &'a mut Vec<(String, f64)>,
+    static_floats: &'a mut Vec<(String, f32)>,
     label_counter: &'a mut usize,
     var_struct_tags: &'a HashMap<String, String>,
     struct_defs: &'a HashMap<String, StructDef>,
@@ -598,6 +629,7 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
     let types = ctx.types;
     let out = &mut *ctx.out;
     let static_doubles = &mut *ctx.static_doubles;
+    let static_floats = &mut *ctx.static_floats;
     let label_counter = &mut *ctx.label_counter;
     let var_struct_tags = ctx.var_struct_tags;
     let struct_defs = ctx.struct_defs;
@@ -778,7 +810,10 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
             }
         }
         TackyInstr::Return(val) => {
-            let t = val_type(val, types);
+            let t = match val {
+                TackyVal::Var(_) => val_type(val, types),
+                _ => ctx.return_type.into(),
+            };
             // Check if returning a struct
             if let TackyVal::Var(ref name) = val {
                 if types.get(name).copied() == Some(CType::Struct) {
@@ -817,12 +852,23 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
             if t == AsmType::LongDouble {
                 x87_load_val(out, val, types, static_doubles);
             } else if matches!(t, AsmType::Float | AsmType::Double) {
-                let src = convert_double_val(val, static_doubles);
-                out.push(AsmInstr::Mov(
-                    AsmType::Double,
-                    src,
-                    AsmOperand::Xmm(XmmReg::XMM0),
-                ));
+                if matches!(val, TackyVal::Constant(0)) {
+                    out.push(AsmInstr::Binary(
+                        t,
+                        AsmBinaryOp::Xor,
+                        AsmOperand::Xmm(XmmReg::XMM0),
+                        AsmOperand::Xmm(XmmReg::XMM0),
+                    ));
+                } else {
+                    let src = match (t, val) {
+                        (AsmType::Float, _) => convert_float_return_val(val, static_floats),
+                        (AsmType::Double, TackyVal::Constant(c)) => {
+                            convert_double_val(&TackyVal::DoubleConstant(*c as f64), static_doubles)
+                        }
+                        _ => convert_double_val(val, static_doubles),
+                    };
+                    out.push(AsmInstr::Mov(t, src, AsmOperand::Xmm(XmmReg::XMM0)));
+                }
             } else if t == AsmType::Octword {
                 let (low, high) = i128_part_operands(val)?;
                 out.push(AsmInstr::Mov(
@@ -2962,6 +3008,7 @@ fn convert_function(
     func: &TackyFunction,
     ctx: &X86FunctionContext<'_>,
     static_doubles: &mut Vec<(String, f64)>,
+    static_floats: &mut Vec<(String, f32)>,
 ) -> Result<AsmFunction, String> {
     let mut instructions = Vec::new();
     static I128_LABEL_BASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -3171,10 +3218,12 @@ fn convert_function(
         let va_start_stack_offset = 16 + stack_arg_offset as i32;
         let mut instruction_ctx = InstructionContext {
             function_name: &func.name,
+            return_type: func.return_type,
             target: ctx.target,
             types: ctx.types,
             out: &mut instructions,
             static_doubles,
+            static_floats,
             label_counter: &mut label_counter,
             var_struct_tags: ctx.var_struct_tags,
             struct_defs: ctx.struct_defs,
@@ -3962,19 +4011,25 @@ fn compute_aliased(
 }
 
 fn compute_ret_regs(
-    body: &[TackyInstr],
+    func: &TackyFunction,
     types: &HashMap<String, CType>,
     var_struct_tags: &HashMap<String, String>,
     struct_defs: &HashMap<String, StructDef>,
 ) -> Vec<super::regalloc::RegId> {
     use super::regalloc::RegId;
-    for instr in body {
+    for instr in &func.body {
         match instr {
             TackyInstr::Return(TackyVal::DoubleConstant(_)) => {
                 return vec![RegId::Xmm(XmmReg::XMM0)];
             }
             TackyInstr::Return(TackyVal::Constant(_)) => {
-                return vec![RegId::Gp(Reg::AX)];
+                return match func.return_type {
+                    CType::Float | CType::Double | CType::LongDouble => {
+                        vec![RegId::Xmm(XmmReg::XMM0)]
+                    }
+                    CType::Void => vec![],
+                    _ => vec![RegId::Gp(Reg::AX)],
+                };
             }
             TackyInstr::Return(TackyVal::Var(name)) => {
                 let ct = types.get(name).copied().unwrap_or(CType::Int);
@@ -4038,6 +4093,7 @@ pub fn gen(
         .collect();
     let mut top_level = Vec::new();
     let mut static_doubles = Vec::new();
+    let mut static_floats = Vec::new();
     let function_ctx = X86FunctionContext {
         target,
         types,
@@ -4049,18 +4105,15 @@ pub fn gen(
     for tl in &program.top_level {
         match tl {
             TackyTopLevel::Function(tf) => {
-                let mut asm_func = convert_function(tf, &function_ctx, &mut static_doubles)?;
+                let mut asm_func =
+                    convert_function(tf, &function_ctx, &mut static_doubles, &mut static_floats)?;
 
                 // Compute aliased variables (address-taken + static)
                 let aliased = compute_aliased(&tf.body, static_vars);
 
                 // Compute return value registers for EXIT node liveness
-                let ret_regs = compute_ret_regs(
-                    &tf.body,
-                    types,
-                    &program.var_struct_tags,
-                    &program.struct_defs,
-                );
+                let ret_regs =
+                    compute_ret_regs(tf, types, &program.var_struct_tags, &program.struct_defs);
 
                 // Register allocation
                 let allocation = super::regalloc::allocate_registers(
@@ -4115,6 +4168,16 @@ pub fn gen(
     }
 
     // Emit double constants as static data
+    for (label, value) in static_floats {
+        top_level.push(AsmTopLevel::StaticVar(AsmStaticVar {
+            name: label,
+            global: false,
+            thread_local: false,
+            alignment: 4,
+            init_values: vec![StaticInit::FloatInit(value)],
+        }));
+    }
+
     for (label, value) in static_doubles {
         top_level.push(AsmTopLevel::StaticVar(AsmStaticVar {
             name: label,

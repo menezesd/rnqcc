@@ -22907,6 +22907,50 @@ int main(void) {
 }
 
 #[test]
+fn nested_function_forwards_grandparent_capture_to_inner_nested_function() {
+    let src = temp_file("nested-function-grandparent-capture", "c");
+    let exe = temp_file("nested-function-grandparent-capture", "bin");
+    std::fs::write(
+        &src,
+        r#"
+void abort(void);
+
+int main(void) {
+    unsigned int x = 0;
+
+    void nested(void) {
+        void nested2(void) {
+            x += 4;
+        }
+        nested2();
+        nested2();
+    }
+
+    nested();
+    if (x != 8)
+        abort();
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn fpermissive_allows_gcc_invalid_pointer_compatibility_cases() {
     let src = temp_file("fpermissive-pointer-compat", "c");
     let out = temp_file("fpermissive-pointer-compat", "s");

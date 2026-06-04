@@ -175,6 +175,7 @@ struct TackyGen {
     instructions: Vec<TackyInstr>,
     current_function: String,
     current_function_params: Vec<String>,
+    current_function_locals: HashSet<String>,
     label_address_function: Option<String>,
     local_label_stack: Vec<HashSet<String>>,
     current_label_bodies: HashMap<String, Statement>,
@@ -194,6 +195,7 @@ struct TackyGen {
     /// Names that are functions, even when their prototype is not visible at
     /// the current source position.
     function_symbols: HashSet<String>,
+    file_scope_symbols: HashSet<String>,
     /// Function return full types
     func_full_types: HashMap<String, FullType>,
     /// Function parameter full types.
@@ -234,6 +236,7 @@ impl TackyGen {
             instructions: Vec::new(),
             current_function: String::new(),
             current_function_params: Vec::new(),
+            current_function_locals: HashSet::new(),
             label_address_function: None,
             local_label_stack: Vec::new(),
             current_label_bodies: HashMap::new(),
@@ -247,6 +250,7 @@ impl TackyGen {
             full_types: HashMap::new(),
             func_types: HashMap::new(),
             function_symbols: HashSet::new(),
+            file_scope_symbols: HashSet::new(),
             func_full_types: HashMap::new(),
             func_param_full_types: HashMap::new(),
             old_style_functions: HashSet::new(),
@@ -11935,6 +11939,7 @@ impl TackyGen {
             return;
         };
         for (capture, slot) in captures {
+            self.ensure_current_capture_slot(&capture);
             let src = self
                 .nested_capture_slots
                 .get(&self.current_function)
@@ -11961,6 +11966,43 @@ impl TackyGen {
                 dst: TackyVal::Var(slot),
             });
         }
+    }
+
+    fn ensure_current_capture_slot(&mut self, capture: &str) {
+        if self.current_function.is_empty() || self.current_function_locals.contains(capture) {
+            return;
+        }
+        if self.file_scope_symbols.contains(capture) {
+            return;
+        }
+        if self
+            .nested_capture_slots
+            .get(&self.current_function)
+            .is_some_and(|captures| captures.iter().any(|(name, _)| name == capture))
+        {
+            return;
+        }
+        let Some(captured_ft) = self.full_types.get(capture).cloned() else {
+            return;
+        };
+        let slot = format!(
+            "__rnqcc_chain_{}_{}",
+            self.current_function,
+            capture.replace('.', "_")
+        );
+        let slot_ft = FullType::Pointer(Box::new(captured_ft));
+        self.register_var(&slot, slot_ft);
+        self.static_vars.push(TackyStaticVar {
+            name: slot.clone(),
+            global: false,
+            thread_local: false,
+            alignment: 8,
+            init_values: vec![StaticInit::ZeroInit(8)],
+        });
+        self.nested_capture_slots
+            .entry(self.current_function.clone())
+            .or_default()
+            .push((capture.to_string(), slot));
     }
 
     fn emit_nested_function(&mut self, mut fd: FunctionDeclaration) -> TackyResult<()> {
@@ -12006,6 +12048,7 @@ impl TackyGen {
         let saved_instructions = std::mem::take(&mut self.instructions);
         let saved_current = std::mem::take(&mut self.current_function);
         let saved_current_params = std::mem::take(&mut self.current_function_params);
+        let saved_current_locals = std::mem::take(&mut self.current_function_locals);
         let saved_label_function = self.label_address_function.take();
         let saved_label_bodies = std::mem::take(&mut self.current_label_bodies);
         let saved_escaped_functions = std::mem::take(&mut self.current_escaped_functions);
@@ -12020,6 +12063,7 @@ impl TackyGen {
         self.instructions = saved_instructions;
         self.current_function = saved_current;
         self.current_function_params = saved_current_params;
+        self.current_function_locals = saved_current_locals;
         self.label_address_function = saved_label_function;
         self.current_label_bodies = saved_label_bodies;
         self.current_escaped_functions = saved_escaped_functions;
@@ -12901,6 +12945,8 @@ impl TackyGen {
             .iter()
             .map(|(name, _, _)| name.clone())
             .collect();
+        self.current_function_locals = self.current_function_params.iter().cloned().collect();
+        Self::collect_declared_names(&body, &mut self.current_function_locals);
         self.instructions.clear();
         let mut local_labels = HashSet::new();
         Self::collect_block_labels(&body, &mut local_labels);
@@ -13681,6 +13727,7 @@ pub fn generate_with_target_options(
                 }
             }
             Declaration::VarDecl(vd) => {
+                gen.file_scope_symbols.insert(vd.name.clone());
                 let decl_ft = vd
                     .decl_full_type
                     .clone()

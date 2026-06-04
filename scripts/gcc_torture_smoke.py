@@ -266,9 +266,9 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "oversized code-generation stress test"
     if "! { i?86-*-* x86_64-*-* }" in text:
         return "x86-only GCC torture test"
-    if src.parent.name == "execute" and src.name == "20061220-1.c":
-        return "unsupported inline asm input/output constraints in nested function"
-    if re.search(r"^\s+void\s+nested\w*\s*\(", text, re.MULTILINE):
+    if src.name != "20061220-1.c" and re.search(
+        r"^\s+void\s+nested\w*\s*\(", text, re.MULTILINE
+    ):
         return "unsupported GCC nested-function extension"
     if "gcc_tmpnam.h" in text and "dg-require-effective-target fileio" in text:
         return "requires tmpnam file I/O unavailable in this sandbox"

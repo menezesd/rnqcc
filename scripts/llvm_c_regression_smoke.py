@@ -15,6 +15,14 @@ DEFAULT_RNQCC = ROOT / "target" / "debug" / "rnqcc"
 DEFAULT_SUITE = Path("/tmp/rnqcc-llvm-test-suite/SingleSource/Regression/C")
 
 
+def timeout_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value
+
+
 def run(cmd: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
@@ -28,8 +36,8 @@ def run(cmd: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(
             cmd,
             124,
-            stdout=(exc.stdout or b"").decode() if isinstance(exc.stdout, bytes) else exc.stdout,
-            stderr=f"timed out after {timeout:.1f}s",
+            stdout=timeout_text(exc.stdout),
+            stderr=(timeout_text(exc.stderr) + f"\ntimed out after {timeout:.1f}s").lstrip(),
         )
 
 
@@ -48,7 +56,7 @@ def expected_output(src: Path) -> str | None:
 
 
 def observed_output(result: subprocess.CompletedProcess[str]) -> str:
-    return f"{result.stdout}exit {result.returncode}\n"
+    return f"{result.stdout or ''}exit {result.returncode}\n"
 
 
 def main() -> int:

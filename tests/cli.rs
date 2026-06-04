@@ -235,6 +235,61 @@ fn fuzz_smoke_script_compiles_seeded_case() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn llvm_c_regression_smoke_reports_timeouts_cleanly() -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let suite = TempPath::new("llvm-c-timeout-suite", "dir");
+    std::fs::create_dir_all(suite.path())
+        .map_err(|err| format!("failed to create fake LLVM suite: {err}"))?;
+    std::fs::write(
+        suite.path().join("slow.c"),
+        "int main(void) { return 0; }\n",
+    )
+    .map_err(|err| format!("failed to write fake LLVM source: {err}"))?;
+
+    let fake_rnqcc = TempPath::new("llvm-c-timeout-rnqcc", "sh");
+    std::fs::write(
+        fake_rnqcc.path(),
+        "#!/bin/sh\n\
+         printf 'partial stdout without newline'\n\
+         printf 'partial stderr without newline' >&2\n\
+         sleep 5\n",
+    )
+    .map_err(|err| format!("failed to write fake rnqcc: {err}"))?;
+    let mut perms = std::fs::metadata(fake_rnqcc.path())
+        .map_err(|err| format!("missing fake rnqcc: {err}"))?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(fake_rnqcc.path(), perms)
+        .map_err(|err| format!("failed to chmod fake rnqcc: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/llvm_c_regression_smoke.py")
+        .arg("--rnqcc")
+        .arg(fake_rnqcc.path())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--limit")
+        .arg("1")
+        .arg("--timeout")
+        .arg("0.1")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run LLVM C smoke script: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stdout = stdout(output);
+    assert!(stdout.contains("FAIL slow.c:"), "{stdout}");
+    assert!(stdout.contains("timed out after 0.1s"), "{stdout}");
+    assert!(!stdout.contains("None"), "{stdout}");
+    Ok(())
+}
+
 #[test]
 fn gcc_torture_xfail_reporter_lists_artifact_xfails_absent_from_fixture() -> Result<(), String> {
     let expected = TempPath::new("gcc-xfail-report-expected", "txt");

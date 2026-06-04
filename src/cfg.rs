@@ -188,6 +188,10 @@ pub enum CopySrc {
     DoubleConstant(u64), // store as bits for Eq/Hash
 }
 
+fn can_propagate_double_constant_to(ty: CType) -> bool {
+    matches!(ty, CType::Float | CType::Double)
+}
+
 pub fn copy_propagation(
     cfg: &mut Cfg,
     aliased_vars: &HashSet<String>,
@@ -282,10 +286,13 @@ fn collect_all_copies(cfg: &Cfg, types: &HashMap<String, CType>) -> HashSet<Copy
                     src: TackyVal::DoubleConstant(c),
                     dst: TackyVal::Var(d),
                 } => {
-                    copies.insert(CopyInstr {
-                        src: CopySrc::DoubleConstant(c.to_bits()),
-                        dst: d.clone(),
-                    });
+                    let dt = types.get(d).copied().unwrap_or(CType::Int);
+                    if can_propagate_double_constant_to(dt) {
+                        copies.insert(CopyInstr {
+                            src: CopySrc::DoubleConstant(c.to_bits()),
+                            dst: d.clone(),
+                        });
+                    }
                 }
                 TackyInstr::CopyStruct { src_name, dst_name } => {
                     copies.insert(CopyInstr {
@@ -400,11 +407,23 @@ fn transfer_copies(
                 src: TackyVal::DoubleConstant(c),
                 dst: TackyVal::Var(d),
             } => {
-                let copy = CopyInstr {
-                    src: CopySrc::DoubleConstant(c.to_bits()),
-                    dst: d.clone(),
-                };
-                if !current.contains(&copy) {
+                let dt = types.get(d).copied().unwrap_or(CType::Int);
+                if can_propagate_double_constant_to(dt) {
+                    let copy = CopyInstr {
+                        src: CopySrc::DoubleConstant(c.to_bits()),
+                        dst: d.clone(),
+                    };
+                    if !current.contains(&copy) {
+                        current.retain(|c_instr| {
+                            let src_match = match &c_instr.src {
+                                CopySrc::Var(v) => v == d,
+                                _ => false,
+                            };
+                            c_instr.dst != *d && !src_match
+                        });
+                        current.insert(copy);
+                    }
+                } else {
                     current.retain(|c_instr| {
                         let src_match = match &c_instr.src {
                             CopySrc::Var(v) => v == d,
@@ -412,7 +431,6 @@ fn transfer_copies(
                         };
                         c_instr.dst != *d && !src_match
                     });
-                    current.insert(copy);
                 }
             }
             TackyInstr::FunCall { dst, .. } => {
@@ -633,6 +651,11 @@ fn replace_operand_typed(
                         if const_size == var_size {
                             best = Some(copy);
                         }
+                    }
+                    (None, CopySrc::DoubleConstant(_))
+                        if can_propagate_double_constant_to(orig_type) =>
+                    {
+                        best = Some(copy);
                     }
                     (Some(b), CopySrc::Var(_)) if !matches!(&b.src, CopySrc::Var(_)) => {
                         best = Some(copy)

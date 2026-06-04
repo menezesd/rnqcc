@@ -23517,9 +23517,14 @@ fn assert_x86_64_linux_assembly_regression_case(name: &str, source: &str) {
         assert!(asm.contains("fstpt"), "{name}: {asm}");
     }
     if name == "x86-linux-long-double-x87-does-not-coalesce-with-double" {
+        assert!(asm.contains("fucomip %st(1), %st"), "{name}: {asm}");
         assert!(
             !asm.contains("\tmulsd -"),
             "{name}: double multiply read an x87 long-double spill slot: {asm}"
+        );
+        assert!(
+            !asm.contains("\tmovsd -"),
+            "{name}: x87 long-double value was read as an SSE double: {asm}"
         );
     }
     if name == "x86-linux-local-vprintf-chk-keeps-shadow-va-list" {

@@ -202,7 +202,13 @@ fn constant_folding(
                     src: TackyVal::DoubleConstant(d),
                     dst: TackyVal::Var(name),
                 } => {
-                    const_map.insert(name.clone(), (TackyVal::DoubleConstant(*d), CType::Double));
+                    let dst_type = types.get(name).copied().unwrap_or(CType::Double);
+                    if matches!(dst_type, CType::Float | CType::Double) {
+                        const_map
+                            .insert(name.clone(), (TackyVal::DoubleConstant(*d), CType::Double));
+                    } else {
+                        const_map.remove(name);
+                    }
                 }
                 TackyInstr::Copy {
                     src: TackyVal::Var(s),
@@ -210,7 +216,12 @@ fn constant_folding(
                 } => {
                     // If source has a known constant, propagate it
                     if let Some((cval, ct)) = const_map.get(s).cloned() {
-                        const_map.insert(name.clone(), (cval, ct));
+                        let dst_type = types.get(name).copied().unwrap_or(CType::Int);
+                        if same_copy_type(ct, dst_type) {
+                            const_map.insert(name.clone(), (cval, ct));
+                        } else {
+                            const_map.remove(name);
+                        }
                     } else {
                         const_map.remove(name);
                     }
@@ -226,6 +237,10 @@ fn constant_folding(
             folded
         })
         .collect()
+}
+
+fn same_copy_type(src: CType, dst: CType) -> bool {
+    src == dst || (src.is_signed() == dst.is_signed() && src.size() == dst.size())
 }
 
 fn resolve_constants(

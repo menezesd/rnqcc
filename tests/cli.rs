@@ -235,6 +235,36 @@ fn fuzz_smoke_script_compiles_seeded_case() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn fuzz_smoke_script_passes_extra_rnqcc_args() -> Result<(), String> {
+    let output = match Command::new("python3")
+        .args([
+            "scripts/fuzz_smoke.py",
+            "--seed",
+            "19",
+            "--cases",
+            "1",
+            "--rnqcc",
+            rnqcc(),
+            "--target",
+            "x86_64-linux",
+            "--rnqcc-arg=--optimize",
+        ])
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run fuzz smoke script: {err}")),
+    };
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn fuzz_smoke_reports_timeouts_cleanly() -> Result<(), String> {

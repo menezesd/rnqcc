@@ -35,6 +35,9 @@ jobs:
       - name: Test
         run: cargo test
 
+      - name: Optimized fuzz smoke
+        run: python3 scripts/fuzz_smoke.py --seed 31337 --cases 12 --rnqcc target/debug/rnqcc --target x86_64-linux --target aarch64-linux --rnqcc-arg=--optimize
+
       - name: Layout oracle
         run: python3 scripts/layout_oracle.py
 

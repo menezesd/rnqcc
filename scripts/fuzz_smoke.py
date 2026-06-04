@@ -116,6 +116,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="target triple/alias to exercise; repeatable. Defaults to rnqcc --print-targets.",
     )
     parser.add_argument(
+        "--rnqcc-arg",
+        action="append",
+        dest="rnqcc_args",
+        default=[],
+        help="extra argument to pass to rnqcc for every compile invocation; repeatable.",
+    )
+    parser.add_argument(
         "--work-dir",
         type=Path,
         help="directory for generated sources and assembly outputs",
@@ -171,17 +178,32 @@ def discover_targets(rnqcc: str, cwd: Path, timeout: float) -> list[str]:
     return targets
 
 
-def compile_case(rnqcc: str, src: Path, targets: list[str], cwd: Path, timeout: float) -> None:
+def compile_case(
+    rnqcc: str,
+    extra_args: list[str],
+    src: Path,
+    targets: list[str],
+    cwd: Path,
+    timeout: float,
+) -> None:
     for stage in STAGES:
         if stage == "codegen":
             for target in targets:
-                check_run([rnqcc, "--target", target, "--stage", stage, str(src)], cwd, timeout)
+                check_run(
+                    [rnqcc, "--target", target, *extra_args, "--stage", stage, str(src)],
+                    cwd,
+                    timeout,
+                )
         else:
-            check_run([rnqcc, "--stage", stage, str(src)], cwd, timeout)
+            check_run([rnqcc, *extra_args, "--stage", stage, str(src)], cwd, timeout)
 
     for target in targets:
         asm = src.with_suffix(f".{target}.s")
-        check_run([rnqcc, "--target", target, "-S", "-o", str(asm), str(src)], cwd, timeout)
+        check_run(
+            [rnqcc, "--target", target, *extra_args, "-S", "-o", str(asm), str(src)],
+            cwd,
+            timeout,
+        )
 
 
 def check_run(cmd: list[str], cwd: Path, timeout: float) -> None:
@@ -219,7 +241,7 @@ def main(argv: list[str]) -> int:
 
         try:
             if not args.emit_only:
-                compile_case(rnqcc, src, targets, repo, args.timeout)
+                compile_case(rnqcc, args.rnqcc_args, src, targets, repo, args.timeout)
         except Exception as exc:
             print(f"FAIL seed={args.seed} case={case} src={src}", file=sys.stderr)
             print(exc, file=sys.stderr)

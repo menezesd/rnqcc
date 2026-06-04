@@ -742,15 +742,15 @@ fn rewrite_instruction(
             target.clone(),
         )),
         TackyInstr::Truncate { src, dst } => Some(TackyInstr::Truncate {
-            src: replace_operand(src, reaching),
+            src: replace_operand_typed(src, reaching, types),
             dst: dst.clone(),
         }),
         TackyInstr::SignExtend { src, dst } => Some(TackyInstr::SignExtend {
-            src: replace_operand(src, reaching),
+            src: replace_operand_typed(src, reaching, types),
             dst: dst.clone(),
         }),
         TackyInstr::ZeroExtend { src, dst } => Some(TackyInstr::ZeroExtend {
-            src: replace_operand(src, reaching),
+            src: replace_operand_typed(src, reaching, types),
             dst: dst.clone(),
         }),
         TackyInstr::Store { src, dst_ptr } => {
@@ -766,43 +766,43 @@ fn rewrite_instruction(
             dst: dst.clone(),
         }),
         TackyInstr::DoubleToInt { src, dst } => Some(TackyInstr::DoubleToInt {
-            src: replace_operand(src, reaching),
+            src: replace_operand_typed(src, reaching, types),
             dst: dst.clone(),
         }),
         TackyInstr::FloatToInt { src, dst } => Some(TackyInstr::FloatToInt {
-            src: replace_operand(src, reaching),
+            src: replace_operand_typed(src, reaching, types),
             dst: dst.clone(),
         }),
         TackyInstr::DoubleToUInt { src, dst } => Some(TackyInstr::DoubleToUInt {
-            src: replace_operand(src, reaching),
+            src: replace_operand_typed(src, reaching, types),
             dst: dst.clone(),
         }),
         TackyInstr::FloatToUInt { src, dst } => Some(TackyInstr::FloatToUInt {
-            src: replace_operand(src, reaching),
+            src: replace_operand_typed(src, reaching, types),
             dst: dst.clone(),
         }),
         TackyInstr::IntToDouble { src, dst } => Some(TackyInstr::IntToDouble {
-            src: replace_operand(src, reaching),
+            src: replace_operand_typed(src, reaching, types),
             dst: dst.clone(),
         }),
         TackyInstr::IntToFloat { src, dst } => Some(TackyInstr::IntToFloat {
-            src: replace_operand(src, reaching),
+            src: replace_operand_typed(src, reaching, types),
             dst: dst.clone(),
         }),
         TackyInstr::UIntToDouble { src, dst } => Some(TackyInstr::UIntToDouble {
-            src: replace_operand(src, reaching),
+            src: replace_operand_typed(src, reaching, types),
             dst: dst.clone(),
         }),
         TackyInstr::UIntToFloat { src, dst } => Some(TackyInstr::UIntToFloat {
-            src: replace_operand(src, reaching),
+            src: replace_operand_typed(src, reaching, types),
             dst: dst.clone(),
         }),
         TackyInstr::FloatToDouble { src, dst } => Some(TackyInstr::FloatToDouble {
-            src: replace_operand(src, reaching),
+            src: replace_operand_typed(src, reaching, types),
             dst: dst.clone(),
         }),
         TackyInstr::DoubleToFloat { src, dst } => Some(TackyInstr::DoubleToFloat {
-            src: replace_operand(src, reaching),
+            src: replace_operand_typed(src, reaching, types),
             dst: dst.clone(),
         }),
         // Don't rewrite GetAddress (uses address, not value; changing address breaks aliasing)

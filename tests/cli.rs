@@ -21830,6 +21830,44 @@ int main(void) {
 }
 
 #[test]
+fn copy_propagation_preserves_unsigned_long_conversion_source_width() {
+    let src = temp_file("copy-prop-ulong-conv-source-width", "c");
+    std::fs::write(
+        &src,
+        r#"
+double f(void) {
+    unsigned long x = 18446744073709551615UL;
+    return (double)x;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args([
+            "--target",
+            "aarch64-linux",
+            "--optimize",
+            "--stage",
+            "tacky",
+        ])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let tacky = stdout(output);
+    assert!(tacky.contains("UIntToDouble"), "{tacky}");
+    assert!(tacky.contains("\"x.0\""), "{tacky}");
+    assert!(
+        !tacky.contains("UIntToDouble {\n                        src: Constant"),
+        "{tacky}"
+    );
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn static_unsigned_cast_initializer_truncates_before_widening() {
     let src = temp_file("static-unsigned-cast-widen", "c");
     let exe = temp_file("static-unsigned-cast-widen", "bin");

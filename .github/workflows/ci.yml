@@ -46,6 +46,11 @@ jobs:
         env:
           CI_ARTIFACT_DIR: target/ci-artifacts
 
+      - name: Optimized real project corpus
+        run: python3 scripts/real_project_corpus.py --rnqcc-arg=--optimize
+        env:
+          CI_ARTIFACT_DIR: target/ci-artifacts
+
       - name: Real project smoke
         run: sh scripts/real_project_smoke.sh
         env:

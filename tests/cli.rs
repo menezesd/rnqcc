@@ -519,6 +519,78 @@ fn llvm_c_regression_smoke_rejects_invalid_numeric_args() -> Result<(), String> 
 
 #[cfg(unix)]
 #[test]
+fn llvm_c_regression_smoke_passes_extra_rnqcc_args() -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let suite = TempPath::new("llvm-c-extra-args-suite", "dir");
+    std::fs::create_dir_all(suite.path())
+        .map_err(|err| format!("failed to create fake LLVM suite: {err}"))?;
+    std::fs::write(
+        suite.path().join("extra.c"),
+        "int main(void) { return 0; }\n",
+    )
+    .map_err(|err| format!("failed to write fake LLVM source: {err}"))?;
+
+    let log = TempPath::new("llvm-c-extra-args-log", "txt");
+    let fake_rnqcc = TempPath::new("llvm-c-extra-args-rnqcc", "sh");
+    std::fs::write(
+        fake_rnqcc.path(),
+        format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+out=
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-o" ]; then
+        shift
+        out="$1"
+    fi
+    shift
+done
+if [ -z "$out" ]; then
+    exit 2
+fi
+{{
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' 'exit 0'
+}} > "$out"
+chmod +x "$out"
+"#,
+            log.path().display()
+        ),
+    )
+    .map_err(|err| format!("failed to write fake rnqcc: {err}"))?;
+    let mut perms = std::fs::metadata(fake_rnqcc.path())
+        .map_err(|err| format!("missing fake rnqcc: {err}"))?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(fake_rnqcc.path(), perms)
+        .map_err(|err| format!("failed to chmod fake rnqcc: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/llvm_c_regression_smoke.py")
+        .arg("--rnqcc")
+        .arg(fake_rnqcc.path())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--limit")
+        .arg("1")
+        .arg("--rnqcc-arg=--optimize")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run LLVM C smoke script: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let log = std::fs::read_to_string(log.path())
+        .map_err(|err| format!("failed to read fake rnqcc log: {err}"))?;
+    assert!(log.contains("--optimize"), "{log}");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn real_project_corpus_reports_timeouts_cleanly() -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -565,6 +637,73 @@ fn real_project_corpus_reports_timeouts_cleanly() -> Result<(), String> {
     assert!(stderr.contains("slow.c: unexpected failure"), "{stderr}");
     assert!(stderr.contains("timed out after 0.1s"), "{stderr}");
     assert!(!stderr.contains("None"), "{stderr}");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn real_project_corpus_passes_extra_rnqcc_args() -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempPath::new("real-project-extra-args", "dir");
+    std::fs::create_dir_all(dir.path())
+        .map_err(|err| format!("failed to create fake corpus dir: {err}"))?;
+    let src = dir.path().join("extra.c");
+    let manifest = dir.path().join("corpus.txt");
+    std::fs::write(&src, "int main(void) { return 0; }\n")
+        .map_err(|err| format!("failed to write fake corpus source: {err}"))?;
+    std::fs::write(&manifest, format!("{}\n", src.display()))
+        .map_err(|err| format!("failed to write fake corpus manifest: {err}"))?;
+
+    let log = TempPath::new("real-project-extra-args-log", "txt");
+    let fake_rnqcc = TempPath::new("real-project-extra-args-rnqcc", "sh");
+    std::fs::write(
+        fake_rnqcc.path(),
+        format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+out=
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-o" ]; then
+        shift
+        out="$1"
+    fi
+    shift
+done
+if [ -z "$out" ]; then
+    exit 2
+fi
+printf '' > "$out"
+"#,
+            log.path().display()
+        ),
+    )
+    .map_err(|err| format!("failed to write fake rnqcc: {err}"))?;
+    let mut perms = std::fs::metadata(fake_rnqcc.path())
+        .map_err(|err| format!("missing fake rnqcc: {err}"))?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(fake_rnqcc.path(), perms)
+        .map_err(|err| format!("failed to chmod fake rnqcc: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/real_project_corpus.py")
+        .arg("--rnqcc")
+        .arg(fake_rnqcc.path())
+        .arg("--manifest")
+        .arg(&manifest)
+        .arg("--rnqcc-arg=--optimize")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run real project corpus script: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let log = std::fs::read_to_string(log.path())
+        .map_err(|err| format!("failed to read fake rnqcc log: {err}"))?;
+    assert!(log.contains("--optimize"), "{log}");
     Ok(())
 }
 
@@ -7035,6 +7174,94 @@ fn function_pointer_parameter_call_shadows_global_function() {
     assert_eq!(run.code(), Some(42));
 
     let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn block_function_prototype_shadows_outer_local_variable() {
+    let src = temp_file("block-function-prototype-shadow", "i");
+    let exe = temp_file("block-function-prototype-shadow", "bin");
+    std::fs::write(
+        &src,
+        "int main(void) {\n\
+             int foo = 3;\n\
+             int bar = 4;\n\
+             if (foo + bar > 0) {\n\
+                 int foo(void);\n\
+                 bar = foo();\n\
+             }\n\
+             return foo + bar;\n\
+         }\n\
+         int foo(void) { return 8; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(11));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn extern_block_function_prototype_reshadows_local_variable() {
+    let client_src = temp_file("extern-block-prototype-client", "i");
+    let helper_src = temp_file("extern-block-prototype-helper", "i");
+    let exe = temp_file("extern-block-prototype", "bin");
+    std::fs::write(
+        &client_src,
+        "int add_one_and_two(void) {\n\
+             extern int sum(int a, int b);\n\
+             int sum(int a, int b);\n\
+             return sum(1, 2);\n\
+         }\n\
+         extern int sum(int x, int y);\n\
+         int sum(int x, int y);\n\
+         int add_three_and_four(void) {\n\
+             int sum = 3;\n\
+             if (sum > 2) {\n\
+                 extern int sum(int one, int two);\n\
+                 return sum(3, 4);\n\
+             }\n\
+             return 1;\n\
+         }\n\
+         int main(void) {\n\
+             if (add_three_and_four() != 7) return 1;\n\
+             if (add_one_and_two() != 3) return 1;\n\
+             return 0;\n\
+         }\n",
+    )
+    .expect("failed to write client input");
+    std::fs::write(
+        &helper_src,
+        "extern int sum(int a, int b);\n\
+         int sum(int i, int j) { return i + j; }\n\
+         int sum(int x, int y);\n",
+    )
+    .expect("failed to write helper input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&client_src)
+        .arg(&helper_src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(0));
+
+    let _ = std::fs::remove_file(client_src);
+    let _ = std::fs::remove_file(helper_src);
     let _ = std::fs::remove_file(exe);
 }
 

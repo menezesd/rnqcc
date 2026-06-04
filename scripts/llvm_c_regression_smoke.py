@@ -67,6 +67,13 @@ def main() -> int:
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--internal-cpp", action="store_true")
+    parser.add_argument(
+        "--rnqcc-arg",
+        action="append",
+        dest="rnqcc_args",
+        default=[],
+        help="extra argument to pass to rnqcc for every compile invocation; repeatable.",
+    )
     args = parser.parse_args()
 
     if args.start < 0:
@@ -92,7 +99,7 @@ def main() -> int:
         tmpdir = Path(tmp)
         for idx, src in enumerate(selected, start=args.start):
             exe = tmpdir / f"{idx:04d}-{src.stem}"
-            cmd = [str(rnqcc), "--Wno-missing-return"]
+            cmd = [str(rnqcc), *args.rnqcc_args, "--Wno-missing-return"]
             if args.internal_cpp:
                 cmd.append("--internal-cpp")
             result = run([*cmd, str(src), "-o", str(exe)], args.timeout)

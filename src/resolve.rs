@@ -282,6 +282,20 @@ impl Resolver {
         Ok(unique)
     }
 
+    fn declare_block_function_prototype(&mut self, name: &str) -> ResolveResult<()> {
+        if let Some(existing) = self.current_scope_mut()?.get(name).cloned() {
+            if existing == name {
+                return Ok(());
+            }
+            return Err(Diagnostic::resolve(DiagnosticKind::DuplicateVariable {
+                name: name.to_string(),
+            }));
+        }
+        self.current_scope_mut()?
+            .insert(name.to_string(), name.to_string());
+        Ok(())
+    }
+
     fn resolve_tag(&self, tag: &str) -> String {
         for scope in self.tag_scopes.iter().rev() {
             if let Some(unique) = scope.get(tag) {
@@ -813,6 +827,7 @@ impl Resolver {
                             }
                         }
                         self.functions.insert(original_name, signature);
+                        self.declare_block_function_prototype(&fd.name)?;
                         BlockItem::Declaration(Declaration::FunDecl(self.resolve_function(fd)?))
                     } else {
                         let unique_name = self.declare_block_function(&original_name)?;

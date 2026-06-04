@@ -14,6 +14,7 @@ fails so the manifest can be updated.
 
 from __future__ import annotations
 
+import argparse
 import os
 import shlex
 import subprocess
@@ -26,7 +27,6 @@ from smoke_utils import env_timeout, timeout_text
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "tests" / "fixtures" / "real_project" / "corpus.txt"
-RNQCC = Path(os.environ.get("RNQCC", ROOT / "target" / "debug" / "rnqcc"))
 ARTIFACT_DIR = os.environ.get("CI_ARTIFACT_DIR")
 DEFAULT_TIMEOUT = env_timeout("REAL_PROJECT_TIMEOUT", "60.0")
 
@@ -38,7 +38,35 @@ class Entry:
         self.expected_failure = expected_failure
 
 
-def run(cmd: list[str], timeout: float = DEFAULT_TIMEOUT) -> subprocess.CompletedProcess[str]:
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--rnqcc",
+        default=os.environ.get("RNQCC", str(ROOT / "target" / "debug" / "rnqcc")),
+        help="path to rnqcc binary, or set RNQCC",
+    )
+    parser.add_argument(
+        "--manifest",
+        default=os.environ.get("REAL_PROJECT_MANIFEST", str(DEFAULT_MANIFEST)),
+        help="corpus manifest path, or set REAL_PROJECT_MANIFEST",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT,
+        help="seconds to allow each command, or set REAL_PROJECT_TIMEOUT",
+    )
+    parser.add_argument(
+        "--rnqcc-arg",
+        action="append",
+        dest="rnqcc_args",
+        default=[],
+        help="extra argument to pass to rnqcc for every compile invocation; repeatable.",
+    )
+    return parser.parse_args(argv)
+
+
+def run(cmd: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             cmd,
@@ -56,10 +84,10 @@ def run(cmd: list[str], timeout: float = DEFAULT_TIMEOUT) -> subprocess.Complete
         )
 
 
-def build_rnqcc() -> None:
-    if RNQCC.exists():
+def build_rnqcc(rnqcc: Path, timeout: float) -> None:
+    if rnqcc.exists():
         return
-    result = run(["cargo", "build", "--manifest-path", str(ROOT / "Cargo.toml")])
+    result = run(["cargo", "build", "--manifest-path", str(ROOT / "Cargo.toml")], timeout)
     if result.returncode != 0:
         sys.stderr.write(result.stdout)
         sys.stderr.write(result.stderr)
@@ -115,14 +143,16 @@ def parse_manifest(path: Path) -> list[Entry]:
     return entries
 
 
-def main() -> int:
-    if DEFAULT_TIMEOUT <= 0:
-        print("REAL_PROJECT_TIMEOUT must be positive", file=sys.stderr)
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    if args.timeout <= 0:
+        print("--timeout must be positive", file=sys.stderr)
         return 1
-    manifest = Path(os.environ.get("REAL_PROJECT_MANIFEST", DEFAULT_MANIFEST))
+    manifest = Path(args.manifest)
     if not manifest.is_absolute():
         manifest = ROOT / manifest
-    build_rnqcc()
+    rnqcc = Path(args.rnqcc)
+    build_rnqcc(rnqcc, args.timeout)
     entries = parse_manifest(manifest)
     if not entries:
         print(f"{manifest}: no corpus entries", file=sys.stderr)
@@ -133,8 +163,17 @@ def main() -> int:
         failures = 0
         for index, entry in enumerate(entries, start=1):
             output = tmpdir / f"{index}.o"
-            cmd = [str(RNQCC), "--internal-cpp", *entry.flags, "-c", str(entry.source), "-o", str(output)]
-            result = run(cmd)
+            cmd = [
+                str(rnqcc),
+                "--internal-cpp",
+                *args.rnqcc_args,
+                *entry.flags,
+                "-c",
+                str(entry.source),
+                "-o",
+                str(output),
+            ]
+            result = run(cmd, args.timeout)
             text = result.stdout + result.stderr
             if entry.expected_failure is None:
                 if result.returncode != 0:
@@ -166,4 +205,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

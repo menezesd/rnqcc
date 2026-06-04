@@ -233,6 +233,7 @@ fn condition_name(cc: &CondCode) -> &'static str {
         CondCode::AE => "hs",
         CondCode::B => "lo",
         CondCode::BE => "ls",
+        CondCode::P | CondCode::NP => unreachable!("x86 parity condition in AArch64 emitter"),
     }
 }
 

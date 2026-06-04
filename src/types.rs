@@ -1993,6 +1993,8 @@ pub enum CondCode {
     AE, // above or equal
     B,  // below
     BE, // below or equal
+    P,  // parity set
+    NP, // parity clear
 }
 
 #[derive(Debug, Clone)]

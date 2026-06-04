@@ -56,13 +56,24 @@ run_single_test() {
     chapter_dir=$(echo "$src" | sed 's|/valid/.*|/|')
     local helper_dir="${chapter_dir}helper_libs"
     local helpers=()
+    add_helper() {
+        local helper="$1"
+        local existing
+        for existing in "${helpers[@]}"; do
+            [ "$existing" = "$helper" ] && return
+        done
+        helpers+=("$helper")
+    }
     if [ -d "$helper_dir" ]; then
         for h in "$helper_dir"/${name}.c "$helper_dir"/${name}_*.c; do
-            [ -f "$h" ] && helpers+=("$h")
+            [ -f "$h" ] && add_helper "$h"
         done
+        if grep -q 'double_isnan' "$src" && [ -f "$helper_dir/nan.c" ]; then
+            add_helper "$helper_dir/nan.c"
+        fi
     fi
     for h in "$(dirname "$src")"/*_"$HELPER_PLATFORM".s; do
-        [ -f "$h" ] && helpers+=("$h")
+        [ -f "$h" ] && add_helper "$h"
     done
 
     if [ ${#helpers[@]} -gt 0 ]; then

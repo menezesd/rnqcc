@@ -4218,6 +4218,76 @@ fn x86_64_long_double_comparisons_use_x87_status_flags() {
 }
 
 #[test]
+fn x86_64_double_comparisons_are_unordered_aware() {
+    let src = temp_file("x86-double-nan-cmp", "c");
+    let out = temp_file("x86-double-nan-cmp", "s");
+    std::fs::write(
+        &src,
+        "int eq(double a, double b) { return a == b; }\n\
+         int ne(double a, double b) { return a != b; }\n\
+         int lt(double a, double b) { return a < b; }\n\
+         int le(double a, double b) { return a <= b; }\n\
+         int gt(double a, double b) { return a > b; }\n\
+         int ge(double a, double b) { return a >= b; }\n\
+         int logical_not(double a) { return !a; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("comisd"), "{asm}");
+    assert!(asm.contains("setp"), "{asm}");
+    assert!(asm.contains("setnp"), "{asm}");
+    assert!(asm.contains("orb"), "{asm}");
+    assert!(asm.contains("andb"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn x86_64_uint_to_double_labels_are_unique_across_functions() {
+    let src = temp_file("x86-uint-to-double-labels", "c");
+    let out = temp_file("x86-uint-to-double-labels", "s");
+    std::fs::write(
+        &src,
+        "double f(unsigned long x) { return x; }\n\
+         double g(unsigned long x) { return x; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    for prefix in [".Luint_to_double_ok", ".Luint_to_double_end"] {
+        let labels: Vec<&str> = asm
+            .lines()
+            .filter_map(|line| line.strip_suffix(':'))
+            .filter(|line| line.starts_with(prefix))
+            .collect();
+        let unique: std::collections::HashSet<&str> = labels.iter().copied().collect();
+        assert_eq!(labels.len(), unique.len(), "{asm}");
+        assert!(labels.len() >= 2, "{asm}");
+    }
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn x86_64_long_double_va_arg_uses_x87_loads_and_conversions() {
     let src = temp_file("x86-ld-va-arg", "c");
     let out = temp_file("x86-ld-va-arg", "s");

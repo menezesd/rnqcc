@@ -473,6 +473,8 @@ fn show_cc(cc: &CondCode) -> &'static str {
         CondCode::AE => "ae",
         CondCode::B => "b",
         CondCode::BE => "be",
+        CondCode::P => "p",
+        CondCode::NP => "np",
     }
 }
 

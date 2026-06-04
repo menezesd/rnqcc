@@ -95,6 +95,42 @@ fn is_comparison(op: &TackyBinaryOp, is_unsigned: bool) -> Option<CondCode> {
     }
 }
 
+fn emit_float_comparison_result(out: &mut Vec<AsmInstr>, op: &TackyBinaryOp, dst: AsmOperand) {
+    let cmp_cc = match op {
+        TackyBinaryOp::Equal => CondCode::E,
+        TackyBinaryOp::NotEqual => CondCode::NE,
+        TackyBinaryOp::LessThan => CondCode::B,
+        TackyBinaryOp::LessEqual => CondCode::BE,
+        TackyBinaryOp::GreaterThan => CondCode::A,
+        TackyBinaryOp::GreaterEqual => CondCode::AE,
+        _ => unreachable!("not a floating comparison"),
+    };
+    out.push(AsmInstr::Mov(
+        AsmType::Longword,
+        AsmOperand::Imm(0),
+        dst.clone(),
+    ));
+    out.push(AsmInstr::SetCC(cmp_cc, dst.clone()));
+    out.push(AsmInstr::SetCC(
+        if matches!(op, TackyBinaryOp::NotEqual) {
+            CondCode::P
+        } else {
+            CondCode::NP
+        },
+        AsmOperand::Reg(Reg::R10),
+    ));
+    out.push(AsmInstr::Binary(
+        AsmType::Byte,
+        if matches!(op, TackyBinaryOp::NotEqual) {
+            AsmBinaryOp::Or
+        } else {
+            AsmBinaryOp::And
+        },
+        AsmOperand::Reg(Reg::R10),
+        dst,
+    ));
+}
+
 // Double constants need to be emitted as static data and referenced by label
 fn double_const_label(static_doubles: &[(String, f64)]) -> String {
     format!("__double_const_{}", static_doubles.len())
@@ -253,10 +289,11 @@ fn clamp_floating_to_signed_int_overflow(
     dst: &TackyVal,
     static_doubles: &mut Vec<(String, f64)>,
     label_counter: &mut usize,
+    function_name: &str,
 ) {
     let base = *label_counter;
     *label_counter += 1;
-    let end_label = format!("float_to_int_ok.{}", base);
+    let end_label = format!("float_to_int_ok.{}.{}", function_name, base);
     let src_op = if src_ty == AsmType::Float {
         let tmp = AsmOperand::Xmm(XmmReg::XMM14);
         out.push(AsmInstr::Cvtss2sd(convert_val(src), tmp.clone()));
@@ -958,7 +995,16 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                 AsmOperand::Imm(0),
                 dst_op.clone(),
             ));
-            out.push(AsmInstr::SetCC(CondCode::E, dst_op));
+            out.push(AsmInstr::SetCC(CondCode::E, dst_op.clone()));
+            if matches!(t, AsmType::Float | AsmType::Double) {
+                out.push(AsmInstr::SetCC(CondCode::NP, AsmOperand::Reg(Reg::R10)));
+                out.push(AsmInstr::Binary(
+                    AsmType::Byte,
+                    AsmBinaryOp::And,
+                    AsmOperand::Reg(Reg::R10),
+                    dst_op,
+                ));
+            }
         }
         TackyInstr::Unary { op, src, dst } => {
             let t = val_type(dst, types);
@@ -1313,6 +1359,7 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                         dst,
                         static_doubles,
                         label_counter,
+                        function_name,
                     );
                 }
             }
@@ -1344,6 +1391,7 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                         dst,
                         static_doubles,
                         label_counter,
+                        function_name,
                     );
                 }
             }
@@ -1383,8 +1431,8 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                 // cvtsi2sdq, then addsd result to itself
                 let base = *label_counter;
                 *label_counter += 1;
-                let ok_label = format!("uint_to_double_ok.{}", base);
-                let end_label = format!("uint_to_double_end.{}", base);
+                let ok_label = format!("uint_to_double_ok.{}.{}", function_name, base);
+                let end_label = format!("uint_to_double_end.{}.{}", function_name, base);
                 out.push(AsmInstr::Cmp(
                     AsmType::Quadword,
                     AsmOperand::Imm(0),
@@ -1780,19 +1828,25 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
         TackyInstr::JumpIfZero(val, label) => {
             let t = val_type(val, types);
             if matches!(t, AsmType::Float | AsmType::Double) {
-                // xorpd zeroes an xmm; comisd compares
                 out.push(AsmInstr::Binary(
                     AsmType::Double,
                     AsmBinaryOp::Xor,
                     AsmOperand::Xmm(XmmReg::XMM14),
                     AsmOperand::Xmm(XmmReg::XMM14),
                 ));
+                let skip_label = format!(
+                    "float_jz_unordered.{}.{}",
+                    ctx.function_name, *ctx.label_counter
+                );
+                *ctx.label_counter += 1;
                 out.push(AsmInstr::Cmp(
-                    AsmType::Double,
-                    convert_val(val),
+                    t,
+                    convert_double_val(val, static_doubles),
                     AsmOperand::Xmm(XmmReg::XMM14),
                 ));
+                out.push(AsmInstr::JmpCC(CondCode::P, skip_label.clone()));
                 out.push(AsmInstr::JmpCC(CondCode::E, label.clone()));
+                out.push(AsmInstr::Label(skip_label));
             } else {
                 out.push(AsmInstr::Cmp(t, AsmOperand::Imm(0), convert_val(val)));
                 out.push(AsmInstr::JmpCC(CondCode::E, label.clone()));
@@ -1800,7 +1854,7 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
         }
         TackyInstr::JumpIfNotZero(val, label) => {
             let t = val_type(val, types);
-            if t == AsmType::Double {
+            if matches!(t, AsmType::Float | AsmType::Double) {
                 out.push(AsmInstr::Binary(
                     AsmType::Double,
                     AsmBinaryOp::Xor,
@@ -1808,10 +1862,11 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                     AsmOperand::Xmm(XmmReg::XMM14),
                 ));
                 out.push(AsmInstr::Cmp(
-                    AsmType::Double,
-                    convert_val(val),
+                    t,
+                    convert_double_val(val, static_doubles),
                     AsmOperand::Xmm(XmmReg::XMM14),
                 ));
+                out.push(AsmInstr::JmpCC(CondCode::P, label.clone()));
                 out.push(AsmInstr::JmpCC(CondCode::NE, label.clone()));
             } else {
                 out.push(AsmInstr::Cmp(t, AsmOperand::Imm(0), convert_val(val)));
@@ -2484,12 +2539,16 @@ fn convert_binary(
             let l = promoted_cmp_operand(out, left, cmp_type, Reg::R11, types);
             out.push(AsmInstr::Cmp(cmp_type, r, l));
         }
-        out.push(AsmInstr::Mov(
-            AsmType::Longword,
-            AsmOperand::Imm(0),
-            convert_val(dst),
-        ));
-        out.push(AsmInstr::SetCC(cc, convert_val(dst)));
+        if matches!(cmp_type, AsmType::Float | AsmType::Double) {
+            emit_float_comparison_result(out, op, convert_val(dst));
+        } else {
+            out.push(AsmInstr::Mov(
+                AsmType::Longword,
+                AsmOperand::Imm(0),
+                convert_val(dst),
+            ));
+            out.push(AsmInstr::SetCC(cc, convert_val(dst)));
+        }
         Ok(())
     } else {
         let t = val_type(dst, types);

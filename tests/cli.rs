@@ -1171,6 +1171,26 @@ fn gcc_torture_smoke_emits_canonical_skip_paths() -> Result<(), String> {
 }
 
 #[test]
+fn gcc_torture_helpers_are_importable_from_repo_root() -> Result<(), String> {
+    let output = match Command::new("python3")
+        .arg("-c")
+        .arg(
+            "import scripts.gcc_torture_smoke\n\
+             import scripts.report_gcc_torture_xfails\n\
+             import scripts.triage_gcc_torture_xfails\n",
+        )
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to import GCC torture helpers: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    Ok(())
+}
+
+#[test]
 fn gcc_torture_smoke_rejects_missing_explicit_expected_fixture() -> Result<(), String> {
     let suite = TempPath::new("gcc-smoke-missing-expected-suite", "dir");
     let execute_dir = suite.path().join("execute");

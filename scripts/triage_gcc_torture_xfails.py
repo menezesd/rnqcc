@@ -8,14 +8,26 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from gcc_torture_expected import (
-    DEFAULT_EXPECTED,
-    display_reason,
-    load_expected_failures,
-    normalize_test_path,
-    parse_failure_log,
-    validate_test_path,
-)
+try:
+    from gcc_torture_expected import (
+        DEFAULT_EXPECTED,
+        display_reason,
+        load_expected_failures,
+        normalize_test_path,
+        parse_failure_log,
+        validate_test_path,
+    )
+except ModuleNotFoundError as err:
+    if err.name != "gcc_torture_expected":
+        raise
+    from scripts.gcc_torture_expected import (
+        DEFAULT_EXPECTED,
+        display_reason,
+        load_expected_failures,
+        normalize_test_path,
+        parse_failure_log,
+        validate_test_path,
+    )
 
 
 @dataclass(frozen=True)

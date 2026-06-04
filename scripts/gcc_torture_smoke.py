@@ -19,7 +19,16 @@ import tempfile
 from collections import Counter
 from pathlib import Path
 
-from gcc_torture_expected import load_expected_failures, normalize_test_path, validate_test_path
+try:
+    from gcc_torture_expected import load_expected_failures, normalize_test_path, validate_test_path
+except ModuleNotFoundError as err:
+    if err.name != "gcc_torture_expected":
+        raise
+    from scripts.gcc_torture_expected import (
+        load_expected_failures,
+        normalize_test_path,
+        validate_test_path,
+    )
 
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -6,12 +6,22 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from gcc_torture_expected import (
-    DEFAULT_EXPECTED,
-    display_reason,
-    load_expected_failures,
-    parse_failure_log,
-)
+try:
+    from gcc_torture_expected import (
+        DEFAULT_EXPECTED,
+        display_reason,
+        load_expected_failures,
+        parse_failure_log,
+    )
+except ModuleNotFoundError as err:
+    if err.name != "gcc_torture_expected":
+        raise
+    from scripts.gcc_torture_expected import (
+        DEFAULT_EXPECTED,
+        display_reason,
+        load_expected_failures,
+        parse_failure_log,
+    )
 
 
 def parse_failures(path: Path) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:

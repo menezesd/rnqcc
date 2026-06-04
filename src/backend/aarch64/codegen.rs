@@ -510,6 +510,39 @@ fn val_operand(
     }
 }
 
+fn floating_return_operand(
+    ty: AsmType,
+    val: &TackyVal,
+    stack_slots: &HashMap<String, i32>,
+    global_vars: &HashSet<String>,
+) -> Result<AsmOperand, String> {
+    match (ty, val) {
+        (AsmType::Float, TackyVal::DoubleConstant(d)) => {
+            Ok(AsmOperand::Imm((*d as f32).to_bits() as i64))
+        }
+        (AsmType::Float, TackyVal::Constant(c)) => {
+            Ok(AsmOperand::Imm((*c as f32).to_bits() as i64))
+        }
+        (AsmType::Float, TackyVal::Int128Constant(c)) => {
+            Ok(AsmOperand::Imm((*c as f32).to_bits() as i64))
+        }
+        (AsmType::Float, TackyVal::UInt128Constant(c)) => {
+            Ok(AsmOperand::Imm((*c as f32).to_bits() as i64))
+        }
+        (AsmType::Double, TackyVal::DoubleConstant(d)) => Ok(AsmOperand::Imm(d.to_bits() as i64)),
+        (AsmType::Double, TackyVal::Constant(c)) => {
+            Ok(AsmOperand::Imm((*c as f64).to_bits() as i64))
+        }
+        (AsmType::Double, TackyVal::Int128Constant(c)) => {
+            Ok(AsmOperand::Imm((*c as f64).to_bits() as i64))
+        }
+        (AsmType::Double, TackyVal::UInt128Constant(c)) => {
+            Ok(AsmOperand::Imm((*c as f64).to_bits() as i64))
+        }
+        _ => val_operand(val, stack_slots, global_vars),
+    }
+}
+
 fn intern_long_double_const(pool: &mut Vec<(String, f64)>, value: f64) -> String {
     let bits = value.to_bits();
     if let Some((name, _)) = pool.iter().find(|(_, existing)| existing.to_bits() == bits) {
@@ -1643,11 +1676,12 @@ fn convert_function(
                     } else {
                         AsmOperand::Reg(Reg::AX)
                     };
-                instructions.push(AsmInstr::Mov(
-                    ty,
-                    val_operand(val, &stack_slots, global_vars)?,
-                    ret_dst,
-                ));
+                let src = if matches!(ty, AsmType::Float | AsmType::Double) {
+                    floating_return_operand(ty, val, &stack_slots, global_vars)?
+                } else {
+                    val_operand(val, &stack_slots, global_vars)?
+                };
+                instructions.push(AsmInstr::Mov(ty, src, ret_dst));
                 emit_epilogue(&mut instructions, frame_size, link_register_offset);
             }
             TackyInstr::Copy { src, dst } => {

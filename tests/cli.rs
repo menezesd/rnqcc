@@ -20122,6 +20122,69 @@ double g(void) { return -0.0; }
 }
 
 #[test]
+fn aarch64_optimized_float_return_constants_use_float_width() {
+    let src = temp_file("aarch64-float-return-constants", "c");
+    let out = temp_file("aarch64-float-return-constants", "s");
+    std::fs::write(
+        &src,
+        r#"
+float f(void) { return 7; }
+double d(void) { return 7; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\tmovz w9, #0"), "{asm}");
+    assert!(asm.contains("\tmovk w9, #16608, lsl #16"), "{asm}");
+    assert!(asm.contains("\tfmov s0, w9"), "{asm}");
+    assert!(asm.contains("\tmovz x9, #0"), "{asm}");
+    assert!(asm.contains("\tmovk x9, #16412, lsl #48"), "{asm}");
+    assert!(asm.contains("\tfmov d0, x9"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_optimized_float_negative_zero_return_preserves_sign_bit() {
+    let src = temp_file("aarch64-float-negative-zero-return", "c");
+    let out = temp_file("aarch64-float-negative-zero-return", "s");
+    std::fs::write(
+        &src,
+        r#"
+float f(void) { return -0.0f; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\tmovk x9, #32768, lsl #48"), "{asm}");
+    assert!(asm.contains("\tfmov d9, x9"), "{asm}");
+    assert!(asm.contains("\tfcvt s10, d9"), "{asm}");
+    assert!(asm.contains("\tldr s0, [sp]"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn supports_file_scope_gnu_vectors_larger_than_scalar_storage() {
     let src = temp_file("file-scope-large-gnu-vector", "c");
     let exe = temp_file("file-scope-large-gnu-vector", "bin");

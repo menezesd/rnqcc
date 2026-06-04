@@ -159,7 +159,16 @@ def skip_reason_for_test(src: Path) -> str | None:
         src.parent.name == "compile" and src.name in portable_target_compile_smoke
     ):
         return "target-specific DejaGnu test outside smoke target model"
-    if "../../gcc.target/" in text or "../../gcc.dg/" in text:
+    portable_target_execute_smoke = {
+        "pr105777.c",
+        "pr109938.c",
+        "pr109986.c",
+        "pr30314.c",
+        "pr98304-2.c",
+    }
+    if (
+        "../../gcc.target/" in text or "../../gcc.dg/" in text
+    ) and not (src.parent.name == "execute" and src.name in portable_target_execute_smoke):
         return "target-specific included GCC test"
     if "#if empty#cpu" in text:
         return "invalid preprocessor token-paste edge test"

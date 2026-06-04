@@ -1659,8 +1659,8 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, target: &Target) -> std
             writeln!(w, "\tmov sp, x11")?;
             writeln!(w, "\tbr x12")
         }
-        AsmInstr::Call(name, _, _, false) => writeln!(w, "\tbl {}", target.show_label(name)),
-        AsmInstr::Call(_, _, _, true) => writeln!(w, "\tblr x9"),
+        AsmInstr::Call(name, _, _, false, _) => writeln!(w, "\tbl {}", target.show_label(name)),
+        AsmInstr::Call(_, _, _, true, _) => writeln!(w, "\tblr x9"),
         AsmInstr::AArch64AddPtr(ptr, index, scale, dst) => {
             emit_add_ptr(w, target, ptr, index, *scale, dst)
         }

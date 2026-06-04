@@ -5620,6 +5620,43 @@ int main(void) {
 }
 
 #[test]
+fn x86_64_linux_local_calls_do_not_use_plt() {
+    let src = temp_file("x86-local-call-no-plt", "i");
+    let out = temp_file("x86-local-call-no-plt", "s");
+    std::fs::write(
+        &src,
+        r#"
+extern int printf(const char *, ...);
+
+static int local_test(double x) {
+    return x > 0.0;
+}
+
+int main(void) {
+    return local_test(1.0) + printf("%d", 1);
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
+    assert!(asm.contains("call local_test\n"), "{asm}");
+    assert!(!asm.contains("call local_test@PLT"), "{asm}");
+    assert!(asm.contains("call printf@PLT"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn x86_64_macos_variadic_call_sets_xmm_count_or_runs_on_native_host() {
     let src = temp_file("x86-macos-varargs-call", "i");
     let out = temp_file("x86-macos-varargs-call", "s");
@@ -10003,7 +10040,8 @@ fn x86_local_variadic_shadow_arguments_are_not_duplicated() {
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
-    assert!(asm.contains("call take@PLT"), "{asm}");
+    assert!(asm.contains("call take\n"), "{asm}");
+    assert!(!asm.contains("call take@PLT"), "{asm}");
     assert!(
         asm.contains("movl $3, 0(%rsp)") || asm.contains("movl $3, (%rsp)"),
         "{asm}"

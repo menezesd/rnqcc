@@ -268,7 +268,7 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
             (used, vec![RegId::Gp(Reg::AX), RegId::Gp(Reg::DX)])
         }
         AsmInstr::Cdq(_) => (vec![RegId::Gp(Reg::AX)], vec![RegId::Gp(Reg::DX)]),
-        AsmInstr::Call(_, int_regs, sse_regs, _) => {
+        AsmInstr::Call(_, int_regs, sse_regs, _, _) => {
             let mut used = Vec::new();
             for reg in ARG_INT_REGS.iter().take(*int_regs) {
                 used.push(RegId::Gp(*reg));

@@ -2041,7 +2041,7 @@ pub enum AsmInstr {
         value: AsmOperand,
     },
     Push(AsmOperand),
-    Call(String, usize, usize, bool), // name, int_reg_args, sse_reg_args, indirect
+    Call(String, usize, usize, bool, bool), // name, int_reg_args, sse_reg_args, indirect, local
     Pop(Reg),
     Cvtsi2sd(AsmType, AsmOperand, AsmOperand), // int/long → double
     Cvtsi2ss(AsmType, AsmOperand, AsmOperand), // int/long → float

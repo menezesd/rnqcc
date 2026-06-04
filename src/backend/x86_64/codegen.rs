@@ -1225,7 +1225,7 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                     right_high,
                     AsmOperand::Reg(Reg::CX),
                 ));
-                out.push(AsmInstr::Call(helper.to_string(), 4, 0, false));
+                out.push(AsmInstr::Call(helper.to_string(), 4, 0, false, false));
                 let dst_op = convert_val(dst);
                 out.push(AsmInstr::Mov(
                     AsmType::Quadword,
@@ -2381,6 +2381,7 @@ fn convert_funcall(call: &FuncallArgs<'_>, ctx: &mut FuncallContext<'_>) -> Resu
             int_reg_args.len(),
             xmm_reg_args.len(),
             indirect,
+            !indirect && ctx.local_function_names.contains(name),
         ));
         let bytes_to_dealloc = outgoing_bytes as i32;
         if bytes_to_dealloc > 0 {

@@ -1184,7 +1184,7 @@ fn emit_long_double_helper_call(
         val_operand(right, stack_slots, global_vars)?,
         AsmOperand::Xmm(XmmReg::XMM1),
     ));
-    instructions.push(AsmInstr::Call(helper.to_string(), 0, 2, false));
+    instructions.push(AsmInstr::Call(helper.to_string(), 0, 2, false, false));
     instructions.push(AsmInstr::Mov(
         AsmType::LongDouble,
         AsmOperand::Xmm(XmmReg::XMM0),
@@ -1213,7 +1213,7 @@ fn emit_long_double_comparison(
         val_operand(right, stack_slots, global_vars)?,
         AsmOperand::Xmm(XmmReg::XMM1),
     ));
-    instructions.push(AsmInstr::Call(helper.to_string(), 0, 2, false));
+    instructions.push(AsmInstr::Call(helper.to_string(), 0, 2, false, false));
     instructions.push(AsmInstr::Cmp(
         AsmType::Longword,
         AsmOperand::Imm(0),
@@ -2467,7 +2467,13 @@ fn convert_function(
                         ));
                     }
                 }
-                instructions.push(AsmInstr::Call(name.clone(), args.len(), 0, *indirect));
+                instructions.push(AsmInstr::Call(
+                    name.clone(),
+                    args.len(),
+                    0,
+                    *indirect,
+                    false,
+                ));
                 if outgoing_bytes > 0 {
                     instructions.push(AsmInstr::DeallocateStack(outgoing_bytes));
                 }
@@ -2828,6 +2834,7 @@ fn convert_function(
                                     4,
                                     0,
                                     false,
+                                    false,
                                 ));
                                 instructions.push(AsmInstr::Mov(
                                     AsmType::Quadword,
@@ -2928,7 +2935,13 @@ fn convert_function(
                                 right_high,
                                 AsmOperand::Reg(Reg::DX),
                             ));
-                            instructions.push(AsmInstr::Call(helper.to_string(), 4, 0, false));
+                            instructions.push(AsmInstr::Call(
+                                helper.to_string(),
+                                4,
+                                0,
+                                false,
+                                false,
+                            ));
                             instructions.push(AsmInstr::Mov(
                                 AsmType::Quadword,
                                 AsmOperand::Reg(Reg::AX),

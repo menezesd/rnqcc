@@ -1178,7 +1178,7 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
         AsmInstr::Pop(reg) => {
             writeln!(w, "\tpopq {}", reg_name(reg, AsmType::Quadword)?)
         }
-        AsmInstr::Call(name, _, _, indirect) => {
+        AsmInstr::Call(name, _, _, indirect, local) => {
             if *indirect {
                 // Indirect call through R10 (function pointer already loaded there)
                 writeln!(w, "\tcall *%r10")
@@ -1186,6 +1186,7 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                 let label = platform.show_label(name);
                 match platform.os {
                     TargetOs::MacOs => writeln!(w, "\tcall {}", label),
+                    TargetOs::Linux if *local => writeln!(w, "\tcall {}", label),
                     TargetOs::Linux => writeln!(w, "\tcall {}@PLT", label),
                 }
             }

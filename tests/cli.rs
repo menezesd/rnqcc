@@ -341,6 +341,92 @@ fn real_project_corpus_reports_timeouts_cleanly() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn layout_oracle_reports_executable_timeouts_cleanly() -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fake_cc = TempPath::new("layout-timeout-cc", "sh");
+    std::fs::write(
+        fake_cc.path(),
+        r#"#!/bin/sh
+out=
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-o" ]; then
+        shift
+        out="$1"
+    fi
+    shift
+done
+if [ -z "$out" ]; then
+    exit 2
+fi
+{
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' 'exit 0'
+} > "$out"
+chmod +x "$out"
+"#,
+    )
+    .map_err(|err| format!("failed to write fake cc: {err}"))?;
+    let mut perms = std::fs::metadata(fake_cc.path())
+        .map_err(|err| format!("missing fake cc: {err}"))?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(fake_cc.path(), perms)
+        .map_err(|err| format!("failed to chmod fake cc: {err}"))?;
+
+    let fake_rnqcc = TempPath::new("layout-timeout-rnqcc", "sh");
+    std::fs::write(
+        fake_rnqcc.path(),
+        r#"#!/bin/sh
+out=
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-o" ]; then
+        shift
+        out="$1"
+    fi
+    shift
+done
+if [ -z "$out" ]; then
+    exit 2
+fi
+{
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' "printf 'partial stdout without newline'"
+    printf '%s\n' "printf 'partial stderr without newline' >&2"
+    printf '%s\n' 'sleep 5'
+} > "$out"
+chmod +x "$out"
+"#,
+    )
+    .map_err(|err| format!("failed to write fake rnqcc: {err}"))?;
+    let mut perms = std::fs::metadata(fake_rnqcc.path())
+        .map_err(|err| format!("missing fake rnqcc: {err}"))?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(fake_rnqcc.path(), perms)
+        .map_err(|err| format!("failed to chmod fake rnqcc: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/layout_oracle.py")
+        .env("CC", fake_cc.path())
+        .env("RNQCC", fake_rnqcc.path())
+        .env("LAYOUT_ORACLE_TIMEOUT", "0.1")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run layout oracle script: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("timed out after 0.1s"), "{stderr}");
+    assert!(!stderr.contains("None"), "{stderr}");
+    Ok(())
+}
+
 #[test]
 fn gcc_torture_xfail_reporter_lists_artifact_xfails_absent_from_fixture() -> Result<(), String> {
     let expected = TempPath::new("gcc-xfail-report-expected", "txt");

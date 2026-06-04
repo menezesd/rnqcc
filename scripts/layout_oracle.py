@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RNQCC = Path(os.environ.get("RNQCC", ROOT / "target" / "debug" / "rnqcc"))
 CC = os.environ.get("CC", "cc")
+DEFAULT_TIMEOUT = float(os.environ.get("LAYOUT_ORACLE_TIMEOUT", "30.0"))
 
 
 CASES: list[tuple[str, str]] = [
@@ -93,8 +94,30 @@ CASES: list[tuple[str, str]] = [
 ]
 
 
-def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def timeout_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value
+
+
+def run(cmd: list[str], timeout: float = DEFAULT_TIMEOUT) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            cmd,
+            124,
+            stdout=timeout_text(exc.stdout),
+            stderr=(timeout_text(exc.stderr) + f"\ntimed out after {timeout:.1f}s").lstrip(),
+        )
 
 
 def build_rnqcc() -> None:
@@ -113,10 +136,18 @@ def compile_and_run(compiler: list[str], source: Path, output: Path) -> int:
         sys.stderr.write(result.stdout)
         sys.stderr.write(result.stderr)
         raise SystemExit(result.returncode)
-    return subprocess.run([str(output)]).returncode
+    result = run([str(output)])
+    if result.returncode == 124 and "timed out after" in result.stderr:
+        sys.stderr.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        raise SystemExit(result.returncode)
+    return result.returncode
 
 
 def main() -> int:
+    if DEFAULT_TIMEOUT <= 0:
+        print("LAYOUT_ORACLE_TIMEOUT must be positive", file=sys.stderr)
+        return 1
     build_rnqcc()
     with tempfile.TemporaryDirectory(prefix="rnqcc-layout-oracle.") as tmp:
         tmpdir = Path(tmp)

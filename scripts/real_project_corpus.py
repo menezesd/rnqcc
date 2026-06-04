@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "tests" / "fixtures" / "real_project" / "corpus.txt"
 RNQCC = Path(os.environ.get("RNQCC", ROOT / "target" / "debug" / "rnqcc"))
 ARTIFACT_DIR = os.environ.get("CI_ARTIFACT_DIR")
+DEFAULT_TIMEOUT = float(os.environ.get("REAL_PROJECT_TIMEOUT", "60.0"))
 
 
 class Entry:
@@ -35,8 +36,30 @@ class Entry:
         self.expected_failure = expected_failure
 
 
-def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def timeout_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value
+
+
+def run(cmd: list[str], timeout: float = DEFAULT_TIMEOUT) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            cmd,
+            124,
+            stdout=timeout_text(exc.stdout),
+            stderr=(timeout_text(exc.stderr) + f"\ntimed out after {timeout:.1f}s").lstrip(),
+        )
 
 
 def build_rnqcc() -> None:
@@ -99,6 +122,9 @@ def parse_manifest(path: Path) -> list[Entry]:
 
 
 def main() -> int:
+    if DEFAULT_TIMEOUT <= 0:
+        print("REAL_PROJECT_TIMEOUT must be positive", file=sys.stderr)
+        return 1
     manifest = Path(os.environ.get("REAL_PROJECT_MANIFEST", DEFAULT_MANIFEST))
     if not manifest.is_absolute():
         manifest = ROOT / manifest

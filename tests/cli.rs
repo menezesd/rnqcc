@@ -290,6 +290,57 @@ fn llvm_c_regression_smoke_reports_timeouts_cleanly() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn real_project_corpus_reports_timeouts_cleanly() -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempPath::new("real-project-timeout", "dir");
+    std::fs::create_dir_all(dir.path())
+        .map_err(|err| format!("failed to create fake corpus dir: {err}"))?;
+    let src = dir.path().join("slow.c");
+    let manifest = dir.path().join("corpus.txt");
+    std::fs::write(&src, "int main(void) { return 0; }\n")
+        .map_err(|err| format!("failed to write fake corpus source: {err}"))?;
+    std::fs::write(&manifest, format!("{}\n", src.display()))
+        .map_err(|err| format!("failed to write fake corpus manifest: {err}"))?;
+
+    let fake_rnqcc = TempPath::new("real-project-timeout-rnqcc", "sh");
+    std::fs::write(
+        fake_rnqcc.path(),
+        "#!/bin/sh\n\
+         printf 'partial stdout without newline'\n\
+         printf 'partial stderr without newline' >&2\n\
+         sleep 5\n",
+    )
+    .map_err(|err| format!("failed to write fake rnqcc: {err}"))?;
+    let mut perms = std::fs::metadata(fake_rnqcc.path())
+        .map_err(|err| format!("missing fake rnqcc: {err}"))?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(fake_rnqcc.path(), perms)
+        .map_err(|err| format!("failed to chmod fake rnqcc: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/real_project_corpus.py")
+        .env("RNQCC", fake_rnqcc.path())
+        .env("REAL_PROJECT_MANIFEST", &manifest)
+        .env("REAL_PROJECT_TIMEOUT", "0.1")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run real project corpus script: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("slow.c: unexpected failure"), "{stderr}");
+    assert!(stderr.contains("timed out after 0.1s"), "{stderr}");
+    assert!(!stderr.contains("None"), "{stderr}");
+    Ok(())
+}
+
 #[test]
 fn gcc_torture_xfail_reporter_lists_artifact_xfails_absent_from_fixture() -> Result<(), String> {
     let expected = TempPath::new("gcc-xfail-report-expected", "txt");

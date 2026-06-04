@@ -20062,6 +20062,66 @@ double absish(double x) { return x >= 0.0 ? x : -x; }
 }
 
 #[test]
+fn x86_64_linux_positive_zero_double_returns_use_xmm_zeroing() {
+    let src = temp_file("x86-positive-zero-double-returns", "c");
+    let out = temp_file("x86-positive-zero-double-returns", "s");
+    std::fs::write(
+        &src,
+        r#"
+double g(void) { return 0; }
+double h(void) { return 0.0; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert_eq!(asm.matches("\txorpd %xmm0, %xmm0").count(), 2, "{asm}");
+    assert!(!asm.contains("__float_const_"), "{asm}");
+    assert!(!asm.contains("__double_const_"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn x86_64_linux_negative_zero_float_returns_preserve_sign_bit() {
+    let src = temp_file("x86-negative-zero-float-returns", "c");
+    let out = temp_file("x86-negative-zero-float-returns", "s");
+    std::fs::write(
+        &src,
+        r#"
+float f(void) { return -0.0f; }
+double g(void) { return -0.0; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("__double_const_"), "{asm}");
+    assert!(asm.contains("\t.quad 9223372036854775808"), "{asm}");
+    assert!(!asm.contains("\txorpd %xmm0, %xmm0"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn supports_file_scope_gnu_vectors_larger_than_scalar_storage() {
     let src = temp_file("file-scope-large-gnu-vector", "c");
     let exe = temp_file("file-scope-large-gnu-vector", "bin");

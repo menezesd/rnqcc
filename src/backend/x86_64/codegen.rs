@@ -187,8 +187,40 @@ fn convert_float_return_val(val: &TackyVal, static_floats: &mut Vec<(String, f32
         }
         TackyVal::Constant(c) => AsmOperand::Data(intern_float_const(static_floats, *c as f32)),
         TackyVal::Var(name) => AsmOperand::Pseudo(name.clone()),
-        TackyVal::Int128Constant(c) => AsmOperand::Imm(*c as i64),
-        TackyVal::UInt128Constant(c) => AsmOperand::Imm(*c as i64),
+        TackyVal::Int128Constant(c) => {
+            AsmOperand::Data(intern_float_const(static_floats, *c as f32))
+        }
+        TackyVal::UInt128Constant(c) => {
+            AsmOperand::Data(intern_float_const(static_floats, *c as f32))
+        }
+    }
+}
+
+fn convert_double_return_val(
+    val: &TackyVal,
+    static_doubles: &mut Vec<(String, f64)>,
+) -> AsmOperand {
+    match val {
+        TackyVal::DoubleConstant(d) => AsmOperand::Data(intern_double_const(static_doubles, *d)),
+        TackyVal::Constant(c) => AsmOperand::Data(intern_double_const(static_doubles, *c as f64)),
+        TackyVal::Var(name) => AsmOperand::Pseudo(name.clone()),
+        TackyVal::Int128Constant(c) => {
+            AsmOperand::Data(intern_double_const(static_doubles, *c as f64))
+        }
+        TackyVal::UInt128Constant(c) => {
+            AsmOperand::Data(intern_double_const(static_doubles, *c as f64))
+        }
+    }
+}
+
+fn is_positive_float_zero_return(t: AsmType, val: &TackyVal) -> bool {
+    match (t, val) {
+        (_, TackyVal::Constant(0))
+        | (_, TackyVal::Int128Constant(0))
+        | (_, TackyVal::UInt128Constant(0)) => true,
+        (AsmType::Float, TackyVal::DoubleConstant(d)) => (*d as f32).to_bits() == 0,
+        (AsmType::Double, TackyVal::DoubleConstant(d)) => d.to_bits() == 0,
+        _ => false,
     }
 }
 
@@ -852,7 +884,7 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
             if t == AsmType::LongDouble {
                 x87_load_val(out, val, types, static_doubles);
             } else if matches!(t, AsmType::Float | AsmType::Double) {
-                if matches!(val, TackyVal::Constant(0)) {
+                if is_positive_float_zero_return(t, val) {
                     out.push(AsmInstr::Binary(
                         t,
                         AsmBinaryOp::Xor,
@@ -862,10 +894,8 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                 } else {
                     let src = match (t, val) {
                         (AsmType::Float, _) => convert_float_return_val(val, static_floats),
-                        (AsmType::Double, TackyVal::Constant(c)) => {
-                            convert_double_val(&TackyVal::DoubleConstant(*c as f64), static_doubles)
-                        }
-                        _ => convert_double_val(val, static_doubles),
+                        (AsmType::Double, _) => convert_double_return_val(val, static_doubles),
+                        _ => unreachable!("non-floating return type handled above"),
                     };
                     out.push(AsmInstr::Mov(t, src, AsmOperand::Xmm(XmmReg::XMM0)));
                 }

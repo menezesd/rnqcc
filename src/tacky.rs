@@ -4658,8 +4658,19 @@ impl TackyGen {
             };
             let (arg, from_type) = self.emit_exp(arg_exp)?;
             let value = self.convert_to(arg, from_type, arg_type);
-            let (high_op, low_op, limit) =
-                (TackyBinaryOp::Equal, TackyBinaryOp::Equal, f64::INFINITY);
+            let (high_op, low_op, limit) = match arg_type {
+                CType::Float => (
+                    TackyBinaryOp::GreaterThan,
+                    TackyBinaryOp::LessThan,
+                    f32::MAX as f64,
+                ),
+                CType::Double => (
+                    TackyBinaryOp::GreaterThan,
+                    TackyBinaryOp::LessThan,
+                    f64::MAX,
+                ),
+                _ => (TackyBinaryOp::Equal, TackyBinaryOp::Equal, f64::INFINITY),
+            };
             let raw_high_limit = self.fresh_tmp(CType::Double);
             self.emit(TackyInstr::Copy {
                 src: TackyVal::DoubleConstant(limit),

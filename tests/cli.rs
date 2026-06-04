@@ -21638,6 +21638,47 @@ int main(void) {
 }
 
 #[test]
+fn builtin_isinf_detects_max_value_overflow_products() {
+    let src = temp_file("builtin-isinf-max-overflow-product", "c");
+    let exe = temp_file("builtin-isinf-max-overflow-product", "bin");
+    std::fs::write(
+        &src,
+        r#"
+static int testf(float b) {
+    float c = 1.01f * b;
+    return __builtin_isinff(c);
+}
+
+static int test(double b) {
+    double c = 1.01 * b;
+    return __builtin_isinf(c);
+}
+
+int main(void) {
+    if (testf(__FLT_MAX__) < 1) return 1;
+    if (test(__DBL_MAX__) < 1) return 2;
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn builtin_isinfl_keeps_long_double_precision() {
     let src = temp_file("builtin-isinfl-long-double", "c");
     std::fs::write(

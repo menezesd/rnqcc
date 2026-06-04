@@ -2190,10 +2190,12 @@ fn convert_funcall(call: &FuncallArgs<'_>, ctx: &mut FuncallContext<'_>) -> Resu
         // Move int register args
         for (i, arg_idx, arg) in &int_reg_args {
             let t = val_type(arg, types);
-            if libc_va_list_bridge.is_some_and(|(bridge_reg_idx, _, _)| bridge_reg_idx == *i)
-                && Some(*arg_idx) == libc_va_list_arg
-            {
-                let (_, _, va_list_offset) = libc_va_list_bridge.unwrap();
+            let bridge_va_list_offset =
+                libc_va_list_bridge.and_then(|(bridge_reg_idx, _, va_list_offset)| {
+                    (bridge_reg_idx == *i && Some(*arg_idx) == libc_va_list_arg)
+                        .then_some(va_list_offset)
+                });
+            if let Some(va_list_offset) = bridge_va_list_offset {
                 out.push(AsmInstr::Lea(
                     AsmOperand::StackArg(va_list_offset),
                     AsmOperand::Reg(ARG_REGISTERS[*i]),

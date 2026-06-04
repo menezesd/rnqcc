@@ -3776,7 +3776,9 @@ impl TackyGen {
                 let elem_size = elem_ft.byte_size_with(&self.struct_defs);
                 if let TackyVal::Var(ref name) = result {
                     if ft.is_complex() && elems.len() == 1 {
-                        let elem = elems.into_iter().next().unwrap();
+                        let Some(elem) = elems.into_iter().next() else {
+                            return Ok((result, target_type));
+                        };
                         if self.typeof_exp(&elem).is_complex() {
                             let (val, val_type) = self.emit_exp(elem)?;
                             let val_ft = self.val_full_type(&val);

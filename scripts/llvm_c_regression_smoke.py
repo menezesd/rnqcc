@@ -9,18 +9,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+from smoke_utils import timeout_text
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RNQCC = ROOT / "target" / "debug" / "rnqcc"
 DEFAULT_SUITE = Path("/tmp/rnqcc-llvm-test-suite/SingleSource/Regression/C")
-
-
-def timeout_text(value: str | bytes | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode(errors="replace")
-    return value
 
 
 def run(cmd: list[str], timeout: float) -> subprocess.CompletedProcess[str]:

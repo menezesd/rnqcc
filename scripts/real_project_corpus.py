@@ -21,20 +21,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+from smoke_utils import env_timeout, timeout_text
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "tests" / "fixtures" / "real_project" / "corpus.txt"
 RNQCC = Path(os.environ.get("RNQCC", ROOT / "target" / "debug" / "rnqcc"))
 ARTIFACT_DIR = os.environ.get("CI_ARTIFACT_DIR")
-
-
-def env_timeout(name: str, default: str) -> float:
-    try:
-        return float(os.environ.get(name, default))
-    except ValueError:
-        raise SystemExit(f"{name} must be a number")
-
-
 DEFAULT_TIMEOUT = env_timeout("REAL_PROJECT_TIMEOUT", "60.0")
 
 
@@ -43,14 +36,6 @@ class Entry:
         self.source = source
         self.flags = flags
         self.expected_failure = expected_failure
-
-
-def timeout_text(value: str | bytes | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode(errors="replace")
-    return value
 
 
 def run(cmd: list[str], timeout: float = DEFAULT_TIMEOUT) -> subprocess.CompletedProcess[str]:

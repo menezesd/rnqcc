@@ -15,6 +15,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from smoke_utils import env_timeout, timeout_text
+
 
 STAGES = ("lex", "parse", "validate", "tacky", "codegen")
 
@@ -137,21 +139,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def env_timeout(name: str, default: str) -> float:
-    try:
-        return float(os.environ.get(name, default))
-    except ValueError:
-        raise SystemExit(f"{name} must be a number")
-
-
-def timeout_text(value: str | bytes | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode(errors="replace")
-    return value
-
-
 def run(cmd: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
@@ -220,7 +207,7 @@ def main(argv: list[str]) -> int:
         print("--timeout must be positive", file=sys.stderr)
         return 1
     repo = Path.cwd()
-    work_dir = args.work_dir or Path(tempfile.gettempdir()) / f"rnqcc-fuzz-smoke-{args.seed}"
+    work_dir = args.work_dir or Path(tempfile.mkdtemp(prefix=f"rnqcc-fuzz-smoke-{args.seed}-"))
     work_dir.mkdir(parents=True, exist_ok=True)
 
     rnqcc = args.rnqcc

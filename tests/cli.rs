@@ -306,6 +306,57 @@ fn fuzz_smoke_rejects_nonpositive_case_count() -> Result<(), String> {
 }
 
 #[test]
+fn fuzz_smoke_parallel_default_workdirs_do_not_collide() -> Result<(), String> {
+    let first = match Command::new("python3")
+        .arg("scripts/fuzz_smoke.py")
+        .arg("--seed")
+        .arg("17")
+        .arg("--cases")
+        .arg("1")
+        .arg("--rnqcc")
+        .arg(rnqcc())
+        .arg("--target")
+        .arg("x86_64-linux")
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to start first fuzz smoke script: {err}")),
+    };
+    let second = match Command::new("python3")
+        .arg("scripts/fuzz_smoke.py")
+        .arg("--seed")
+        .arg("17")
+        .arg("--cases")
+        .arg("1")
+        .arg("--rnqcc")
+        .arg(rnqcc())
+        .arg("--target")
+        .arg("x86_64-linux")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run second fuzz smoke script: {err}")),
+    };
+    let first = first
+        .wait_with_output()
+        .map_err(|err| format!("failed to wait for first fuzz smoke script: {err}"))?;
+
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    Ok(())
+}
+
+#[test]
 fn smoke_scripts_reject_nonnumeric_timeout_env() -> Result<(), String> {
     let cases: [(&str, &str, &[&str]); 3] = [
         (

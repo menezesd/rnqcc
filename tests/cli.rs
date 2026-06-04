@@ -11135,6 +11135,35 @@ fn internal_cpp_m_mf_writes_dependencies_only_to_requested_file() {
 }
 
 #[test]
+fn internal_cpp_rejects_m_mf_with_multiple_inputs_before_writing_dependencies() {
+    let dir = temp_file("internal-cpp-m-mf-multi-input", "d");
+    std::fs::create_dir(&dir).expect("failed to create dep dir");
+    let first = dir.join("first.c");
+    let second = dir.join("second.c");
+    let dep = dir.join("multi.d");
+    std::fs::write(&first, "int first;\n").expect("failed to write first source");
+    std::fs::write(&second, "int second;\n").expect("failed to write second source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-M")
+        .arg("-MF")
+        .arg(&dep)
+        .arg(&first)
+        .arg(&second)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    assert!(stderr(output).contains("-MF requires exactly one input file"));
+    assert!(!dep.exists());
+
+    let _ = std::fs::remove_file(first);
+    let _ = std::fs::remove_file(second);
+    let _ = std::fs::remove_dir(dir);
+}
+
+#[test]
 fn internal_cpp_md_mf_preprocesses_to_stdout_without_dependency_text() {
     let dir = temp_file("internal-cpp-md-mf-preprocess-stdout", "d");
     std::fs::create_dir(&dir).expect("failed to create dep dir");
@@ -11170,6 +11199,98 @@ fn internal_cpp_md_mf_preprocesses_to_stdout_without_dependency_text() {
     let _ = std::fs::remove_file(header);
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_dir(dir);
+}
+
+#[test]
+fn internal_cpp_rejects_md_mf_with_multiple_inputs_before_writing_dependencies() {
+    let dir = temp_file("internal-cpp-md-mf-multi-input", "d");
+    std::fs::create_dir(&dir).expect("failed to create dep dir");
+    let first = dir.join("first.c");
+    let second = dir.join("second.c");
+    let dep = dir.join("multi.d");
+    std::fs::write(&first, "int first;\n").expect("failed to write first source");
+    std::fs::write(&second, "int second;\n").expect("failed to write second source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-MD")
+        .arg("-MF")
+        .arg(&dep)
+        .arg(&first)
+        .arg(&second)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    assert!(stderr(output).contains("-MF requires exactly one input file"));
+    assert!(!dep.exists());
+
+    let _ = std::fs::remove_file(first);
+    let _ = std::fs::remove_file(second);
+    let _ = std::fs::remove_dir(dir);
+}
+
+#[test]
+fn internal_cpp_rejects_conflicting_dependency_modes_before_writing_dependencies() {
+    let dir = temp_file("internal-cpp-conflicting-dep-modes", "d");
+    std::fs::create_dir(&dir).expect("failed to create dep dir");
+    let src = dir.join("main.c");
+    let dep = dir.join("conflict.d");
+    std::fs::write(&src, "int value;\n").expect("failed to write source");
+
+    for modes in [["-M", "-MD"], ["-M", "-MM"]] {
+        let _ = std::fs::remove_file(&dep);
+        let output = Command::new(rnqcc())
+            .arg("--internal-cpp")
+            .args(modes)
+            .arg("-MF")
+            .arg(&dep)
+            .arg(&src)
+            .output()
+            .expect("failed to run rnqcc");
+
+        assert!(!output.status.success());
+        assert!(
+            stderr(output).contains("-M, -MM, -MD, and -MMD are mutually exclusive"),
+            "{modes:?}"
+        );
+        assert!(!dep.exists(), "{modes:?}");
+    }
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_dir(dir);
+}
+
+#[test]
+fn internal_cpp_rejects_dependency_modifiers_without_dependency_mode() {
+    for args in [
+        vec!["-MF", "unused.d"],
+        vec!["-MP"],
+        vec!["-MT", "target.o"],
+        vec!["-MQ", "quoted target.o"],
+    ] {
+        let src = temp_file("dep-modifier-without-mode", "c");
+        let asm = src.with_extension("s");
+        std::fs::write(&src, "int main(void) { return 0; }\n").expect("failed to write source");
+        let _ = std::fs::remove_file(&asm);
+
+        let output = Command::new(rnqcc())
+            .arg("--internal-cpp")
+            .arg("-S")
+            .args(&args)
+            .arg(&src)
+            .output()
+            .expect("failed to run rnqcc");
+
+        assert!(!output.status.success(), "{args:?}");
+        assert!(
+            stderr(output).contains("-MF, -MP, -MT, and -MQ require -M, -MM, -MD, or -MMD"),
+            "{args:?}"
+        );
+        assert!(!asm.exists(), "{args:?}");
+
+        let _ = std::fs::remove_file(src);
+    }
 }
 
 #[test]
@@ -18317,6 +18438,114 @@ fn expands_quoted_nested_response_file_paths_with_spaces() {
     let _ = std::fs::remove_file(nested_rsp);
     let _ = std::fs::remove_dir(subdir);
     let _ = std::fs::remove_dir(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn expands_bom_prefixed_response_file_arguments() {
+    let src = temp_file("bom response file source", "c");
+    let out = temp_file("bom response file output", "s");
+    let rsp = temp_file("bom-response-file", "rsp");
+    std::fs::write(&src, "int main(void) { return 42; }\n").expect("failed to write source");
+    let mut contents = vec![0xef, 0xbb, 0xbf];
+    contents.extend_from_slice(
+        format!("-S -o \"{}\" \"{}\"\n", out.display(), src.display()).as_bytes(),
+    );
+    std::fs::write(&rsp, contents).expect("failed to write response file");
+
+    let output = Command::new(rnqcc())
+        .arg(format!("@{}", rsp.display()))
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    assert!(std::fs::read_to_string(&out)
+        .expect("failed to read assembly output")
+        .contains("main"));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+    let _ = std::fs::remove_file(rsp);
+}
+
+#[cfg(unix)]
+#[test]
+fn reports_malformed_response_file_path() {
+    let rsp = TempPath::new("bad-response-file", "rsp");
+    std::fs::write(rsp.path(), "-S 'unterminated\n").expect("failed to write response file");
+
+    let output = Command::new(rnqcc())
+        .arg(format!("@{}", rsp.path().display()))
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains(&rsp.path().display().to_string()),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("unterminated ' quote in response file"),
+        "{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn reports_too_deep_response_file_path() {
+    let dir = TempPath::new("deep-response-files", "d");
+    std::fs::create_dir(dir.path()).expect("failed to create response dir");
+    let files: Vec<_> = (0..18)
+        .map(|index| dir.path().join(format!("{index}.rsp")))
+        .collect();
+
+    for pair in files.windows(2) {
+        std::fs::write(&pair[0], format!("@{}\n", pair[1].display()))
+            .expect("failed to write response file");
+    }
+    std::fs::write(files.last().expect("missing final response file"), "-S\n")
+        .expect("failed to write final response file");
+
+    let output = Command::new(rnqcc())
+        .arg(format!("@{}", files[0].display()))
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("response file nesting is too deep while reading"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&files[17].display().to_string()),
+        "{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn reports_response_file_cycles() {
+    let dir = TempPath::new("cyclic-response-files", "d");
+    std::fs::create_dir(dir.path()).expect("failed to create response dir");
+    let first = dir.path().join("first.rsp");
+    let second = dir.path().join("second.rsp");
+    std::fs::write(&first, "@second.rsp\n").expect("failed to write first response file");
+    std::fs::write(&second, "@./first.rsp\n").expect("failed to write second response file");
+
+    let output = Command::new(rnqcc())
+        .arg(format!("@{}", first.display()))
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("response file cycle while reading"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("./first.rsp"), "{stderr}");
 }
 
 #[cfg(unix)]

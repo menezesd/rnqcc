@@ -208,6 +208,7 @@ where
 }
 
 fn parse_response_file_args(contents: &str) -> Result<Vec<OsString>, String> {
+    let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
     let mut args = Vec::new();
     let mut current = String::new();
     let mut has_arg = false;
@@ -280,13 +281,10 @@ where
         arg: OsString,
         depth: usize,
         base_dir: Option<&Path>,
+        stack: &mut Vec<PathBuf>,
         out: &mut Vec<OsString>,
     ) -> Result<(), String> {
         const MAX_RESPONSE_DEPTH: usize = 16;
-        if depth > MAX_RESPONSE_DEPTH {
-            return Err("response file nesting is too deep".to_string());
-        }
-
         let Some(text) = arg.to_str() else {
             out.push(arg);
             return Ok(());
@@ -308,23 +306,50 @@ where
         } else {
             response_path.to_path_buf()
         };
-        let contents = std::fs::read_to_string(&resolved_path).map_err(|err| {
+        if depth > MAX_RESPONSE_DEPTH {
+            return Err(format!(
+                "response file nesting is too deep while reading {}",
+                resolved_path.display()
+            ));
+        }
+        let stack_path = std::fs::canonicalize(&resolved_path).map_err(|err| {
             format!(
                 "could not read response file {}: {}",
                 resolved_path.display(),
                 err
             )
         })?;
-        let nested_base_dir = resolved_path.parent();
-        for expanded in parse_response_file_args(&contents)? {
-            expand_one(expanded, depth + 1, nested_base_dir, out)?;
+        if stack.contains(&stack_path) {
+            return Err(format!(
+                "response file cycle while reading {}",
+                resolved_path.display()
+            ));
         }
-        Ok(())
+        stack.push(stack_path);
+        let result = (|| {
+            let contents = std::fs::read_to_string(&resolved_path).map_err(|err| {
+                format!(
+                    "could not read response file {}: {}",
+                    resolved_path.display(),
+                    err
+                )
+            })?;
+            let nested_base_dir = resolved_path.parent();
+            for expanded in parse_response_file_args(&contents)
+                .map_err(|err| format!("{}: {}", resolved_path.display(), err))?
+            {
+                expand_one(expanded, depth + 1, nested_base_dir, stack, out)?;
+            }
+            Ok(())
+        })();
+        stack.pop();
+        result
     }
 
     let mut expanded = Vec::new();
+    let mut stack = Vec::new();
     for arg in args {
-        expand_one(arg, 0, None, &mut expanded)?;
+        expand_one(arg, 0, None, &mut stack, &mut expanded)?;
     }
     Ok(expanded)
 }
@@ -6082,6 +6107,13 @@ fn driver(options: DriverOptions<'_>) -> Result<(), String> {
         return Err("stdin may only be used once".to_string());
     }
 
+    if dependency_options.file.is_some()
+        && (dependency_options.emit || dependency_options.side_effect)
+        && sources.len() != 1
+    {
+        return Err("-MF requires exactly one input file".to_string());
+    }
+
     if output.is_some() && !stage_accepts_output(&stage) {
         return Err("-o is only valid when producing preprocessed source, assembly, an object file, or an executable".to_string());
     }
@@ -6716,6 +6748,27 @@ fn real_main() -> Result<(), String> {
             println!("{}", target.triple_name());
         }
         return Ok(());
+    }
+
+    let dependency_mode_count = [
+        "dep_only",
+        "dep_user_only",
+        "dep_side_effect",
+        "dep_side_effect_user",
+    ]
+    .iter()
+    .filter(|name| matches.is_present(name))
+    .count();
+    if dependency_mode_count > 1 {
+        return Err("-M, -MM, -MD, and -MMD are mutually exclusive".to_string());
+    }
+    if dependency_mode_count == 0
+        && (matches.is_present("dep_file")
+            || matches.is_present("dep_phony")
+            || matches.is_present("dep_target")
+            || matches.is_present("dep_quoted_target"))
+    {
+        return Err("-MF, -MP, -MT, and -MQ require -M, -MM, -MD, or -MMD".to_string());
     }
 
     let dependency_options = DependencyOptions {

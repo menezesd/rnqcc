@@ -276,8 +276,6 @@ def skip_reason_for_test(src: Path) -> str | None:
     }
     if src.parent.name == "execute" and src.name in recursive_nested_control_flow_gaps:
         return "unsupported recursive nested nonlocal control flow"
-    if src.parent.name == "execute" and src.name == "20011008-3.c":
-        return "platform-sensitive stack layout stress test"
     if stack_stress and src.parent.name != "execute":
         return "stack-size stress test"
     if "C4096" in text and "This testcase exposed" in text:

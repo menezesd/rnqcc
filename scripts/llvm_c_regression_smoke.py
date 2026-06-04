@@ -45,6 +45,10 @@ def short_failure(result: subprocess.CompletedProcess[str]) -> str:
     text = (result.stderr or result.stdout).strip()
     if not text:
         return f"exit status {result.returncode}"
+    if result.returncode == 124:
+        for line in reversed(text.splitlines()):
+            if "timed out after" in line:
+                return line[:240]
     return text.splitlines()[0][:240]
 
 

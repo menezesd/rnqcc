@@ -1606,6 +1606,12 @@ impl Parser {
                 _ => Err(self.format_error("typeof cannot use -> on non-pointer expression")),
             },
             Exp::Unary(UnaryOp::LogicalNot, _) => Ok(FullType::Scalar(CType::Int)),
+            Exp::Unary(UnaryOp::Negate | UnaryOp::Complement, inner) => {
+                match self.typeof_expression(inner)? {
+                    FullType::Scalar(ct) => Ok(FullType::Scalar(ct.promote())),
+                    inner_type => Ok(inner_type),
+                }
+            }
             Exp::Unary(_, inner) => self.typeof_expression(inner),
             Exp::Binary(op, left, right) => {
                 if matches!(
@@ -1623,6 +1629,12 @@ impl Parser {
                 }
                 let left_type = self.typeof_expression(left)?;
                 let right_type = self.typeof_expression(right)?;
+                if matches!(op, BinaryOp::ShiftLeft | BinaryOp::ShiftRight) {
+                    return match left_type {
+                        FullType::Scalar(ct) => Ok(FullType::Scalar(ct.promote())),
+                        other => Ok(other),
+                    };
+                }
                 if matches!(op, BinaryOp::Add | BinaryOp::Sub) {
                     if matches!(left_type, FullType::Pointer(_))
                         && matches!(right_type, FullType::Pointer(_))

@@ -4912,6 +4912,46 @@ fn compiles_sizeof_expression_edges_in_file_scope_bounds() {
 }
 
 #[test]
+fn sizeof_expression_types_follow_casts_and_integer_promotions() {
+    let src = temp_file("sizeof-expression-promotions", "c");
+    let exe = temp_file("sizeof-expression-promotions", "bin");
+    std::fs::write(
+        &src,
+        "int main(void) {\n\
+             double d;\n\
+             static char c = 0;\n\
+             int i = 0;\n\
+             long l = 0;\n\
+             return sizeof((int)d) == 4\n\
+                 && sizeof(c ^ c) == 4\n\
+                 && sizeof(c << i) == 4\n\
+                 && sizeof(i << l) == 4\n\
+                 && sizeof(l >> c) == 8\n\
+                 && sizeof(d ? c : 10l) == 8\n\
+                 && sizeof(c = 10.0) == 1\n\
+                 ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn compiles_sizeof_incomplete_extern_array_redeclaration() {
     let src = temp_file("sizeof-incomplete-extern-array-redeclaration", "c");
     std::fs::write(

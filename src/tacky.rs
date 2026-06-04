@@ -1719,16 +1719,34 @@ impl TackyGen {
                 } else if matches!(op, BinaryOp::ShiftLeft | BinaryOp::ShiftRight) {
                     let ft = self.typeof_exp(left);
                     match ft {
-                        FullType::Scalar(ct) if ct.size() < 4 => FullType::Scalar(CType::Int),
+                        FullType::Scalar(ct) => FullType::Scalar(ct.promote()),
                         _ => ft,
                     }
                 } else {
                     let l = self.typeof_exp(left);
                     let r = self.typeof_exp(right);
-                    if l.byte_size_with(&self.struct_defs) >= r.byte_size_with(&self.struct_defs) {
-                        l
-                    } else {
-                        r
+                    if matches!(op, BinaryOp::Add | BinaryOp::Sub) {
+                        if matches!(l, FullType::Pointer(_)) && matches!(r, FullType::Pointer(_)) {
+                            return FullType::Scalar(CType::Long);
+                        }
+                        if matches!(l, FullType::Pointer(_)) {
+                            return l;
+                        }
+                        if matches!(r, FullType::Pointer(_)) && matches!(op, BinaryOp::Add) {
+                            return r;
+                        }
+                    }
+                    match (&l, &r) {
+                        (FullType::Scalar(lt), FullType::Scalar(rt)) => {
+                            FullType::Scalar(CType::common(*lt, *rt))
+                        }
+                        _ if l == r => l,
+                        _ if l.byte_size_with(&self.struct_defs)
+                            >= r.byte_size_with(&self.struct_defs) =>
+                        {
+                            l
+                        }
+                        _ => r,
                     }
                 }
             }
@@ -1737,10 +1755,17 @@ impl TackyGen {
             Exp::Conditional(_, then_e, else_e) => {
                 let t = self.typeof_exp(then_e);
                 let e = self.typeof_exp(else_e);
-                if t.byte_size_with(&self.struct_defs) >= e.byte_size_with(&self.struct_defs) {
-                    t
-                } else {
-                    e
+                match (&t, &e) {
+                    _ if t == e => t,
+                    (FullType::Scalar(tt), FullType::Scalar(et)) => {
+                        FullType::Scalar(CType::common(*tt, *et))
+                    }
+                    _ if t.byte_size_with(&self.struct_defs)
+                        >= e.byte_size_with(&self.struct_defs) =>
+                    {
+                        t
+                    }
+                    _ => e,
                 }
             }
             Exp::Comma(_, right) => self.typeof_exp(right),
@@ -13137,7 +13162,7 @@ fn eval_static_expr_full_type(
             size: s.chars().count() + 1,
         }),
         Exp::Cast(_, Some(ft), _) => Some(ft.clone()),
-        Exp::Cast(_, None, inner) => eval_static_expr_full_type(inner, full_types),
+        Exp::Cast(ctype, None, _) => Some(FullType::Scalar(*ctype)),
         Exp::Unary(UnaryOp::Deref, inner) => match eval_static_expr_full_type(inner, full_types)? {
             FullType::Pointer(pointee) => Some(*pointee),
             _ => None,

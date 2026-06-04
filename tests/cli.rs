@@ -4211,6 +4211,8 @@ fn x86_64_long_double_comparisons_use_x87_status_flags() {
     assert!(asm.contains("setbe"), "{asm}");
     assert!(asm.contains("seta"), "{asm}");
     assert!(asm.contains("setae"), "{asm}");
+    assert!(asm.contains("setp"), "{asm}");
+    assert!(asm.contains("setnp"), "{asm}");
     assert!(!asm.contains("cmpl %xmm"), "{asm}");
 
     let _ = std::fs::remove_file(src);

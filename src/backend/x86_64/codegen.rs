@@ -2615,7 +2615,10 @@ fn convert_binary(
             let l = promoted_cmp_operand(out, left, cmp_type, Reg::R11, types);
             out.push(AsmInstr::Cmp(cmp_type, r, l));
         }
-        if matches!(cmp_type, AsmType::Float | AsmType::Double) {
+        if matches!(
+            cmp_type,
+            AsmType::Float | AsmType::Double | AsmType::LongDouble
+        ) {
             emit_float_comparison_result(out, op, convert_val(dst));
         } else {
             out.push(AsmInstr::Mov(

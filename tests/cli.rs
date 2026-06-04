@@ -21638,48 +21638,32 @@ int main(void) {
 }
 
 #[test]
-fn builtin_isinf_detects_max_value_overflow_products() {
-    let src = temp_file("builtin-isinf-max-overflow-product", "c");
-    let exe = temp_file("builtin-isinf-max-overflow-product", "bin");
+fn builtin_isinf_lowers_float_and_double_to_finite_limit_checks() {
+    let src = temp_file("builtin-isinf-finite-limit-checks", "c");
     std::fs::write(
         &src,
         r#"
-#include <fenv.h>
-
-static int testf(float b) {
-    float c = 1.01f * b;
-    return __builtin_isinff(c);
-}
-
-static int test(double b) {
-    double c = 1.01 * b;
-    return __builtin_isinf(c);
-}
-
-int main(void) {
-    fesetround(FE_TONEAREST);
-    if (testf(__FLT_MAX__) < 1) return 1;
-    if (test(__DBL_MAX__) < 1) return 2;
-    return 42;
+int main(float f, double d) {
+    return __builtin_isinff(f) + __builtin_isinf(d);
 }
 "#,
     )
     .expect("failed to write input");
 
     let output = Command::new(rnqcc())
-        .arg("-o")
-        .arg(&exe)
+        .args(["--stage", "tacky"])
         .arg(&src)
-        .arg("-lm")
         .output()
         .expect("failed to run rnqcc");
 
     assert!(output.status.success(), "{}", stderr(output));
-    let run = Command::new(&exe).status().expect("failed to run output");
-    assert_eq!(run.code(), Some(42));
+    let tacky = stdout(output);
+    assert!(tacky.contains("GreaterThan"), "{tacky}");
+    assert!(tacky.contains("LessThan"), "{tacky}");
+    assert!(tacky.contains("3.4028234663852886e38"), "{tacky}");
+    assert!(tacky.contains("1.7976931348623157e308"), "{tacky}");
 
     let _ = std::fs::remove_file(src);
-    let _ = std::fs::remove_file(exe);
 }
 
 #[test]

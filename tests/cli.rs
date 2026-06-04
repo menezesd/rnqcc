@@ -21644,6 +21644,8 @@ fn builtin_isinf_detects_max_value_overflow_products() {
     std::fs::write(
         &src,
         r#"
+#include <fenv.h>
+
 static int testf(float b) {
     float c = 1.01f * b;
     return __builtin_isinff(c);
@@ -21655,6 +21657,7 @@ static int test(double b) {
 }
 
 int main(void) {
+    fesetround(FE_TONEAREST);
     if (testf(__FLT_MAX__) < 1) return 1;
     if (test(__DBL_MAX__) < 1) return 2;
     return 42;
@@ -21667,6 +21670,7 @@ int main(void) {
         .arg("-o")
         .arg(&exe)
         .arg(&src)
+        .arg("-lm")
         .output()
         .expect("failed to run rnqcc");
 

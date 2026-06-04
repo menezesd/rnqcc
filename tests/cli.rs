@@ -20356,6 +20356,134 @@ int main(void) {
 }
 
 #[test]
+fn contentless_local_tag_redeclaration_keeps_prior_definition() {
+    let src = temp_file("contentless-local-tag-redecl", "c");
+    let exe = temp_file("contentless-local-tag-redecl", "bin");
+    std::fs::write(
+        &src,
+        r#"
+struct S { int a; int b; };
+union U { int i; long l; };
+struct S;
+union U;
+
+int main(void) {
+    struct T { int a; int b; };
+    union V { int i; long l; };
+    struct T;
+    union V;
+    struct S s = { 17, 25 };
+    union U u = { 13 };
+    struct T t = { 8, 34 };
+    union V v = { 21 };
+    return s.a == 17 && s.b == 25 && u.i == 13
+        && t.a == 8 && t.b == 34 && v.i == 21 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn initializes_single_char_array_struct_member_from_string_literal() {
+    let src = temp_file("single-char-array-member-string-init", "c");
+    let exe = temp_file("single-char-array-member-string-init", "bin");
+    std::fs::write(
+        &src,
+        r#"
+struct Buffer { char text[7]; };
+
+int main(void) {
+    struct Buffer b = { "abcdef" };
+    struct Buffer copy = b;
+    return copy.text[0] == 'a' && copy.text[1] == 'b'
+        && copy.text[5] == 'f' && copy.text[6] == '\0' ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn initializes_struct_array_member_from_struct_expression() {
+    let src = temp_file("struct-array-member-struct-expression-init", "c");
+    let exe = temp_file("struct-array-member-struct-expression-init", "bin");
+    std::fs::write(
+        &src,
+        r#"
+struct Inner {
+    double a;
+    char b;
+    int *p;
+};
+
+struct Outer {
+    int prefix;
+    struct Inner items[3];
+    int suffix;
+};
+
+int main(void) {
+    int value = 9;
+    struct Inner inner = { 150.0, -12, &value };
+    struct Outer outer = { 5, { inner, { 25.0, 3, &value } }, 7 };
+
+    inner.a += 10.0;
+    if (inner.a != 160.0) return 1;
+    if (outer.items[0].a != 150.0 || outer.items[0].b != -12) return 2;
+    if (*outer.items[0].p != 9) return 3;
+    if (outer.items[1].a != 25.0 || outer.items[1].b != 3) return 4;
+    if (outer.prefix != 5 || outer.suffix != 7) return 5;
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn same_size_gnu_vector_casts_reinterpret_bits() {
     let src = temp_file("gnu-vector-bitcast", "c");
     let exe = temp_file("gnu-vector-bitcast", "bin");

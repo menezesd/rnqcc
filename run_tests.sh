@@ -72,9 +72,29 @@ run_single_test() {
             add_helper "$helper_dir/nan.c"
         fi
     fi
-    for h in "$(dirname "$src")"/*_"$HELPER_PLATFORM".s; do
+    local src_dir
+    src_dir=$(dirname "$src")
+    for h in "$src_dir"/${name}_"$HELPER_PLATFORM".s "$src_dir"/${name}_*_"$HELPER_PLATFORM".s; do
         [ -f "$h" ] && add_helper "$h"
     done
+    case "$name" in
+        pass_args_on_page_boundary|return_struct_on_page_boundary)
+            [ -f "$src_dir/data_on_page_boundary_$HELPER_PLATFORM.s" ] \
+                && add_helper "$src_dir/data_on_page_boundary_$HELPER_PLATFORM.s"
+            ;;
+        return_big_struct_on_page_boundary)
+            [ -f "$src_dir/big_data_on_page_boundary_$HELPER_PLATFORM.s" ] \
+                && add_helper "$src_dir/big_data_on_page_boundary_$HELPER_PLATFORM.s"
+            ;;
+        return_pointer_in_rax)
+            [ -f "$src_dir/validate_return_pointer_$HELPER_PLATFORM.s" ] \
+                && add_helper "$src_dir/validate_return_pointer_$HELPER_PLATFORM.s"
+            ;;
+        return_space_overlap)
+            [ -f "$src_dir/return_space_address_overlap_$HELPER_PLATFORM.s" ] \
+                && add_helper "$src_dir/return_space_address_overlap_$HELPER_PLATFORM.s"
+            ;;
+    esac
 
     if [ ${#helpers[@]} -gt 0 ]; then
         "$COMPILER" "${COMPILER_TARGET[@]}" -o "$WORKDIR/$name" "$src" "${helpers[@]}" > /dev/null 2>&1

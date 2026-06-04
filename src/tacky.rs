@@ -9475,6 +9475,16 @@ impl TackyGen {
                         break;
                     }
                     let elem_init = &elems[*index];
+                    if elem.is_struct() && self.typeof_exp(elem_init) == elem.as_ref().clone() {
+                        self.emit_initializer_value_at(
+                            arr_name,
+                            elem,
+                            elem_init,
+                            base_offset + i as i64 * elem_size,
+                        )?;
+                        *index += 1;
+                        continue;
+                    }
                     if (Self::static_aggregate_initializer(elem_init).is_some()
                         || matches!(elem_init, Exp::StringLiteral(_)))
                         && (elem.is_array() || elem.is_struct())
@@ -10015,6 +10025,13 @@ impl TackyGen {
                     member_index = 0;
                 }
                 _ => {
+                    let elem_ft = FullType::Struct(tag.to_string());
+                    if self.typeof_exp(elem) == elem_ft {
+                        self.emit_initializer_value_at(arr_name, &elem_ft, elem, elem_offset)?;
+                        elem_index += 1;
+                        member_index = 0;
+                        continue;
+                    }
                     if member_index >= max_members {
                         elem_index += 1;
                         member_index = 0;
@@ -11371,6 +11388,18 @@ impl TackyGen {
                             }
                             t.to_ctype()
                         };
+                        if let [single] = elems.as_slice() {
+                            if matches!(single, Exp::StringLiteral(_)) {
+                                self.emit_array_init_flat(
+                                    &vd.name,
+                                    single,
+                                    scalar_t,
+                                    member.offset as i64,
+                                    &elem_sizes,
+                                )?;
+                                return Ok(());
+                            }
+                        }
                         self.emit_array_init_flat(
                             &vd.name,
                             init_ref,
@@ -11443,22 +11472,39 @@ impl TackyGen {
                                 );
                             } else if let Exp::ArrayInit(ref sub_elems) = elem {
                                 if mem_ft.is_array() {
-                                    let elem_sizes =
-                                        Self::compute_elem_sizes(mem_ft, &self.struct_defs);
-                                    let scalar_t = {
-                                        let mut t = mem_ft;
-                                        while let FullType::Array { elem: e, .. } = t {
-                                            t = e;
+                                    if let FullType::Array {
+                                        elem: array_elem,
+                                        size,
+                                    } = mem_ft
+                                    {
+                                        if let FullType::Struct(array_tag) = array_elem.as_ref() {
+                                            let array_tag = array_tag.clone();
+                                            self.emit_struct_array_init_flat(
+                                                &vd.name,
+                                                elem,
+                                                &array_tag,
+                                                *size,
+                                                member.offset as i64,
+                                            )?;
+                                        } else {
+                                            let elem_sizes =
+                                                Self::compute_elem_sizes(mem_ft, &self.struct_defs);
+                                            let scalar_t = {
+                                                let mut t = mem_ft;
+                                                while let FullType::Array { elem: e, .. } = t {
+                                                    t = e;
+                                                }
+                                                t.to_ctype()
+                                            };
+                                            self.emit_array_init_flat(
+                                                &vd.name,
+                                                elem,
+                                                scalar_t,
+                                                member.offset as i64,
+                                                &elem_sizes,
+                                            )?;
                                         }
-                                        t.to_ctype()
-                                    };
-                                    self.emit_array_init_flat(
-                                        &vd.name,
-                                        elem,
-                                        scalar_t,
-                                        member.offset as i64,
-                                        &elem_sizes,
-                                    )?;
+                                    }
                                 } else if let FullType::Struct(ref inner_tag) = mem_ft {
                                     // Nested struct compound init
                                     let inner_def =
@@ -11839,6 +11885,9 @@ impl TackyGen {
                     }
                 }
                 BlockItem::Declaration(Declaration::StructDecl(sd)) => {
+                    if sd.members.is_empty() && self.struct_defs.contains_key(&sd.tag) {
+                        continue;
+                    }
                     if sd.is_union && sd.transparent_union {
                         if let Some(member) = sd.members.first() {
                             self.transparent_unions
@@ -13633,6 +13682,9 @@ pub fn generate_with_options(
                 global_vars.insert(vd.name.clone());
             }
             Declaration::StructDecl(sd) => {
+                if sd.members.is_empty() && gen.struct_defs.contains_key(&sd.tag) {
+                    continue;
+                }
                 if sd.is_union && sd.transparent_union {
                     if let Some(member) = sd.members.first() {
                         gen.transparent_unions

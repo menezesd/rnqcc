@@ -1185,10 +1185,14 @@ pub fn allocate_registers(
                     continue;
                 }
                 let ct = types.get(name).copied().unwrap_or(CType::Int);
-                if ct.is_floating() {
-                    xmm_candidates.insert(name.clone());
-                } else if ct != CType::Struct {
-                    gp_candidates.insert(name.clone());
+                match ct {
+                    CType::Float | CType::Double => {
+                        xmm_candidates.insert(name.clone());
+                    }
+                    CType::LongDouble | CType::Struct => {}
+                    _ => {
+                        gp_candidates.insert(name.clone());
+                    }
                 }
             }
         }

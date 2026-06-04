@@ -23330,6 +23330,34 @@ int main(void) {
 "#,
         ),
         (
+            "x86-linux-long-double-x87-does-not-coalesce-with-double",
+            r#"
+extern void abort(void);
+
+static inline int __attribute__((always_inline)) testf(float b) {
+    float c = 1.01f * b;
+    return __builtin_isinff(c);
+}
+
+static inline int __attribute__((always_inline)) test(double b) {
+    double c = 1.01 * b;
+    return __builtin_isinf(c);
+}
+
+static inline int __attribute__((always_inline)) testl(long double b) {
+    long double c = 1.01L * b;
+    return __builtin_isinfl(c);
+}
+
+int main(void) {
+    if (testf(__FLT_MAX__) < 1) abort();
+    if (test(__DBL_MAX__) < 1) abort();
+    if (testl(__LDBL_MAX__) < 1) abort();
+    return 0;
+}
+"#,
+        ),
+        (
             "x86-linux-local-vprintf-chk-keeps-shadow-va-list",
             r#"
 #include <stdarg.h>
@@ -23399,8 +23427,13 @@ fn assert_x86_64_linux_assembly_regression_case(name: &str, source: &str) {
     let out = TempPath::new(name, "s");
     std::fs::write(src.path(), source).expect("failed to write input");
 
-    let output = Command::new(rnqcc())
-        .args(["--target", "x86_64-linux", "-S", "-o"])
+    let mut command = Command::new(rnqcc());
+    command.args(["--target", "x86_64-linux"]);
+    if name == "x86-linux-long-double-x87-does-not-coalesce-with-double" {
+        command.arg("--optimize");
+    }
+    let output = command
+        .args(["-S", "-o"])
         .arg(out.path())
         .arg(src.path())
         .output()
@@ -23483,6 +23516,12 @@ fn assert_x86_64_linux_assembly_regression_case(name: &str, source: &str) {
         assert!(asm.contains("fldt"), "{name}: {asm}");
         assert!(asm.contains("fstpt"), "{name}: {asm}");
     }
+    if name == "x86-linux-long-double-x87-does-not-coalesce-with-double" {
+        assert!(
+            !asm.contains("\tmulsd -"),
+            "{name}: double multiply read an x87 long-double spill slot: {asm}"
+        );
+    }
     if name == "x86-linux-local-vprintf-chk-keeps-shadow-va-list" {
         assert!(asm.contains("call __vprintf_chk"), "{name}: {asm}");
         assert!(asm.contains("call vprintf"), "{name}: {asm}");
@@ -23561,6 +23600,7 @@ fn x86_64_linux_assembly_regression_buckets() -> &'static [(&'static str, &'stat
                 "x86-linux-vfprintf-shadow-va-list-bridge",
                 "x86-linux-vprintf-chk-shadow-va-list-bridge",
                 "x86-linux-complex-long-double-raw-copies",
+                "x86-linux-long-double-x87-does-not-coalesce-with-double",
                 "x86-linux-local-vprintf-chk-keeps-shadow-va-list",
                 "x86-linux-aligned-struct-shadow-va-arg",
             ],

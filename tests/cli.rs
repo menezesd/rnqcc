@@ -21658,8 +21658,8 @@ int main(float f, double d) {
 
     assert!(output.status.success(), "{}", stderr(output));
     let tacky = stdout(output);
-    assert!(tacky.contains("GreaterThan"), "{tacky}");
-    assert!(tacky.contains("LessThan"), "{tacky}");
+    assert!(tacky.contains("GreaterEqual"), "{tacky}");
+    assert!(tacky.contains("LessEqual"), "{tacky}");
     assert!(tacky.contains("3.4028234663852886e38"), "{tacky}");
     assert!(tacky.contains("1.7976931348623157e308"), "{tacky}");
 

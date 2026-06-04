@@ -4660,13 +4660,13 @@ impl TackyGen {
             let value = self.convert_to(arg, from_type, arg_type);
             let (high_op, low_op, limit) = match arg_type {
                 CType::Float => (
-                    TackyBinaryOp::GreaterThan,
-                    TackyBinaryOp::LessThan,
+                    TackyBinaryOp::GreaterEqual,
+                    TackyBinaryOp::LessEqual,
                     f32::MAX as f64,
                 ),
                 CType::Double => (
-                    TackyBinaryOp::GreaterThan,
-                    TackyBinaryOp::LessThan,
+                    TackyBinaryOp::GreaterEqual,
+                    TackyBinaryOp::LessEqual,
                     f64::MAX,
                 ),
                 _ => (TackyBinaryOp::Equal, TackyBinaryOp::Equal, f64::INFINITY),

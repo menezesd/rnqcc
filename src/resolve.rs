@@ -429,6 +429,7 @@ impl Resolver {
             | Exp::ULongConstant(_)
             | Exp::UInt128Constant(_)
             | Exp::DoubleConstant(_)
+            | Exp::LongDoubleConstant(_)
             | Exp::ImaginaryIntConstant(_)
             | Exp::ImaginaryDoubleConstant(_)
             | Exp::StringLiteral(_)
@@ -1085,7 +1086,7 @@ fn eval_integer_constant_exp(exp: &Exp) -> Option<i64> {
         Exp::Constant(c) | Exp::LongConstant(c) | Exp::UIntConstant(c) | Exp::ULongConstant(c) => {
             Some(*c)
         }
-        Exp::DoubleConstant(d) => Some(*d as i64),
+        Exp::DoubleConstant(d) | Exp::LongDoubleConstant(d) => Some(*d as i64),
         Exp::Cast(_, _, inner) => eval_integer_constant_exp(inner),
         Exp::Unary(op, inner) => {
             let value = eval_integer_constant_exp(inner)?;

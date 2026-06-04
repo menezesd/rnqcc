@@ -116,9 +116,10 @@ fn build_asm_cfg(instrs: &[AsmInstr]) -> Vec<AsmBlock> {
 
     // Identify block boundaries: labels start blocks; jmp/jmpcc/ret end blocks
     let mut leaders: Vec<usize> = vec![0]; // first instruction is always a leader
+    let mut leader_set: HashSet<usize> = HashSet::from([0]);
     for (i, instr) in instrs.iter().enumerate() {
         match instr {
-            AsmInstr::Label(_) if !leaders.contains(&i) => {
+            AsmInstr::Label(_) if leader_set.insert(i) => {
                 leaders.push(i);
             }
             AsmInstr::Jmp(_)
@@ -127,7 +128,7 @@ fn build_asm_cfg(instrs: &[AsmInstr]) -> Vec<AsmBlock> {
             | AsmInstr::JmpIndirect(_)
             | AsmInstr::Ret
             | AsmInstr::Unreachable
-                if i + 1 < instrs.len() && !leaders.contains(&(i + 1)) =>
+                if i + 1 < instrs.len() && leader_set.insert(i + 1) =>
             {
                 leaders.push(i + 1);
             }
@@ -433,8 +434,10 @@ fn liveness_analysis(instrs: &[AsmInstr], exit_live: &HashSet<RegId>) -> Vec<Has
     let num_blocks = blocks.len();
     let mut block_live_in: Vec<HashSet<RegId>> = vec![HashSet::new(); num_blocks];
     let mut worklist: VecDeque<usize> = (0..num_blocks).rev().collect();
+    let mut queued: Vec<bool> = vec![true; num_blocks];
 
     while let Some(bi) = worklist.pop_front() {
+        queued[bi] = false;
         // Meet: union of successors' live_in
         let mut live_out: HashSet<RegId> = HashSet::new();
         for &si in &blocks[bi].succs {
@@ -459,8 +462,9 @@ fn liveness_analysis(instrs: &[AsmInstr], exit_live: &HashSet<RegId>) -> Vec<Has
         if live != block_live_in[bi] {
             block_live_in[bi] = live;
             for &pi in &blocks[bi].preds {
-                if !worklist.contains(&pi) {
+                if !queued[pi] {
                     worklist.push_back(pi);
+                    queued[pi] = true;
                 }
             }
         }
@@ -637,73 +641,84 @@ fn color_graph(graph: &mut Graph, hard_reg_ids: &[RegId], k: usize) {
         return;
     }
 
-    // Simplify: push nodes to stack
-    let mut stack: Vec<(RegId, bool)> = Vec::new(); // (node, is_potential_spill)
-    let mut pruned: HashSet<RegId> = HashSet::new();
+    // Simplify: push nodes to stack. Keep mutable degrees so each prune is
+    // proportional to the removed node's neighbors, not to all remaining nodes.
+    let mut stack: Vec<RegId> = Vec::new();
+    let mut remaining: HashSet<RegId> = pseudo_nodes.iter().cloned().collect();
+    let mut degree: HashMap<RegId, usize> = pseudo_nodes
+        .iter()
+        .map(|node| {
+            let degree = graph.adj.get(node).map(|nbrs| nbrs.len()).unwrap_or(0);
+            (node.clone(), degree)
+        })
+        .collect();
+    let mut low_degree: VecDeque<RegId> = pseudo_nodes
+        .iter()
+        .filter(|node| degree.get(*node).copied().unwrap_or(0) < k)
+        .cloned()
+        .collect();
 
-    let remaining = |pruned: &HashSet<RegId>| -> Vec<RegId> {
-        pseudo_nodes
-            .iter()
-            .filter(|n| !pruned.contains(n))
-            .cloned()
-            .collect()
-    };
+    while !remaining.is_empty() {
+        let node = loop {
+            match low_degree.pop_front() {
+                Some(candidate)
+                    if remaining.contains(&candidate)
+                        && degree.get(&candidate).copied().unwrap_or(0) < k =>
+                {
+                    break candidate;
+                }
+                Some(_) => continue,
+                None => {
+                    break remaining
+                        .iter()
+                        .min_by(|a, b| {
+                            let cost_a = graph.spill_cost.get(*a).copied().unwrap_or(0.0);
+                            let cost_b = graph.spill_cost.get(*b).copied().unwrap_or(0.0);
+                            let deg_a = degree.get(*a).copied().unwrap_or(0).max(1) as f64;
+                            let deg_b = degree.get(*b).copied().unwrap_or(0).max(1) as f64;
+                            (cost_a / deg_a)
+                                .partial_cmp(&(cost_b / deg_b))
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .cloned()
+                        .expect("remaining pseudo set is non-empty");
+                }
+            }
+        };
 
-    let current_degree = |id: &RegId, graph: &Graph, pruned: &HashSet<RegId>| -> usize {
-        graph
-            .adj
-            .get(id)
-            .map(|nbrs| nbrs.iter().filter(|n| !pruned.contains(n)).count())
-            .unwrap_or(0)
-    };
+        remaining.remove(&node);
+        stack.push(node.clone());
 
-    loop {
-        let rem = remaining(&pruned);
-        if rem.is_empty() {
-            break;
-        }
-
-        // Try to find a node with degree < k
-        let low_degree = rem.iter().find(|n| current_degree(n, graph, &pruned) < k);
-
-        if let Some(node) = low_degree {
-            stack.push((node.clone(), false));
-            pruned.insert(node.clone());
-        } else {
-            // Pick spill candidate: min(spill_cost / degree)
-            let candidate = rem
-                .iter()
-                .min_by(|a, b| {
-                    let cost_a = graph.spill_cost.get(*a).copied().unwrap_or(0.0);
-                    let cost_b = graph.spill_cost.get(*b).copied().unwrap_or(0.0);
-                    let deg_a = current_degree(a, graph, &pruned).max(1) as f64;
-                    let deg_b = current_degree(b, graph, &pruned).max(1) as f64;
-                    (cost_a / deg_a)
-                        .partial_cmp(&(cost_b / deg_b))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .cloned();
-            if let Some(node) = candidate {
-                stack.push((node.clone(), true));
-                pruned.insert(node);
+        if let Some(neighbors) = graph.adj.get(&node) {
+            for neighbor in neighbors {
+                if !remaining.contains(neighbor) {
+                    continue;
+                }
+                let Some(neighbor_degree) = degree.get_mut(neighbor) else {
+                    continue;
+                };
+                *neighbor_degree = neighbor_degree.saturating_sub(1);
+                if *neighbor_degree < k {
+                    low_degree.push_back(neighbor.clone());
+                }
             }
         }
     }
 
     // Select: pop from stack and assign colors
-    while let Some((node, _is_spill)) = stack.pop() {
-        let used_colors: HashSet<usize> = graph
-            .adj
-            .get(&node)
-            .map(|nbrs| {
-                nbrs.iter()
-                    .filter_map(|n| graph.color.get(n).and_then(|c| *c))
-                    .collect()
-            })
-            .unwrap_or_default();
+    while let Some(node) = stack.pop() {
+        let mut used_colors = vec![false; k];
+        if let Some(neighbors) = graph.adj.get(&node) {
+            for neighbor in neighbors {
+                if let Some(color) = graph.color.get(neighbor).and_then(|color| *color) {
+                    if color < k {
+                        used_colors[color] = true;
+                    }
+                }
+            }
+        }
 
-        // Find minimum available color
-        let color = (0..k).find(|c| !used_colors.contains(c));
+        let color = used_colors.iter().position(|used| !*used);
         graph.color.insert(node, color);
     }
 }

@@ -1626,6 +1626,63 @@ fn define_virtual_object_macros(macros: &mut HashMap<String, MacroDef>, entries:
     }
 }
 
+fn target_long_double_max_macro(target: &Target) -> &'static str {
+    if target.long_double_size() == 8 {
+        "1.7976931348623157e+308L"
+    } else {
+        "__builtin_huge_vall()"
+    }
+}
+
+fn virtual_long_double_max_macro(macros: &HashMap<String, MacroDef>) -> &'static str {
+    if matches!(
+        macros.get("__SIZEOF_LONG_DOUBLE__"),
+        Some(MacroDef::Object(size)) if size == "8"
+    ) {
+        "1.7976931348623157e+308L"
+    } else {
+        "__builtin_huge_vall()"
+    }
+}
+
+fn virtual_long_double_limits(
+    macros: &HashMap<String, MacroDef>,
+) -> [(&'static str, &'static str); 6] {
+    if matches!(
+        macros.get("__SIZEOF_LONG_DOUBLE__"),
+        Some(MacroDef::Object(size)) if size == "8"
+    ) {
+        return [
+            ("LDBL_MANT_DIG", "53"),
+            ("LDBL_DIG", "15"),
+            ("LDBL_MIN_EXP", "(-1021)"),
+            ("LDBL_MAX_EXP", "1024"),
+            ("LDBL_MIN", "2.2250738585072014e-308L"),
+            ("LDBL_EPSILON", "2.2204460492503131e-16L"),
+        ];
+    }
+
+    if macros.contains_key("__aarch64__") || macros.contains_key("__arm64__") {
+        [
+            ("LDBL_MANT_DIG", "113"),
+            ("LDBL_DIG", "33"),
+            ("LDBL_MIN_EXP", "(-16381)"),
+            ("LDBL_MAX_EXP", "16384"),
+            ("LDBL_MIN", "3.36210314311209350626267781732175260e-4932L"),
+            ("LDBL_EPSILON", "1.92592994438723585305597794258492732e-34L"),
+        ]
+    } else {
+        [
+            ("LDBL_MANT_DIG", "64"),
+            ("LDBL_DIG", "18"),
+            ("LDBL_MIN_EXP", "(-16381)"),
+            ("LDBL_MAX_EXP", "16384"),
+            ("LDBL_MIN", "3.36210314311209350626e-4932L"),
+            ("LDBL_EPSILON", "1.08420217248550443401e-19L"),
+        ]
+    }
+}
+
 fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroDef>) -> String {
     match name {
         "assert.h" => {
@@ -3406,28 +3463,28 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 ("FLT_RADIX", "2"),
                 ("FLT_MANT_DIG", "24"),
                 ("DBL_MANT_DIG", "53"),
-                ("LDBL_MANT_DIG", "53"),
                 ("FLT_DIG", "6"),
                 ("DBL_DIG", "15"),
-                ("LDBL_DIG", "15"),
                 ("FLT_MIN_EXP", "(-125)"),
                 ("DBL_MIN_EXP", "(-1021)"),
-                ("LDBL_MIN_EXP", "(-1021)"),
                 ("FLT_MAX_EXP", "128"),
                 ("DBL_MAX_EXP", "1024"),
-                ("LDBL_MAX_EXP", "1024"),
                 ("FLT_MIN", "1.17549435e-38F"),
                 ("DBL_MIN", "2.2250738585072014e-308"),
-                ("LDBL_MIN", "2.2250738585072014e-308L"),
-                ("FLT_MAX", "3.40282347e+38F"),
-                ("DBL_MAX", "1.7976931348623157e+308"),
-                ("LDBL_MAX", "1.7976931348623157e+308L"),
+                ("FLT_MAX", "0x1.fffffep+127F"),
+                ("DBL_MAX", "0x1.fffffffffffffp+1023"),
                 ("FLT_EPSILON", "1.19209290e-7F"),
                 ("DBL_EPSILON", "2.2204460492503131e-16"),
-                ("LDBL_EPSILON", "2.2204460492503131e-16L"),
             ] {
                 macros.insert(name.to_string(), MacroDef::Object(value.to_string()));
             }
+            for (name, value) in virtual_long_double_limits(macros) {
+                macros.insert(name.to_string(), MacroDef::Object(value.to_string()));
+            }
+            macros.insert(
+                "LDBL_MAX".to_string(),
+                MacroDef::Object(virtual_long_double_max_macro(macros).to_string()),
+            );
             String::new()
         }
         "stdalign.h" => {
@@ -4747,6 +4804,9 @@ fn seed_internal_predefined_macros(macros: &mut HashMap<String, MacroDef>, targe
         "__SIZEOF_LONG_DOUBLE__",
         &target.long_double_size().to_string(),
     );
+    define_builtin_macro(macros, "__FLT_MAX__", "0x1.fffffep+127F");
+    define_builtin_macro(macros, "__DBL_MAX__", "0x1.fffffffffffffp+1023");
+    define_builtin_macro(macros, "__LDBL_MAX__", target_long_double_max_macro(target));
     define_builtin_macro(macros, "__SIZEOF_SIZE_T__", "8");
     define_builtin_macro(macros, "__SIZEOF_PTRDIFF_T__", "8");
     define_builtin_macro(macros, "__SIZEOF_WCHAR_T__", "4");
@@ -5603,6 +5663,7 @@ fn preprocess(invocation: PreprocessInvocation<'_>) -> Result<PreprocessedSource
             "-D__SIZEOF_LONG_DOUBLE__={}",
             invocation.target.long_double_size()
         )));
+        args.extend(external_cpp_target_macro_args(invocation.target));
         args.extend(
             invocation
                 .include_paths
@@ -5735,6 +5796,59 @@ fn do_compile(invocation: CompileInvocation<'_>) -> Result<String, String> {
 
 fn gcc_arch_args(target: &Target) -> Vec<&'static str> {
     target.cc_arch_args()
+}
+
+fn external_cpp_target_macro_args(target: &Target) -> Vec<OsString> {
+    let mut args = Vec::new();
+    for name in [
+        "__x86_64__",
+        "__amd64__",
+        "__aarch64__",
+        "__arm64__",
+        "__linux__",
+        "__linux",
+        "linux",
+        "__ELF__",
+        "__APPLE__",
+        "__MACH__",
+        "__APPLE_CC__",
+        "__APPLE_CPP__",
+        "__LDBL_MAX__",
+    ] {
+        args.push(OsString::from(format!("-U{name}")));
+    }
+    args.push(OsString::from(format!(
+        "-D__LDBL_MAX__={}",
+        target_long_double_max_macro(target)
+    )));
+
+    match target.arch {
+        Arch::X86_64 => {
+            args.push(OsString::from("-D__x86_64__=1"));
+            args.push(OsString::from("-D__amd64__=1"));
+        }
+        Arch::AArch64 => {
+            args.push(OsString::from("-D__aarch64__=1"));
+            args.push(OsString::from("-D__arm64__=1"));
+        }
+    }
+
+    match target.os {
+        TargetOs::Linux => {
+            args.push(OsString::from("-D__linux__=1"));
+            args.push(OsString::from("-D__linux=1"));
+            args.push(OsString::from("-Dlinux=1"));
+            args.push(OsString::from("-D__ELF__=1"));
+        }
+        TargetOs::MacOs => {
+            args.push(OsString::from("-D__APPLE__=1"));
+            args.push(OsString::from("-D__MACH__=1"));
+            args.push(OsString::from("-D__APPLE_CC__=6000"));
+            args.push(OsString::from("-D__APPLE_CPP__=1"));
+        }
+    }
+
+    args
 }
 
 fn can_assemble_on_host(target: &Target) -> bool {

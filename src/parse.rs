@@ -86,6 +86,7 @@ struct TypedefInfo {
     struct_tag: Option<String>,
     is_enum: bool,
     vla_size: Option<Exp>,
+    alignment: Option<std::num::NonZeroUsize>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -244,6 +245,7 @@ impl Parser {
                 struct_tag: None,
                 is_enum: false,
                 vla_size: None,
+                alignment: None,
             },
         );
         builtin_typedefs.insert(
@@ -254,6 +256,7 @@ impl Parser {
                 struct_tag: None,
                 is_enum: false,
                 vla_size: None,
+                alignment: None,
             },
         );
         builtin_typedefs.insert(
@@ -264,6 +267,7 @@ impl Parser {
                 struct_tag: None,
                 is_enum: false,
                 vla_size: None,
+                alignment: None,
             },
         );
         builtin_typedefs.insert(
@@ -274,6 +278,7 @@ impl Parser {
                 struct_tag: None,
                 is_enum: false,
                 vla_size: None,
+                alignment: None,
             },
         );
 
@@ -1552,6 +1557,7 @@ impl Parser {
             Exp::ULongConstant(_) => Ok(FullType::Scalar(CType::ULong)),
             Exp::UInt128Constant(_) => Ok(FullType::Scalar(CType::UInt128)),
             Exp::DoubleConstant(_) => Ok(FullType::Scalar(CType::Double)),
+            Exp::LongDoubleConstant(_) => Ok(FullType::Scalar(CType::LongDouble)),
             Exp::ImaginaryIntConstant(_) => Ok(Self::complex_full_type(CType::Int)),
             Exp::ImaginaryDoubleConstant(_) => Ok(Self::complex_full_type(CType::Double)),
             Exp::StringLiteral(value) => Ok(FullType::Array {
@@ -2253,6 +2259,7 @@ impl Parser {
                     let ft = info.full_type.clone();
                     let vla_size = info.vla_size.clone();
                     let is_enum = info.is_enum;
+                    let alignment = info.alignment;
                     self.advance()?;
                     if let Some(tag) = tag {
                         self.last_struct_tag = Some(tag);
@@ -2260,6 +2267,10 @@ impl Parser {
                     self.last_typedef_full_type = Some(ft);
                     self.last_typedef_vla_size = vla_size;
                     self.last_type_was_enum = is_enum;
+                    if let Some(alignment) = alignment {
+                        self.pending_alignment =
+                            Self::merge_alignment(self.pending_alignment, alignment);
+                    }
                     return Ok((sc, ct));
                 }
             }
@@ -3603,6 +3614,7 @@ impl Parser {
                     struct_tag: saved_struct_tag.clone(),
                     is_enum: self.last_type_was_enum,
                     vla_size,
+                    alignment: first_alignment,
                 },
             )?;
             while self.eat(&Token::Comma) {
@@ -3633,6 +3645,7 @@ impl Parser {
                         struct_tag: saved_struct_tag.clone(),
                         is_enum: self.last_type_was_enum,
                         vla_size,
+                        alignment: first_alignment,
                     },
                 )?;
             }
@@ -3727,7 +3740,10 @@ impl Parser {
                                 sc.clone(),
                                 first_alignment,
                             )?;
-                            self.add_value_type(decl.name.clone(), full_type2.clone())?;
+                            self.add_value_type(
+                                decl.name.clone(),
+                                self.var_decl_full_type(&decl)?,
+                            )?;
                             extra.push(Declaration::VarDecl(decl));
                         }
                         if !self.eat(&Token::Comma) {
@@ -3850,7 +3866,10 @@ impl Parser {
                                 sc.clone(),
                                 first_alignment,
                             )?;
-                            self.add_value_type(decl.name.clone(), full_type2.clone())?;
+                            self.add_value_type(
+                                decl.name.clone(),
+                                self.var_decl_full_type(&decl)?,
+                            )?;
                             extra.push(Declaration::VarDecl(decl));
                         }
                         if !self.eat(&Token::Comma) {
@@ -3888,7 +3907,7 @@ impl Parser {
         }
 
         let first = self.make_var_decl(name, &full_type, ctype, pi, sc.clone(), first_alignment)?;
-        self.add_value_type(first.name.clone(), full_type.clone())?;
+        self.add_value_type(first.name.clone(), self.var_decl_full_type(&first)?)?;
         // Check for multiple declarators
         if self.eat(&Token::Comma) {
             let mut extra = Vec::new();
@@ -3948,7 +3967,7 @@ impl Parser {
                         sc.clone(),
                         declarator_alignment,
                     )?;
-                    self.add_value_type(decl.name.clone(), full_type2.clone())?;
+                    self.add_value_type(decl.name.clone(), self.var_decl_full_type(&decl)?)?;
                     extra.push(Declaration::VarDecl(decl));
                 }
                 if !self.eat(&Token::Comma) {
@@ -4580,6 +4599,7 @@ impl Parser {
                         struct_tag: saved_struct_tag,
                         is_enum: self.last_type_was_enum,
                         vla_size,
+                        alignment: decl_alignment,
                     },
                 )?;
                 return Ok(BlockItem::Declaration(Declaration::TypedefDecl));
@@ -5532,6 +5552,10 @@ impl Parser {
                 self.advance()?;
                 Ok(Exp::DoubleConstant(val))
             }
+            Some(Token::LongDoubleLiteral(val)) => {
+                self.advance()?;
+                Ok(Exp::LongDoubleConstant(val))
+            }
             Some(Token::ImaginaryIntLiteral(val)) => {
                 self.advance()?;
                 Ok(Exp::ImaginaryIntConstant(val))
@@ -5679,7 +5703,12 @@ impl Parser {
                             );
                         };
                         let is_constant = self.eval_integer_constant_exp_with_layout(arg).is_some()
-                            || matches!(arg, Exp::DoubleConstant(_) | Exp::StringLiteral(_));
+                            || matches!(
+                                arg,
+                                Exp::DoubleConstant(_)
+                                    | Exp::LongDoubleConstant(_)
+                                    | Exp::StringLiteral(_)
+                            );
                         return Ok(Exp::Constant(is_constant as i64));
                     }
                     if name == "__builtin_classify_type" {
@@ -6512,6 +6541,7 @@ mod tests {
                     struct_tag: None,
                     is_enum: false,
                     vla_size: None,
+                    alignment: None,
                 },
             ),
             "missing typedef scope should fail",

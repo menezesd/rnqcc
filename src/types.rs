@@ -1126,6 +1126,7 @@ pub enum StaticInit {
     UCharInit(u8),
     DoubleInit(f64),
     FloatInit(f32),
+    LongDoubleInit(f64),
     ZeroInit(usize),                      // zero-fill N bytes
     StringInit(String, bool),             // (string_content, null_terminated) → .asciz or .ascii
     PointerInit(String),                  // label name → .quad label_name
@@ -1148,6 +1149,7 @@ pub enum Token {
     ULongLiteral(i64),
     UInt128Literal(u128),
     DoubleLiteral(f64),
+    LongDoubleLiteral(f64),
     ImaginaryIntLiteral(i64),
     ImaginaryDoubleLiteral(f64),
     CharLiteral(i64),
@@ -1324,6 +1326,7 @@ pub enum Exp {
     ULongConstant(i64),
     UInt128Constant(u128),
     DoubleConstant(f64),
+    LongDoubleConstant(f64),
     ImaginaryIntConstant(i64),
     ImaginaryDoubleConstant(f64),
     StringLiteral(String),

@@ -498,6 +498,33 @@ fn val_operand(
     }
 }
 
+fn intern_long_double_const(pool: &mut Vec<(String, f64)>, value: f64) -> String {
+    let bits = value.to_bits();
+    if let Some((name, _)) = pool.iter().find(|(_, existing)| existing.to_bits() == bits) {
+        return name.clone();
+    }
+
+    let name = format!("__aarch64_long_double_const_{}", pool.len());
+    pool.push((name.clone(), value));
+    name
+}
+
+fn rewrite_long_double_immediates(instructions: &mut [AsmInstr], pool: &mut Vec<(String, f64)>) {
+    for instr in instructions {
+        match instr {
+            AsmInstr::Mov(AsmType::LongDouble, src, _)
+            | AsmInstr::Binary(AsmType::LongDouble, _, src, _)
+            | AsmInstr::Cmp(AsmType::LongDouble, src, _) => {
+                if let AsmOperand::Imm(bits) = src {
+                    let value = f64::from_bits(*bits as u64);
+                    *src = AsmOperand::Data(intern_long_double_const(pool, value));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn collect_var(val: &TackyVal, vars: &mut Vec<String>, global_vars: &HashSet<String>) {
     if let TackyVal::Var(name) = val {
         if !global_vars.contains(name) && !vars.contains(name) {
@@ -1227,6 +1254,7 @@ fn convert_function(
     function: &TackyFunction,
     target: &Target,
     program: &TackyProgram,
+    long_double_consts: &mut Vec<(String, f64)>,
 ) -> Result<AsmFunction, String> {
     let types = &program.symbol_types;
     let array_sizes = &program.array_sizes;
@@ -2937,6 +2965,8 @@ fn convert_function(
         }
     }
 
+    rewrite_long_double_immediates(&mut instructions, long_double_consts);
+
     Ok(AsmFunction {
         name: function.name.clone(),
         global: function.global,
@@ -2946,10 +2976,12 @@ fn convert_function(
 
 pub fn gen(program: &TackyProgram, target: &Target) -> Result<AsmProgram, String> {
     let mut top_level = Vec::new();
+    let mut long_double_consts = Vec::new();
     for item in &program.top_level {
         match item {
             TackyTopLevel::Function(function) => {
-                let mut function = convert_function(function, target, program)?;
+                let mut function =
+                    convert_function(function, target, program, &mut long_double_consts)?;
                 rewrite_tls_operands(&mut function, &program.thread_local_vars);
                 top_level.push(AsmTopLevel::Function(function));
             }
@@ -2976,6 +3008,13 @@ pub fn gen(program: &TackyProgram, target: &Target) -> Result<AsmProgram, String
                 });
             }
         }
+    }
+    for (name, value) in long_double_consts {
+        top_level.push(AsmTopLevel::StaticConstant(AsmStaticConstant {
+            name,
+            alignment: 16,
+            init: StaticInit::LongDoubleInit(value),
+        }));
     }
     Ok(AsmProgram { top_level })
 }

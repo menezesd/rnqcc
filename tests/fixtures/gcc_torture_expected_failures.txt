@@ -6,25 +6,4 @@
 # Keep this file as small as possible. By default the runner fails if an
 # expected failure starts passing, so entries can be removed as rnqcc improves.
 
-# x86-64 Linux execute frontier from full GCC torture smoke. The same tests can
-# pass on AArch64 hosts, so these are tracked as workflow xfails instead of
-# unconditional skips.
-execute/20010605-2.c | exit status -6
-execute/20030914-2.c | exit status -6
-execute/20050215-1.c | exit status -6
-execute/960215-1.c | exit status -6
-execute/990525-2.c | exit status -11
-execute/align-2.c | exit status -6
-execute/bf64-1.c | exit status -11
-execute/bitfld-5.c | exit status -6
-execute/complex-6.c | exit status -6
-execute/pr23324.c | exit status -6
-execute/pr42833.c | exit status -6
-execute/pr43560.c | exit status -11
-execute/pr65369.c | exit status -11
-execute/pr92904.c | timed out after 10.0s
-execute/regstack-1.c | exit status -6
-execute/stdarg-1.c | exit status -6
-execute/stdarg-2.c | exit status -6
-execute/va-arg-6.c | exit status -6
-execute/va-arg-pack-1.c | exit status -6
+# No known expected failures.

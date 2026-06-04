@@ -362,14 +362,18 @@ impl Lexer {
         false
     }
 
-    fn consume_float_suffixes(&mut self) -> bool {
+    fn consume_float_suffixes(&mut self) -> (bool, bool) {
         let mut saw_float_suffix = false;
+        let mut saw_long_double_suffix = false;
         let mut saw_imaginary_suffix = false;
         loop {
             match self.peek() {
                 Some('f' | 'F' | 'l' | 'L' | 'd' | 'D') if !saw_float_suffix => {
                     saw_float_suffix = true;
                     let first = self.advance();
+                    if matches!(first, Some('l' | 'L')) {
+                        saw_long_double_suffix = true;
+                    }
                     if matches!(first, Some('d' | 'D')) && matches!(self.peek(), Some('d' | 'D')) {
                         self.advance();
                     }
@@ -381,7 +385,7 @@ impl Lexer {
                 _ => break,
             }
         }
-        saw_imaginary_suffix
+        (saw_imaginary_suffix, saw_long_double_suffix)
     }
 
     fn read_number(&mut self) -> Result<Token, String> {
@@ -415,9 +419,19 @@ impl Lexer {
             let value = num_str
                 .parse::<f64>()
                 .map_err(|_| format!("invalid float literal: {}", num_str))?;
-            let imaginary = self.consume_float_suffixes();
+            let (imaginary, long_double) = self.consume_float_suffixes();
+            if let Some(c) = self.peek() {
+                if c.is_ascii_alphabetic() || c == '_' {
+                    return Err(format!(
+                        "invalid float literal suffix at position {}",
+                        self.pos
+                    ));
+                }
+            }
             return Ok(if imaginary {
                 Token::ImaginaryDoubleLiteral(value)
+            } else if long_double {
+                Token::LongDoubleLiteral(value)
             } else {
                 Token::DoubleLiteral(value)
             });
@@ -495,7 +509,7 @@ impl Lexer {
                 ));
             }
             if is_hex_float {
-                let imaginary = self.consume_float_suffixes();
+                let (imaginary, long_double) = self.consume_float_suffixes();
                 if let Some(c) = self.peek() {
                     if c.is_ascii_alphabetic() || c == '_' {
                         return Err(format!(
@@ -506,6 +520,8 @@ impl Lexer {
                 }
                 return Ok(if imaginary {
                     Token::ImaginaryDoubleLiteral(value)
+                } else if long_double {
+                    Token::LongDoubleLiteral(value)
                 } else {
                     Token::DoubleLiteral(value)
                 });
@@ -593,7 +609,7 @@ impl Lexer {
                 .parse::<f64>()
                 .map_err(|_| format!("invalid float literal: {}", num_str))?;
             // Consume optional floating and GNU imaginary suffixes (all treated as double).
-            let imaginary = self.consume_float_suffixes();
+            let (imaginary, long_double) = self.consume_float_suffixes();
             if let Some(c) = self.peek() {
                 if c.is_ascii_alphabetic() || c == '_' {
                     return Err(format!(
@@ -604,6 +620,8 @@ impl Lexer {
             }
             return Ok(if imaginary {
                 Token::ImaginaryDoubleLiteral(value)
+            } else if long_double {
+                Token::LongDoubleLiteral(value)
             } else {
                 Token::DoubleLiteral(value)
             });
@@ -1036,12 +1054,20 @@ impl Lexer {
         }
         let value_text = Self::first_parenthesized_text(inputs)?;
         let value = value_text.trim();
-        let value_token = Self::simple_asm_value_token(value)?;
-        Some(vec![
-            Token::Identifier(output_name),
-            Token::Assign,
-            value_token,
-        ])
+        let value_tokens = Self::simple_asm_value_tokens(value)?;
+        let mut tokens = vec![Token::Identifier(output_name), Token::Assign];
+        tokens.extend(value_tokens);
+        Some(tokens)
+    }
+
+    fn simple_asm_value_tokens(value: &str) -> Option<Vec<Token>> {
+        if let Some(name) = value.trim().strip_prefix('&') {
+            return Some(vec![
+                Token::Ampersand,
+                Self::simple_asm_value_token(name.trim())?,
+            ]);
+        }
+        Some(vec![Self::simple_asm_value_token(value)?])
     }
 
     fn simple_asm_value_token(value: &str) -> Option<Token> {
@@ -1454,6 +1480,9 @@ mod tests {
     fn reports_invalid_number_suffix() -> Result<(), String> {
         let err = require_err(lex("int x = 123abc;"), "lexing should fail")?;
         assert!(err.contains("invalid number literal"));
+
+        let err = require_err(lex("double x = .5Lfoo;"), "lexing should fail")?;
+        assert!(err.contains("invalid float literal suffix"));
         Ok(())
     }
 
@@ -1489,9 +1518,10 @@ mod tests {
 
     #[test]
     fn lexes_leading_zero_float_literals_as_decimal_floats() -> Result<(), String> {
-        let tokens = lex("double x = 0.0; double y = 09.5;")?;
+        let tokens = lex("double x = 0.0; double y = 09.5; long double z = 7.125L;")?;
         assert!(tokens.contains(&Token::DoubleLiteral(0.0)));
         assert!(tokens.contains(&Token::DoubleLiteral(9.5)));
+        assert!(tokens.contains(&Token::LongDoubleLiteral(7.125)));
         Ok(())
     }
 
@@ -1500,7 +1530,7 @@ mod tests {
         let tokens = lex("double x = 0x1p2; double y = 0x1.8p+1F; double z = 0x.8p-1L;")?;
         assert!(tokens.contains(&Token::DoubleLiteral(4.0)));
         assert!(tokens.contains(&Token::DoubleLiteral(3.0)));
-        assert!(tokens.contains(&Token::DoubleLiteral(0.25)));
+        assert!(tokens.contains(&Token::LongDoubleLiteral(0.25)));
         Ok(())
     }
 

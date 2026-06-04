@@ -653,7 +653,7 @@ impl TackyGen {
 
     fn next_tmp_name(&mut self) -> String {
         loop {
-            let name = format!("tmp.{}", self.tmp_counter);
+            let name = format!("__tmp.{}", self.tmp_counter);
             self.tmp_counter += 1;
             if !self.symbol_types.contains_key(&name)
                 && !self.var_types.contains_key(&name)
@@ -1219,7 +1219,7 @@ impl TackyGen {
                 "isinf",
                 CType::Int,
                 FullType::Scalar(CType::Int),
-                vec![CType::Double],
+                vec![CType::LongDouble],
                 None,
             )),
             "alloca" | "__builtin_alloca" => Some((
@@ -1588,6 +1588,7 @@ impl TackyGen {
             Exp::ULongConstant(_) => FullType::Scalar(CType::ULong),
             Exp::UInt128Constant(_) => FullType::Scalar(CType::UInt128),
             Exp::DoubleConstant(_) => FullType::Scalar(CType::Double),
+            Exp::LongDoubleConstant(_) => FullType::Scalar(CType::LongDouble),
             Exp::ImaginaryIntConstant(_) => FullType::Vector {
                 elem: Box::new(FullType::Scalar(CType::Int)),
                 lanes: 2,
@@ -1790,6 +1791,7 @@ impl TackyGen {
             StaticInit::LabelDiffInit(_, _, bytes) => *bytes,
             StaticInit::Int128Init(_) | StaticInit::UInt128Init(_) => 16,
             StaticInit::FloatInit(_) => 4,
+            StaticInit::LongDoubleInit(_) => 16,
             StaticInit::ZeroInit(n) => *n,
             StaticInit::StringInit(s, null_terminated) => {
                 c_string_byte_len(s) + if *null_terminated { 1 } else { 0 }
@@ -2355,6 +2357,14 @@ impl TackyGen {
                     dst: dst.clone(),
                 });
                 Ok((dst, CType::Double))
+            }
+            Exp::LongDoubleConstant(val) => {
+                let dst = self.fresh_tmp(CType::LongDouble);
+                self.emit(TackyInstr::Copy {
+                    src: TackyVal::DoubleConstant(val),
+                    dst: dst.clone(),
+                });
+                Ok((dst, CType::LongDouble))
             }
             Exp::ImaginaryIntConstant(val) => {
                 let ft = FullType::Vector {
@@ -4228,6 +4238,7 @@ impl TackyGen {
             | Exp::ULongConstant(_)
             | Exp::UInt128Constant(_)
             | Exp::DoubleConstant(_)
+            | Exp::LongDoubleConstant(_)
             | Exp::ImaginaryIntConstant(_)
             | Exp::ImaginaryDoubleConstant(_)
             | Exp::StringLiteral(_)
@@ -4577,16 +4588,17 @@ impl TackyGen {
                 | "__builtin_huge_vall"
         ) && args.is_empty()
         {
-            let ret_type = if matches!(name.as_str(), "__builtin_inff" | "__builtin_huge_valf") {
-                CType::Float
-            } else {
-                CType::Double
+            let ret_type = match name.as_str() {
+                "__builtin_inff" | "__builtin_huge_valf" => CType::Float,
+                "__builtin_infl" | "__builtin_huge_vall" => CType::LongDouble,
+                _ => CType::Double,
             };
-            let dst = self.fresh_tmp(ret_type);
+            let raw_inf = self.fresh_tmp(CType::Double);
             self.emit(TackyInstr::Copy {
                 src: TackyVal::DoubleConstant(f64::INFINITY),
-                dst: dst.clone(),
+                dst: raw_inf.clone(),
             });
+            let dst = self.convert_to(raw_inf, CType::Double, ret_type);
             return Ok((dst, ret_type));
         }
         if matches!(
@@ -4594,41 +4606,40 @@ impl TackyGen {
             "__builtin_isinf" | "__builtin_isinff" | "__builtin_isinfl"
         ) && args.len() == 1
         {
-            let arg_type = if name == "__builtin_isinff" {
-                CType::Float
-            } else {
-                CType::Double
-            };
-            let max = if arg_type == CType::Float {
-                f32::MAX as f64
-            } else {
-                f64::MAX
+            let arg_type = match name.as_str() {
+                "__builtin_isinff" => CType::Float,
+                "__builtin_isinfl" => CType::LongDouble,
+                _ => CType::Double,
             };
             let Some(arg_exp) = args.into_iter().next() else {
                 return Err(format!("{} requires an argument", name));
             };
             let (arg, from_type) = self.emit_exp(arg_exp)?;
             let value = self.convert_to(arg, from_type, arg_type);
-            let high_limit = self.fresh_tmp(arg_type);
+            let (high_op, low_op, limit) =
+                (TackyBinaryOp::Equal, TackyBinaryOp::Equal, f64::INFINITY);
+            let raw_high_limit = self.fresh_tmp(CType::Double);
             self.emit(TackyInstr::Copy {
-                src: TackyVal::DoubleConstant(max),
-                dst: high_limit.clone(),
+                src: TackyVal::DoubleConstant(limit),
+                dst: raw_high_limit.clone(),
             });
+            let high_limit = self.convert_to(raw_high_limit, CType::Double, arg_type);
             let high = self.fresh_tmp(CType::Int);
             self.emit(TackyInstr::Binary {
-                op: TackyBinaryOp::GreaterThan,
+                op: high_op,
                 left: value.clone(),
                 right: high_limit,
                 dst: high.clone(),
             });
-            let low_limit = self.fresh_tmp(arg_type);
+            let raw_low_limit = self.fresh_tmp(CType::Double);
             self.emit(TackyInstr::Copy {
-                src: TackyVal::DoubleConstant(-max),
-                dst: low_limit.clone(),
+                src: TackyVal::DoubleConstant(-limit),
+                dst: raw_low_limit.clone(),
             });
+            let low_limit = self.convert_to(raw_low_limit, CType::Double, arg_type);
             let low = self.fresh_tmp(CType::Int);
             self.emit(TackyInstr::Binary {
-                op: TackyBinaryOp::LessThan,
+                op: low_op,
                 left: value,
                 right: low_limit,
                 dst: low.clone(),
@@ -8324,6 +8335,15 @@ impl TackyGen {
         lane: usize,
     ) -> TackyResult<TackyVal> {
         if value_ft.is_vector() {
+            if let TackyVal::Var(name) = value {
+                let lane_value = self.fresh_tmp(elem_type);
+                self.emit(TackyInstr::CopyFromOffset {
+                    src_name: name,
+                    offset: (lane * elem_size) as i64,
+                    dst: lane_value.clone(),
+                });
+                return Ok(lane_value);
+            }
             let addr = self.fresh_tmp(CType::Pointer);
             self.emit(TackyInstr::GetAddress {
                 src: value,
@@ -12661,6 +12681,7 @@ impl TackyGen {
             | Exp::ULongConstant(_)
             | Exp::UInt128Constant(_)
             | Exp::DoubleConstant(_)
+            | Exp::LongDoubleConstant(_)
             | Exp::ImaginaryIntConstant(_)
             | Exp::ImaginaryDoubleConstant(_)
             | Exp::StringLiteral(_)
@@ -13016,6 +13037,14 @@ fn convert_init_value(
         };
         return (d.to_bits()) as i64;
     }
+    if target == CType::LongDouble && !source_is_double {
+        let d = if source_is_unsigned {
+            (val as u64) as f64
+        } else {
+            val as f64
+        };
+        return d.to_bits() as i64;
+    }
     if !matches!(target, CType::Double | CType::LongDouble) && source_is_double {
         let d = f64::from_bits(val as u64);
         return match target {
@@ -13085,7 +13114,7 @@ fn make_static_init(val: i64, t: CType) -> StaticInit {
             CType::UInt128 => StaticInit::UInt128Init(val as u64 as u128),
             CType::Float => StaticInit::FloatInit(f32::from_bits(val as u32)),
             CType::Double => StaticInit::DoubleInit(f64::from_bits(val as u64)),
-            CType::LongDouble => StaticInit::ZeroInit(CType::LongDouble.size() as usize),
+            CType::LongDouble => StaticInit::LongDoubleInit(f64::from_bits(val as u64)),
             CType::Void | CType::Struct => StaticInit::ZeroInit(0),
         }
     }
@@ -13147,7 +13176,9 @@ fn eval_static_integer_constant_exp_with_context_and_values(
         Exp::UIntConstant(c) | Exp::ULongConstant(c) => Some((*c, false, true)),
         Exp::Int128Constant(c) => Some((*c as i64, false, false)),
         Exp::UInt128Constant(c) => Some((*c as i64, false, true)),
-        Exp::DoubleConstant(d) => Some((d.to_bits() as i64, true, false)),
+        Exp::DoubleConstant(d) | Exp::LongDoubleConstant(d) => {
+            Some((d.to_bits() as i64, true, false))
+        }
         Exp::Var(name) => static_const_values.get(name).copied(),
         Exp::SizeOf(inner) => {
             let ft = eval_static_expr_full_type(inner, full_types)?;
@@ -14298,7 +14329,9 @@ mod tests {
             program.top_level.iter().find_map(|item| match item {
                 TackyTopLevel::Function(fun) if fun.name == "foo" => {
                     fun.body.iter().find_map(|instr| match instr {
-                        TackyInstr::Return(TackyVal::Var(name)) if name.starts_with("tmp.") => {
+                        TackyInstr::Return(TackyVal::Var(name))
+                            if matches!(program.array_sizes.get(name), Some(4)) =>
+                        {
                             Some(name.clone())
                         }
                         _ => None,

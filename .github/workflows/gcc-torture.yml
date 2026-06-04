@@ -66,8 +66,17 @@ jobs:
         if: always()
         run: |
           if [ -f "$CI_ARTIFACT_DIR/gcc-torture-failures.txt" ]; then
+            report_args=(
+              --expected tests/fixtures/gcc_torture_expected_failures.txt
+              --fail-on-stale
+              --fail-on-unexpected-xfail
+              --fail-on-unmarked-expected
+            )
+            if [ "${{ inputs.start || '0' }}" = "0" ] && [ "${{ inputs.limit || '100000' }}" = "100000" ]; then
+              report_args+=(--fail-on-absent-expected)
+            fi
             python3 scripts/report_gcc_torture_xfails.py \
-              --expected tests/fixtures/gcc_torture_expected_failures.txt \
+              "${report_args[@]}" \
               "$CI_ARTIFACT_DIR/gcc-torture-failures.txt"
           fi
 

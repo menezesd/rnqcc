@@ -1244,7 +1244,9 @@ fn static_init_size(init: &StaticInit) -> usize {
         | StaticInit::PointerInit(_)
         | StaticInit::PointerInitOffset(_, _) => 8,
         StaticInit::LabelDiffInit(_, _, bytes) => *bytes,
-        StaticInit::Int128Init(_) | StaticInit::UInt128Init(_) => 16,
+        StaticInit::Int128Init(_) | StaticInit::UInt128Init(_) | StaticInit::LongDoubleInit(_) => {
+            16
+        }
         StaticInit::ZeroInit(n) => *n,
         StaticInit::StringInit(s, null_terminated) => {
             c_string_byte_len(s) + usize::from(*null_terminated)
@@ -1375,6 +1377,37 @@ fn emit_string_init(w: &mut dyn Write, s: &str, null_terminated: bool) -> std::i
     }
 }
 
+fn x87_long_double_bytes(value: f64) -> [u8; 16] {
+    let bits = value.to_bits();
+    let sign = ((bits >> 63) as u16) << 15;
+    let exp = ((bits >> 52) & 0x7ff) as i32;
+    let frac = bits & ((1u64 << 52) - 1);
+    let (significand, exponent) = if exp == 0 {
+        if frac == 0 {
+            (0, 0)
+        } else {
+            let top_bit = 63 - frac.leading_zeros() as i32;
+            let significand = frac << (63 - top_bit);
+            let unbiased = top_bit - 1074;
+            (significand, unbiased + 16383)
+        }
+    } else if exp == 0x7ff {
+        let significand = if frac == 0 {
+            1u64 << 63
+        } else {
+            (1u64 << 63) | (frac << 11)
+        };
+        (significand, 0x7fff)
+    } else {
+        let unbiased = exp - 1023;
+        ((1u64 << 63) | (frac << 11), unbiased + 16383)
+    };
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&significand.to_le_bytes());
+    bytes[8..10].copy_from_slice(&(sign | exponent as u16).to_le_bytes());
+    bytes
+}
+
 fn emit_static_init(
     w: &mut dyn Write,
     init: &StaticInit,
@@ -1399,6 +1432,12 @@ fn emit_static_init(
         }
         StaticInit::FloatInit(v) => writeln!(w, "\t.long {}", v.to_bits()),
         StaticInit::DoubleInit(v) => writeln!(w, "\t.quad {}", v.to_bits()),
+        StaticInit::LongDoubleInit(v) => {
+            for byte in x87_long_double_bytes(*v) {
+                writeln!(w, "\t.byte {}", byte)?;
+            }
+            Ok(())
+        }
         StaticInit::ZeroInit(n) => writeln!(w, "\t.zero {}", n),
         StaticInit::StringInit(s, null_terminated) => emit_string_init(w, s, *null_terminated),
         StaticInit::PointerInit(label) => {

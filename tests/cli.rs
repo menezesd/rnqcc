@@ -236,6 +236,2750 @@ fn fuzz_smoke_script_compiles_seeded_case() -> Result<(), String> {
 }
 
 #[test]
+fn gcc_torture_xfail_reporter_lists_artifact_xfails_absent_from_fixture() -> Result<(), String> {
+    let expected = TempPath::new("gcc-xfail-report-expected", "txt");
+    let failures = TempPath::new("gcc-xfail-report-failures", "txt");
+    std::fs::write(expected.path(), "execute/known.c | exit status -6\n")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(
+        failures.path(),
+        "execute/known.c\tXFAIL: exit status -6\n\
+         execute/obsolete.c\tXFAIL: exit status -11\n",
+    )
+    .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("xfails absent from fixture: 1"), "{stdout}");
+    assert!(
+        stdout.contains("execute/obsolete.c | exit status -11"),
+        "{stdout}"
+    );
+
+    let strict_output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--fail-on-unexpected-xfail")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run strict xfail reporter: {err}")),
+    };
+
+    assert!(!strict_output.status.success());
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_strict_mode_fails_on_stale_xfails() -> Result<(), String> {
+    let expected = TempPath::new("gcc-stale-xfail-report-expected", "txt");
+    let failures = TempPath::new("gcc-stale-xfail-report-failures", "txt");
+    std::fs::write(expected.path(), "execute/stale.c | exit status -6\n")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(
+        failures.path(),
+        "execute/stale.c\tSTALE-XFAIL: exit status -6\n",
+    )
+    .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(
+        stdout.contains("stale xfails still in fixture: 1"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("execute/stale.c | exit status -6"),
+        "{stdout}"
+    );
+
+    let strict_output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--fail-on-stale")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run strict xfail reporter: {err}")),
+    };
+
+    assert!(!strict_output.status.success());
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_strict_mode_fails_on_unmarked_expected() -> Result<(), String> {
+    let expected = TempPath::new("gcc-unmarked-xfail-report-expected", "txt");
+    let failures = TempPath::new("gcc-unmarked-xfail-report-failures", "txt");
+    std::fs::write(expected.path(), "execute/raw.c | timed out after 10.0s\n")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/raw.c\ttimed out after 10.0s\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(
+        stdout.contains("expected failures without xfail marker: 1"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("execute/raw.c | timed out after 10.0s"),
+        "{stdout}"
+    );
+
+    let strict_output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--fail-on-unmarked-expected")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run strict xfail reporter: {err}")),
+    };
+
+    assert!(!strict_output.status.success());
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_strict_mode_fails_on_absent_expected() -> Result<(), String> {
+    let expected = TempPath::new("gcc-absent-xfail-report-expected", "txt");
+    let failures = TempPath::new("gcc-absent-xfail-report-failures", "txt");
+    std::fs::write(expected.path(), "execute/absent.c | exit status -6\n")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(
+        stdout.contains("expected entries absent from artifact: 1"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("execute/absent.c | exit status -6"),
+        "{stdout}"
+    );
+
+    let strict_output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--fail-on-absent-expected")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run strict xfail reporter: {err}")),
+    };
+
+    assert!(!strict_output.status.success());
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_truncates_long_display_reasons() -> Result<(), String> {
+    let expected = TempPath::new("gcc-long-reason-xfail-report-expected", "txt");
+    let failures = TempPath::new("gcc-long-reason-xfail-report-failures", "txt");
+    let long_reason = format!("{}{}", "diagnostic ".repeat(40), "sentinel-tail");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(
+        failures.path(),
+        format!("execute/noisy.c\tFAIL: {long_reason}\n"),
+    )
+    .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stdout = stdout(output);
+    assert!(stdout.contains("execute/noisy.c | diagnostic "), "{stdout}");
+    assert!(stdout.contains("..."), "{stdout}");
+    assert!(!stdout.contains("sentinel-tail"), "{stdout}");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn gcc_torture_smoke_marks_expected_timeout_as_xfail() -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let suite = TempPath::new("gcc-smoke-timeout-suite", "dir");
+    let execute_dir = suite.path().join("execute");
+    std::fs::create_dir_all(&execute_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(execute_dir.join("raw.c"), "int main(void) { return 0; }\n")
+        .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+    let expected = TempPath::new("gcc-smoke-timeout-expected", "txt");
+    let failure_log = TempPath::new("gcc-smoke-timeout-failures", "txt");
+    let artifact_dir = TempPath::new("gcc-smoke-timeout-artifacts", "dir");
+    let fake_rnqcc = TempPath::new("gcc-smoke-timeout-rnqcc", "sh");
+    std::fs::write(expected.path(), "execute/raw.c | timed out after 0.1s\n")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(
+        fake_rnqcc.path(),
+        "#!/bin/sh\n\
+         out=\n\
+         while [ \"$#\" -gt 0 ]; do\n\
+           if [ \"$1\" = \"-o\" ]; then\n\
+             shift\n\
+             out=$1\n\
+           fi\n\
+           shift\n\
+         done\n\
+         cat > \"$out\" <<'EOF'\n\
+#!/bin/sh\n\
+printf 'started without newline'\n\
+sleep 5\n\
+EOF\n\
+         chmod +x \"$out\"\n",
+    )
+    .map_err(|err| format!("failed to write fake rnqcc: {err}"))?;
+    let mut perms = std::fs::metadata(fake_rnqcc.path())
+        .map_err(|err| format!("missing fake rnqcc: {err}"))?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(fake_rnqcc.path(), perms)
+        .map_err(|err| format!("failed to chmod fake rnqcc: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/gcc_torture_smoke.py")
+        .arg("--rnqcc")
+        .arg(fake_rnqcc.path())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--mode")
+        .arg("execute")
+        .arg("--limit")
+        .arg("1")
+        .arg("--timeout")
+        .arg("0.1")
+        .arg("--expected-failures")
+        .arg(expected.path())
+        .arg("--failure-log")
+        .arg(failure_log.path())
+        .arg("--artifact-dir")
+        .arg(artifact_dir.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("expected_failed=1"), "{stdout}");
+    let failures = std::fs::read_to_string(failure_log.path())
+        .map_err(|err| format!("failed to read failure log: {err}"))?;
+    assert!(
+        failures.contains("execute/raw.c\tXFAIL: timed out after 0.1s"),
+        "{failures}"
+    );
+    let source_path = std::fs::read_to_string(
+        artifact_dir
+            .path()
+            .join("gcc_torture")
+            .join("xfail")
+            .join("0000-raw")
+            .join("source-path.txt"),
+    )
+    .map_err(|err| format!("failed to read artifact source path: {err}"))?;
+    assert_eq!(source_path, "execute/raw.c\n");
+
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_smoke_emits_canonical_skip_paths() -> Result<(), String> {
+    let suite = TempPath::new("gcc-smoke-skip-path-suite", "dir");
+    let compile_dir = suite.path().join("compile");
+    std::fs::create_dir_all(&compile_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(
+        compile_dir.join("raw.c"),
+        "/* { dg-error \"expected diagnostic\" } */\n",
+    )
+    .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+    let skip_log = TempPath::new("gcc-smoke-skip-path-skips", "txt");
+    let fake_rnqcc = TempPath::new("gcc-smoke-skip-path-rnqcc", "sh");
+    std::fs::write(fake_rnqcc.path(), "#!/bin/sh\nexit 0\n")
+        .map_err(|err| format!("failed to write fake rnqcc: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/gcc_torture_smoke.py")
+        .arg("--rnqcc")
+        .arg(fake_rnqcc.path())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--mode")
+        .arg("compile")
+        .arg("--limit")
+        .arg("1")
+        .arg("--skip-log")
+        .arg(skip_log.path())
+        .arg("--print-skips")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(
+        stdout.contains("SKIP compile/raw.c: expected-diagnostic GCC torture test"),
+        "{stdout}"
+    );
+    let skips = std::fs::read_to_string(skip_log.path())
+        .map_err(|err| format!("failed to read skip log: {err}"))?;
+    assert!(
+        skips.contains("compile/raw.c\tSKIP: expected-diagnostic GCC torture test"),
+        "{skips}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_smoke_rejects_missing_explicit_expected_fixture() -> Result<(), String> {
+    let suite = TempPath::new("gcc-smoke-missing-expected-suite", "dir");
+    let execute_dir = suite.path().join("execute");
+    std::fs::create_dir_all(&execute_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(execute_dir.join("raw.c"), "int main(void) { return 0; }\n")
+        .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+    let missing_expected = TempPath::new("gcc-smoke-missing-expected", "txt");
+
+    let output = match Command::new("python3")
+        .arg("scripts/gcc_torture_smoke.py")
+        .arg("--rnqcc")
+        .arg(rnqcc())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--mode")
+        .arg("execute")
+        .arg("--limit")
+        .arg("1")
+        .arg("--expected-failures")
+        .arg(missing_expected.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("expected-failure fixture not found"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_smoke_rejects_directory_expected_fixture() -> Result<(), String> {
+    let suite = TempPath::new("gcc-smoke-directory-expected-suite", "dir");
+    let execute_dir = suite.path().join("execute");
+    std::fs::create_dir_all(&execute_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(execute_dir.join("raw.c"), "int main(void) { return 0; }\n")
+        .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+    let expected = TempPath::new("gcc-smoke-directory-expected", "dir");
+    std::fs::create_dir_all(expected.path())
+        .map_err(|err| format!("failed to create expected fixture dir: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/gcc_torture_smoke.py")
+        .arg("--rnqcc")
+        .arg(rnqcc())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--mode")
+        .arg("execute")
+        .arg("--limit")
+        .arg("1")
+        .arg("--expected-failures")
+        .arg(expected.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("expected-failure fixture is not a file"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_smoke_rejects_missing_explicit_rnqcc_path() -> Result<(), String> {
+    let suite = TempPath::new("gcc-smoke-missing-rnqcc-suite", "dir");
+    let execute_dir = suite.path().join("execute");
+    std::fs::create_dir_all(&execute_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(execute_dir.join("raw.c"), "int main(void) { return 0; }\n")
+        .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+    let missing_rnqcc = TempPath::new("gcc-smoke-missing-rnqcc", "bin");
+
+    let output = match Command::new("python3")
+        .arg("scripts/gcc_torture_smoke.py")
+        .arg("--rnqcc")
+        .arg(missing_rnqcc.path())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--mode")
+        .arg("execute")
+        .arg("--limit")
+        .arg("1")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("--rnqcc not found"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_smoke_rejects_directory_rnqcc_path() -> Result<(), String> {
+    let suite = TempPath::new("gcc-smoke-directory-rnqcc-suite", "dir");
+    let execute_dir = suite.path().join("execute");
+    std::fs::create_dir_all(&execute_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(execute_dir.join("raw.c"), "int main(void) { return 0; }\n")
+        .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+    let rnqcc_dir = TempPath::new("gcc-smoke-directory-rnqcc", "dir");
+    std::fs::create_dir_all(rnqcc_dir.path())
+        .map_err(|err| format!("failed to create rnqcc dir: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/gcc_torture_smoke.py")
+        .arg("--rnqcc")
+        .arg(rnqcc_dir.path())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--mode")
+        .arg("execute")
+        .arg("--limit")
+        .arg("1")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("--rnqcc path is not a file"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_smoke_rejects_invalid_numeric_args() -> Result<(), String> {
+    for (flag, value, expected) in [
+        ("--start", "-1", "--start must be non-negative"),
+        ("--limit", "0", "--limit must be positive"),
+        ("--timeout", "0", "--timeout must be positive"),
+        (
+            "--max-failures",
+            "-1",
+            "--max-failures must be non-negative",
+        ),
+        (
+            "--progress-every",
+            "-1",
+            "--progress-every must be non-negative",
+        ),
+    ] {
+        let suite = TempPath::new("gcc-smoke-invalid-numeric-suite", "dir");
+        let execute_dir = suite.path().join("execute");
+        std::fs::create_dir_all(&execute_dir)
+            .map_err(|err| format!("failed to create fake suite: {err}"))?;
+        std::fs::write(execute_dir.join("raw.c"), "int main(void) { return 0; }\n")
+            .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+        let output = match Command::new("python3")
+            .arg("scripts/gcc_torture_smoke.py")
+            .arg("--rnqcc")
+            .arg(rnqcc())
+            .arg("--suite")
+            .arg(suite.path())
+            .arg("--mode")
+            .arg("execute")
+            .arg(flag)
+            .arg(value)
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+        };
+
+        assert!(
+            !output.status.success(),
+            "{flag} {value} unexpectedly succeeded"
+        );
+        let stderr = stderr(output);
+        assert!(
+            stderr.contains(expected),
+            "{flag} {value} stderr did not contain {expected:?}: {stderr}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_smoke_rejects_directory_failure_log_path() -> Result<(), String> {
+    let suite = TempPath::new("gcc-smoke-directory-failure-log-suite", "dir");
+    let execute_dir = suite.path().join("execute");
+    std::fs::create_dir_all(&execute_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(execute_dir.join("raw.c"), "int main(void) { return 0; }\n")
+        .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+    let failure_log = TempPath::new("gcc-smoke-directory-failure-log", "dir");
+    std::fs::create_dir_all(failure_log.path())
+        .map_err(|err| format!("failed to create failure log dir: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/gcc_torture_smoke.py")
+        .arg("--rnqcc")
+        .arg(rnqcc())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--mode")
+        .arg("execute")
+        .arg("--limit")
+        .arg("1")
+        .arg("--failure-log")
+        .arg(failure_log.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("--failure-log path is not a file"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_smoke_rejects_directory_skip_log_path() -> Result<(), String> {
+    let suite = TempPath::new("gcc-smoke-directory-skip-log-suite", "dir");
+    let execute_dir = suite.path().join("execute");
+    std::fs::create_dir_all(&execute_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(execute_dir.join("raw.c"), "int main(void) { return 0; }\n")
+        .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+    let skip_log = TempPath::new("gcc-smoke-directory-skip-log", "dir");
+    std::fs::create_dir_all(skip_log.path())
+        .map_err(|err| format!("failed to create skip log dir: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/gcc_torture_smoke.py")
+        .arg("--rnqcc")
+        .arg(rnqcc())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--mode")
+        .arg("execute")
+        .arg("--limit")
+        .arg("1")
+        .arg("--skip-log")
+        .arg(skip_log.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("--skip-log path is not a file"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_smoke_rejects_file_parent_failure_log_path() -> Result<(), String> {
+    let suite = TempPath::new("gcc-smoke-file-parent-failure-log-suite", "dir");
+    let execute_dir = suite.path().join("execute");
+    std::fs::create_dir_all(&execute_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(execute_dir.join("raw.c"), "int main(void) { return 0; }\n")
+        .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+    let parent = TempPath::new("gcc-smoke-file-parent-failure-log", "txt");
+    std::fs::write(parent.path(), "")
+        .map_err(|err| format!("failed to write failure log parent file: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/gcc_torture_smoke.py")
+        .arg("--rnqcc")
+        .arg(rnqcc())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--mode")
+        .arg("execute")
+        .arg("--limit")
+        .arg("1")
+        .arg("--failure-log")
+        .arg(parent.path().join("failures.txt"))
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("--failure-log parent path is not a directory"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_smoke_rejects_file_parent_skip_log_path() -> Result<(), String> {
+    let suite = TempPath::new("gcc-smoke-file-parent-skip-log-suite", "dir");
+    let execute_dir = suite.path().join("execute");
+    std::fs::create_dir_all(&execute_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(execute_dir.join("raw.c"), "int main(void) { return 0; }\n")
+        .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+    let parent = TempPath::new("gcc-smoke-file-parent-skip-log", "txt");
+    std::fs::write(parent.path(), "")
+        .map_err(|err| format!("failed to write skip log parent file: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/gcc_torture_smoke.py")
+        .arg("--rnqcc")
+        .arg(rnqcc())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--mode")
+        .arg("execute")
+        .arg("--limit")
+        .arg("1")
+        .arg("--skip-log")
+        .arg(parent.path().join("skips.txt"))
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("--skip-log parent path is not a directory"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_smoke_rejects_file_artifact_dir_path() -> Result<(), String> {
+    let suite = TempPath::new("gcc-smoke-file-artifact-dir-suite", "dir");
+    let execute_dir = suite.path().join("execute");
+    std::fs::create_dir_all(&execute_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(execute_dir.join("raw.c"), "int main(void) { return 0; }\n")
+        .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+    let artifact_dir = TempPath::new("gcc-smoke-file-artifact-dir", "txt");
+    std::fs::write(artifact_dir.path(), "")
+        .map_err(|err| format!("failed to write artifact dir file: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/gcc_torture_smoke.py")
+        .arg("--rnqcc")
+        .arg(rnqcc())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--mode")
+        .arg("execute")
+        .arg("--limit")
+        .arg("1")
+        .arg("--artifact-dir")
+        .arg(artifact_dir.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("--artifact-dir path is not a directory"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_smoke_rejects_file_parent_artifact_dir_path() -> Result<(), String> {
+    let suite = TempPath::new("gcc-smoke-file-parent-artifact-dir-suite", "dir");
+    let execute_dir = suite.path().join("execute");
+    std::fs::create_dir_all(&execute_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(execute_dir.join("raw.c"), "int main(void) { return 0; }\n")
+        .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+    let parent = TempPath::new("gcc-smoke-file-parent-artifact-dir", "txt");
+    std::fs::write(parent.path(), "")
+        .map_err(|err| format!("failed to write artifact dir parent file: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/gcc_torture_smoke.py")
+        .arg("--rnqcc")
+        .arg(rnqcc())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--mode")
+        .arg("execute")
+        .arg("--limit")
+        .arg("1")
+        .arg("--artifact-dir")
+        .arg(parent.path().join("artifacts"))
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("--artifact-dir parent path is not a directory"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_duplicate_expected_entries() -> Result<(), String> {
+    let expected = TempPath::new("gcc-duplicate-xfail-report-expected", "txt");
+    let failures = TempPath::new("gcc-duplicate-xfail-report-failures", "txt");
+    std::fs::write(
+        expected.path(),
+        "execute/dup.c | exit status -6\n\
+         execute\\dup.c | timed out after 10.0s\n",
+    )
+    .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("duplicate expected failure"), "{stderr}");
+    assert!(stderr.contains("execute/dup.c"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_unsorted_expected_entries() -> Result<(), String> {
+    let expected = TempPath::new("gcc-unsorted-xfail-report-expected", "txt");
+    let failures = TempPath::new("gcc-unsorted-xfail-report-failures", "txt");
+    std::fs::write(
+        expected.path(),
+        "execute/z.c | exit status -6\n\
+         execute/a.c | timed out after 10.0s\n",
+    )
+    .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("expected failures must be sorted"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("execute/a.c"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_missing_expected_fixture() -> Result<(), String> {
+    let expected = TempPath::new("gcc-missing-xfail-report-expected", "txt");
+    let failures = TempPath::new("gcc-missing-xfail-report-failures", "txt");
+    std::fs::write(failures.path(), "")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("expected-failure fixture not found"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_directory_expected_fixture() -> Result<(), String> {
+    let expected = TempPath::new("gcc-directory-xfail-report-expected", "dir");
+    let failures = TempPath::new("gcc-directory-xfail-report-failures", "txt");
+    std::fs::create_dir_all(expected.path())
+        .map_err(|err| format!("failed to create expected fixture dir: {err}"))?;
+    std::fs::write(failures.path(), "")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("expected-failure fixture is not a file"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_whitespace_padded_expected_test_name() -> Result<(), String> {
+    let expected = TempPath::new("gcc-padded-expected-test-report", "txt");
+    let failures = TempPath::new("gcc-padded-expected-test-report-failures", "txt");
+    std::fs::write(expected.path(), " execute/raw.c | exit status -6\n")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("whitespace around test name"), "{stderr}");
+    assert!(stderr.contains("execute/raw.c"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_nonrelative_expected_test_path() -> Result<(), String> {
+    for bad_path in [
+        "/tmp/raw.c",
+        "../execute/raw.c",
+        r"C:\tmp\raw.c",
+        r"..\execute\raw.c",
+    ] {
+        let expected = TempPath::new("gcc-nonrelative-expected-test-report", "txt");
+        let failures = TempPath::new("gcc-nonrelative-expected-test-report-failures", "txt");
+        std::fs::write(expected.path(), format!("{bad_path} | exit status -6\n"))
+            .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+        std::fs::write(failures.path(), "")
+            .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+        let output = match Command::new("python3")
+            .arg("scripts/report_gcc_torture_xfails.py")
+            .arg("--expected")
+            .arg(expected.path())
+            .arg(failures.path())
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+        };
+
+        assert!(!output.status.success(), "{bad_path} unexpectedly passed");
+        let stderr = stderr(output);
+        assert!(stderr.contains("expected relative test path"), "{stderr}");
+        assert!(stderr.contains(bad_path), "{stderr}");
+    }
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_control_character_expected_test_path() -> Result<(), String> {
+    let expected = TempPath::new("gcc-control-xfail-report-expected-test", "txt");
+    let failures = TempPath::new("gcc-control-xfail-report-expected-test-failures", "txt");
+    std::fs::write(expected.path(), "execute/raw\u{001f}.c | exit status -6\n")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/raw.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("control character in test path"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_missing_failure_log() -> Result<(), String> {
+    let expected = TempPath::new("gcc-missing-failure-log-expected", "txt");
+    let failures = TempPath::new("gcc-missing-failure-log", "txt");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("failure log not found"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_directory_failure_log() -> Result<(), String> {
+    let expected = TempPath::new("gcc-directory-failure-log-expected", "txt");
+    let failures = TempPath::new("gcc-directory-failure-log", "dir");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::create_dir_all(failures.path())
+        .map_err(|err| format!("failed to create failure log dir: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("failure log is not a file"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_missing_failure_log_tab_separator() -> Result<(), String> {
+    let expected = TempPath::new("gcc-missing-failure-log-tab-expected", "txt");
+    let failures = TempPath::new("gcc-missing-failure-log-tab-failures", "txt");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/raw.c FAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("missing tab separator"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_duplicate_failure_log_rows() -> Result<(), String> {
+    let expected = TempPath::new("gcc-duplicate-failure-log-expected", "txt");
+    let failures = TempPath::new("gcc-duplicate-failure-log-failures", "txt");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(
+        failures.path(),
+        "execute/dup.c\tFAIL: exit status -6\n\
+         execute\\dup.c\tFAIL: timed out after 10.0s\n",
+    )
+    .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("duplicate failure log row"), "{stderr}");
+    assert!(stderr.contains("execute/dup.c"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_duplicate_skip_failure_log_rows() -> Result<(), String> {
+    let expected = TempPath::new("gcc-duplicate-skip-failure-log-expected", "txt");
+    let failures = TempPath::new("gcc-duplicate-skip-failure-log-failures", "txt");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(
+        failures.path(),
+        "execute/dup.c\tSKIP: requires unsupported builtin\n\
+         execute\\dup.c\tFAIL: exit status -6\n",
+    )
+    .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("duplicate failure log row"), "{stderr}");
+    assert!(stderr.contains("execute/dup.c"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_missing_failure_log_test_name() -> Result<(), String> {
+    let expected = TempPath::new("gcc-missing-failure-log-test-expected", "txt");
+    let failures = TempPath::new("gcc-missing-failure-log-test-failures", "txt");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("missing test name"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_missing_failure_log_status() -> Result<(), String> {
+    let expected = TempPath::new("gcc-missing-failure-log-status-expected", "txt");
+    let failures = TempPath::new("gcc-missing-failure-log-status-failures", "txt");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/raw.c\t\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("missing status"), "{stderr}");
+    assert!(stderr.contains("execute/raw.c"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_extra_failure_log_status_tab() -> Result<(), String> {
+    let expected = TempPath::new("gcc-extra-tab-failure-log-status-expected", "txt");
+    let failures = TempPath::new("gcc-extra-tab-failure-log-status-failures", "txt");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(
+        failures.path(),
+        "execute/raw.c\tFAIL: exit status -6\textra\n",
+    )
+    .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("unexpected tab in failure log status"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("execute/raw.c"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_missing_failure_log_reason() -> Result<(), String> {
+    let expected = TempPath::new("gcc-missing-failure-log-reason-expected", "txt");
+    let failures = TempPath::new("gcc-missing-failure-log-reason-failures", "txt");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/raw.c\tFAIL:\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("missing reason"), "{stderr}");
+    assert!(stderr.contains("execute/raw.c"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_missing_skip_failure_log_reason() -> Result<(), String> {
+    let expected = TempPath::new("gcc-missing-skip-failure-log-reason-expected", "txt");
+    let failures = TempPath::new("gcc-missing-skip-failure-log-reason-failures", "txt");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/raw.c\tSKIP:\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("missing reason"), "{stderr}");
+    assert!(stderr.contains("execute/raw.c"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_whitespace_padded_failure_log_status() -> Result<(), String> {
+    let expected = TempPath::new("gcc-padded-failure-log-status-expected", "txt");
+    let failures = TempPath::new("gcc-padded-failure-log-status-failures", "txt");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/raw.c\t FAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("whitespace around status"), "{stderr}");
+    assert!(stderr.contains("execute/raw.c"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_whitespace_padded_failure_log_test_name() -> Result<(), String>
+{
+    let expected = TempPath::new("gcc-padded-failure-log-test-expected", "txt");
+    let failures = TempPath::new("gcc-padded-failure-log-test-failures", "txt");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), " execute/raw.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("whitespace around test name"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_nonrelative_failure_log_test_path() -> Result<(), String> {
+    for bad_path in [
+        "/tmp/raw.c",
+        "../execute/raw.c",
+        r"C:\tmp\raw.c",
+        r"..\execute\raw.c",
+    ] {
+        let expected = TempPath::new("gcc-nonrelative-failure-log-report-expected", "txt");
+        let failures = TempPath::new("gcc-nonrelative-failure-log-report-failures", "txt");
+        std::fs::write(expected.path(), "")
+            .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+        std::fs::write(
+            failures.path(),
+            format!("{bad_path}\tFAIL: exit status -6\n"),
+        )
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+        let output = match Command::new("python3")
+            .arg("scripts/report_gcc_torture_xfails.py")
+            .arg("--expected")
+            .arg(expected.path())
+            .arg(failures.path())
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+        };
+
+        assert!(!output.status.success(), "{bad_path} unexpectedly passed");
+        let stderr = stderr(output);
+        assert!(stderr.contains("expected relative test path"), "{stderr}");
+        assert!(stderr.contains(bad_path), "{stderr}");
+    }
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_xfail_reporter_rejects_nonnormal_failure_log_test_path() -> Result<(), String> {
+    for bad_path in ["execute//raw.c", "execute/./raw.c", r"execute\\raw.c"] {
+        let expected = TempPath::new("gcc-nonnormal-failure-log-report-expected", "txt");
+        let failures = TempPath::new("gcc-nonnormal-failure-log-report-failures", "txt");
+        std::fs::write(expected.path(), "")
+            .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+        std::fs::write(
+            failures.path(),
+            format!("{bad_path}\tFAIL: exit status -6\n"),
+        )
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+        let output = match Command::new("python3")
+            .arg("scripts/report_gcc_torture_xfails.py")
+            .arg("--expected")
+            .arg(expected.path())
+            .arg(failures.path())
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+        };
+
+        assert!(!output.status.success(), "{bad_path} unexpectedly passed");
+        let stderr = stderr(output);
+        assert!(stderr.contains("expected normalized test path"), "{stderr}");
+        assert!(stderr.contains(bad_path), "{stderr}");
+    }
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_unsorted_expected_entries() -> Result<(), String> {
+    let expected = TempPath::new("gcc-unsorted-triage-expected", "txt");
+    let failures = TempPath::new("gcc-unsorted-triage-failures", "txt");
+    std::fs::write(
+        expected.path(),
+        "execute/z.c | exit status -6\n\
+         execute/a.c | timed out after 10.0s\n",
+    )
+    .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/a.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("expected failures must be sorted"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("execute/a.c"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_duplicate_expected_entries() -> Result<(), String> {
+    let expected = TempPath::new("gcc-duplicate-triage-expected", "txt");
+    let failures = TempPath::new("gcc-duplicate-triage-failures", "txt");
+    std::fs::write(
+        expected.path(),
+        "execute/dup.c | exit status -6\n\
+         execute/dup.c | timed out after 10.0s\n",
+    )
+    .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/dup.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("duplicate expected failure"), "{stderr}");
+    assert!(stderr.contains("execute/dup.c"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_whitespace_padded_expected_test_name() -> Result<(), String> {
+    let expected = TempPath::new("gcc-padded-triage-expected-test", "txt");
+    let failures = TempPath::new("gcc-padded-triage-expected-test-failures", "txt");
+    std::fs::write(expected.path(), " execute/raw.c | exit status -6\n")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/raw.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("whitespace around test name"), "{stderr}");
+    assert!(stderr.contains("execute/raw.c"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_nonrelative_expected_test_path() -> Result<(), String> {
+    for bad_path in [
+        "/tmp/raw.c",
+        "../execute/raw.c",
+        r"C:\tmp\raw.c",
+        r"..\execute\raw.c",
+    ] {
+        let expected = TempPath::new("gcc-nonrelative-triage-expected-test", "txt");
+        let failures = TempPath::new("gcc-nonrelative-triage-expected-test-failures", "txt");
+        std::fs::write(expected.path(), format!("{bad_path} | exit status -6\n"))
+            .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+        std::fs::write(failures.path(), "execute/raw.c\tFAIL: exit status -6\n")
+            .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+        let output = match Command::new("python3")
+            .arg("scripts/triage_gcc_torture_xfails.py")
+            .arg("--expected")
+            .arg(expected.path())
+            .arg(failures.path())
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+        };
+
+        assert!(!output.status.success(), "{bad_path} unexpectedly passed");
+        let stderr = stderr(output);
+        assert!(stderr.contains("expected relative test path"), "{stderr}");
+        assert!(stderr.contains(bad_path), "{stderr}");
+    }
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_nonnormal_expected_test_path() -> Result<(), String> {
+    for bad_path in ["execute//raw.c", "execute/./raw.c", r"execute\\raw.c"] {
+        let expected = TempPath::new("gcc-nonnormal-triage-expected-test", "txt");
+        let failures = TempPath::new("gcc-nonnormal-triage-expected-test-failures", "txt");
+        std::fs::write(expected.path(), format!("{bad_path} | exit status -6\n"))
+            .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+        std::fs::write(failures.path(), "execute/raw.c\tFAIL: exit status -6\n")
+            .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+        let output = match Command::new("python3")
+            .arg("scripts/triage_gcc_torture_xfails.py")
+            .arg("--expected")
+            .arg(expected.path())
+            .arg(failures.path())
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+        };
+
+        assert!(!output.status.success(), "{bad_path} unexpectedly passed");
+        let stderr = stderr(output);
+        assert!(stderr.contains("expected normalized test path"), "{stderr}");
+        assert!(stderr.contains(bad_path), "{stderr}");
+    }
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_missing_expected_fixture() -> Result<(), String> {
+    let expected = TempPath::new("gcc-missing-triage-expected", "txt");
+    let failures = TempPath::new("gcc-missing-triage-failures", "txt");
+    std::fs::write(failures.path(), "execute/a.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("expected-failure fixture not found"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_directory_expected_fixture() -> Result<(), String> {
+    let expected = TempPath::new("gcc-directory-triage-expected", "dir");
+    let failures = TempPath::new("gcc-directory-triage-failures", "txt");
+    std::fs::create_dir_all(expected.path())
+        .map_err(|err| format!("failed to create expected fixture dir: {err}"))?;
+    std::fs::write(failures.path(), "execute/a.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("expected-failure fixture is not a file"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_missing_failure_log() -> Result<(), String> {
+    let expected = TempPath::new("gcc-missing-triage-failure-log-expected", "txt");
+    let failures = TempPath::new("gcc-missing-triage-failure-log", "txt");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("failure log not found"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_directory_failure_log() -> Result<(), String> {
+    let expected = TempPath::new("gcc-directory-triage-failure-log-expected", "txt");
+    let failures = TempPath::new("gcc-directory-triage-failure-log", "dir");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::create_dir_all(failures.path())
+        .map_err(|err| format!("failed to create failure log dir: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("failure log is not a file"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_missing_failure_log_tab_separator() -> Result<(), String> {
+    let expected = TempPath::new("gcc-missing-triage-failure-log-tab-expected", "txt");
+    let failures = TempPath::new("gcc-missing-triage-failure-log-tab-failures", "txt");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/raw.c FAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("missing tab separator"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_nonrelative_failure_log_test_path() -> Result<(), String> {
+    for bad_path in [
+        "/tmp/raw.c",
+        "../execute/raw.c",
+        r"C:\tmp\raw.c",
+        r"..\execute\raw.c",
+    ] {
+        let expected = TempPath::new("gcc-nonrelative-triage-failure-log-expected", "txt");
+        let failures = TempPath::new("gcc-nonrelative-triage-failure-log-failures", "txt");
+        std::fs::write(expected.path(), "")
+            .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+        std::fs::write(
+            failures.path(),
+            format!("{bad_path}\tFAIL: exit status -6\n"),
+        )
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+        let output = match Command::new("python3")
+            .arg("scripts/triage_gcc_torture_xfails.py")
+            .arg("--expected")
+            .arg(expected.path())
+            .arg(failures.path())
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+        };
+
+        assert!(!output.status.success(), "{bad_path} unexpectedly passed");
+        let stderr = stderr(output);
+        assert!(stderr.contains("expected relative test path"), "{stderr}");
+        assert!(stderr.contains(bad_path), "{stderr}");
+    }
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_nonnormal_failure_log_test_path() -> Result<(), String> {
+    for bad_path in ["execute//raw.c", "execute/./raw.c", r"execute\\raw.c"] {
+        let expected = TempPath::new("gcc-nonnormal-triage-failure-log-expected", "txt");
+        let failures = TempPath::new("gcc-nonnormal-triage-failure-log-failures", "txt");
+        std::fs::write(expected.path(), "")
+            .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+        std::fs::write(
+            failures.path(),
+            format!("{bad_path}\tFAIL: exit status -6\n"),
+        )
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+        let output = match Command::new("python3")
+            .arg("scripts/triage_gcc_torture_xfails.py")
+            .arg("--expected")
+            .arg(expected.path())
+            .arg(failures.path())
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+        };
+
+        assert!(!output.status.success(), "{bad_path} unexpectedly passed");
+        let stderr = stderr(output);
+        assert!(stderr.contains("expected normalized test path"), "{stderr}");
+        assert!(stderr.contains(bad_path), "{stderr}");
+    }
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_file_suite_path() -> Result<(), String> {
+    let expected = TempPath::new("gcc-file-triage-suite-expected", "txt");
+    let failures = TempPath::new("gcc-file-triage-suite-failures", "txt");
+    let suite = TempPath::new("gcc-file-triage-suite", "txt");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/a.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+    std::fs::write(suite.path(), "")
+        .map_err(|err| format!("failed to write suite path file: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("suite path is not a directory"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_missing_artifact_dir() -> Result<(), String> {
+    let expected = TempPath::new("gcc-missing-triage-artifact-expected", "txt");
+    let failures = TempPath::new("gcc-missing-triage-artifact-failures", "txt");
+    let artifact_dir = TempPath::new("gcc-missing-triage-artifact", "dir");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/a.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg("--artifact-dir")
+        .arg(artifact_dir.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("artifact directory not found"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_file_artifact_dir_path() -> Result<(), String> {
+    let expected = TempPath::new("gcc-file-triage-artifact-expected", "txt");
+    let failures = TempPath::new("gcc-file-triage-artifact-failures", "txt");
+    let artifact_dir = TempPath::new("gcc-file-triage-artifact", "txt");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/a.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+    std::fs::write(artifact_dir.path(), "")
+        .map_err(|err| format!("failed to write artifact path file: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg("--artifact-dir")
+        .arg(artifact_dir.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("artifact path is not a directory"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_file_copy_to_path() -> Result<(), String> {
+    let expected = TempPath::new("gcc-file-triage-copy-expected", "txt");
+    let failures = TempPath::new("gcc-file-triage-copy-failures", "txt");
+    let copy_to = TempPath::new("gcc-file-triage-copy", "txt");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/a.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+    std::fs::write(copy_to.path(), "")
+        .map_err(|err| format!("failed to write copy-to path file: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg("--copy-to")
+        .arg(copy_to.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("copy-to path is not a directory"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_file_parent_copy_to_path() -> Result<(), String> {
+    let expected = TempPath::new("gcc-file-parent-triage-copy-expected", "txt");
+    let failures = TempPath::new("gcc-file-parent-triage-copy-failures", "txt");
+    let parent = TempPath::new("gcc-file-parent-triage-copy-parent", "txt");
+    let copy_to = parent.path().join("bucketed");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/a.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+    std::fs::write(parent.path(), "")
+        .map_err(|err| format!("failed to write copy-to parent file: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg("--copy-to")
+        .arg(&copy_to)
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("copy-to parent path is not a directory"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_indexes_artifact_sources_once() -> Result<(), String> {
+    let expected = TempPath::new("gcc-artifact-index-triage-expected", "txt");
+    let failures = TempPath::new("gcc-artifact-index-triage-failures", "txt");
+    let artifact_dir = TempPath::new("gcc-artifact-index-triage-artifacts", "dir");
+    let copy_to = TempPath::new("gcc-artifact-index-triage-copy", "dir");
+    let artifact_test_dir = artifact_dir
+        .path()
+        .join("gcc_torture")
+        .join("failures")
+        .join("0000-raw");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/raw.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+    std::fs::create_dir_all(&artifact_test_dir)
+        .map_err(|err| format!("failed to create artifact dir: {err}"))?;
+    std::fs::write(artifact_test_dir.join("source-path.txt"), "execute/raw.c\n")
+        .map_err(|err| format!("failed to write source path: {err}"))?;
+    std::fs::write(
+        artifact_test_dir.join("raw.c"),
+        "struct sample { int value; };\n",
+    )
+    .map_err(|err| format!("failed to write copied source: {err}"))?;
+    std::fs::write(artifact_test_dir.join("output.txt"), "compiler output\n")
+        .map_err(|err| format!("failed to write output artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg("--artifact-dir")
+        .arg(artifact_dir.path())
+        .arg("--copy-to")
+        .arg(copy_to.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("with source: 1"), "{stdout}");
+    assert!(stdout.contains("aggregate-abi: 1"), "{stdout}");
+    assert!(
+        copy_to
+            .path()
+            .join("aggregate-abi")
+            .join("execute__raw.c")
+            .is_file(),
+        "missing copied source"
+    );
+    assert!(
+        copy_to
+            .path()
+            .join("aggregate-abi")
+            .join("execute__raw.c.output.txt")
+            .is_file(),
+        "missing copied output"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_indexes_windows_style_artifact_source_paths() -> Result<(), String> {
+    let expected = TempPath::new("gcc-windows-artifact-index-triage-expected", "txt");
+    let failures = TempPath::new("gcc-windows-artifact-index-triage-failures", "txt");
+    let artifact_dir = TempPath::new("gcc-windows-artifact-index-triage-artifacts", "dir");
+    let copy_to = TempPath::new("gcc-windows-artifact-index-triage-copy", "dir");
+    let artifact_test_dir = artifact_dir
+        .path()
+        .join("gcc_torture")
+        .join("failures")
+        .join("0000-raw");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute\\raw.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+    std::fs::create_dir_all(&artifact_test_dir)
+        .map_err(|err| format!("failed to create artifact dir: {err}"))?;
+    std::fs::write(
+        artifact_test_dir.join("source-path.txt"),
+        "execute\\raw.c\n",
+    )
+    .map_err(|err| format!("failed to write source path: {err}"))?;
+    std::fs::write(
+        artifact_test_dir.join("raw.c"),
+        "struct sample { int value; };\n",
+    )
+    .map_err(|err| format!("failed to write copied source: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg("--artifact-dir")
+        .arg(artifact_dir.path())
+        .arg("--copy-to")
+        .arg(copy_to.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("with source: 1"), "{stdout}");
+    assert!(stdout.contains("aggregate-abi: 1"), "{stdout}");
+    assert!(
+        copy_to
+            .path()
+            .join("aggregate-abi")
+            .join("execute__raw.c")
+            .is_file(),
+        "missing copied source"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_finds_windows_style_test_paths_in_suite() -> Result<(), String> {
+    let expected = TempPath::new("gcc-windows-suite-triage-expected", "txt");
+    let failures = TempPath::new("gcc-windows-suite-triage-failures", "txt");
+    let suite = TempPath::new("gcc-windows-suite-triage-suite", "dir");
+    let copy_to = TempPath::new("gcc-windows-suite-triage-copy", "dir");
+    let execute_dir = suite.path().join("execute");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute\\raw.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+    std::fs::create_dir_all(&execute_dir)
+        .map_err(|err| format!("failed to create suite dir: {err}"))?;
+    std::fs::write(
+        execute_dir.join("raw.c"),
+        "struct suite_case { int value; };\n",
+    )
+    .map_err(|err| format!("failed to write suite source: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--copy-to")
+        .arg(copy_to.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("with source: 1"), "{stdout}");
+    assert!(stdout.contains("aggregate-abi: 1"), "{stdout}");
+    let copied =
+        std::fs::read_to_string(copy_to.path().join("aggregate-abi").join("execute__raw.c"))
+            .map_err(|err| format!("failed to read copied source: {err}"))?;
+    assert!(copied.contains("suite_case"), "{copied}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_ignores_directory_suite_source_paths() -> Result<(), String> {
+    let expected = TempPath::new("gcc-directory-source-triage-expected", "txt");
+    let failures = TempPath::new("gcc-directory-source-triage-failures", "txt");
+    let suite = TempPath::new("gcc-directory-source-triage-suite", "dir");
+    let copy_to = TempPath::new("gcc-directory-source-triage-copy", "dir");
+    let source_dir = suite.path().join("execute").join("raw.c");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/raw.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+    std::fs::create_dir_all(&source_dir)
+        .map_err(|err| format!("failed to create directory source path: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--copy-to")
+        .arg(copy_to.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("with source: 0"), "{stdout}");
+    assert!(
+        !copy_to
+            .path()
+            .join("runtime-abort")
+            .join("execute__raw.c")
+            .exists(),
+        "directory source path should not be copied"
+    );
+    assert!(
+        copy_to
+            .path()
+            .join("runtime-abort")
+            .join("execute__raw.c.reason.txt")
+            .is_file(),
+        "missing copied reason"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_copy_to_keeps_same_basename_sources() -> Result<(), String> {
+    let expected = TempPath::new("gcc-copy-collision-triage-expected", "txt");
+    let failures = TempPath::new("gcc-copy-collision-triage-failures", "txt");
+    let suite = TempPath::new("gcc-copy-collision-triage-suite", "dir");
+    let copy_to = TempPath::new("gcc-copy-collision-triage-copy", "dir");
+    let compile_dir = suite.path().join("compile");
+    let execute_dir = suite.path().join("execute");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(
+        failures.path(),
+        "compile/raw.c\tFAIL: exit status -6\n\
+         execute/raw.c\tFAIL: exit status -6\n",
+    )
+    .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+    std::fs::create_dir_all(&compile_dir)
+        .map_err(|err| format!("failed to create compile suite dir: {err}"))?;
+    std::fs::create_dir_all(&execute_dir)
+        .map_err(|err| format!("failed to create execute suite dir: {err}"))?;
+    std::fs::write(
+        compile_dir.join("raw.c"),
+        "struct compile_case { int value; };\n",
+    )
+    .map_err(|err| format!("failed to write compile source: {err}"))?;
+    std::fs::write(
+        execute_dir.join("raw.c"),
+        "struct execute_case { int value; };\n",
+    )
+    .map_err(|err| format!("failed to write execute source: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--copy-to")
+        .arg(copy_to.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let bucket = copy_to.path().join("aggregate-abi");
+    let compile_copy = bucket.join("compile__raw.c");
+    let execute_copy = bucket.join("execute__raw.c");
+    assert!(compile_copy.is_file(), "missing compile source copy");
+    assert!(execute_copy.is_file(), "missing execute source copy");
+    let compile_text = std::fs::read_to_string(compile_copy)
+        .map_err(|err| format!("failed to read compile source copy: {err}"))?;
+    let execute_text = std::fs::read_to_string(execute_copy)
+        .map_err(|err| format!("failed to read execute source copy: {err}"))?;
+    assert!(compile_text.contains("compile_case"), "{compile_text}");
+    assert!(execute_text.contains("execute_case"), "{execute_text}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_copy_to_flattens_windows_style_test_paths() -> Result<(), String> {
+    let expected = TempPath::new("gcc-copy-windows-path-triage-expected", "txt");
+    let failures = TempPath::new("gcc-copy-windows-path-triage-failures", "txt");
+    let copy_to = TempPath::new("gcc-copy-windows-path-triage-copy", "dir");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), r"execute\raw.c	FAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg("--copy-to")
+        .arg(copy_to.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    assert!(
+        copy_to
+            .path()
+            .join("runtime-abort")
+            .join(r"execute__raw.c.reason.txt")
+            .is_file(),
+        "missing flattened copied reason"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_copy_to_sanitizes_punctuation_in_test_paths() -> Result<(), String> {
+    let expected = TempPath::new("gcc-copy-punctuation-path-triage-expected", "txt");
+    let failures = TempPath::new("gcc-copy-punctuation-path-triage-failures", "txt");
+    let copy_to = TempPath::new("gcc-copy-punctuation-path-triage-copy", "dir");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(
+        failures.path(),
+        "execute/raw:case one.c\tFAIL: exit status -6\n",
+    )
+    .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg("--copy-to")
+        .arg(copy_to.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    assert!(
+        copy_to
+            .path()
+            .join("runtime-abort")
+            .join("execute__raw_case_one.c.reason.txt")
+            .is_file(),
+        "missing sanitized copied reason"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_sanitized_copy_name_collisions() -> Result<(), String> {
+    let expected = TempPath::new("gcc-copy-name-collision-triage-expected", "txt");
+    let failures = TempPath::new("gcc-copy-name-collision-triage-failures", "txt");
+    let copy_to = TempPath::new("gcc-copy-name-collision-triage-copy", "dir");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(
+        failures.path(),
+        "execute/raw:case.c\tFAIL: exit status -6\nexecute/raw_case.c\tFAIL: exit status -6\n",
+    )
+    .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg("--copy-to")
+        .arg(copy_to.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(!output.status.success(), "expected failure");
+    let stderr = stderr(output);
+    assert!(stderr.contains("copy filename collision"), "{}", stderr);
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_truncates_stdout_reasons_but_copies_full_reason() -> Result<(), String> {
+    let expected = TempPath::new("gcc-long-reason-triage-expected", "txt");
+    let failures = TempPath::new("gcc-long-reason-triage-failures", "txt");
+    let copy_to = TempPath::new("gcc-long-reason-triage-copy", "dir");
+    let long_reason = format!("{}{}", "diagnostic ".repeat(40), "sentinel-tail");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(
+        failures.path(),
+        format!("execute/noisy.c\tFAIL: {long_reason}\n"),
+    )
+    .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg("--copy-to")
+        .arg(copy_to.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("execute/noisy.c | diagnostic "), "{stdout}");
+    assert!(stdout.contains("..."), "{stdout}");
+    assert!(!stdout.contains("sentinel-tail"), "{stdout}");
+    let reason = std::fs::read_to_string(
+        copy_to
+            .path()
+            .join("other")
+            .join("execute__noisy.c.reason.txt"),
+    )
+    .map_err(|err| format!("failed to read copied reason: {err}"))?;
+    assert!(reason.contains("sentinel-tail"), "{reason}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_nonrelative_artifact_source_path() -> Result<(), String> {
+    let expected = TempPath::new("gcc-nonrelative-artifact-triage-expected", "txt");
+    let failures = TempPath::new("gcc-nonrelative-artifact-triage-failures", "txt");
+    let artifact_dir = TempPath::new("gcc-nonrelative-artifact-triage-artifacts", "dir");
+    let artifact_test_dir = artifact_dir
+        .path()
+        .join("gcc_torture")
+        .join("failures")
+        .join("0000-raw");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/raw.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+    std::fs::create_dir_all(&artifact_test_dir)
+        .map_err(|err| format!("failed to create artifact dir: {err}"))?;
+    std::fs::write(
+        artifact_test_dir.join("source-path.txt"),
+        "../execute/raw.c\n",
+    )
+    .map_err(|err| format!("failed to write source path: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg("--artifact-dir")
+        .arg(artifact_dir.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("expected relative test path"), "{stderr}");
+    assert!(stderr.contains("../execute/raw.c"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_nonnormal_artifact_source_path() -> Result<(), String> {
+    for bad_path in ["execute//raw.c", "execute/./raw.c", r"execute\\raw.c"] {
+        let expected = TempPath::new("gcc-nonnormal-artifact-triage-expected", "txt");
+        let failures = TempPath::new("gcc-nonnormal-artifact-triage-failures", "txt");
+        let artifact_dir = TempPath::new("gcc-nonnormal-artifact-triage-artifacts", "dir");
+        let artifact_test_dir = artifact_dir
+            .path()
+            .join("gcc_torture")
+            .join("failures")
+            .join("0000-raw");
+        std::fs::write(expected.path(), "")
+            .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+        std::fs::write(failures.path(), "execute/raw.c\tFAIL: exit status -6\n")
+            .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+        std::fs::create_dir_all(&artifact_test_dir)
+            .map_err(|err| format!("failed to create artifact dir: {err}"))?;
+        std::fs::write(
+            artifact_test_dir.join("source-path.txt"),
+            format!("{bad_path}\n"),
+        )
+        .map_err(|err| format!("failed to write source path: {err}"))?;
+
+        let output = match Command::new("python3")
+            .arg("scripts/triage_gcc_torture_xfails.py")
+            .arg("--expected")
+            .arg(expected.path())
+            .arg("--artifact-dir")
+            .arg(artifact_dir.path())
+            .arg(failures.path())
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+        };
+
+        assert!(!output.status.success(), "{bad_path} unexpectedly passed");
+        let stderr = stderr(output);
+        assert!(stderr.contains("expected normalized test path"), "{stderr}");
+        assert!(stderr.contains(bad_path), "{stderr}");
+    }
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_control_character_artifact_source_path() -> Result<(), String> {
+    let expected = TempPath::new("gcc-control-artifact-triage-expected", "txt");
+    let failures = TempPath::new("gcc-control-artifact-triage-failures", "txt");
+    let artifact_dir = TempPath::new("gcc-control-artifact-triage-artifacts", "dir");
+    let artifact_test_dir = artifact_dir
+        .path()
+        .join("gcc_torture")
+        .join("failures")
+        .join("0000-raw");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/raw.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+    std::fs::create_dir_all(&artifact_test_dir)
+        .map_err(|err| format!("failed to create artifact dir: {err}"))?;
+    std::fs::write(
+        artifact_test_dir.join("source-path.txt"),
+        "execute/raw\u{001f}.c\n",
+    )
+    .map_err(|err| format!("failed to write source path: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg("--artifact-dir")
+        .arg(artifact_dir.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("control character in test path"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_whitespace_padded_artifact_source_path() -> Result<(), String> {
+    let expected = TempPath::new("gcc-padded-artifact-triage-expected", "txt");
+    let failures = TempPath::new("gcc-padded-artifact-triage-failures", "txt");
+    let artifact_dir = TempPath::new("gcc-padded-artifact-triage-artifacts", "dir");
+    let artifact_test_dir = artifact_dir
+        .path()
+        .join("gcc_torture")
+        .join("failures")
+        .join("0000-raw");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/raw.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+    std::fs::create_dir_all(&artifact_test_dir)
+        .map_err(|err| format!("failed to create artifact dir: {err}"))?;
+    std::fs::write(
+        artifact_test_dir.join("source-path.txt"),
+        " execute/raw.c\n",
+    )
+    .map_err(|err| format!("failed to write source path: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg("--artifact-dir")
+        .arg(artifact_dir.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("whitespace around artifact source path"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_multiline_artifact_source_path() -> Result<(), String> {
+    let expected = TempPath::new("gcc-multiline-artifact-triage-expected", "txt");
+    let failures = TempPath::new("gcc-multiline-artifact-triage-failures", "txt");
+    let artifact_dir = TempPath::new("gcc-multiline-artifact-triage-artifacts", "dir");
+    let artifact_test_dir = artifact_dir
+        .path()
+        .join("gcc_torture")
+        .join("failures")
+        .join("0000-raw");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/raw.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+    std::fs::create_dir_all(&artifact_test_dir)
+        .map_err(|err| format!("failed to create artifact dir: {err}"))?;
+    std::fs::write(
+        artifact_test_dir.join("source-path.txt"),
+        "execute/raw.c\nexecute/other.c\n",
+    )
+    .map_err(|err| format!("failed to write source path: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg("--artifact-dir")
+        .arg(artifact_dir.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("expected exactly one artifact source path"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_empty_artifact_source_path() -> Result<(), String> {
+    let expected = TempPath::new("gcc-empty-artifact-triage-expected", "txt");
+    let failures = TempPath::new("gcc-empty-artifact-triage-failures", "txt");
+    let artifact_dir = TempPath::new("gcc-empty-artifact-triage-artifacts", "dir");
+    let artifact_test_dir = artifact_dir
+        .path()
+        .join("gcc_torture")
+        .join("failures")
+        .join("0000-raw");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/raw.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+    std::fs::create_dir_all(&artifact_test_dir)
+        .map_err(|err| format!("failed to create artifact dir: {err}"))?;
+    std::fs::write(artifact_test_dir.join("source-path.txt"), "")
+        .map_err(|err| format!("failed to write source path: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg("--artifact-dir")
+        .arg(artifact_dir.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("expected exactly one artifact source path"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_triage_rejects_duplicate_artifact_sources() -> Result<(), String> {
+    let expected = TempPath::new("gcc-duplicate-artifact-triage-expected", "txt");
+    let failures = TempPath::new("gcc-duplicate-artifact-triage-failures", "txt");
+    let artifact_dir = TempPath::new("gcc-duplicate-artifact-triage-artifacts", "dir");
+    let first = artifact_dir
+        .path()
+        .join("gcc_torture")
+        .join("failures")
+        .join("0000-raw");
+    let second = artifact_dir
+        .path()
+        .join("gcc_torture")
+        .join("xfail")
+        .join("0000-raw");
+    std::fs::write(expected.path(), "")
+        .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/raw.c\tFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+    std::fs::create_dir_all(&first)
+        .map_err(|err| format!("failed to create first artifact dir: {err}"))?;
+    std::fs::create_dir_all(&second)
+        .map_err(|err| format!("failed to create second artifact dir: {err}"))?;
+    std::fs::write(first.join("source-path.txt"), "execute/raw.c\n")
+        .map_err(|err| format!("failed to write first source path: {err}"))?;
+    std::fs::write(second.join("source-path.txt"), "execute\\raw.c\n")
+        .map_err(|err| format!("failed to write second source path: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/triage_gcc_torture_xfails.py")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg("--artifact-dir")
+        .arg(artifact_dir.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail triage: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("duplicate artifact entry"), "{stderr}");
+    assert!(stderr.contains("execute/raw.c"), "{stderr}");
+    Ok(())
+}
+
+#[test]
 fn rejects_unsupported_input_extension() {
     let src = temp_file("bad-extension", "txt");
     std::fs::write(&src, "int main(void) { return 0; }\n").expect("failed to write input");
@@ -704,6 +3448,180 @@ fn x86_64_long_double_uses_x87_stack_abi() {
 }
 
 #[test]
+fn x86_64_static_long_double_initializers_emit_x87_bytes() {
+    let src = temp_file("x86-static-ld-x87", "c");
+    let out = temp_file("x86-static-ld-x87", "s");
+    std::fs::write(
+        &src,
+        "long double x = 27.0L;\n\
+         long double z = 2;\n\
+         struct S { char c; long double y; } s = { 'e', 29.0L };\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("x:\n\t.byte 0\n\t.byte 0\n\t.byte 0"), "{asm}");
+    assert!(asm.contains("\t.byte 216\n\t.byte 3\n\t.byte 64"), "{asm}");
+    assert!(asm.contains("\t.byte 232\n\t.byte 3\n\t.byte 64"), "{asm}");
+    assert!(asm.contains("z:\n\t.byte 0\n\t.byte 0\n\t.byte 0"), "{asm}");
+    assert!(asm.contains("\t.byte 128\n\t.byte 0\n\t.byte 64"), "{asm}");
+    assert!(!asm.contains("x:\n\t.zero 16"), "{asm}");
+    assert!(
+        !asm.contains("s:\n\t.byte 101\n\t.zero 15\n\t.zero 16"),
+        "{asm}"
+    );
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn x86_64_static_long_double_subnormal_initializers_preserve_significand() {
+    let src = temp_file("x86-static-ld-subnormal", "c");
+    let out = temp_file("x86-static-ld-subnormal", "s");
+    std::fs::write(&src, "long double tiny = 4.9406564584124654e-324L;\n")
+        .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("tiny:\n"), "{asm}");
+    assert!(
+        asm.contains("\t.byte 128\n\t.byte 205\n\t.byte 59"),
+        "{asm}"
+    );
+    assert!(!asm.contains("tiny:\n\t.zero 16"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn x86_64_internal_temporaries_do_not_collide_with_user_tmp_names() {
+    let src = temp_file("x86-temp-user-name-collision", "c");
+    let out = temp_file("x86-temp-user-name-collision", "s");
+    std::fs::write(
+        &src,
+        r#"
+typedef struct { int v[4]; } Test1;
+
+Test1 func2(void);
+
+int func1(void) {
+    Test1 test;
+    test = func2();
+    return test.v[0] != 10;
+}
+
+Test1 func2(void) {
+    Test1 tmp;
+    tmp.v[0] = 10;
+    tmp.v[1] = 20;
+    tmp.v[2] = 30;
+    tmp.v[3] = 40;
+    return tmp;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(!asm.contains("movl %eax, -"), "{asm}");
+    assert!(asm.contains("leaq -"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn x86_64_typedef_alignment_applies_to_static_object() {
+    let src = temp_file("x86-typedef-alignment-static", "c");
+    let out = temp_file("x86-typedef-alignment-static", "s");
+    std::fs::write(
+        &src,
+        "typedef struct { char c[8]; } V __attribute__((aligned(8)));\n\
+         V v;\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains(".balign 8\nv:"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn x86_64_stack_memory_param_copy_preserves_register_params() {
+    let src = temp_file("x86-memory-param-preserves-register", "c");
+    let out = temp_file("x86-memory-param-preserves-register", "s");
+    std::fs::write(
+        &src,
+        "struct s { int i[18]; };\n\
+         int f(struct s pa, int pb, ...) { return pb; }\n\
+         struct s gs;\n\
+         int main(void) { return f(gs, 0x1234) == 0x1234 ? 42 : 1; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    let f_start = asm.find("f:\n").expect("missing f label");
+    let copy = asm[f_start..]
+        .find("rep movsb")
+        .map(|index| f_start + index)
+        .expect("missing stack memory param copy");
+    let save = asm[f_start..copy]
+        .find("movl %edi,")
+        .expect("register param was not saved before memory copy");
+    assert!(save < copy - f_start, "{asm}");
+    assert!(
+        !asm[f_start..].contains("rep movsb\n\tmovl %edi, %eax"),
+        "{asm}"
+    );
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn x86_64_long_double_comparisons_use_x87_status_flags() {
     let src = temp_file("x86-ld-x87-cmp", "c");
     let out = temp_file("x86-ld-x87-cmp", "s");
@@ -872,6 +3790,60 @@ fn aarch64_linux_long_double_supports_comparisons_and_negation() {
     assert!(asm.contains("cmp w0, w10"), "{asm}");
     assert!(asm.contains("eor w9, w9, w10"), "{asm}");
     assert!(asm.contains("str x30"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_linux_long_double_literals_use_static_constant_pool() {
+    let src = temp_file("aarch64-ld-literal-pool", "c");
+    let out = temp_file("aarch64-ld-literal-pool", "s");
+    std::fs::write(
+        &src,
+        "long double scale(long double x) { return 1.01L * x; }\n\
+         int is_max_inf(void) { return __builtin_isinfl(1.01L * __LDBL_MAX__); }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("__aarch64_long_double_const_0"), "{asm}");
+    assert!(asm.contains("ldr q"), "{asm}");
+    assert!(asm.contains("\t.quad"), "{asm}");
+    assert!(asm.contains("bl __multf3"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_linux_static_long_double_subnormal_initializers_preserve_significand() {
+    let src = temp_file("aarch64-static-ld-subnormal", "c");
+    let out = temp_file("aarch64-static-ld-subnormal", "s");
+    std::fs::write(&src, "long double tiny = 4.9406564584124654e-324L;\n")
+        .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    let high = 0x3bcdu64 << 48;
+    assert!(asm.contains("tiny:\n"), "{asm}");
+    assert!(asm.contains(&format!("\t.quad 0\n\t.quad {high}")), "{asm}");
+    assert!(!asm.contains("tiny:\n\t.zero 16"), "{asm}");
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -6323,6 +9295,47 @@ fn x86_shadow_varargs_store_unnamed_long_double_with_x87() {
 }
 
 #[test]
+fn x86_shadow_varargs_aligns_long_double_literal_slots() {
+    let src = temp_file("x86-shadow-varargs-long-double-literal", "c");
+    let out = temp_file("x86-shadow-varargs-long-double-literal", "s");
+    std::fs::write(
+        &src,
+        "#include <stdarg.h>\n\
+         void sink(int n, ...) {\n\
+             va_list ap;\n\
+             va_start(ap, n);\n\
+             if (va_arg(ap, int) != 10) __builtin_abort();\n\
+             if (va_arg(ap, long long) != 10000000000LL) __builtin_abort();\n\
+             if (va_arg(ap, int) != 11) __builtin_abort();\n\
+             if (va_arg(ap, long double) != 3.14L) __builtin_abort();\n\
+             if (va_arg(ap, int) != 12) __builtin_abort();\n\
+         }\n\
+         int main(void) {\n\
+             sink(4, 10, 10000000000LL, 11, 3.14L, 12);\n\
+             return 0;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("fldt (%r11)"), "{asm}");
+    assert!(asm.contains("fstpt 32(%rsp)"), "{asm}");
+    assert!(asm.contains("movl $12, 48(%rsp)"), "{asm}");
+    assert!(!asm.contains("movsd %xmm"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn x86_va_arg_struct_temporary_gets_real_stack_storage() {
     let src = temp_file("x86-va-arg-struct-storage", "c");
     let out = temp_file("x86-va-arg-struct-storage", "s");
@@ -10120,7 +13133,7 @@ fn internal_cpp_provides_float_virtual_header() {
          #error bad radix\n\
          #endif\n\
          int main(void) {\n\
-             return FLT_MANT_DIG == 24 && DBL_MANT_DIG == 53 && LDBL_MANT_DIG == 53 &&\n\
+             return FLT_MANT_DIG == 24 && DBL_MANT_DIG == 53 && LDBL_MANT_DIG >= DBL_MANT_DIG &&\n\
                     FLT_DIG == 6 && DBL_DIG == 15 && DBL_MAX > DBL_MIN &&\n\
                     FLT_MAX > FLT_MIN && DBL_EPSILON > 0.0 ? 42 : 1;\n\
          }\n",
@@ -10144,6 +13157,76 @@ fn internal_cpp_provides_float_virtual_header() {
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_float_header_long_double_limits_follow_target() {
+    let src = temp_file("internal-cpp-float-header-ld-target", "c");
+    std::fs::write(
+        &src,
+        "#include <float.h>\n\
+         int mant = LDBL_MANT_DIG;\n\
+         int dig = LDBL_DIG;\n\
+         int min_exp = LDBL_MIN_EXP;\n\
+         int max_exp = LDBL_MAX_EXP;\n\
+         long double min = LDBL_MIN;\n\
+         long double eps = LDBL_EPSILON;\n",
+    )
+    .expect("failed to write source");
+
+    let x86 = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("--target")
+        .arg("x86_64-linux")
+        .arg("-nostdinc")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+    assert!(x86.status.success(), "{}", stderr(x86));
+    let x86_stdout = stdout(x86);
+    assert!(x86_stdout.contains("int mant = 64;"), "{x86_stdout}");
+    assert!(x86_stdout.contains("int dig = 18;"), "{x86_stdout}");
+    assert!(
+        x86_stdout.contains("int min_exp = (-16381);"),
+        "{x86_stdout}"
+    );
+    assert!(x86_stdout.contains("int max_exp = 16384;"), "{x86_stdout}");
+    assert!(
+        x86_stdout.contains("long double eps = 1.08420217248550443401e-19L;"),
+        "{x86_stdout}"
+    );
+
+    let aarch64 = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("--target")
+        .arg("aarch64-linux")
+        .arg("-nostdinc")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+    assert!(aarch64.status.success(), "{}", stderr(aarch64));
+    let aarch64_stdout = stdout(aarch64);
+    assert!(
+        aarch64_stdout.contains("int mant = 113;"),
+        "{aarch64_stdout}"
+    );
+    assert!(aarch64_stdout.contains("int dig = 33;"), "{aarch64_stdout}");
+    assert!(
+        aarch64_stdout.contains("int min_exp = (-16381);"),
+        "{aarch64_stdout}"
+    );
+    assert!(
+        aarch64_stdout.contains("int max_exp = 16384;"),
+        "{aarch64_stdout}"
+    );
+    assert!(
+        aarch64_stdout.contains("long double eps = 1.92592994438723585305597794258492732e-34L;"),
+        "{aarch64_stdout}"
+    );
+
+    let _ = std::fs::remove_file(src);
 }
 
 #[test]
@@ -14311,6 +17394,33 @@ fn uses_cc_option_for_preprocessing() {
 
 #[cfg(unix)]
 #[test]
+fn external_cpp_receives_target_platform_macros() {
+    let log_path = temp_file("cc-target-macros", "log");
+    let cc_script = write_cc_script("cc-target-macros", &log_path);
+
+    let output = Command::new(rnqcc())
+        .arg("--cc")
+        .arg(&cc_script)
+        .arg("--target")
+        .arg("x86_64-linux")
+        .args(["-E", "tests/return_42.c"])
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success());
+    let log = std::fs::read_to_string(&log_path).expect("failed to read cc log");
+    assert!(log.contains("-U__APPLE__"), "{log}");
+    assert!(log.contains("-U__MACH__"), "{log}");
+    assert!(log.contains("-D__x86_64__=1"), "{log}");
+    assert!(log.contains("-D__linux__=1"), "{log}");
+    assert!(log.contains("-D__ELF__=1"), "{log}");
+
+    let _ = std::fs::remove_file(cc_script);
+    let _ = std::fs::remove_file(log_path);
+}
+
+#[cfg(unix)]
+#[test]
 fn forwards_successful_external_cpp_stderr_without_polluting_stdout() {
     let cc_script = write_stderr_cc("cc-stderr", "rnqcc external cpp note");
 
@@ -15757,6 +18867,115 @@ int main(void) {
 }
 
 #[test]
+fn scalarized_vector_binary_reads_lanes_by_offset() {
+    let src = temp_file("vector-binary-lane-offsets", "c");
+    std::fs::write(
+        &src,
+        r#"
+typedef unsigned short V __attribute__((vector_size(16)));
+
+V divv(V x) {
+    return x / ((V){1, 2, 4, 8, 16, 32, 64, 128});
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let tacky = stdout(output);
+    assert_eq!(tacky.matches("CopyFromOffset").count(), 16, "{tacky}");
+    assert!(!tacky.contains("GetAddress"), "{tacky}");
+    assert!(!tacky.contains("AddPtr"), "{tacky}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn runs_gcc_pr53645_vector_division_remainder_shape() {
+    let src = temp_file("gcc-pr53645-vector-div-rem", "c");
+    let exe = temp_file("gcc-pr53645-vector-div-rem", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef unsigned short UV __attribute__((vector_size(16)));
+typedef short SV __attribute__((vector_size(16)));
+
+__attribute__((noinline)) UV uq(UV y) { return y / ((UV){1, 4, 2, 8, 16, 64, 32, 128}); }
+__attribute__((noinline)) UV ur(UV y) { return y % ((UV){1, 4, 2, 8, 16, 64, 32, 128}); }
+__attribute__((noinline)) SV sq(SV y) { return y / ((SV){6, 5, 6, 5, 6, 5, 6, 5}); }
+__attribute__((noinline)) SV sr(SV y) { return y % ((SV){6, 5, 6, 5, 6, 5, 6, 5}); }
+
+int main(void) {
+    UV u = (UV){73U, 65531U, 0U, 174U, 921U, 65535U, 17U, 178U};
+    SV s = (SV){73, -9123, 32761, 8191, 16371, 1201, 12701, 9999};
+    UV uquot = uq(u);
+    UV urem = ur(u);
+    SV squot = sq(s);
+    SV srem = sr(s);
+    if (uquot[0] != 73U || uquot[1] != 16382U || uquot[7] != 1U) return 1;
+    if (urem[0] != 0U || urem[1] != 3U || urem[7] != 50U) return 2;
+    if (squot[0] != 12 || squot[1] != -1824 || squot[7] != 1999) return 3;
+    if (srem[0] != 1 || srem[1] != -3 || srem[7] != 4) return 4;
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn x86_64_linux_pools_repeated_double_constants() {
+    let src = temp_file("x86-double-constant-pool", "c");
+    let out = temp_file("x86-double-constant-pool", "s");
+    std::fs::write(
+        &src,
+        r#"
+double a(void) { return 3.5; }
+double b(void) { return 3.5 + 3.5; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    let labels = asm
+        .lines()
+        .filter(|line| line.starts_with("__double_const_"))
+        .count();
+    assert_eq!(labels, 1, "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn supports_file_scope_gnu_vectors_larger_than_scalar_storage() {
     let src = temp_file("file-scope-large-gnu-vector", "c");
     let exe = temp_file("file-scope-large-gnu-vector", "bin");
@@ -16422,6 +19641,72 @@ int main(void) {
 }
 
 #[test]
+fn empty_inline_asm_tied_address_input_copies_to_output() {
+    let src = temp_file("empty-asm-tied-address-input-copy", "c");
+    let exe = temp_file("empty-asm-tied-address-input-copy", "bin");
+    std::fs::write(
+        &src,
+        r#"
+struct S { int a, b; char c[10]; };
+const struct S s = { 0, 0, "" };
+
+int main(void) {
+    const struct S *p;
+    asm ("" : "=r" (p) : "0" (&s));
+    return p == &s ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn sizeof_inferred_static_string_array_drives_later_array_bound() {
+    let src = temp_file("sizeof-inferred-static-string-array", "c");
+    let exe = temp_file("sizeof-inferred-static-string-array", "bin");
+    std::fs::write(
+        &src,
+        r#"
+static const char data[] = "abcd";
+
+int main(void) {
+    unsigned char input[sizeof data + 16] __attribute__((aligned(16)));
+    return sizeof input == 21 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn supports_int128_arithmetic_matrix() {
     let src = TempPath::new("int128-arithmetic-matrix", "c");
     let exe = TempPath::new("int128-arithmetic-matrix", "bin");
@@ -16917,9 +20202,9 @@ fn builtin_isinf_detects_overflowed_float_and_double_values() {
         &src,
         r#"
 int main(void) {
-    float f = 1.01f * __FLT_MAX__;
-    double d = 1.01 * __DBL_MAX__;
-    return __builtin_isinff(f) && __builtin_isinf(d) ? 42 : 1;
+    float f = __builtin_huge_valf();
+    double d = -__builtin_huge_val();
+    return __builtin_isinff(f) && __builtin_isinf(d) && !__builtin_isinf(1.0) ? 42 : 1;
 }
 "#,
     )
@@ -16938,6 +20223,70 @@ int main(void) {
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn builtin_isinfl_keeps_long_double_precision() {
+    let src = temp_file("builtin-isinfl-long-double", "c");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    long double x = 1.0L;
+    return __builtin_isinfl(x);
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let tacky = stdout(output);
+    assert!(tacky.contains("LongDouble"), "{tacky}");
+    assert!(
+        tacky.contains("DoubleConstant(\n                            inf,"),
+        "{tacky}"
+    );
+    assert!(!tacky.contains("Truncate"), "{tacky}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn x86_64_linux_ldbl_max_macro_is_long_double_infinity() {
+    let src = temp_file("x86-ldbl-max-target-macro", "c");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    long double x = __LDBL_MAX__;
+    return __builtin_isinfl(1.01L * x);
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let tacky = stdout(output);
+    assert!(tacky.contains("LongDouble"), "{tacky}");
+    assert!(
+        tacky.contains("DoubleConstant(\n                            inf,"),
+        "{tacky}"
+    );
+    assert!(!tacky.contains("Truncate"), "{tacky}");
+
+    let _ = std::fs::remove_file(src);
 }
 
 #[test]
@@ -17521,6 +20870,91 @@ int main(void) {
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn runs_gcc_pr92904_aligned_variadic_aggregate_shape() {
+    let src = temp_file("gcc-pr92904-aligned-varargs", "c");
+    let exe = temp_file("gcc-pr92904-aligned-varargs", "bin");
+    let out = temp_file("gcc-pr92904-aligned-varargs-x86", "s");
+    std::fs::write(
+        &src,
+        r#"
+#include <stdarg.h>
+
+struct __attribute__((aligned(16))) T { long long a, b; };
+struct __attribute__((aligned(32))) V { double a, b, c, d; };
+struct __attribute__((aligned(16))) X { double a; long long b; };
+
+__attribute__((noinline)) struct T take_t(int skip, ...) {
+    va_list ap;
+    va_start(ap, skip);
+    while (skip--) va_arg(ap, int);
+    struct T value = va_arg(ap, struct T);
+    va_end(ap);
+    return value;
+}
+
+__attribute__((noinline)) struct V take_v(int skip, ...) {
+    va_list ap;
+    va_start(ap, skip);
+    while (skip--) va_arg(ap, double);
+    struct V value = va_arg(ap, struct V);
+    va_end(ap);
+    return value;
+}
+
+__attribute__((noinline)) struct X take_x(int skip, ...) {
+    va_list ap;
+    va_start(ap, skip);
+    while (skip--) {
+        va_arg(ap, int);
+        va_arg(ap, double);
+    }
+    struct X value = va_arg(ap, struct X);
+    va_end(ap);
+    return value;
+}
+
+int main(void) {
+    struct T t = { 0x1111111122222222LL, 0x3333333344444444LL };
+    struct V v = { 1.25, 2.75, -3.5, -2.0 };
+    struct X x = { 9.5, 0x5555555566666666LL };
+    struct T rt = take_t(7, 0, 0, 0, 0, 0, 0, 0, t);
+    struct V rv = take_v(8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, v);
+    struct X rx = take_x(7, 0, 0.0, 0, 0.0, 0, 0.0, 0, 0.0, 0, 0.0, 0, 0.0, 0, 0.0, x);
+    if (rt.a != t.a || rt.b != t.b) return 1;
+    if (rv.a != v.a || rv.b != v.b || rv.c != v.c || rv.d != v.d) return 2;
+    if (rx.a != x.a || rx.b != x.b) return 3;
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let x86_output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(x86_output.status.success(), "{}", stderr(x86_output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+    let _ = std::fs::remove_file(out);
 }
 
 #[test]
@@ -18474,7 +21908,9 @@ fn assert_x86_64_linux_assembly_regression_case(name: &str, source: &str) {
     }
     if name == "x86-linux-complex-long-double-raw-copies" {
         assert!(!asm.contains("movt"), "{name}: {asm}");
-        assert!(asm.contains("movups"), "{name}: {asm}");
+        assert!(!asm.contains("movups"), "{name}: {asm}");
+        assert!(asm.contains("fldt"), "{name}: {asm}");
+        assert!(asm.contains("fstpt"), "{name}: {asm}");
     }
     if name == "x86-linux-local-vprintf-chk-keeps-shadow-va-list" {
         assert!(asm.contains("call __vprintf_chk"), "{name}: {asm}");

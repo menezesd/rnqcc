@@ -19,6 +19,8 @@ import tempfile
 from collections import Counter
 from pathlib import Path
 
+from gcc_torture_expected import load_expected_failures, normalize_test_path, validate_test_path
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RNQCC = ROOT / "target" / "debug" / "rnqcc"
@@ -35,6 +37,14 @@ def resolve_suite(path: Path | None) -> Path:
             return candidate
     searched = ", ".join(str(candidate) for candidate in candidates if candidate is not None)
     raise SystemExit(f"gcc.c-torture suite not found; searched: {searched}")
+
+
+def timeout_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value
 
 
 def run(cmd: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
@@ -61,8 +71,10 @@ def run(cmd: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(
             cmd,
             124,
-            stdout=(exc.stdout or "") + (stdout or ""),
-            stderr=((exc.stderr or "") + (stderr or "") + f"\ntimed out after {timeout:.1f}s").lstrip(),
+            stdout=timeout_text(exc.stdout) + (stdout or ""),
+            stderr=(
+                timeout_text(exc.stderr) + (stderr or "") + f"\ntimed out after {timeout:.1f}s"
+            ).lstrip(),
         )
 
 
@@ -258,23 +270,25 @@ def short_failure(result: subprocess.CompletedProcess[str]) -> str:
     text = (result.stderr or result.stdout).strip()
     if not text:
         return f"exit status {result.returncode}"
+    for line in text.splitlines():
+        if "timed out after" in line:
+            return line[:240]
     first = text.splitlines()[0]
     return first[:240]
 
 
-def load_expected_failures(path: Path | None) -> dict[str, str]:
-    if path is None or not path.exists():
-        return {}
-    expected: dict[str, str] = {}
-    for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        line = raw.split("#", 1)[0].strip()
-        if not line:
-            continue
-        fields = [field.strip() for field in line.split("|", 1)]
-        if len(fields) != 2 or not fields[0] or not fields[1]:
-            raise SystemExit(f"{path}:{line_no}: expected `relative/path.c | diagnostic substring`")
-        expected[fields[0]] = fields[1]
-    return expected
+def failure_matches_expected(result: subprocess.CompletedProcess[str], expected: str) -> bool:
+    return expected in (result.stderr or "") or expected in (result.stdout or "")
+
+
+def test_path_for_log(suite: Path, src: Path) -> str:
+    try:
+        rel = src.relative_to(suite)
+    except ValueError:
+        rel = Path(src.name)
+    test = rel.as_posix()
+    validate_test_path(src, 1, test)
+    return normalize_test_path(test)
 
 
 def write_skip_log(path: Path | None, suite: Path, skipped: list[tuple[Path, str]]) -> None:
@@ -282,9 +296,52 @@ def write_skip_log(path: Path | None, suite: Path, skipped: list[tuple[Path, str
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        "".join(f"{src.relative_to(suite)}\tSKIP: {reason}\n" for src, reason in skipped),
+        "".join(f"{test_path_for_log(suite, src)}\tSKIP: {reason}\n" for src, reason in skipped),
         encoding="utf-8",
     )
+
+
+def validate_output_path(path: Path | None, label: str) -> None:
+    if path is None:
+        return
+    if path.exists() and not path.is_file():
+        raise SystemExit(f"{label} path is not a file: {path}")
+    if path.parent.exists() and not path.parent.is_dir():
+        raise SystemExit(f"{label} parent path is not a directory: {path.parent}")
+
+
+def validate_output_dir(path: Path | None, label: str) -> None:
+    if path is None:
+        return
+    if path.exists() and not path.is_dir():
+        raise SystemExit(f"{label} path is not a directory: {path}")
+    if path.parent.exists() and not path.parent.is_dir():
+        raise SystemExit(f"{label} parent path is not a directory: {path.parent}")
+
+
+def ensure_rnqcc(path: Path) -> None:
+    if not path.exists():
+        if path == DEFAULT_RNQCC:
+            subprocess.run(["cargo", "build"], cwd=ROOT, check=True)
+        else:
+            raise SystemExit(f"--rnqcc not found: {path}")
+    if not path.exists():
+        raise SystemExit(f"--rnqcc not found after build: {path}")
+    if not path.is_file():
+        raise SystemExit(f"--rnqcc path is not a file: {path}")
+
+
+def validate_numeric_args(args: argparse.Namespace) -> None:
+    if args.start < 0:
+        raise SystemExit("--start must be non-negative")
+    if args.limit <= 0:
+        raise SystemExit("--limit must be positive")
+    if args.timeout <= 0:
+        raise SystemExit("--timeout must be positive")
+    if args.max_failures < 0:
+        raise SystemExit("--max-failures must be non-negative")
+    if args.progress_every < 0:
+        raise SystemExit("--progress-every must be non-negative")
 
 
 def save_failure_artifact(
@@ -308,11 +365,7 @@ def save_failure_artifact(
         (result.stdout or "") + (result.stderr or ""),
         encoding="utf-8",
     )
-    try:
-        rel = src.relative_to(suite)
-    except ValueError:
-        rel = Path(src.name)
-    (dest / "source-path.txt").write_text(str(rel) + "\n", encoding="utf-8")
+    (dest / "source-path.txt").write_text(test_path_for_log(suite, src) + "\n", encoding="utf-8")
     try:
         (dest / src.name).write_bytes(src.read_bytes())
     except OSError as err:
@@ -389,9 +442,12 @@ def main() -> int:
     args = parser.parse_args()
 
     rnqcc = Path(args.rnqcc)
+    validate_numeric_args(args)
     suite = resolve_suite(args.suite)
-    if not rnqcc.exists():
-        subprocess.run(["cargo", "build"], cwd=ROOT, check=True)
+    validate_output_path(args.failure_log, "--failure-log")
+    validate_output_path(args.skip_log, "--skip-log")
+    validate_output_dir(args.artifact_dir, "--artifact-dir")
+    ensure_rnqcc(rnqcc)
 
     tests = tests_for_mode(suite, args.mode)
     selected = tests[args.start : args.start + args.limit]
@@ -408,7 +464,7 @@ def main() -> int:
         tmpdir = Path(tmp)
         for offset, src in enumerate(selected):
             idx = args.start + offset
-            rel = str(src.relative_to(suite))
+            rel = test_path_for_log(suite, src)
             if reason := skip_reason_for_test(src):
                 skipped.append((src, reason))
                 if args.progress_every > 0 and (offset + 1) % args.progress_every == 0:
@@ -442,7 +498,7 @@ def main() -> int:
                 else:
                     failure = short_failure(result)
                     expected = expected_failures.get(rel)
-                    if expected is not None and expected in failure:
+                    if expected is not None and failure_matches_expected(result, expected):
                         expected_failed.append((src, failure))
                         save_failure_artifact(
                             args.artifact_dir, suite, idx, src, cmd, result, "xfail"
@@ -462,7 +518,7 @@ def main() -> int:
                 else:
                     failure = short_failure(result)
                     expected = expected_failures.get(rel)
-                    if expected is not None and expected in failure:
+                    if expected is not None and failure_matches_expected(result, expected):
                         expected_failed.append((src, failure))
                         save_failure_artifact(
                             args.artifact_dir, suite, idx, src, cmd, result, "xfail"
@@ -493,28 +549,28 @@ def main() -> int:
     write_skip_log(args.skip_log, suite, skipped)
     if args.print_skips:
         for src, reason in skipped:
-            print(f"SKIP {src.relative_to(suite)}: {reason}")
+            print(f"SKIP {test_path_for_log(suite, src)}: {reason}")
     if args.failure_log:
         args.failure_log.parent.mkdir(parents=True, exist_ok=True)
         args.failure_log.write_text(
             "".join(
-                f"{src.relative_to(suite)}\t{reason}\n" for src, reason in failures
+                f"{test_path_for_log(suite, src)}\t{reason}\n" for src, reason in failures
             )
             + "".join(
                 f"{rel}\tSTALE-XFAIL: {reason}\n" for rel, reason in stale_expected
             )
             + "".join(
-                f"{src.relative_to(suite)}\tXFAIL: {reason}\n"
+                f"{test_path_for_log(suite, src)}\tXFAIL: {reason}\n"
                 for src, reason in expected_failed
             )
             + "".join(
-                f"{src.relative_to(suite)}\tSKIP: {reason}\n" for src, reason in skipped
+                f"{test_path_for_log(suite, src)}\tSKIP: {reason}\n" for src, reason in skipped
             )
         )
 
     shown = failures if args.max_failures == 0 else failures[: args.max_failures]
     for src, reason in shown:
-        rel = src.relative_to(suite)
+        rel = test_path_for_log(suite, src)
         print(f"FAIL {rel}: {reason}")
     if args.max_failures != 0 and len(failures) > args.max_failures:
         print(f"... {len(failures) - args.max_failures} more failures")

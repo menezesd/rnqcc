@@ -100,12 +100,24 @@ fn double_const_label(static_doubles: &[(String, f64)]) -> String {
     format!("__double_const_{}", static_doubles.len())
 }
 
+fn intern_double_const(static_doubles: &mut Vec<(String, f64)>, value: f64) -> String {
+    let bits = value.to_bits();
+    if let Some((label, _)) = static_doubles
+        .iter()
+        .find(|(_, existing)| existing.to_bits() == bits)
+    {
+        return label.clone();
+    }
+    let label = double_const_label(static_doubles);
+    static_doubles.push((label.clone(), value));
+    label
+}
+
 /// Convert a TackyVal for doubles, emitting a data label for double constants
 fn convert_double_val(val: &TackyVal, static_doubles: &mut Vec<(String, f64)>) -> AsmOperand {
     match val {
         TackyVal::DoubleConstant(d) => {
-            let label = double_const_label(static_doubles);
-            static_doubles.push((label.clone(), *d));
+            let label = intern_double_const(static_doubles, *d);
             AsmOperand::Data(label)
         }
         TackyVal::Constant(c) => AsmOperand::Imm(*c),
@@ -252,8 +264,7 @@ fn clamp_floating_to_signed_int_overflow(
     } else {
         convert_double_val(src, static_doubles)
     };
-    let max_label = double_const_label(static_doubles);
-    static_doubles.push((max_label.clone(), 2147483648.0));
+    let max_label = intern_double_const(static_doubles, 2147483648.0);
     out.push(AsmInstr::Cmp(
         AsmType::Double,
         AsmOperand::Data(max_label),
@@ -960,13 +971,12 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
             {
                 // Double negation: XOR with sign bit mask (bit 63)
                 // Emit a static constant with just the sign bit set
-                let sign_mask_label = double_const_label(static_doubles);
                 let sign_bit: u64 = if t == AsmType::Float {
                     (1u32 << 31) as u64
                 } else {
                     1u64 << 63
                 };
-                static_doubles.push((sign_mask_label.clone(), f64::from_bits(sign_bit)));
+                let sign_mask_label = intern_double_const(static_doubles, f64::from_bits(sign_bit));
                 let src_op = convert_double_val(src, static_doubles);
                 out.push(AsmInstr::Mov(t, src_op, convert_val(dst)));
                 out.push(AsmInstr::Binary(
@@ -1547,6 +1557,12 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                     high,
                     AsmOperand::PseudoMem(dst_name.clone(), (*offset + 8) as i32),
                 ));
+            } else if src_t == AsmType::LongDouble {
+                x87_load_val(out, src, types, static_doubles);
+                out.push(AsmInstr::X87Store(AsmOperand::PseudoMem(
+                    dst_name.clone(),
+                    *offset as i32,
+                )));
             } else if matches!(src_t, AsmType::Float | AsmType::Double) {
                 let src_op = convert_double_val(src, static_doubles);
                 out.push(AsmInstr::Mov(
@@ -1580,6 +1596,12 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                     AsmOperand::PseudoMem(src_name.clone(), (*offset + 8) as i32),
                     high64_operand(dst_op)?,
                 ));
+            } else if dst_t == AsmType::LongDouble {
+                out.push(AsmInstr::X87Load(
+                    AsmType::LongDouble,
+                    AsmOperand::PseudoMem(src_name.clone(), *offset as i32),
+                ));
+                out.push(AsmInstr::X87Store(convert_val(dst)));
             } else {
                 out.push(AsmInstr::Mov(
                     dst_t,
@@ -2949,6 +2971,9 @@ fn convert_function(
         }
     }
 
+    let mut register_param_instructions = Vec::new();
+    let mut stack_param_instructions = Vec::new();
+
     for (i, param) in func.params.iter().enumerate() {
         if let Some((dst_name, size)) = memory_param_blocks.get(&i).copied() {
             let align = get_struct_def(dst_name, ctx.var_struct_tags, ctx.struct_defs)
@@ -2957,7 +2982,7 @@ fn convert_function(
             let layout = StackArgLayout::for_memory_block(size, align);
             stack_arg_offset = layout.place_at(stack_arg_offset);
             let offset = 16 + stack_arg_offset as i32;
-            instructions.push(AsmInstr::CopyFromStackArg {
+            stack_param_instructions.push(AsmInstr::CopyFromStackArg {
                 src_offset: offset,
                 dst: AsmOperand::PseudoMem(dst_name.clone(), 0),
                 size,
@@ -2971,24 +2996,25 @@ fn convert_function(
             stack_arg_offset = layout.place_at(stack_arg_offset);
             let offset = 16 + stack_arg_offset as i32;
             if t == AsmType::LongDouble {
-                instructions.push(AsmInstr::X87Load(
+                stack_param_instructions.push(AsmInstr::X87Load(
                     AsmType::LongDouble,
                     AsmOperand::Stack(offset),
                 ));
-                instructions.push(AsmInstr::X87Store(AsmOperand::Pseudo(param.clone())));
+                stack_param_instructions
+                    .push(AsmInstr::X87Store(AsmOperand::Pseudo(param.clone())));
             } else if t == AsmType::Octword {
-                instructions.push(AsmInstr::Mov(
+                stack_param_instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     AsmOperand::Stack(offset),
                     AsmOperand::PseudoMem(param.clone(), 0),
                 ));
-                instructions.push(AsmInstr::Mov(
+                stack_param_instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     AsmOperand::Stack(offset + 8),
                     AsmOperand::PseudoMem(param.clone(), 8),
                 ));
             } else {
-                instructions.push(AsmInstr::Mov(
+                stack_param_instructions.push(AsmInstr::Mov(
                     t,
                     AsmOperand::Stack(offset),
                     AsmOperand::Pseudo(param.clone()),
@@ -3002,15 +3028,15 @@ fn convert_function(
             let layout = StackArgLayout::for_scalar(t);
             stack_arg_offset = layout.place_at(stack_arg_offset);
             let offset = 16 + stack_arg_offset as i32;
-            instructions.push(AsmInstr::X87Load(
+            stack_param_instructions.push(AsmInstr::X87Load(
                 AsmType::LongDouble,
                 AsmOperand::Stack(offset),
             ));
-            instructions.push(AsmInstr::X87Store(AsmOperand::Pseudo(param.clone())));
+            stack_param_instructions.push(AsmInstr::X87Store(AsmOperand::Pseudo(param.clone())));
             stack_arg_offset += layout.size;
         } else if matches!(t, AsmType::Float | AsmType::Double) {
             if xmm_reg_idx < 8 {
-                instructions.push(AsmInstr::Mov(
+                register_param_instructions.push(AsmInstr::Mov(
                     t,
                     AsmOperand::Xmm(XMM_ARG_REGISTERS[xmm_reg_idx]),
                     AsmOperand::Pseudo(param.clone()),
@@ -3020,7 +3046,7 @@ fn convert_function(
                 let layout = StackArgLayout::for_scalar(t);
                 stack_arg_offset = layout.place_at(stack_arg_offset);
                 let offset = 16 + stack_arg_offset as i32;
-                instructions.push(AsmInstr::Mov(
+                stack_param_instructions.push(AsmInstr::Mov(
                     t,
                     AsmOperand::Stack(offset),
                     AsmOperand::Pseudo(param.clone()),
@@ -3029,12 +3055,12 @@ fn convert_function(
             }
         } else if t == AsmType::Octword {
             if int_reg_idx + 1 < 6 {
-                instructions.push(AsmInstr::Mov(
+                register_param_instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     AsmOperand::Reg(ARG_REGISTERS[int_reg_idx]),
                     AsmOperand::PseudoMem(param.clone(), 0),
                 ));
-                instructions.push(AsmInstr::Mov(
+                register_param_instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     AsmOperand::Reg(ARG_REGISTERS[int_reg_idx + 1]),
                     AsmOperand::PseudoMem(param.clone(), 8),
@@ -3044,12 +3070,12 @@ fn convert_function(
                 let layout = StackArgLayout::for_scalar(t);
                 stack_arg_offset = layout.place_at(stack_arg_offset);
                 let offset = 16 + stack_arg_offset as i32;
-                instructions.push(AsmInstr::Mov(
+                stack_param_instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     AsmOperand::Stack(offset),
                     AsmOperand::PseudoMem(param.clone(), 0),
                 ));
-                instructions.push(AsmInstr::Mov(
+                stack_param_instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     AsmOperand::Stack(offset + 8),
                     AsmOperand::PseudoMem(param.clone(), 8),
@@ -3058,7 +3084,7 @@ fn convert_function(
             }
         } else {
             if int_reg_idx < 6 {
-                instructions.push(AsmInstr::Mov(
+                register_param_instructions.push(AsmInstr::Mov(
                     t,
                     AsmOperand::Reg(ARG_REGISTERS[int_reg_idx]),
                     AsmOperand::Pseudo(param.clone()),
@@ -3068,7 +3094,7 @@ fn convert_function(
                 let layout = StackArgLayout::for_scalar(t);
                 stack_arg_offset = layout.place_at(stack_arg_offset);
                 let offset = 16 + stack_arg_offset as i32;
-                instructions.push(AsmInstr::Mov(
+                stack_param_instructions.push(AsmInstr::Mov(
                     t,
                     AsmOperand::Stack(offset),
                     AsmOperand::Pseudo(param.clone()),
@@ -3077,6 +3103,8 @@ fn convert_function(
             }
         }
     }
+    instructions.extend(register_param_instructions);
+    instructions.extend(stack_param_instructions);
 
     for instr in &func.body {
         let va_start_stack_offset = 16 + stack_arg_offset as i32;

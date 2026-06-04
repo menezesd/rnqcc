@@ -23,12 +23,12 @@ TackyProgram {
                             2,
                         ),
                         dst: Var(
-                            "tmp.0",
+                            "__tmp.0",
                         ),
                     },
                     Return(
                         Var(
-                            "tmp.0",
+                            "__tmp.0",
                         ),
                     ),
                     Return(
@@ -47,7 +47,7 @@ TackyProgram {
     thread_local_vars: {},
     symbol_types: {
         "x.0": Int,
-        "tmp.0": Int,
+        "__tmp.0": Int,
     },
     symbol_alignments: {},
     array_sizes: {},

@@ -1765,7 +1765,9 @@ fn static_init_size(init: &StaticInit) -> usize {
         | StaticInit::PointerInit(_)
         | StaticInit::PointerInitOffset(_, _) => 8,
         StaticInit::LabelDiffInit(_, _, bytes) => *bytes,
-        StaticInit::Int128Init(_) | StaticInit::UInt128Init(_) => 16,
+        StaticInit::Int128Init(_) | StaticInit::UInt128Init(_) | StaticInit::LongDoubleInit(_) => {
+            16
+        }
         StaticInit::FloatInit(_) => 4,
         StaticInit::ZeroInit(n) => *n,
         StaticInit::StringInit(s, null_terminated) => {
@@ -1820,6 +1822,28 @@ fn emit_macho_tls_static_var(
     writeln!(w, "\t.quad {}", init_label)
 }
 
+fn binary128_from_f64(value: f64) -> u128 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 63) as u128) << 127;
+    let exp = ((bits >> 52) & 0x7ff) as i32;
+    let frac = (bits & ((1u64 << 52) - 1)) as u128;
+    if exp == 0 {
+        if frac == 0 {
+            return sign;
+        }
+        let top_bit = 127 - frac.leading_zeros() as i32;
+        let normalized = frac << (63 - top_bit);
+        let unbiased = top_bit - 1074;
+        let exponent = (unbiased + 16383) as u128;
+        return sign | (exponent << 112) | ((normalized & ((1u128 << 63) - 1)) << 49);
+    }
+    if exp == 0x7ff {
+        return sign | (0x7fffu128 << 112) | (frac << 60);
+    }
+    let exponent = (exp - 1023 + 16383) as u128;
+    sign | (exponent << 112) | (frac << 60)
+}
+
 fn emit_static_init(w: &mut dyn Write, init: &StaticInit, target: &Target) -> std::io::Result<()> {
     match init {
         StaticInit::CharInit(v) => writeln!(w, "\t.byte {}", *v as u8),
@@ -1840,6 +1864,11 @@ fn emit_static_init(w: &mut dyn Write, init: &StaticInit, target: &Target) -> st
         }
         StaticInit::FloatInit(v) => writeln!(w, "\t.long {}", v.to_bits()),
         StaticInit::DoubleInit(v) => writeln!(w, "\t.quad {}", v.to_bits()),
+        StaticInit::LongDoubleInit(v) => {
+            let bits = binary128_from_f64(*v);
+            writeln!(w, "\t.quad {}", bits as u64)?;
+            writeln!(w, "\t.quad {}", (bits >> 64) as u64)
+        }
         StaticInit::ZeroInit(n) => writeln!(w, "\t.zero {}", n),
         StaticInit::StringInit(s, null_terminated) => emit_string_init(w, s, *null_terminated),
         StaticInit::PointerInit(label) => {

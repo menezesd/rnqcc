@@ -2051,6 +2051,7 @@ pub enum AsmInstr {
     Cvtsd2ss(AsmOperand, AsmOperand),          // double → float
     X87Load(AsmType, AsmOperand),
     X87Store(AsmOperand),
+    X87StoreFloat(AsmType, AsmOperand),
     X87StoreInt(AsmType, AsmOperand),
     X87LoadIndirect(AsmType, Reg),
     X87StoreIndirect(Reg),

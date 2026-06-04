@@ -1036,6 +1036,11 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
         TackyInstr::Truncate { src, dst } => {
             let dst_t = val_type(dst, types);
             let src_t = val_type(src, types);
+            if matches!(dst_t, AsmType::Float | AsmType::Double) && src_t == AsmType::LongDouble {
+                x87_load_val(out, src, types, static_doubles);
+                out.push(AsmInstr::X87StoreFloat(dst_t, convert_val(dst)));
+                return Ok(());
+            }
             let src_op = if src_t == AsmType::Octword {
                 low64_operand(convert_val(src))?
             } else {
@@ -1332,6 +1337,13 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
             let t = val_type(dst, types);
             if t == AsmType::LongDouble {
                 x87_copy_to_long_double(out, src, dst, types, static_doubles);
+                return Ok(());
+            }
+            if matches!(t, AsmType::Float | AsmType::Double)
+                && val_type(src, types) == AsmType::LongDouble
+            {
+                x87_load_val(out, src, types, static_doubles);
+                out.push(AsmInstr::X87StoreFloat(t, convert_val(dst)));
                 return Ok(());
             }
             if t == AsmType::Octword {
@@ -3442,6 +3454,9 @@ fn replace_pseudos(func: &mut AsmFunction, ctx: &ReplacePseudoContext<'_>) -> i3
             AsmInstr::X87Store(dst) => {
                 replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
             }
+            AsmInstr::X87StoreFloat(_, dst) => {
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
+            }
             AsmInstr::X87StoreInt(_, dst) => {
                 replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
             }
@@ -3982,7 +3997,9 @@ fn verify_final_function(func: &AsmFunction) -> Result<(), String> {
             AsmInstr::CopyFromStackArg { dst, .. } => {
                 assert_no_pseudo_operand(dst, instr)?;
             }
-            AsmInstr::X87Load(_, src) | AsmInstr::X87Store(src) => {
+            AsmInstr::X87Load(_, src)
+            | AsmInstr::X87Store(src)
+            | AsmInstr::X87StoreFloat(_, src) => {
                 assert_no_pseudo_operand(src, instr)?;
             }
             AsmInstr::X87StoreInt(_, dst) => {

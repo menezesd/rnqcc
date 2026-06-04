@@ -587,6 +587,19 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                 show_operand(dst, AsmType::LongDouble, platform)?
             )
         }
+        AsmInstr::X87StoreFloat(t, dst) => {
+            let mnemonic = match t {
+                AsmType::Float => "fstps",
+                AsmType::Double => "fstpl",
+                other => {
+                    return invalid_input(format!(
+                        "unsupported x87 floating store type in x86-64 emitter: {:?}",
+                        other
+                    ))
+                }
+            };
+            writeln!(w, "\t{} {}", mnemonic, show_operand(dst, *t, platform)?)
+        }
         AsmInstr::X87StoreInt(t, dst) => {
             let mnemonic = match t {
                 AsmType::Word => "fisttps",

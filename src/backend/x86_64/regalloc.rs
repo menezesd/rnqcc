@@ -302,6 +302,7 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
         | AsmInstr::AArch64DoubleToFloat(src, dst) => (operand_reads(src), operand_writes(dst)),
         AsmInstr::X87Load(_, src) => (operand_reads(src), vec![]),
         AsmInstr::X87Store(dst) => (vec![], operand_writes(dst)),
+        AsmInstr::X87StoreFloat(_, _) => (vec![], vec![]),
         AsmInstr::X87StoreInt(_, dst) => (vec![], operand_writes(dst)),
         AsmInstr::X87LoadIndirect(_, reg) | AsmInstr::X87StoreIndirect(reg) => {
             (vec![RegId::Gp(*reg)], vec![])
@@ -1175,13 +1176,23 @@ pub fn allocate_registers(
     // Determine candidate pseudo-registers
     let mut gp_candidates: HashSet<String> = HashSet::new();
     let mut xmm_candidates: HashSet<String> = HashSet::new();
+    let mut x87_float_store_dsts: HashSet<String> = HashSet::new();
+
+    for instr in &func.instructions {
+        if let AsmInstr::X87StoreFloat(_, AsmOperand::Pseudo(name)) = instr {
+            x87_float_store_dsts.insert(name.clone());
+        }
+    }
 
     // Scan instructions for all pseudo names
     for instr in &func.instructions {
         let (used, updated) = find_used_and_updated(instr);
         for id in used.iter().chain(updated.iter()) {
             if let RegId::Pseudo(name) = id {
-                if aliased.contains(name) || arr_sizes.contains_key(name) {
+                if aliased.contains(name)
+                    || arr_sizes.contains_key(name)
+                    || x87_float_store_dsts.contains(name)
+                {
                     continue;
                 }
                 let ct = types.get(name).copied().unwrap_or(CType::Int);

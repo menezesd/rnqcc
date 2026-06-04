@@ -6352,6 +6352,41 @@ fn emits_aarch64_assembly_for_mixed_integer_and_double_arguments() {
 }
 
 #[test]
+fn aarch64_preserves_unsigned_long_constant_argument_width_after_copy_prop() {
+    let src = temp_file("aarch64-ulong-constant-arg-width", "c");
+    let out = temp_file("aarch64-ulong-constant-arg-width", "s");
+    std::fs::write(
+        &src,
+        r#"
+__attribute__((noinline)) unsigned long id(unsigned long x) { return x; }
+double f(void) {
+    unsigned long x = id(18446744073709551615UL);
+    return (double)x;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
+    assert!(asm.contains("\tmovz x9, #65535"), "{asm}");
+    assert!(asm.contains("\tmovk x9, #65535, lsl #48"), "{asm}");
+    assert!(asm.contains("\tldr x0, [sp]"), "{asm}");
+    assert!(asm.contains("\tucvtf d9, x9"), "{asm}");
+    assert!(!asm.contains("\tmovz w0, #65535"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn emits_aarch64_assembly_for_ninth_integer_argument() -> Result<(), String> {
     let src = temp_file("aarch64-ninth-arg", "i");
     let out = temp_file("aarch64-ninth-arg", "s");
@@ -21688,6 +21723,43 @@ int main(void) {
     .expect("failed to write input");
 
     let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn copy_propagation_preserves_unsigned_long_call_argument_width() {
+    let src = temp_file("copy-prop-ulong-call-arg-width", "c");
+    let exe = temp_file("copy-prop-ulong-call-arg-width", "bin");
+    std::fs::write(
+        &src,
+        r#"
+__attribute__((noinline)) unsigned long id(unsigned long x) { return x; }
+
+double f(void) {
+    unsigned long x = id(18446744073709551615UL);
+    return (double)x;
+}
+
+int main(void) {
+    return f() > 1.0e19 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--optimize")
         .arg("-o")
         .arg(&exe)
         .arg(&src)

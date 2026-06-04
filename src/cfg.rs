@@ -819,8 +819,10 @@ fn rewrite_instruction(
             hidden_return,
             indirect,
         } => {
-            let new_args: Vec<TackyVal> =
-                args.iter().map(|a| replace_operand(a, reaching)).collect();
+            let new_args: Vec<TackyVal> = args
+                .iter()
+                .map(|a| replace_operand_typed(a, reaching, types))
+                .collect();
             Some(TackyInstr::FunCall {
                 name: name.clone(),
                 args: new_args,

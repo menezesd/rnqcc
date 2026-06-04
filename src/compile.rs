@@ -373,9 +373,13 @@ pub fn compile(stage: &Stage, src_file: &str, options: CompileOptions<'_>) -> Re
     }
 
     // Generate TACKY IR
-    let mut tacky_program =
-        tacky::generate_with_options(resolved_ast, instrument_functions, compatibility.permissive)
-            .map_err(|err| Diagnostic::tacky(err).render())?;
+    let mut tacky_program = tacky::generate_with_target_options(
+        resolved_ast,
+        *target,
+        instrument_functions,
+        compatibility.permissive,
+    )
+    .map_err(|err| Diagnostic::tacky(err).render())?;
     validate_tacky_program(&tacky_program).map_err(|err| Diagnostic::tacky(err).render())?;
     if dumps.tacky_pre_opt {
         eprintln!("{:#?}", tacky_program);

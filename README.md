@@ -27,7 +27,8 @@ sources with existing `.o`, `.a`, `.so`, and `.dylib` artifacts.
 | `int`, `long`, signed/unsigned chars | yes | yes |
 | pointers, arrays, pointer arithmetic | yes | yes |
 | globals, statics, string literals | yes | yes |
-| `double` arithmetic/comparison/conversion | yes | yes |
+| `float`/`double` arithmetic/comparison/conversion | yes | yes |
+| `long double` ABI storage/calls | x87 extended | binary128 on Linux, `double` width on macOS |
 | direct calls and indirect calls | yes | yes |
 | stack arguments | yes | yes |
 | struct copies and member access | yes | yes |
@@ -38,8 +39,9 @@ sources with existing `.o`, `.a`, `.so`, and `.dylib` artifacts.
 
 Known simplifications:
 
-- `float`, `long double`, and `_Float*` names are currently lowered through the
-  compiler's `double` representation.
+- `long double` arithmetic is lowered for the target ABI but still uses `f64`
+  literal/static-initializer values internally today. `_Float*` names are accepted
+  as compatibility aliases over the existing `float`/`double` representation.
 - The external C driver handles preprocessing, assembly, and linking.
 - Direct calls to variadic prototypes and indirect calls through variadic
   function pointers are supported.

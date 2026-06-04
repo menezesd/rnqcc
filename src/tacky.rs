@@ -168,6 +168,7 @@ impl StaticInitBuilder {
 }
 
 struct TackyGen {
+    target: Target,
     tmp_counter: usize,
     label_counter: usize,
     string_counter: usize,
@@ -221,7 +222,12 @@ struct TackyGen {
 
 impl TackyGen {
     fn new() -> Self {
+        Self::new_for_target(Target::host())
+    }
+
+    fn new_for_target(target: Target) -> Self {
         TackyGen {
+            target,
             tmp_counter: 0,
             label_counter: 0,
             string_counter: 0,
@@ -260,6 +266,14 @@ impl TackyGen {
             no_instrument_functions: std::collections::HashSet::new(),
             inline_va_arg_pack_functions: HashMap::new(),
             nested_capture_slots: HashMap::new(),
+        }
+    }
+
+    fn long_double_ctype(&self) -> CType {
+        if self.target.long_double_size() > CType::Double.size() as usize {
+            CType::LongDouble
+        } else {
+            CType::Double
         }
     }
 
@@ -931,7 +945,7 @@ impl TackyGen {
             .unwrap_or_else(|| tag.to_string())
     }
 
-    fn builtin_function_info(name: &str) -> Option<BuiltinFunctionInfo> {
+    fn builtin_function_info(&self, name: &str) -> Option<BuiltinFunctionInfo> {
         let void_ptr = Self::void_pointer_type();
         let char_ptr = Self::char_pointer_type();
         match name {
@@ -1219,7 +1233,7 @@ impl TackyGen {
                 "isinf",
                 CType::Int,
                 FullType::Scalar(CType::Int),
-                vec![CType::LongDouble],
+                vec![self.long_double_ctype()],
                 None,
             )),
             "alloca" | "__builtin_alloca" => Some((
@@ -1588,7 +1602,7 @@ impl TackyGen {
             Exp::ULongConstant(_) => FullType::Scalar(CType::ULong),
             Exp::UInt128Constant(_) => FullType::Scalar(CType::UInt128),
             Exp::DoubleConstant(_) => FullType::Scalar(CType::Double),
-            Exp::LongDoubleConstant(_) => FullType::Scalar(CType::LongDouble),
+            Exp::LongDoubleConstant(_) => FullType::Scalar(self.long_double_ctype()),
             Exp::ImaginaryIntConstant(_) => FullType::Vector {
                 elem: Box::new(FullType::Scalar(CType::Int)),
                 lanes: 2,
@@ -2384,12 +2398,13 @@ impl TackyGen {
                 Ok((dst, CType::Double))
             }
             Exp::LongDoubleConstant(val) => {
-                let dst = self.fresh_tmp(CType::LongDouble);
+                let ty = self.long_double_ctype();
+                let dst = self.fresh_tmp(ty);
                 self.emit(TackyInstr::Copy {
                     src: TackyVal::DoubleConstant(val),
                     dst: dst.clone(),
                 });
-                Ok((dst, CType::LongDouble))
+                Ok((dst, ty))
             }
             Exp::ImaginaryIntConstant(val) => {
                 let ft = FullType::Vector {
@@ -4617,7 +4632,7 @@ impl TackyGen {
         {
             let ret_type = match name.as_str() {
                 "__builtin_inff" | "__builtin_huge_valf" => CType::Float,
-                "__builtin_infl" | "__builtin_huge_vall" => CType::LongDouble,
+                "__builtin_infl" | "__builtin_huge_vall" => self.long_double_ctype(),
                 _ => CType::Double,
             };
             let raw_inf = self.fresh_tmp(CType::Double);
@@ -4635,7 +4650,7 @@ impl TackyGen {
         {
             let arg_type = match name.as_str() {
                 "__builtin_isinff" => CType::Float,
-                "__builtin_isinfl" => CType::LongDouble,
+                "__builtin_isinfl" => self.long_double_ctype(),
                 _ => CType::Double,
             };
             let Some(arg_exp) = args.into_iter().next() else {
@@ -5369,7 +5384,7 @@ impl TackyGen {
         let builtin_info = if user_declares_function && !name.starts_with("__builtin_") {
             None
         } else {
-            Self::builtin_function_info(&name)
+            self.builtin_function_info(&name)
         };
         let call_name = builtin_info
             .as_ref()
@@ -13571,7 +13586,16 @@ pub fn generate_with_options(
     instrument_functions: bool,
     permissive: bool,
 ) -> TackyResult<TackyProgram> {
-    let mut gen = TackyGen::new();
+    generate_with_target_options(program, Target::host(), instrument_functions, permissive)
+}
+
+pub fn generate_with_target_options(
+    program: Program,
+    target: Target,
+    instrument_functions: bool,
+    permissive: bool,
+) -> TackyResult<TackyProgram> {
+    let mut gen = TackyGen::new_for_target(target);
     gen.instrument_functions = instrument_functions;
     gen.permissive = permissive;
     let mut top_level = Vec::new();

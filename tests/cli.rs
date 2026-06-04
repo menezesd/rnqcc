@@ -21662,6 +21662,61 @@ int main(void) {
 }
 
 #[test]
+fn aarch64_macos_isinfl_uses_double_width_long_double() {
+    let src = temp_file("aarch64-macos-isinfl-double-ldbl", "c");
+    let asm = temp_file("aarch64-macos-isinfl-double-ldbl", "s");
+    std::fs::write(
+        &src,
+        r#"
+extern void abort(void);
+
+static inline int testl(long double b) {
+    long double c = 1.01L * b;
+    return __builtin_isinfl(c);
+}
+
+int main(void) {
+    if (testl(__LDBL_MAX__) < 1) abort();
+    return 0;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let tacky_output = Command::new(rnqcc())
+        .args(["--target", "aarch64-macos", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    if !tacky_output.status.success() {
+        panic!("{}", stderr(tacky_output));
+    }
+    let tacky = stdout(tacky_output);
+    assert!(!tacky.contains("LongDouble"), "{tacky}");
+    assert!(!tacky.contains("__multf3"), "{tacky}");
+    assert!(!tacky.contains("__eqtf2"), "{tacky}");
+
+    let asm_output = Command::new(rnqcc())
+        .args(["--target", "aarch64-macos", "-S"])
+        .arg(&src)
+        .arg("-o")
+        .arg(&asm)
+        .output()
+        .expect("failed to run rnqcc");
+
+    if !asm_output.status.success() {
+        panic!("{}", stderr(asm_output));
+    }
+    let asm_text = std::fs::read_to_string(&asm).expect("failed to read assembly");
+    assert!(!asm_text.contains("__multf3"), "{asm_text}");
+    assert!(!asm_text.contains("__eqtf2"), "{asm_text}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(asm);
+}
+
+#[test]
 fn builtin_signbit_detects_negative_zero() {
     let src = temp_file("builtin-signbit-negative-zero", "c");
     let exe = temp_file("builtin-signbit-negative-zero", "bin");

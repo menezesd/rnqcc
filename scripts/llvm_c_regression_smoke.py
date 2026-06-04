@@ -75,6 +75,13 @@ def main() -> int:
     parser.add_argument("--internal-cpp", action="store_true")
     args = parser.parse_args()
 
+    if args.start < 0:
+        raise SystemExit("--start must be non-negative")
+    if args.limit <= 0:
+        raise SystemExit("--limit must be positive")
+    if args.timeout <= 0:
+        raise SystemExit("--timeout must be positive")
+
     rnqcc = Path(args.rnqcc)
     suite = Path(args.suite)
     if not rnqcc.exists():

@@ -360,6 +360,43 @@ fn llvm_c_regression_smoke_reports_timeouts_cleanly() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn llvm_c_regression_smoke_rejects_invalid_numeric_args() -> Result<(), String> {
+    let suite = TempPath::new("llvm-c-invalid-args-suite", "dir");
+    std::fs::create_dir_all(suite.path())
+        .map_err(|err| format!("failed to create fake LLVM suite: {err}"))?;
+    let cases = [
+        ("--start", "-1", "--start must be non-negative"),
+        ("--limit", "0", "--limit must be positive"),
+        ("--timeout", "0", "--timeout must be positive"),
+    ];
+
+    for (flag, value, expected) in cases {
+        let output = match Command::new("python3")
+            .arg("scripts/llvm_c_regression_smoke.py")
+            .arg("--rnqcc")
+            .arg(rnqcc())
+            .arg("--suite")
+            .arg(suite.path())
+            .arg(flag)
+            .arg(value)
+            .output()
+        {
+            Ok(output) => output,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(format!("failed to run LLVM C smoke script: {err}")),
+        };
+
+        assert!(
+            !output.status.success(),
+            "{flag} {value} unexpectedly succeeded"
+        );
+        let stderr = stderr(output);
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn real_project_corpus_reports_timeouts_cleanly() -> Result<(), String> {

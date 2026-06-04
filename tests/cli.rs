@@ -237,6 +237,54 @@ fn fuzz_smoke_script_compiles_seeded_case() -> Result<(), String> {
 
 #[cfg(unix)]
 #[test]
+fn fuzz_smoke_reports_timeouts_cleanly() -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fake_rnqcc = TempPath::new("fuzz-smoke-timeout-rnqcc", "sh");
+    std::fs::write(
+        fake_rnqcc.path(),
+        "#!/bin/sh\n\
+         printf 'partial stdout without newline'\n\
+         printf 'partial stderr without newline' >&2\n\
+         sleep 5\n",
+    )
+    .map_err(|err| format!("failed to write fake rnqcc: {err}"))?;
+    let mut perms = std::fs::metadata(fake_rnqcc.path())
+        .map_err(|err| format!("missing fake rnqcc: {err}"))?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(fake_rnqcc.path(), perms)
+        .map_err(|err| format!("failed to chmod fake rnqcc: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/fuzz_smoke.py")
+        .arg("--seed")
+        .arg("17")
+        .arg("--cases")
+        .arg("1")
+        .arg("--rnqcc")
+        .arg(fake_rnqcc.path())
+        .arg("--target")
+        .arg("x86_64-linux")
+        .arg("--timeout")
+        .arg("0.1")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run fuzz smoke script: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("FAIL seed=17 case=0"), "{stderr}");
+    assert!(stderr.contains("timed out after 0.1s"), "{stderr}");
+    assert!(!stderr.contains("None"), "{stderr}");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn llvm_c_regression_smoke_reports_timeouts_cleanly() -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
 

@@ -128,15 +128,44 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="only write generated C inputs; do not run rnqcc",
     )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=float(os.environ.get("FUZZ_SMOKE_TIMEOUT", "10.0")),
+        help="seconds to allow each rnqcc invocation, or set FUZZ_SMOKE_TIMEOUT",
+    )
     return parser.parse_args(argv)
 
 
-def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, check=False)
+def timeout_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value
 
 
-def discover_targets(rnqcc: str, cwd: Path) -> list[str]:
-    result = run([rnqcc, "--print-targets"], cwd)
+def run(cmd: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            cmd,
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            cmd,
+            124,
+            stdout=timeout_text(exc.stdout),
+            stderr=(timeout_text(exc.stderr) + f"\ntimed out after {timeout:.1f}s").lstrip(),
+        )
+
+
+def discover_targets(rnqcc: str, cwd: Path, timeout: float) -> list[str]:
+    result = run([rnqcc, "--print-targets"], cwd, timeout)
     if result.returncode != 0:
         raise RuntimeError(
             "could not discover targets with --print-targets\n"
@@ -148,21 +177,21 @@ def discover_targets(rnqcc: str, cwd: Path) -> list[str]:
     return targets
 
 
-def compile_case(rnqcc: str, src: Path, targets: list[str], cwd: Path) -> None:
+def compile_case(rnqcc: str, src: Path, targets: list[str], cwd: Path, timeout: float) -> None:
     for stage in STAGES:
         if stage == "codegen":
             for target in targets:
-                check_run([rnqcc, "--target", target, "--stage", stage, str(src)], cwd)
+                check_run([rnqcc, "--target", target, "--stage", stage, str(src)], cwd, timeout)
         else:
-            check_run([rnqcc, "--stage", stage, str(src)], cwd)
+            check_run([rnqcc, "--stage", stage, str(src)], cwd, timeout)
 
     for target in targets:
         asm = src.with_suffix(f".{target}.s")
-        check_run([rnqcc, "--target", target, "-S", "-o", str(asm), str(src)], cwd)
+        check_run([rnqcc, "--target", target, "-S", "-o", str(asm), str(src)], cwd, timeout)
 
 
-def check_run(cmd: list[str], cwd: Path) -> None:
-    result = run(cmd, cwd)
+def check_run(cmd: list[str], cwd: Path, timeout: float) -> None:
+    result = run(cmd, cwd, timeout)
     if result.returncode == 0:
         return
 
@@ -177,12 +206,15 @@ def check_run(cmd: list[str], cwd: Path) -> None:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    if args.timeout <= 0:
+        print("--timeout must be positive", file=sys.stderr)
+        return 1
     repo = Path.cwd()
     work_dir = args.work_dir or Path(tempfile.gettempdir()) / f"rnqcc-fuzz-smoke-{args.seed}"
     work_dir.mkdir(parents=True, exist_ok=True)
 
     rnqcc = args.rnqcc
-    targets = args.targets or ([] if args.emit_only else discover_targets(rnqcc, repo))
+    targets = args.targets or ([] if args.emit_only else discover_targets(rnqcc, repo, args.timeout))
 
     for case in range(args.cases):
         src = work_dir / f"seed_{args.seed}_case_{case}.i"
@@ -190,7 +222,7 @@ def main(argv: list[str]) -> int:
 
         try:
             if not args.emit_only:
-                compile_case(rnqcc, src, targets, repo)
+                compile_case(rnqcc, src, targets, repo, args.timeout)
         except Exception as exc:
             print(f"FAIL seed={args.seed} case={case} src={src}", file=sys.stderr)
             print(exc, file=sys.stderr)

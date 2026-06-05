@@ -1226,6 +1226,54 @@ fn gcc_torture_smoke_admits_portable_execute_stack_stress() -> Result<(), String
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn gcc_torture_smoke_materializes_tmpnam_fileio_tests() -> Result<(), String> {
+    let suite = TempPath::new("gcc-smoke-tmpnam-fileio-suite", "dir");
+    let execute_dir = suite.path().join("execute");
+    std::fs::create_dir_all(&execute_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(
+        execute_dir.join("fprintf-2.c"),
+        "#include <stdio.h>\n\
+         #include <stdlib.h>\n\
+         #include \"gcc_tmpnam.h\"\n\
+         /* { dg-require-effective-target fileio } */\n\
+         int main(void) {\n\
+           char *path = gcc_tmpnam(0);\n\
+           FILE *f = fopen(path, \"w\");\n\
+           if (!f) return 1;\n\
+           fputs(\"ok\", f);\n\
+           fclose(f);\n\
+           remove(path);\n\
+           return 0;\n\
+         }\n",
+    )
+    .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/gcc_torture_smoke.py")
+        .arg("--rnqcc")
+        .arg(rnqcc())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--mode")
+        .arg("execute")
+        .arg("--limit")
+        .arg("1")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("skipped=0"), "{stdout}");
+    Ok(())
+}
+
 #[test]
 fn gcc_torture_smoke_rejects_missing_explicit_expected_fixture() -> Result<(), String> {
     let suite = TempPath::new("gcc-smoke-missing-expected-suite", "dir");

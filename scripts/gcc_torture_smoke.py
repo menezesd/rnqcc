@@ -37,6 +37,30 @@ DEFAULT_SUITE_CANDIDATES = [
     Path("/tmp/rnqcc-gcc-torture/gcc/testsuite/gcc.c-torture"),
     Path("/tmp/rnqcc-gcc-torture/gcc/gcc/testsuite/gcc.c-torture"),
 ]
+SANDBOX_TMPNAM_HEADER = """\
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#ifndef GCC_TMPNAM
+#define GCC_TMPNAM
+static inline char *gcc_tmpnam(char *s)
+{
+  static char storage[4096];
+  char *out = s ? s : storage;
+  int fd;
+  strcpy(out, "/tmp/rnqcc-gcc-torture.XXXXXX");
+  fd = mkstemp(out);
+  if (fd >= 0)
+    {
+      close(fd);
+      remove(out);
+    }
+  return out;
+}
+#endif
+"""
 
 
 def resolve_suite(path: Path | None) -> Path:
@@ -119,6 +143,24 @@ def rnqcc_options_for_test(src: Path) -> list[str]:
             if option in {"-finstrument-functions", "-fpermissive"}:
                 options.append(option)
     return options
+
+
+def uses_tmpnam_fileio(src: Path) -> bool:
+    try:
+        text = src.read_text(errors="ignore")
+    except OSError:
+        return False
+    return "gcc_tmpnam.h" in text and "dg-require-effective-target fileio" in text
+
+
+def materialize_source_for_test(src: Path, tmpdir: Path, idx: int) -> Path:
+    if not uses_tmpnam_fileio(src):
+        return src
+    dest = tmpdir / "sources" / f"{idx:04d}-{src.name}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(src.read_text(errors="ignore"), encoding="utf-8")
+    (dest.parent / "gcc_tmpnam.h").write_text(SANDBOX_TMPNAM_HEADER, encoding="utf-8")
+    return dest
 
 
 def use_internal_cpp_for_test(src: Path) -> bool:
@@ -286,8 +328,6 @@ def skip_reason_for_test(src: Path) -> str | None:
         r"^\s+void\s+nested\w*\s*\(", text, re.MULTILINE
     ):
         return "unsupported GCC nested-function extension"
-    if "gcc_tmpnam.h" in text and "dg-require-effective-target fileio" in text:
-        return "requires tmpnam file I/O unavailable in this sandbox"
     return None
 
 
@@ -506,10 +546,11 @@ def main() -> int:
             timeout = timeout_for_test(src, args.timeout)
             if args.internal_cpp or use_internal_cpp_for_test(src):
                 common.append("--internal-cpp")
+            compile_src = materialize_source_for_test(src, tmpdir, idx)
 
             if args.mode == "execute":
                 exe = tmpdir / stem
-                compile_cmd = [*common, str(src), "-o", str(exe), "-lm"]
+                compile_cmd = [*common, str(compile_src), "-o", str(exe), "-lm"]
                 result = run(compile_cmd, timeout)
                 cmd = compile_cmd
                 if result.returncode == 0:
@@ -534,7 +575,7 @@ def main() -> int:
 
             else:
                 obj = tmpdir / f"{stem}.o"
-                cmd = [*common, "-c", str(src), "-o", str(obj)]
+                cmd = [*common, "-c", str(compile_src), "-o", str(obj)]
                 result = run(cmd, timeout)
                 if result.returncode == 0:
                     passed += 1

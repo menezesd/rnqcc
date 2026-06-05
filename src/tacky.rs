@@ -51,6 +51,12 @@ struct BitBuiltinSignature {
     width: i64,
 }
 
+struct FunctionSignature {
+    return_type: FullType,
+    params: Vec<FullType>,
+    variadic: bool,
+}
+
 struct StaticInitBuilder {
     pieces: Vec<(usize, StaticInit)>,
 }
@@ -936,13 +942,17 @@ impl TackyGen {
         }
     }
 
-    fn function_signature_from_full(ft: &FullType) -> Option<(FullType, Vec<FullType>, bool)> {
+    fn function_signature_from_full(ft: &FullType) -> Option<FunctionSignature> {
         match ft {
             FullType::Function {
                 return_type,
                 params,
                 variadic,
-            } => Some((return_type.as_ref().clone(), params.clone(), *variadic)),
+            } => Some(FunctionSignature {
+                return_type: return_type.as_ref().clone(),
+                params: params.clone(),
+                variadic: *variadic,
+            }),
             FullType::Pointer(inner) => Self::function_signature_from_full(inner),
             _ => None,
         }
@@ -5648,16 +5658,16 @@ impl TackyGen {
                     .get(&name)
                     .cloned()
                     .or_else(|| {
-                        pointer_sig.as_ref().map(|(ret_ft, param_fts, variadic)| {
-                            let ret_pi = match ret_ft {
+                        pointer_sig.as_ref().map(|signature| {
+                            let ret_pi = match &signature.return_type {
                                 FullType::Pointer(inner) => Some(Self::ptr_info_from_full(inner)),
                                 _ => None,
                             };
                             (
-                                ret_ft.to_ctype(),
-                                param_fts.iter().map(FullType::to_ctype).collect(),
+                                signature.return_type.to_ctype(),
+                                signature.params.iter().map(FullType::to_ctype).collect(),
                                 ret_pi,
-                                *variadic,
+                                signature.variadic,
                             )
                         })
                     })
@@ -5695,10 +5705,11 @@ impl TackyGen {
             .as_ref()
             .map(|(_, _, ret_ft, _, _)| ret_ft.clone())
             .or_else(|| {
-                self.func_full_types
-                    .get(&name)
-                    .cloned()
-                    .or_else(|| pointer_sig.as_ref().map(|(ret_ft, _, _)| ret_ft.clone()))
+                self.func_full_types.get(&name).cloned().or_else(|| {
+                    pointer_sig
+                        .as_ref()
+                        .map(|signature| signature.return_type.clone())
+                })
             });
         let param_full_types: Vec<FullType> = if direct_old_style_call {
             Vec::new()
@@ -5709,7 +5720,7 @@ impl TackyGen {
                 .or_else(|| {
                     pointer_sig
                         .as_ref()
-                        .map(|(_, param_fts, _)| param_fts.clone())
+                        .map(|signature| signature.params.clone())
                 })
                 .unwrap_or_default()
         };
@@ -6069,17 +6080,21 @@ impl TackyGen {
         let pointer_sig = Self::function_signature_from_full(&callee_ft);
         let (ret_ft, param_types, variadic) = pointer_sig
             .as_ref()
-            .map(|(ret_ft, param_fts, variadic)| {
+            .map(|signature| {
                 (
-                    ret_ft.clone(),
-                    param_fts.iter().map(FullType::to_ctype).collect::<Vec<_>>(),
-                    *variadic,
+                    signature.return_type.clone(),
+                    signature
+                        .params
+                        .iter()
+                        .map(FullType::to_ctype)
+                        .collect::<Vec<_>>(),
+                    signature.variadic,
                 )
             })
             .unwrap_or((FullType::Scalar(CType::Int), Vec::new(), false));
         let param_full_types: Vec<FullType> = pointer_sig
             .as_ref()
-            .map(|(_, param_fts, _)| param_fts.clone())
+            .map(|signature| signature.params.clone())
             .unwrap_or_default();
         let param_full_types = self.canonical_param_full_types(&param_full_types);
         let param_types = if param_full_types.is_empty() {

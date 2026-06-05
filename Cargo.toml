@@ -2,6 +2,10 @@
 name = "rnqcc"
 version = "0.2.0"
 edition = "2021"
+rust-version = "1.87"
+description = "A not-quite-C compiler targeting x86-64 and AArch64 assembly"
+repository = "https://github.com/menezesd/rnqcc"
+license = "MIT"
 
 [dependencies]
 clap = "3.0"

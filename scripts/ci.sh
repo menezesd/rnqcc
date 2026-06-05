@@ -6,6 +6,7 @@ cargo check --all-targets
 cargo clippy --all-targets -- -D warnings
 cargo test
 python3 scripts/fuzz_smoke.py --seed 31337 --cases 12 --rnqcc target/debug/rnqcc --target x86_64-linux --target aarch64-linux --rnqcc-arg=--optimize
+python3 scripts/fuzz_smoke.py --seed 4242 --cases 6 --rnqcc target/debug/rnqcc --target x86_64-linux --compare-runtime
 python3 scripts/layout_oracle.py
 python3 scripts/real_project_corpus.py
 python3 scripts/real_project_corpus.py --rnqcc-arg=--optimize

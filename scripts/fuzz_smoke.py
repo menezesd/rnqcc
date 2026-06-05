@@ -110,6 +110,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="path to rnqcc binary, or set RNQCC",
     )
     parser.add_argument(
+        "--cc",
+        default=os.environ.get("CC", "cc"),
+        help="reference C compiler for --compare-runtime, or set CC",
+    )
+    parser.add_argument(
         "--target",
         action="append",
         dest="targets",
@@ -136,6 +141,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--emit-only",
         action="store_true",
         help="only write generated C inputs; do not run rnqcc",
+    )
+    parser.add_argument(
+        "--compare-runtime",
+        action="store_true",
+        help="compile each generated case with rnqcc and cc, run both, and compare exit status.",
     )
     parser.add_argument(
         "--timeout",
@@ -206,6 +216,29 @@ def compile_case(
         )
 
 
+def compare_runtime(
+    rnqcc: str,
+    cc: str,
+    extra_args: list[str],
+    src: Path,
+    work_dir: Path,
+    cwd: Path,
+    timeout: float,
+) -> None:
+    host_exe = work_dir / f"{src.stem}.host"
+    rnqcc_exe = work_dir / f"{src.stem}.rnqcc"
+    check_run([cc, str(src), "-o", str(host_exe)], cwd, timeout)
+    check_run([rnqcc, *extra_args, str(src), "-o", str(rnqcc_exe)], cwd, timeout)
+
+    host = run([str(host_exe)], cwd, timeout)
+    rnqcc_result = run([str(rnqcc_exe)], cwd, timeout)
+    if host.returncode != rnqcc_result.returncode:
+        raise RuntimeError(
+            "runtime mismatch: "
+            f"cc exited {host.returncode}, rnqcc exited {rnqcc_result.returncode}"
+        )
+
+
 def check_run(cmd: list[str], cwd: Path, timeout: float) -> None:
     result = run(cmd, cwd, timeout)
     if result.returncode == 0:
@@ -242,6 +275,16 @@ def main(argv: list[str]) -> int:
         try:
             if not args.emit_only:
                 compile_case(rnqcc, args.rnqcc_args, src, targets, repo, args.timeout)
+                if args.compare_runtime:
+                    compare_runtime(
+                        rnqcc,
+                        args.cc,
+                        args.rnqcc_args,
+                        src,
+                        work_dir,
+                        repo,
+                        args.timeout,
+                    )
         except Exception as exc:
             print(f"FAIL seed={args.seed} case={case} src={src}", file=sys.stderr)
             print(exc, file=sys.stderr)
@@ -251,6 +294,8 @@ def main(argv: list[str]) -> int:
             src.unlink(missing_ok=True)
             for asm in work_dir.glob(f"{src.stem}.*.s"):
                 asm.unlink(missing_ok=True)
+            for exe in work_dir.glob(f"{src.stem}.*"):
+                exe.unlink(missing_ok=True)
 
     if not args.keep_successes and not args.emit_only:
         try:

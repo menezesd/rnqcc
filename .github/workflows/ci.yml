@@ -38,6 +38,9 @@ jobs:
       - name: Optimized fuzz smoke
         run: python3 scripts/fuzz_smoke.py --seed 31337 --cases 12 --rnqcc target/debug/rnqcc --target x86_64-linux --target aarch64-linux --rnqcc-arg=--optimize
 
+      - name: Runtime differential fuzz smoke
+        run: python3 scripts/fuzz_smoke.py --seed 4242 --cases 6 --rnqcc target/debug/rnqcc --target x86_64-linux --compare-runtime
+
       - name: Layout oracle
         run: python3 scripts/layout_oracle.py
 

@@ -265,6 +265,95 @@ fn fuzz_smoke_script_passes_extra_rnqcc_args() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn fuzz_smoke_script_compares_runtime_with_reference_cc() -> Result<(), String> {
+    let output = match Command::new("python3")
+        .args([
+            "scripts/fuzz_smoke.py",
+            "--seed",
+            "23",
+            "--cases",
+            "1",
+            "--rnqcc",
+            rnqcc(),
+            "--target",
+            "x86_64-linux",
+            "--compare-runtime",
+        ])
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run fuzz smoke script: {err}")),
+    };
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn fuzz_smoke_script_reports_runtime_mismatches() -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fake_rnqcc = TempPath::new("fuzz-smoke-runtime-mismatch-rnqcc", "sh");
+    std::fs::write(
+        fake_rnqcc.path(),
+        "#!/bin/sh\n\
+         out=\n\
+         while [ \"$#\" -gt 0 ]; do\n\
+           if [ \"$1\" = \"-o\" ]; then\n\
+             shift\n\
+             out=$1\n\
+           fi\n\
+           shift\n\
+         done\n\
+         if [ -z \"$out\" ]; then\n\
+           exit 0\n\
+         fi\n\
+         cat > \"$out\" <<'EOF'\n\
+#!/bin/sh\n\
+exit 99\n\
+EOF\n\
+         chmod +x \"$out\"\n",
+    )
+    .map_err(|err| format!("failed to write fake rnqcc: {err}"))?;
+    let mut perms = std::fs::metadata(fake_rnqcc.path())
+        .map_err(|err| format!("missing fake rnqcc: {err}"))?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(fake_rnqcc.path(), perms)
+        .map_err(|err| format!("failed to chmod fake rnqcc: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/fuzz_smoke.py")
+        .arg("--seed")
+        .arg("23")
+        .arg("--cases")
+        .arg("1")
+        .arg("--rnqcc")
+        .arg(fake_rnqcc.path())
+        .arg("--target")
+        .arg("x86_64-linux")
+        .arg("--compare-runtime")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run fuzz smoke script: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("runtime mismatch:"), "{stderr}");
+    assert!(stderr.contains("rnqcc exited 99"), "{stderr}");
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn fuzz_smoke_reports_timeouts_cleanly() -> Result<(), String> {

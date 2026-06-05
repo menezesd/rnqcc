@@ -40,6 +40,11 @@ struct StaticStringAddress<'a> {
     elem_size: i64,
 }
 
+struct DirectArrayStructElem<'a> {
+    tag: &'a str,
+    array_len: usize,
+}
+
 struct StaticInitBuilder {
     pieces: Vec<(usize, StaticInit)>,
 }
@@ -10097,10 +10102,13 @@ impl TackyGen {
         Ok(())
     }
 
-    fn direct_array_struct_elem(ft: &FullType) -> Option<(&str, usize)> {
+    fn direct_array_struct_elem(ft: &FullType) -> Option<DirectArrayStructElem<'_>> {
         match ft {
             FullType::Array { elem, size } => match elem.as_ref() {
-                FullType::Struct(tag) => Some((tag.as_str(), *size)),
+                FullType::Struct(tag) => Some(DirectArrayStructElem {
+                    tag: tag.as_str(),
+                    array_len: *size,
+                }),
                 _ => None,
             },
             _ => None,
@@ -11377,9 +11385,9 @@ impl TackyGen {
                     self.emit_initializer_list_at(&vd.name, &full_type, elems, &mut index, 0)?;
                     return Ok(());
                 }
-                if let Some((tag, array_len)) = Self::direct_array_struct_elem(&full_type) {
-                    let tag = tag.to_string();
-                    self.emit_struct_array_init_flat(&vd.name, &init, &tag, array_len, 0)?;
+                if let Some(elem) = Self::direct_array_struct_elem(&full_type) {
+                    let tag = elem.tag.to_string();
+                    self.emit_struct_array_init_flat(&vd.name, &init, &tag, elem.array_len, 0)?;
                     return Ok(());
                 }
                 let elem_sizes = Self::compute_elem_sizes(&full_type, &self.struct_defs);

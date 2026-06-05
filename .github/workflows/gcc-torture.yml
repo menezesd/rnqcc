@@ -34,9 +34,6 @@ jobs:
   smoke:
     name: GCC torture ${{ matrix.mode }} ${{ matrix.preprocessor }} smoke
     runs-on: ubuntu-latest
-    if: >-
-      github.event_name == 'schedule' ||
-      (matrix.mode == inputs.mode && matrix.preprocessor == inputs.preprocessor)
     strategy:
       fail-fast: false
       matrix:

@@ -45,6 +45,12 @@ struct DirectArrayStructElem<'a> {
     array_len: usize,
 }
 
+struct BitBuiltinSignature {
+    kind: BitBuiltinKind,
+    arg_type: CType,
+    width: i64,
+}
+
 struct StaticInitBuilder {
     pieces: Vec<(usize, StaticInit)>,
 }
@@ -4002,7 +4008,7 @@ impl TackyGen {
         Ok((TackyVal::Constant(0), target_type))
     }
 
-    fn bit_builtin_signature(name: &str) -> Option<(BitBuiltinKind, CType, i64)> {
+    fn bit_builtin_signature(name: &str) -> Option<BitBuiltinSignature> {
         let (kind, suffix) = if let Some(suffix) = name.strip_prefix("__builtin_ffs") {
             (BitBuiltinKind::Ffs, suffix)
         } else if let Some(suffix) = name.strip_prefix("__builtin_clz") {
@@ -4020,8 +4026,16 @@ impl TackyGen {
         };
 
         match suffix {
-            "" => Some((kind, CType::UInt, 32)),
-            "l" | "ll" => Some((kind, CType::ULong, 64)),
+            "" => Some(BitBuiltinSignature {
+                kind,
+                arg_type: CType::UInt,
+                width: 32,
+            }),
+            "l" | "ll" => Some(BitBuiltinSignature {
+                kind,
+                arg_type: CType::ULong,
+                width: 64,
+            }),
             _ => None,
         }
     }
@@ -4713,11 +4727,16 @@ impl TackyGen {
             return Ok((dst, CType::Pointer));
         }
         if args.len() == 1 {
-            if let Some((kind, arg_type, width)) = Self::bit_builtin_signature(&name) {
+            if let Some(signature) = Self::bit_builtin_signature(&name) {
                 let Some(arg_exp) = args.into_iter().next() else {
                     return Err(format!("{} requires an argument", name));
                 };
-                return self.emit_bit_builtin(kind, arg_type, width, arg_exp);
+                return self.emit_bit_builtin(
+                    signature.kind,
+                    signature.arg_type,
+                    signature.width,
+                    arg_exp,
+                );
             }
         }
         if matches!(

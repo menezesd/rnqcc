@@ -4,7 +4,6 @@ use crate::diagnostic::{Phase, Warning, WarningKind};
 use crate::types::*;
 use std::collections::{HashMap, HashSet};
 
-type FileScopeVarInfo = (bool, bool, Option<(i64, bool, bool)>, CType);
 type StaticScalarValue = (i64, bool, bool);
 type StaticComplexValue = (StaticScalarValue, StaticScalarValue);
 type BuiltinFunctionInfo = (
@@ -32,6 +31,13 @@ enum BitBuiltinKind {
     Clrsb,
     Popcount,
     Parity,
+}
+
+struct FileScopeVarInfo {
+    global: bool,
+    thread_local: bool,
+    init_val: Option<StaticScalarValue>,
+    var_type: CType,
 }
 
 struct StaticInitBuilder {
@@ -14253,16 +14259,21 @@ pub fn generate_with_target_options_and_warnings(
             }
             if let Some(entry) = file_scope_vars.get_mut(&vd.name) {
                 if init_val.is_some() {
-                    entry.2 = init_val;
+                    entry.init_val = init_val;
                 }
                 if file_scope_static_inits.contains_key(&vd.name) {
-                    entry.2 = None;
+                    entry.init_val = None;
                 }
-                entry.1 |= is_thread_local;
+                entry.thread_local |= is_thread_local;
             } else {
                 file_scope_vars.insert(
                     vd.name.clone(),
-                    (is_global, is_thread_local, init_val, vd.var_type),
+                    FileScopeVarInfo {
+                        global: is_global,
+                        thread_local: is_thread_local,
+                        init_val,
+                        var_type: vd.var_type,
+                    },
                 );
                 file_scope_order.push(vd.name.clone());
             }
@@ -14644,27 +14655,26 @@ pub fn generate_with_target_options_and_warnings(
     }
 
     for name in file_scope_order {
-        let Some((is_global, thread_local, init_val, var_type)) = file_scope_vars.remove(&name)
-        else {
+        let Some(info) = file_scope_vars.remove(&name) else {
             continue;
         };
-        let (raw_init, is_dbl, is_uns) = init_val.unwrap_or((0, false, false));
-        let converted_init = convert_init_value(raw_init, var_type, is_dbl, is_uns);
-        let align = if var_type == CType::Double {
+        let (raw_init, is_dbl, is_uns) = info.init_val.unwrap_or((0, false, false));
+        let converted_init = convert_init_value(raw_init, info.var_type, is_dbl, is_uns);
+        let align = if info.var_type == CType::Double {
             16
         } else {
-            var_type.size() as usize
+            info.var_type.size() as usize
         };
         let align = file_scope_alignments
             .remove(&name)
             .map_or(align, |a| a.max(align));
         let init_v = file_scope_static_inits
             .remove(&name)
-            .unwrap_or_else(|| make_static_init(converted_init, var_type));
+            .unwrap_or_else(|| make_static_init(converted_init, info.var_type));
         top_level.push(TackyTopLevel::StaticVar(TackyStaticVar {
             name,
-            global: is_global,
-            thread_local,
+            global: info.global,
+            thread_local: info.thread_local,
             alignment: align,
             init_values: vec![init_v],
         }));

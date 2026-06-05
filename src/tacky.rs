@@ -9498,6 +9498,7 @@ impl TackyGen {
 
         match target_ft {
             FullType::Array { elem, size } => {
+                self.reject_flexible_array_struct_array_initializer(target_ft)?;
                 if *index < elems.len()
                     && matches!(elems[*index], Exp::StringLiteral(_))
                     && Self::is_one_dimensional_char_array(target_ft)
@@ -10030,6 +10031,27 @@ impl TackyGen {
         self.emit_initializer_value_at(arr_name, &mem.member_full_type, value, offset)
     }
 
+    fn reject_flexible_array_struct_array_initializer(
+        &self,
+        target_ft: &FullType,
+    ) -> TackyResult<()> {
+        let FullType::Array { elem, .. } = target_ft else {
+            return Ok(());
+        };
+        let FullType::Struct(tag) = elem.as_ref() else {
+            return Ok(());
+        };
+        let has_flexible_member = self
+            .struct_defs
+            .get(tag)
+            .is_some_and(|def| def.members.iter().any(|member| member.flexible_array));
+        if has_flexible_member {
+            Err("initialization of flexible array member".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
     fn emit_struct_array_init_flat(
         &mut self,
         arr_name: &str,
@@ -10055,6 +10077,9 @@ impl TackyGen {
             .get(tag)
             .cloned()
             .ok_or_else(|| format!("Undefined struct: {}", tag))?;
+        if def.members.iter().any(|member| member.flexible_array) {
+            return Err("initialization of flexible array member".to_string());
+        }
         let struct_size = def.size as i64;
         let max_members = if def.is_union { 1 } else { def.members.len() };
         let mut elem_index = 0usize;
@@ -10666,6 +10691,7 @@ impl TackyGen {
                 builder.put(base_offset, StaticInit::StringInit(s.clone(), false))?;
             }
             (FullType::Array { elem, size }, Exp::ArrayInit(elems)) => {
+                self.reject_flexible_array_struct_array_initializer(base_ft)?;
                 if !elems
                     .iter()
                     .any(|elem| matches!(elem, Exp::DesignatedInit(_, _)))
@@ -11011,6 +11037,7 @@ impl TackyGen {
 
         match base_ft {
             FullType::Array { elem, size } => {
+                self.reject_flexible_array_struct_array_initializer(base_ft)?;
                 if *index < elems.len()
                     && matches!(elems[*index], Exp::StringLiteral(_))
                     && Self::is_one_dimensional_char_array(base_ft)
@@ -14901,6 +14928,7 @@ mod tests {
                     name: "value".to_string(),
                     member_type: CType::Int,
                     member_full_type: FullType::Scalar(CType::Int),
+                    flexible_array: false,
                     offset: 0,
                     size: 4,
                     bit_width: None,
@@ -14968,6 +14996,7 @@ mod tests {
                     name: "value".to_string(),
                     member_type: CType::Int,
                     member_full_type: FullType::Scalar(CType::Int),
+                    flexible_array: false,
                     offset: 0,
                     size: 4,
                     bit_width: None,
@@ -15160,6 +15189,7 @@ mod tests {
                         name: "a".to_string(),
                         member_type: CType::Int,
                         member_full_type: FullType::Scalar(CType::Int),
+                        flexible_array: false,
                         offset: 0,
                         size: 4,
                         bit_width: None,
@@ -15170,6 +15200,7 @@ mod tests {
                         name: "b".to_string(),
                         member_type: CType::Int,
                         member_full_type: FullType::Scalar(CType::Int),
+                        flexible_array: false,
                         offset: 4,
                         size: 4,
                         bit_width: None,
@@ -15233,6 +15264,7 @@ mod tests {
                     name: "value".to_string(),
                     member_type: CType::Int,
                     member_full_type: FullType::Scalar(CType::Int),
+                    flexible_array: false,
                     offset: 0,
                     size: 4,
                     bit_width: None,
@@ -15708,6 +15740,7 @@ mod tests {
                         name: "a".to_string(),
                         member_type: CType::Int,
                         member_full_type: FullType::Scalar(CType::Int),
+                        flexible_array: false,
                         offset: 0,
                         size: 4,
                         bit_width: None,
@@ -15718,6 +15751,7 @@ mod tests {
                         name: "b".to_string(),
                         member_type: CType::Int,
                         member_full_type: FullType::Scalar(CType::Int),
+                        flexible_array: false,
                         offset: 4,
                         size: 4,
                         bit_width: None,
@@ -15772,6 +15806,7 @@ mod tests {
                         name: "a".to_string(),
                         member_type: CType::Long,
                         member_full_type: FullType::Scalar(CType::Long),
+                        flexible_array: false,
                         offset: 0,
                         size: 8,
                         bit_width: None,
@@ -15782,6 +15817,7 @@ mod tests {
                         name: "b".to_string(),
                         member_type: CType::Long,
                         member_full_type: FullType::Scalar(CType::Long),
+                        flexible_array: false,
                         offset: 8,
                         size: 8,
                         bit_width: None,
@@ -15792,6 +15828,7 @@ mod tests {
                         name: "c".to_string(),
                         member_type: CType::Long,
                         member_full_type: FullType::Scalar(CType::Long),
+                        flexible_array: false,
                         offset: 16,
                         size: 8,
                         bit_width: None,
@@ -15911,6 +15948,7 @@ mod tests {
                         name: "a".to_string(),
                         member_type: CType::Int,
                         member_full_type: FullType::Scalar(CType::Int),
+                        flexible_array: false,
                         offset: 0,
                         size: 4,
                         bit_width: None,
@@ -15921,6 +15959,7 @@ mod tests {
                         name: "b".to_string(),
                         member_type: CType::Int,
                         member_full_type: FullType::Scalar(CType::Int),
+                        flexible_array: false,
                         offset: 4,
                         size: 4,
                         bit_width: None,
@@ -15973,6 +16012,7 @@ mod tests {
                         name: "a".to_string(),
                         member_type: CType::Long,
                         member_full_type: FullType::Scalar(CType::Long),
+                        flexible_array: false,
                         offset: 0,
                         size: 8,
                         bit_width: None,
@@ -15983,6 +16023,7 @@ mod tests {
                         name: "b".to_string(),
                         member_type: CType::Long,
                         member_full_type: FullType::Scalar(CType::Long),
+                        flexible_array: false,
                         offset: 8,
                         size: 8,
                         bit_width: None,
@@ -15993,6 +16034,7 @@ mod tests {
                         name: "c".to_string(),
                         member_type: CType::Long,
                         member_full_type: FullType::Scalar(CType::Long),
+                        flexible_array: false,
                         offset: 16,
                         size: 8,
                         bit_width: None,
@@ -16240,6 +16282,7 @@ mod tests {
                     name: "value".to_string(),
                     member_type: CType::Int,
                     member_full_type: FullType::Scalar(CType::Int),
+                    flexible_array: false,
                     offset: 4,
                     size: 4,
                     bit_width: None,
@@ -16285,6 +16328,7 @@ mod tests {
                     name: "value".to_string(),
                     member_type: CType::Int,
                     member_full_type: FullType::Scalar(CType::Int),
+                    flexible_array: false,
                     offset: 0,
                     size: 4,
                     bit_width: None,
@@ -16304,6 +16348,7 @@ mod tests {
                     name: "inner".to_string(),
                     member_type: CType::Struct,
                     member_full_type: FullType::Struct("inner".to_string()),
+                    flexible_array: false,
                     offset: 0,
                     size: 4,
                     bit_width: None,
@@ -16348,6 +16393,7 @@ mod tests {
                     name: "value".to_string(),
                     member_type: CType::Int,
                     member_full_type: FullType::Scalar(CType::Int),
+                    flexible_array: false,
                     offset: 0,
                     size: 4,
                     bit_width: None,
@@ -16367,6 +16413,7 @@ mod tests {
                     name: "inner".to_string(),
                     member_type: CType::Struct,
                     member_full_type: FullType::Struct("inner".to_string()),
+                    flexible_array: false,
                     offset: 0,
                     size: 4,
                     bit_width: None,
@@ -16408,6 +16455,7 @@ mod tests {
                     name: "value".to_string(),
                     member_type: CType::Int,
                     member_full_type: FullType::Scalar(CType::Int),
+                    flexible_array: false,
                     offset: 0,
                     size: 4,
                     bit_width: None,
@@ -16427,6 +16475,7 @@ mod tests {
                     name: "inner".to_string(),
                     member_type: CType::Struct,
                     member_full_type: FullType::Struct("inner".to_string()),
+                    flexible_array: false,
                     offset: 0,
                     size: 4,
                     bit_width: None,
@@ -16471,6 +16520,7 @@ mod tests {
                     name: "value".to_string(),
                     member_type: CType::Int,
                     member_full_type: FullType::Scalar(CType::Int),
+                    flexible_array: false,
                     offset: 0,
                     size: 4,
                     bit_width: None,
@@ -16511,6 +16561,7 @@ mod tests {
                     name: "value".to_string(),
                     member_type: CType::Int,
                     member_full_type: FullType::Scalar(CType::Int),
+                    flexible_array: false,
                     offset: 0,
                     size: 4,
                     bit_width: None,
@@ -16530,6 +16581,7 @@ mod tests {
                     name: "field".to_string(),
                     member_type: CType::Struct,
                     member_full_type: FullType::Struct("inner".to_string()),
+                    flexible_array: false,
                     offset: 0,
                     size: 4,
                     bit_width: None,
@@ -16571,6 +16623,7 @@ mod tests {
                     name: "value".to_string(),
                     member_type: CType::Int,
                     member_full_type: FullType::Scalar(CType::Int),
+                    flexible_array: false,
                     offset: 0,
                     size: 4,
                     bit_width: None,
@@ -16616,6 +16669,7 @@ mod tests {
                     name: "value".to_string(),
                     member_type: CType::Int,
                     member_full_type: FullType::Scalar(CType::Int),
+                    flexible_array: false,
                     offset: 0,
                     size: 4,
                     bit_width: None,
@@ -16750,6 +16804,7 @@ mod tests {
                     name: "value".to_string(),
                     member_type: CType::Int,
                     member_full_type: FullType::Scalar(CType::Int),
+                    flexible_array: false,
                     offset: 4,
                     size: 4,
                     bit_width: None,
@@ -16827,6 +16882,7 @@ mod tests {
                     name: "value".to_string(),
                     member_type: CType::Int,
                     member_full_type: FullType::Scalar(CType::Int),
+                    flexible_array: false,
                     offset: 0,
                     size: 4,
                     bit_width: None,
@@ -16957,6 +17013,7 @@ mod tests {
                     name: "value".to_string(),
                     member_type: CType::Int,
                     member_full_type: FullType::Scalar(CType::Int),
+                    flexible_array: false,
                     offset: 0,
                     size: 4,
                     bit_width: None,
@@ -16999,6 +17056,7 @@ mod tests {
                     name: "value".to_string(),
                     member_type: CType::Int,
                     member_full_type: FullType::Scalar(CType::Int),
+                    flexible_array: false,
                     offset: 0,
                     size: 4,
                     bit_width: None,
@@ -17208,6 +17266,7 @@ mod tests {
                     name: "field".to_string(),
                     member_type: CType::Struct,
                     member_full_type: FullType::Struct("inner".to_string()),
+                    flexible_array: false,
                     offset: 0,
                     size: 4,
                     bit_width: None,
@@ -17259,6 +17318,7 @@ mod tests {
                     name: "field".to_string(),
                     member_type: CType::Struct,
                     member_full_type: FullType::Struct("inner".to_string()),
+                    flexible_array: false,
                     offset: 0,
                     size: 4,
                     bit_width: None,

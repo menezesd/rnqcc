@@ -10748,6 +10748,31 @@ fn compiles_flexible_array_member_layout() {
 }
 
 #[test]
+fn rejects_flexible_array_member_initializer() {
+    let src = temp_file("flexible-array-member-init", "c");
+    std::fs::write(
+        &src,
+        "struct packet { int len; char data[]; };\n\
+         static struct packet packets[] = { { 3, \"abc\" } };\n",
+    )
+    .expect("failed to write test input");
+
+    let output = Command::new(rnqcc())
+        .arg("-c")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success(), "unexpected success");
+    assert!(
+        stderr(output).contains("initialization of flexible array member"),
+        "missing flexible array initializer diagnostic"
+    );
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn links_multiple_inputs_to_requested_executable() {
     let main_src = temp_file("multi-main", "i");
     let helper_src = temp_file("multi-helper", "i");

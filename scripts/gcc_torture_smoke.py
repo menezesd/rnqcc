@@ -178,7 +178,13 @@ def skip_reason_for_test(src: Path) -> str | None:
         return None
     if "-fgimple" in text or "__GIMPLE" in text:
         return "unsupported GCC GIMPLE source extension"
-    if "dg-error" in text or "dg-warning" in text:
+    portable_expected_diagnostic_smoke = {
+        "20030305-1.c",
+        "pr28865.c",
+    }
+    if (
+        "dg-error" in text or "dg-warning" in text
+    ) and not (src.parent.name == "compile" and src.name in portable_expected_diagnostic_smoke):
         return "expected-diagnostic GCC torture test"
     target_specific_dejagnu = "dg-do compile { target" in text or "dg-do assemble { target" in text
     portable_target_compile_smoke = {

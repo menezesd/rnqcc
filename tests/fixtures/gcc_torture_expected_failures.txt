@@ -6,4 +6,5 @@
 # Keep this file as small as possible. By default the runner fails if an
 # expected failure starts passing, so entries can be removed as rnqcc improves.
 
-# No known expected failures.
+compile/20030305-1.c | initialization of flexible array member
+compile/pr28865.c | initialization of flexible array member

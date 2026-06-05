@@ -167,14 +167,23 @@ fn parse_define(tokens: &[PpToken]) -> Result<Directive, String> {
     if is_function_like_define(tokens, name_index) {
         let close = find_matching_paren(tokens, name_index + 1)
             .ok_or_else(|| format!("missing ')' in function-like macro {}", name))?;
-        let (params, variadic) = parse_macro_params(&tokens[name_index + 2..close])?;
+        let (params, variadic, gnu_variadic_name) =
+            parse_macro_params(&tokens[name_index + 2..close])?;
         let replacement_start = skip_ws(tokens, close + 1);
+        let mut body = trim_tokens(&tokens[replacement_start..]);
+        if let Some(gnu_variadic_name) = gnu_variadic_name {
+            for token in &mut body {
+                if matches!(&token.kind, PpTokenKind::Ident(name) if name == &gnu_variadic_name) {
+                    token.kind = PpTokenKind::Ident("__VA_ARGS__".to_string());
+                }
+            }
+        }
         return Ok(Directive::Define {
             name,
             def: MacroDef::Function {
                 params,
                 variadic,
-                body: trim_tokens(&tokens[replacement_start..]),
+                body,
             },
         });
     }
@@ -215,12 +224,13 @@ fn find_matching_paren(tokens: &[PpToken], open_index: usize) -> Option<usize> {
     None
 }
 
-fn parse_macro_params(tokens: &[PpToken]) -> Result<(Vec<String>, bool), String> {
+fn parse_macro_params(tokens: &[PpToken]) -> Result<(Vec<String>, bool, Option<String>), String> {
     let mut params = Vec::new();
     let mut variadic = false;
+    let mut gnu_variadic_name = None;
     let mut index = skip_ws(tokens, 0);
     if index >= tokens.len() {
-        return Ok((params, variadic));
+        return Ok((params, variadic, gnu_variadic_name));
     }
     loop {
         index = skip_ws(tokens, index);
@@ -238,6 +248,8 @@ fn parse_macro_params(tokens: &[PpToken]) -> Result<(Vec<String>, bool), String>
             if matches!(tokens.get(after_name).map(|token| &token.kind), Some(PpTokenKind::Punct(value)) if value == "...")
             {
                 reject_duplicate_macro_param(&params, "__VA_ARGS__")?;
+                params.pop();
+                gnu_variadic_name = Some(name.to_string());
                 variadic = true;
                 index = after_name + 1;
             }
@@ -258,7 +270,7 @@ fn parse_macro_params(tokens: &[PpToken]) -> Result<(Vec<String>, bool), String>
         }
         return Err("expected ',' in macro parameter list".to_string());
     }
-    Ok((params, variadic))
+    Ok((params, variadic, gnu_variadic_name))
 }
 
 fn reject_reserved_macro_param(name: &str) -> Result<(), String> {
@@ -723,6 +735,15 @@ mod tests {
                 name,
                 def: MacroDef::Function { params, variadic: true, body },
             } if name == "LOG" && params == vec!["fmt"] && !body.is_empty()
+        ));
+        assert!(matches!(
+            directive("#define TEST(ret, args...) fprintf(args)")?,
+            Directive::Define {
+                name,
+                def: MacroDef::Function { params, variadic: true, body },
+            } if name == "TEST"
+                && params == vec!["ret"]
+                && body.iter().any(|token| matches!(&token.kind, PpTokenKind::Ident(value) if value == "__VA_ARGS__"))
         ));
         Ok(())
     }

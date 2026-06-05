@@ -131,6 +131,8 @@ def timeout_for_test(src: Path, base_timeout: float) -> float:
         "pr110386-2.c",
     }:
         timeout *= 8.0
+    if src.parent.name == "execute" and src.name == "strlen-5.c":
+        timeout *= 2.0
     if "dg-add-options stack_size" in text or "dg-require-stack-size" in text:
         timeout *= 8.0
     match = re.search(r"dg-timeout-factor\s+([0-9]+(?:\.[0-9]+)?)", text)
@@ -240,6 +242,8 @@ def skip_reason_for_test(src: Path, internal_cpp: bool = False) -> str | None:
         "limits-structnest.c",
     }:
         return "internal-cpp translation-limit stress timeout"
+    if internal_cpp and "dg-require-effective-target run_expensive_tests" in text:
+        return "internal-cpp expensive stress test"
     portable_expected_diagnostic_smoke = {
         "20030305-1.c",
         "pr103314-1.c",

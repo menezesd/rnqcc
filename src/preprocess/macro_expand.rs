@@ -81,6 +81,11 @@ fn expand_macros_inner(
                     index += 1;
                     continue;
                 };
+                let args = if args.is_empty() && !*variadic && params.len() == 1 {
+                    vec![Vec::new()]
+                } else {
+                    args
+                };
                 if (!variadic && args.len() != params.len())
                     || (*variadic && args.len() < params.len())
                 {
@@ -191,6 +196,31 @@ fn substitute_function_macro(
         }
         if let Some((param_index, _name)) = param_at(&body, index, &param_names) {
             if adjacent_to_paste(&body, index) {
+                if macro_args[param_index].is_empty() {
+                    while matches!(
+                        out.last().map(|token| &token.kind),
+                        Some(PpTokenKind::Whitespace(_))
+                    ) {
+                        out.pop();
+                    }
+                    if is_punct(out.last(), "##") {
+                        out.pop();
+                        while matches!(
+                            out.last().map(|token| &token.kind),
+                            Some(PpTokenKind::Whitespace(_))
+                        ) {
+                            out.pop();
+                        }
+                    } else {
+                        let next = skip_ws(&body, index + 1);
+                        if is_punct(body.get(next), "##") {
+                            index = skip_ws(&body, next + 1);
+                            continue;
+                        }
+                    }
+                    index += 1;
+                    continue;
+                }
                 out.extend(macro_args[param_index].clone());
             } else {
                 out.extend(expand_macros_with_hooks(
@@ -634,6 +664,36 @@ mod tests {
             },
         );
         assert_eq!(text(&expand_macros(&lex("CAT(x, y)")?, &macros)?), "42");
+        Ok(())
+    }
+
+    #[test]
+    fn token_paste_with_empty_argument_elides_paste_operator() -> Result<(), String> {
+        let mut macros = MacroTable::new();
+        macros.insert(
+            "LEFT".to_string(),
+            MacroDef::Function {
+                params: vec!["suffix".to_string()],
+                variadic: false,
+                body: lex("my_ffs ## suffix (x)")?,
+            },
+        );
+        macros.insert(
+            "RIGHT".to_string(),
+            MacroDef::Function {
+                params: vec!["prefix".to_string()],
+                variadic: false,
+                body: lex("prefix ## my_ffs (x)")?,
+            },
+        );
+        assert_eq!(
+            text(&expand_macros(&lex("LEFT()")?, &macros)?),
+            "my_ffs (x)"
+        );
+        assert_eq!(
+            text(&expand_macros(&lex("RIGHT()")?, &macros)?),
+            "my_ffs (x)"
+        );
         Ok(())
     }
 

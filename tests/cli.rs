@@ -1171,6 +1171,59 @@ fn gcc_torture_smoke_emits_canonical_skip_paths() -> Result<(), String> {
 }
 
 #[test]
+fn gcc_torture_smoke_skips_internal_cpp_expensive_tests() -> Result<(), String> {
+    let suite = TempPath::new("gcc-smoke-internal-cpp-expensive-suite", "dir");
+    let execute_dir = suite.path().join("execute");
+    std::fs::create_dir_all(&execute_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(
+        execute_dir.join("expensive.c"),
+        "/* { dg-require-effective-target run_expensive_tests } */\nint main(void) { return 0; }\n",
+    )
+    .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+    let skip_log = TempPath::new("gcc-smoke-internal-cpp-expensive-skips", "txt");
+    let fake_rnqcc = TempPath::new("gcc-smoke-internal-cpp-expensive-rnqcc", "sh");
+    std::fs::write(fake_rnqcc.path(), "#!/bin/sh\nexit 0\n")
+        .map_err(|err| format!("failed to write fake rnqcc: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/gcc_torture_smoke.py")
+        .arg("--rnqcc")
+        .arg(fake_rnqcc.path())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--mode")
+        .arg("execute")
+        .arg("--internal-cpp")
+        .arg("--limit")
+        .arg("1")
+        .arg("--skip-log")
+        .arg(skip_log.path())
+        .arg("--print-skips")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(
+        stdout.contains("SKIP execute/expensive.c: internal-cpp expensive stress test"),
+        "{stdout}"
+    );
+    let skips = std::fs::read_to_string(skip_log.path())
+        .map_err(|err| format!("failed to read skip log: {err}"))?;
+    assert!(
+        skips.contains("execute/expensive.c\tSKIP: internal-cpp expensive stress test"),
+        "{skips}"
+    );
+    Ok(())
+}
+
+#[test]
 fn gcc_torture_helpers_are_importable_from_repo_root() -> Result<(), String> {
     let output = match Command::new("python3")
         .arg("-c")
@@ -14568,6 +14621,51 @@ fn internal_cpp_stdarg_header_exposes_standard_macros() {
 }
 
 #[test]
+fn internal_cpp_va_end_preserves_argument_side_effects() {
+    let src = temp_file("internal-cpp-va-end-side-effect", "c");
+    let exe = temp_file("internal-cpp-va-end-side-effect", "bin");
+    std::fs::write(
+        &src,
+        "#include <stdarg.h>\n\
+         void consume(const char *fmt, ...) {\n\
+             va_list ap0;\n\
+             va_list ap1;\n\
+             va_list *items[3];\n\
+             va_list **cursor = items;\n\
+             items[0] = &ap0;\n\
+             items[1] = 0;\n\
+             items[2] = &ap1;\n\
+             va_start(ap0, fmt);\n\
+             va_end(**cursor++);\n\
+             cursor++;\n\
+             va_start(ap1, fmt);\n\
+             va_end(**cursor);\n\
+             if (*cursor == 0) __builtin_abort();\n\
+         }\n\
+         int main(void) { consume(\"%d\", 7); return 0; }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-nostdinc")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(0));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn internal_cpp_provides_align_and_noreturn_virtual_headers() {
     let src = temp_file("internal-cpp-align-noreturn-headers", "c");
     let exe = temp_file("internal-cpp-align-noreturn-headers", "bin");
@@ -19272,6 +19370,31 @@ fn internal_cpp_x_c_accepts_extensionless_source() {
 
     assert!(output.status.success(), "{}", stderr(output));
     assert!(stdout(output).contains("int main(void)"));
+}
+
+#[test]
+fn internal_cpp_accepts_raw_non_utf8_source_bytes() {
+    let src = temp_file("internal-cpp-raw-byte", "c");
+    let exe = temp_file("internal-cpp-raw-byte", "bin");
+    let mut source = b"static const unsigned char g[] = \"\\0".to_vec();
+    source.push(0xff);
+    source.extend_from_slice(b"\";\nint main(void) { return sizeof g != 3 || g[1] != 255; }\n");
+    std::fs::write(&src, source).expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(0));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
 }
 
 #[test]

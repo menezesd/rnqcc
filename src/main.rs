@@ -1672,6 +1672,70 @@ fn target_long_double_max_macro(target: &Target) -> &'static str {
     }
 }
 
+fn target_long_double_limits(target: &Target) -> [(&'static str, &'static str); 6] {
+    if target.long_double_size() == 8 {
+        return [
+            ("mant_dig", "53"),
+            ("dig", "15"),
+            ("min_exp", "(-1021)"),
+            ("max_exp", "1024"),
+            ("min", "2.2250738585072014e-308L"),
+            ("epsilon", "2.2204460492503131e-16L"),
+        ];
+    }
+
+    if target.arch == Arch::AArch64 {
+        [
+            ("mant_dig", "113"),
+            ("dig", "33"),
+            ("min_exp", "(-16381)"),
+            ("max_exp", "16384"),
+            ("min", "3.36210314311209350626267781732175260e-4932L"),
+            ("epsilon", "1.92592994438723585305597794258492732e-34L"),
+        ]
+    } else {
+        [
+            ("mant_dig", "64"),
+            ("dig", "18"),
+            ("min_exp", "(-16381)"),
+            ("max_exp", "16384"),
+            ("min", "3.36210314311209350626e-4932L"),
+            ("epsilon", "1.08420217248550443401e-19L"),
+        ]
+    }
+}
+
+fn target_long_double_limit(target: &Target, key: &str) -> &'static str {
+    target_long_double_limits(target)
+        .into_iter()
+        .find_map(|(name, value)| if name == key { Some(value) } else { None })
+        .unwrap_or("")
+}
+
+fn target_long_double_min_macro(target: &Target) -> &'static str {
+    target_long_double_limit(target, "min")
+}
+
+fn target_long_double_epsilon_macro(target: &Target) -> &'static str {
+    target_long_double_limit(target, "epsilon")
+}
+
+fn target_long_double_mant_dig_macro(target: &Target) -> &'static str {
+    target_long_double_limit(target, "mant_dig")
+}
+
+fn target_long_double_dig_macro(target: &Target) -> &'static str {
+    target_long_double_limit(target, "dig")
+}
+
+fn target_long_double_min_exp_macro(target: &Target) -> &'static str {
+    target_long_double_limit(target, "min_exp")
+}
+
+fn target_long_double_max_exp_macro(target: &Target) -> &'static str {
+    target_long_double_limit(target, "max_exp")
+}
+
 fn virtual_long_double_max_macro(macros: &HashMap<String, MacroDef>) -> &'static str {
     if matches!(
         macros.get("__SIZEOF_LONG_DOUBLE__"),
@@ -1780,7 +1844,7 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                     true,
                     "__builtin_va_start(ap, ## __VA_ARGS__)",
                 ),
-                ("va_end", vec!["ap"], false, "((void)0)"),
+                ("va_end", vec!["ap"], false, "__builtin_va_end(ap)"),
                 ("va_copy", vec!["dst", "src"], false, "((dst) = (src))"),
                 ("__va_copy", vec!["dst", "src"], false, "((dst) = (src))"),
                 (
@@ -4883,6 +4947,40 @@ fn seed_internal_predefined_macros(macros: &mut HashMap<String, MacroDef>, targe
     define_builtin_macro(macros, "__FLT_MAX__", "0x1.fffffep+127F");
     define_builtin_macro(macros, "__DBL_MAX__", "0x1.fffffffffffffp+1023");
     define_builtin_macro(macros, "__LDBL_MAX__", target_long_double_max_macro(target));
+    define_builtin_macro(macros, "__FLT_MIN__", "1.17549435e-38F");
+    define_builtin_macro(macros, "__DBL_MIN__", "2.2250738585072014e-308");
+    define_builtin_macro(macros, "__LDBL_MIN__", target_long_double_min_macro(target));
+    define_builtin_macro(macros, "__FLT_EPSILON__", "1.19209290e-7F");
+    define_builtin_macro(macros, "__DBL_EPSILON__", "2.2204460492503131e-16");
+    define_builtin_macro(
+        macros,
+        "__LDBL_EPSILON__",
+        target_long_double_epsilon_macro(target),
+    );
+    define_builtin_macro(macros, "__FLT_MANT_DIG__", "24");
+    define_builtin_macro(macros, "__DBL_MANT_DIG__", "53");
+    define_builtin_macro(
+        macros,
+        "__LDBL_MANT_DIG__",
+        target_long_double_mant_dig_macro(target),
+    );
+    define_builtin_macro(macros, "__FLT_DIG__", "6");
+    define_builtin_macro(macros, "__DBL_DIG__", "15");
+    define_builtin_macro(macros, "__LDBL_DIG__", target_long_double_dig_macro(target));
+    define_builtin_macro(macros, "__FLT_MIN_EXP__", "(-125)");
+    define_builtin_macro(macros, "__DBL_MIN_EXP__", "(-1021)");
+    define_builtin_macro(
+        macros,
+        "__LDBL_MIN_EXP__",
+        target_long_double_min_exp_macro(target),
+    );
+    define_builtin_macro(macros, "__FLT_MAX_EXP__", "128");
+    define_builtin_macro(macros, "__DBL_MAX_EXP__", "1024");
+    define_builtin_macro(
+        macros,
+        "__LDBL_MAX_EXP__",
+        target_long_double_max_exp_macro(target),
+    );
     define_builtin_macro(macros, "__SIZEOF_SIZE_T__", "8");
     define_builtin_macro(macros, "__SIZEOF_PTRDIFF_T__", "8");
     define_builtin_macro(macros, "__SIZEOF_WCHAR_T__", "4");
@@ -5132,8 +5230,9 @@ fn internal_preprocess_source(
     if context.once_files.contains(&canonical) {
         return Ok(String::new());
     }
-    let source = std::fs::read_to_string(src)
-        .map_err(|err| format!("could not read {}: {}", src.display(), err))?;
+    let source_bytes =
+        std::fs::read(src).map_err(|err| format!("could not read {}: {}", src.display(), err))?;
+    let source: String = source_bytes.into_iter().map(char::from).collect();
     let source = strip_comments(&splice_continued_lines(
         &preprocess::lexer::replace_trigraphs(&source),
     ))?;
@@ -5545,6 +5644,19 @@ struct InternalPreprocessInvocation<'a> {
     line_markers: bool,
 }
 
+fn byte_preserving_source_bytes(source: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(source.len());
+    for ch in source.chars() {
+        if (ch as u32) <= u8::MAX as u32 {
+            bytes.push(ch as u8);
+        } else {
+            let mut encoded = [0u8; 4];
+            bytes.extend_from_slice(ch.encode_utf8(&mut encoded).as_bytes());
+        }
+    }
+    bytes
+}
+
 fn internal_preprocess(
     invocation: InternalPreprocessInvocation<'_>,
 ) -> Result<Vec<PathBuf>, String> {
@@ -5638,7 +5750,7 @@ fn internal_preprocess(
         }
         (false, _) => preprocessed,
     };
-    std::fs::write(invocation.output, output)
+    std::fs::write(invocation.output, byte_preserving_source_bytes(&output))
         .map_err(|err| format!("could not write {}: {}", invocation.output, err))?;
     Ok(dependencies)
 }

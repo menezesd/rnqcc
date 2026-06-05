@@ -6,13 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 type StaticScalarValue = (i64, bool, bool);
 type StaticComplexValue = (StaticScalarValue, StaticScalarValue);
-type BuiltinFunctionInfo = (
-    &'static str,
-    CType,
-    FullType,
-    Vec<CType>,
-    Option<(CType, usize)>,
-);
+type BuiltinFunctionInfo = (&'static str, CType, FullType, Vec<CType>, Option<PtrInfo>);
 pub type TackyResult<T> = Result<T, String>;
 
 pub struct TackyOutput {
@@ -14204,7 +14198,7 @@ pub fn generate_with_target_options_and_warnings(
                 .init
                 .as_ref()
                 .and_then(|exp| gen.static_symbol_offset_integer_initializer(exp, vd.var_type));
-            let init_val: Option<(i64, bool, bool)> = match &vd.init {
+            let init_val: Option<StaticScalarValue> = match &vd.init {
                 Some(_) if symbolic_static_init.is_some() => None,
                 Some(_)
                     if matches!(

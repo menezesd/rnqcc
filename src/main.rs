@@ -1468,6 +1468,7 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
     virtual_header("stdatomic.h", Some("__rnqcc_stdatomic_h")),
     virtual_header("limits.h", Some("__rnqcc_limits_h")),
     virtual_header("stdint.h", Some("__rnqcc_stdint_h")),
+    virtual_header("immintrin.h", Some("__rnqcc_immintrin_h")),
     virtual_header("inttypes.h", Some("__rnqcc_inttypes_h")),
     virtual_header("float.h", Some("__rnqcc_float_h")),
     virtual_header("iso646.h", None),
@@ -1790,6 +1791,16 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
                 String::new()
             } else {
                 include_str!("virtual_headers/stdarg.h").to_string()
+            }
+        }
+        "immintrin.h" => {
+            if virtual_header_include_once(macros, "immintrin.h") {
+                String::new()
+            } else {
+                "typedef long long __m128i __attribute__((__vector_size__(16)));\n\
+                 static inline __m128i _mm_abs_epi32(__m128i __x) { return __x; }\n\
+                 static inline __m128i _mm_mullo_epi32(__m128i __a, __m128i __b) { return __a * __b; }\n"
+                    .to_string()
             }
         }
         "stdio.h" => {
@@ -4859,6 +4870,8 @@ fn seed_internal_predefined_macros(macros: &mut HashMap<String, MacroDef>, targe
     define_builtin_macro(macros, "__SIZEOF_WCHAR_T__", "4");
     define_builtin_macro(macros, "__SIZEOF_WINT_T__", "4");
     define_builtin_macro(macros, "__SIZE_TYPE__", "unsigned long");
+    define_builtin_macro(macros, "__WCHAR_TYPE__", "int");
+    define_builtin_macro(macros, "__WINT_TYPE__", "unsigned int");
     define_builtin_macro(macros, "__PTRDIFF_TYPE__", "long");
     define_builtin_macro(macros, "__INTPTR_TYPE__", "long");
     define_builtin_macro(macros, "__UINTPTR_TYPE__", "unsigned long");

@@ -48,8 +48,10 @@ jobs:
           git clone --depth=1 --filter=blob:none --sparse https://github.com/gcc-mirror/gcc.git "$GCC_TORTURE_ROOT"
           git -C "$GCC_TORTURE_ROOT" sparse-checkout set --no-cone \
             /gcc/testsuite/gcc.c-torture \
+            /gcc/testsuite/gcc.dg/20030309-1.c \
             /gcc/testsuite/gcc.dg/tree-ssa \
-            /gcc/testsuite/gcc.dg/pr98304-1.c
+            /gcc/testsuite/gcc.dg/pr98304-1.c \
+            /gcc/testsuite/gcc.target/powerpc/ppc-switch-2.c
 
       - name: Run GCC torture smoke
         run: |

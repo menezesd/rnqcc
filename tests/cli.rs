@@ -1228,6 +1228,127 @@ fn gcc_torture_smoke_admits_portable_execute_stack_stress() -> Result<(), String
 
 #[cfg(unix)]
 #[test]
+fn gcc_torture_smoke_uses_assembly_for_cross_target_compile() -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let suite = TempPath::new("gcc-smoke-cross-target-suite", "dir");
+    let compile_dir = suite.path().join("compile");
+    std::fs::create_dir_all(&compile_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(
+        compile_dir.join("pr110386-2.c"),
+        "/* { dg-do compile { target i?86-*-* x86_64-*-* } } */\n\
+         int value;\n",
+    )
+    .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+    let log = TempPath::new("gcc-smoke-cross-target-args", "txt");
+    let fake_rnqcc = TempPath::new("gcc-smoke-cross-target-rnqcc", "sh");
+    std::fs::write(
+        fake_rnqcc.path(),
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexit 0\n",
+            log.path().display()
+        ),
+    )
+    .map_err(|err| format!("failed to write fake rnqcc: {err}"))?;
+    let mut perms = std::fs::metadata(fake_rnqcc.path())
+        .map_err(|err| format!("failed to stat fake rnqcc: {err}"))?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(fake_rnqcc.path(), perms)
+        .map_err(|err| format!("failed to chmod fake rnqcc: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/gcc_torture_smoke.py")
+        .arg("--rnqcc")
+        .arg(fake_rnqcc.path())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--mode")
+        .arg("compile")
+        .arg("--limit")
+        .arg("1")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let args =
+        std::fs::read_to_string(log.path()).map_err(|err| format!("failed to read log: {err}"))?;
+    assert_contains_in_order(
+        &args,
+        &[
+            "--Wno-missing-return",
+            "--target",
+            "x86_64-linux",
+            "-S",
+            "pr110386-2.c",
+            "-o",
+        ],
+    )?;
+    assert!(!args.lines().any(|arg| arg == "-c"), "{args}");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn gcc_torture_smoke_requires_verified_warning_output() -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let suite = TempPath::new("gcc-smoke-verified-warning-suite", "dir");
+    let compile_dir = suite.path().join("compile");
+    std::fs::create_dir_all(&compile_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(
+        compile_dir.join("pr103314-1.c"),
+        "int main(void) { return 0; } /* { dg-warning \"is negative\" } */\n",
+    )
+    .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+    let fake_rnqcc = TempPath::new("gcc-smoke-verified-warning-rnqcc", "sh");
+    std::fs::write(fake_rnqcc.path(), "#!/bin/sh\nexit 0\n")
+        .map_err(|err| format!("failed to write fake rnqcc: {err}"))?;
+    let mut perms = std::fs::metadata(fake_rnqcc.path())
+        .map_err(|err| format!("failed to stat fake rnqcc: {err}"))?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(fake_rnqcc.path(), perms)
+        .map_err(|err| format!("failed to chmod fake rnqcc: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/gcc_torture_smoke.py")
+        .arg("--rnqcc")
+        .arg(fake_rnqcc.path())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--mode")
+        .arg("compile")
+        .arg("--limit")
+        .arg("1")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+    };
+
+    let success = output.status.success();
+    let out = stdout(output);
+    assert!(!success, "{out}");
+    assert!(!out.is_empty(), "expected failure output");
+    assert!(
+        out.contains("missing expected warning: shift count is negative"),
+        "{out}"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn gcc_torture_smoke_materializes_tmpnam_fileio_tests() -> Result<(), String> {
     let suite = TempPath::new("gcc-smoke-tmpnam-fileio-suite", "dir");
     let execute_dir = suite.path().join("execute");
@@ -15011,6 +15132,65 @@ fn internal_cpp_dump_macros_includes_forced_include_defines() {
 
     let _ = std::fs::remove_file(header);
     let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn internal_cpp_exposes_builtin_type_size_macros() {
+    let src = temp_file("internal-cpp-builtin-type-size-macros", "c");
+    let out = temp_file("internal-cpp-builtin-type-size-macros", "s");
+    std::fs::write(
+        &src,
+        "int a[sizeof(__SIZE_TYPE__) == __SIZEOF_SIZE_T__ ? 1 : -1];\n\
+         int b[sizeof(__WCHAR_TYPE__) == __SIZEOF_WCHAR_T__ ? 1 : -1];\n\
+         int c[sizeof(__WINT_TYPE__) == __SIZEOF_WINT_T__ ? 1 : -1];\n\
+         int d[sizeof(__PTRDIFF_TYPE__) == __SIZEOF_PTRDIFF_T__ ? 1 : -1];\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-S")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn internal_cpp_provides_minimal_immintrin_virtual_header() {
+    let src = temp_file("internal-cpp-immintrin-minimal", "c");
+    let out = temp_file("internal-cpp-immintrin-minimal", "s");
+    std::fs::write(
+        &src,
+        "#include <immintrin.h>\n\
+         __m128i do_stuff(__m128i x) {\n\
+             __m128i y = _mm_abs_epi32(x);\n\
+             return _mm_mullo_epi32(y, x);\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("--target")
+        .arg("x86_64-linux")
+        .arg("-S")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
 }
 
 #[test]

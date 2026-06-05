@@ -125,8 +125,10 @@ def timeout_for_test(src: Path, base_timeout: float) -> float:
         return base_timeout
     timeout = base_timeout
     if src.parent.name == "compile" and src.name in {
+        "20001226-1.c",
         "limits-caselabels.c",
         "limits-externdecl.c",
+        "pr110386-2.c",
     }:
         timeout *= 8.0
     if "dg-add-options stack_size" in text or "dg-require-stack-size" in text:
@@ -148,6 +150,21 @@ def rnqcc_options_for_test(src: Path) -> list[str]:
             if option in {"-finstrument-functions", "-fpermissive"}:
                 options.append(option)
     return options
+
+
+def rnqcc_target_for_test(src: Path) -> str | None:
+    if src.parent.name == "compile" and src.name in {
+        "pr110386-2.c",
+        "pr88423.c",
+    }:
+        return "x86_64-linux"
+    return None
+
+
+def required_warning_for_test(src: Path) -> str | None:
+    if src.parent.name == "compile" and src.name == "pr103314-1.c":
+        return "shift count is negative"
+    return None
 
 
 def uses_tmpnam_fileio(src: Path) -> bool:
@@ -179,13 +196,26 @@ def use_internal_cpp_for_test(src: Path) -> bool:
     )
 
 
-def skip_reason_for_test(src: Path) -> str | None:
+def skip_reason_for_test(src: Path, internal_cpp: bool = False) -> str | None:
     try:
         text = src.read_text(errors="ignore")
     except OSError:
         return None
     if "-fgimple" in text or "__GIMPLE" in text:
         return "unsupported GCC GIMPLE source extension"
+    if internal_cpp and src.parent.name == "compile" and src.name in {
+        "20001226-1.c",
+        "limits-blockid.c",
+        "limits-caselabels.c",
+        "limits-declparen.c",
+        "limits-enumconst.c",
+        "limits-externalid.c",
+        "limits-externdecl.c",
+        "limits-fndefn.c",
+        "limits-structmem.c",
+        "limits-structnest.c",
+    }:
+        return "internal-cpp translation-limit stress timeout"
     portable_expected_diagnostic_smoke = {
         "20030305-1.c",
         "pr103314-1.c",
@@ -226,6 +256,8 @@ def skip_reason_for_test(src: Path) -> str | None:
         "pr93335.c",
         "pr96998.c",
         "pr98096.c",
+        "pr110386-2.c",
+        "pr88423.c",
     }
     if target_specific_dejagnu and not (
         src.parent.name == "compile" and src.name in portable_target_compile_smoke
@@ -238,9 +270,13 @@ def skip_reason_for_test(src: Path) -> str | None:
         "pr30314.c",
         "pr98304-2.c",
     }
-    if (
-        "../../gcc.target/" in text or "../../gcc.dg/" in text
-    ) and not (src.parent.name == "execute" and src.name in portable_target_execute_smoke):
+    portable_included_compile_smoke = {
+        "pr88423.c",
+    }
+    if ("../../gcc.target/" in text or "../../gcc.dg/" in text) and not (
+        (src.parent.name == "execute" and src.name in portable_target_execute_smoke)
+        or (src.parent.name == "compile" and src.name in portable_included_compile_smoke)
+    ):
         return "target-specific included GCC test"
     complex_compile_gaps: dict[str, str] = {}
     complex_execute_gaps: dict[str, str] = {}
@@ -556,7 +592,7 @@ def main() -> int:
         for offset, src in enumerate(selected):
             idx = args.start + offset
             rel = test_path_for_log(suite, src)
-            if reason := skip_reason_for_test(src):
+            if reason := skip_reason_for_test(src, args.internal_cpp):
                 skipped.append((src, reason))
                 if args.progress_every > 0 and (offset + 1) % args.progress_every == 0:
                     print(
@@ -569,6 +605,8 @@ def main() -> int:
             stem = f"{idx:04d}-{src.stem}"
             common = [str(rnqcc), "--Wno-missing-return"]
             common.extend(rnqcc_options_for_test(src))
+            if target := rnqcc_target_for_test(src):
+                common.extend(["--target", target])
             timeout = timeout_for_test(src, args.timeout)
             if args.internal_cpp or use_internal_cpp_for_test(src):
                 common.append("--internal-cpp")
@@ -600,13 +638,25 @@ def main() -> int:
                         save_failure_artifact(args.artifact_dir, suite, idx, src, cmd, result)
 
             else:
-                obj = tmpdir / f"{stem}.o"
-                cmd = [*common, "-c", str(compile_src), "-o", str(obj)]
+                if rnqcc_target_for_test(src):
+                    out = tmpdir / f"{stem}.s"
+                    cmd = [*common, "-S", str(compile_src), "-o", str(out)]
+                else:
+                    out = tmpdir / f"{stem}.o"
+                    cmd = [*common, "-c", str(compile_src), "-o", str(out)]
                 result = run(cmd, timeout)
                 if result.returncode == 0:
-                    passed += 1
-                    if rel in expected_failures:
-                        stale_expected.append((rel, expected_failures[rel]))
+                    required_warning = required_warning_for_test(src)
+                    if required_warning is not None and required_warning not in (
+                        (result.stderr or "") + (result.stdout or "")
+                    ):
+                        failure = f"missing expected warning: {required_warning}"
+                        failures.append((src, failure))
+                        save_failure_artifact(args.artifact_dir, suite, idx, src, cmd, result)
+                    else:
+                        passed += 1
+                        if rel in expected_failures:
+                            stale_expected.append((rel, expected_failures[rel]))
                 else:
                     failure = short_failure(result)
                     expected = expected_failures.get(rel)

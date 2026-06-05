@@ -20,12 +20,18 @@ from collections import Counter
 from pathlib import Path
 
 try:
-    from gcc_torture_expected import load_expected_failures, normalize_test_path, validate_test_path
+    from gcc_torture_expected import (
+        load_expected_failures,
+        load_expected_skips,
+        normalize_test_path,
+        validate_test_path,
+    )
 except ModuleNotFoundError as err:
     if err.name != "gcc_torture_expected":
         raise
     from scripts.gcc_torture_expected import (
         load_expected_failures,
+        load_expected_skips,
         normalize_test_path,
         validate_test_path,
     )
@@ -579,9 +585,22 @@ def main() -> int:
         help="file of `relative/path.c | diagnostic substring` failures to treat as known",
     )
     parser.add_argument(
+        "--expected-skips",
+        type=Path,
+        help=(
+            "file of `mode | preprocessor | relative/path.c | reason` skips "
+            "to treat as known"
+        ),
+    )
+    parser.add_argument(
         "--allow-stale-expected-failures",
         action="store_true",
         help="do not fail if an expected failure passes in this run",
+    )
+    parser.add_argument(
+        "--allow-stale-expected-skips",
+        action="store_true",
+        help="do not fail if an expected skip is selected but no longer skipped",
     )
     parser.add_argument(
         "--artifact-dir",
@@ -609,18 +628,35 @@ def main() -> int:
     if not selected:
         raise SystemExit("no tests selected")
     expected_failures = load_expected_failures(args.expected_failures)
+    expected_skips = load_expected_skips(args.expected_skips)
+    preprocessor = "internal-cpp" if args.internal_cpp else "external"
 
     passed = 0
     skipped: list[tuple[Path, str]] = []
     failures: list[tuple[Path, str]] = []
     expected_failed: list[tuple[Path, str]] = []
     stale_expected: list[tuple[str, str]] = []
+    unexpected_skips: list[tuple[str, str]] = []
+    seen_skip_keys: set[tuple[str, str, str]] = set()
     with tempfile.TemporaryDirectory(prefix="rnqcc-gcc-torture.") as tmp:
         tmpdir = Path(tmp)
         for offset, src in enumerate(selected):
             idx = args.start + offset
             rel = test_path_for_log(suite, src)
             if reason := skip_reason_for_test(src, args.internal_cpp):
+                key = (args.mode, preprocessor, rel)
+                seen_skip_keys.add(key)
+                expected_skip_reason = expected_skips.get(key)
+                if expected_skip_reason is not None and expected_skip_reason != reason:
+                    failures.append(
+                        (
+                            src,
+                            "expected skip reason changed: "
+                            f"fixture has `{expected_skip_reason}`, runner produced `{reason}`",
+                        )
+                    )
+                elif expected_skip_reason is None and args.expected_skips is not None:
+                    unexpected_skips.append((rel, reason))
                 skipped.append((src, reason))
                 if args.progress_every > 0 and (offset + 1) % args.progress_every == 0:
                     print(
@@ -722,6 +758,18 @@ def main() -> int:
                     flush=True,
                 )
 
+    selected_rels = {test_path_for_log(suite, src) for src in selected}
+    selected_expected_skips = {
+        key: reason
+        for key, reason in expected_skips.items()
+        if key[0] == args.mode and key[1] == preprocessor and key[2] in selected_rels
+    }
+    stale_expected_skips = [
+        (key[2], reason)
+        for key, reason in selected_expected_skips.items()
+        if key not in seen_skip_keys
+    ]
+
     print(
         f"gcc torture {args.mode}: {passed}/{len(selected) - len(skipped)} passed "
         f"(start={args.start}, limit={args.limit}, skipped={len(skipped)}, "
@@ -753,6 +801,12 @@ def main() -> int:
             + "".join(
                 f"{test_path_for_log(suite, src)}\tSKIP: {reason}\n" for src, reason in skipped
             )
+            + "".join(
+                f"{rel}\tUNEXPECTED-SKIP: {reason}\n" for rel, reason in unexpected_skips
+            )
+            + "".join(
+                f"{rel}\tSTALE-SKIP: {reason}\n" for rel, reason in stale_expected_skips
+            )
         )
 
     shown = failures if args.max_failures == 0 else failures[: args.max_failures]
@@ -763,7 +817,18 @@ def main() -> int:
         print(f"... {len(failures) - args.max_failures} more failures")
     for rel, reason in stale_expected:
         print(f"STALE-XFAIL {rel}: {reason}")
-    return 1 if failures or (stale_expected and not args.allow_stale_expected_failures) else 0
+    for rel, reason in unexpected_skips:
+        print(f"UNEXPECTED-SKIP {rel}: {reason}")
+    for rel, reason in stale_expected_skips:
+        print(f"STALE-SKIP {rel}: {reason}")
+    return (
+        1
+        if failures
+        or unexpected_skips
+        or (stale_expected and not args.allow_stale_expected_failures)
+        or (stale_expected_skips and not args.allow_stale_expected_skips)
+        else 0
+    )
 
 
 if __name__ == "__main__":

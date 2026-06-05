@@ -7,8 +7,10 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EXPECTED = ROOT / "tests" / "fixtures" / "gcc_torture_expected_failures.txt"
+DEFAULT_EXPECTED_SKIPS = ROOT / "tests" / "fixtures" / "gcc_torture_expected_skips.txt"
 MAX_REASON_DISPLAY = 240
 FailureRow = tuple[str, str, str]
+SkipKey = tuple[str, str, str]
 
 
 def validate_test_path(path: Path, line_no: int, test: str) -> None:
@@ -71,6 +73,55 @@ def load_expected_failures(path: Path | None) -> dict[str, str]:
             )
         expected[test] = reason
         previous_test = test
+    return expected
+
+
+def load_expected_skips(path: Path | None) -> dict[SkipKey, str]:
+    if path is None:
+        return {}
+    if not path.exists():
+        raise SystemExit(f"{path}: expected-skip fixture not found")
+    if not path.is_file():
+        raise SystemExit(f"{path}: expected-skip fixture is not a file")
+
+    expected: dict[SkipKey, str] = {}
+    previous_key: SkipKey | None = None
+    for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        fields = line.split("|", 3)
+        if len(fields) != 4:
+            raise SystemExit(
+                f"{path}:{line_no}: expected '<mode> | <preprocessor> | <test> | <reason>', got {raw!r}"
+            )
+        mode = fields[0].strip()
+        preprocessor = fields[1].strip()
+        test = fields[2].strip()
+        reason = fields[3].strip()
+        if mode not in {"compile", "execute"}:
+            raise SystemExit(f"{path}:{line_no}: expected compile or execute mode, got {mode}")
+        if preprocessor not in {"external", "internal-cpp"}:
+            raise SystemExit(
+                f"{path}:{line_no}: expected external or internal-cpp preprocessor, got {preprocessor}"
+            )
+        if not test or not reason:
+            raise SystemExit(
+                f"{path}:{line_no}: expected '<mode> | <preprocessor> | <test> | <reason>', got {raw!r}"
+            )
+        validate_test_path(path, line_no, test)
+        key = (mode, preprocessor, normalize_test_path(test))
+        if key in expected:
+            raise SystemExit(
+                f"{path}:{line_no}: duplicate expected skip for {mode} {preprocessor} {key[2]}"
+            )
+        if previous_key is not None and key < previous_key:
+            raise SystemExit(
+                f"{path}:{line_no}: expected skips must be sorted; "
+                f"{' | '.join(key)} should appear before {' | '.join(previous_key)}"
+            )
+        expected[key] = reason
+        previous_key = key
     return expected
 
 

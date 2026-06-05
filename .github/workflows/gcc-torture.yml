@@ -11,6 +11,14 @@ on:
         options:
           - execute
           - compile
+      preprocessor:
+        description: preprocessor mode
+        required: true
+        default: external
+        type: choice
+        options:
+          - external
+          - internal-cpp
       start:
         description: First sorted test index
         required: true
@@ -24,8 +32,23 @@ on:
 
 jobs:
   smoke:
-    name: GCC torture ${{ inputs.mode || 'execute' }} smoke
+    name: GCC torture ${{ matrix.mode }} ${{ matrix.preprocessor }} smoke
     runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'schedule' ||
+      (matrix.mode == inputs.mode && matrix.preprocessor == inputs.preprocessor)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: compile
+            preprocessor: external
+          - mode: execute
+            preprocessor: external
+          - mode: compile
+            preprocessor: internal-cpp
+          - mode: execute
+            preprocessor: internal-cpp
     env:
       GCC_TORTURE_ROOT: /tmp/rnqcc-gcc-torture/gcc
       GCC_TORTURE_SUITE: /tmp/rnqcc-gcc-torture/gcc/gcc/testsuite/gcc.c-torture
@@ -55,14 +78,20 @@ jobs:
 
       - name: Run GCC torture smoke
         run: |
+          cpp_args=()
+          if [ "${{ matrix.preprocessor }}" = "internal-cpp" ]; then
+            cpp_args+=(--internal-cpp)
+          fi
           python3 scripts/gcc_torture_smoke.py \
             --suite "$GCC_TORTURE_SUITE" \
-            --mode "${{ inputs.mode || 'execute' }}" \
+            --mode "${{ matrix.mode }}" \
             --start "${{ inputs.start || '0' }}" \
             --limit "${{ inputs.limit || '100000' }}" \
             --progress-every 100 \
             --expected-failures tests/fixtures/gcc_torture_expected_failures.txt \
+            --expected-skips tests/fixtures/gcc_torture_expected_skips.txt \
             --allow-stale-expected-failures \
+            "${cpp_args[@]}" \
             --failure-log "$CI_ARTIFACT_DIR/gcc-torture-failures.txt" \
             --skip-log "$CI_ARTIFACT_DIR/gcc-torture-skips.txt" \
             --print-skips \
@@ -90,6 +119,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: rnqcc-gcc-torture-smoke-artifacts
+          name: rnqcc-gcc-torture-${{ matrix.mode }}-${{ matrix.preprocessor }}-artifacts
           path: target/ci-artifacts
           if-no-files-found: ignore

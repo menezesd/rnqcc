@@ -1171,6 +1171,105 @@ fn gcc_torture_smoke_emits_canonical_skip_paths() -> Result<(), String> {
 }
 
 #[test]
+fn gcc_torture_smoke_rejects_unexpected_skip_with_expected_skip_fixture() -> Result<(), String> {
+    let suite = TempPath::new("gcc-smoke-unexpected-skip-suite", "dir");
+    let compile_dir = suite.path().join("compile");
+    std::fs::create_dir_all(&compile_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(
+        compile_dir.join("raw.c"),
+        "/* { dg-error \"expected diagnostic\" } */\n",
+    )
+    .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+    let expected_skips = TempPath::new("gcc-smoke-unexpected-skip-expected", "txt");
+    std::fs::write(expected_skips.path(), "")
+        .map_err(|err| format!("failed to write expected skip fixture: {err}"))?;
+    let failure_log = TempPath::new("gcc-smoke-unexpected-skip-failures", "txt");
+    let fake_rnqcc = TempPath::new("gcc-smoke-unexpected-skip-rnqcc", "sh");
+    std::fs::write(fake_rnqcc.path(), "#!/bin/sh\nexit 0\n")
+        .map_err(|err| format!("failed to write fake rnqcc: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/gcc_torture_smoke.py")
+        .arg("--rnqcc")
+        .arg(fake_rnqcc.path())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--mode")
+        .arg("compile")
+        .arg("--limit")
+        .arg("1")
+        .arg("--expected-skips")
+        .arg(expected_skips.path())
+        .arg("--failure-log")
+        .arg(failure_log.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+    };
+
+    assert!(!output.status.success(), "{}", stdout(output));
+    let failures = std::fs::read_to_string(failure_log.path())
+        .map_err(|err| format!("failed to read failure log: {err}"))?;
+    assert!(
+        failures.contains("compile/raw.c\tUNEXPECTED-SKIP: expected-diagnostic GCC torture test"),
+        "{failures}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gcc_torture_smoke_rejects_stale_expected_skip() -> Result<(), String> {
+    let suite = TempPath::new("gcc-smoke-stale-skip-suite", "dir");
+    let compile_dir = suite.path().join("compile");
+    std::fs::create_dir_all(&compile_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(compile_dir.join("raw.c"), "int value;\n")
+        .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+    let expected_skips = TempPath::new("gcc-smoke-stale-skip-expected", "txt");
+    std::fs::write(
+        expected_skips.path(),
+        "compile | external | compile/raw.c | old skip reason\n",
+    )
+    .map_err(|err| format!("failed to write expected skip fixture: {err}"))?;
+    let failure_log = TempPath::new("gcc-smoke-stale-skip-failures", "txt");
+
+    let output = match Command::new("python3")
+        .arg("scripts/gcc_torture_smoke.py")
+        .arg("--rnqcc")
+        .arg(rnqcc())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--mode")
+        .arg("compile")
+        .arg("--limit")
+        .arg("1")
+        .arg("--expected-skips")
+        .arg(expected_skips.path())
+        .arg("--failure-log")
+        .arg(failure_log.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+    };
+
+    assert!(!output.status.success(), "{}", stdout(output));
+    let failures = std::fs::read_to_string(failure_log.path())
+        .map_err(|err| format!("failed to read failure log: {err}"))?;
+    assert!(
+        failures.contains("compile/raw.c\tSTALE-SKIP: old skip reason"),
+        "{failures}"
+    );
+    Ok(())
+}
+
+#[test]
 fn gcc_torture_smoke_skips_internal_cpp_expensive_tests() -> Result<(), String> {
     let suite = TempPath::new("gcc-smoke-internal-cpp-expensive-suite", "dir");
     let execute_dir = suite.path().join("execute");

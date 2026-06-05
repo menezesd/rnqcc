@@ -1,0 +1,29 @@
+# Known GCC torture smoke skips.
+#
+# Format:
+# mode | preprocessor | relative/path.c | reason
+#
+# Keep this file as small as possible. The runner fails if a selected expected
+# skip is no longer skipped, so entries can be removed as rnqcc improves.
+compile | external | compile/pr115143-2.c | unsupported GCC GIMPLE source extension
+compile | external | compile/pr115143-3.c | unsupported GCC GIMPLE source extension
+compile | external | compile/pr88347.c | target-specific DejaGnu test outside smoke target model
+compile | internal-cpp | compile/20001226-1.c | internal-cpp translation-limit stress timeout
+compile | internal-cpp | compile/limits-blockid.c | internal-cpp translation-limit stress timeout
+compile | internal-cpp | compile/limits-caselabels.c | internal-cpp translation-limit stress timeout
+compile | internal-cpp | compile/limits-declparen.c | internal-cpp translation-limit stress timeout
+compile | internal-cpp | compile/limits-enumconst.c | internal-cpp translation-limit stress timeout
+compile | internal-cpp | compile/limits-externalid.c | internal-cpp translation-limit stress timeout
+compile | internal-cpp | compile/limits-externdecl.c | internal-cpp translation-limit stress timeout
+compile | internal-cpp | compile/limits-fnargs.c | internal-cpp expensive stress test
+compile | internal-cpp | compile/limits-fndefn.c | internal-cpp translation-limit stress timeout
+compile | internal-cpp | compile/limits-structmem.c | internal-cpp translation-limit stress timeout
+compile | internal-cpp | compile/limits-structnest.c | internal-cpp translation-limit stress timeout
+compile | internal-cpp | compile/pr115143-2.c | unsupported GCC GIMPLE source extension
+compile | internal-cpp | compile/pr115143-3.c | unsupported GCC GIMPLE source extension
+compile | internal-cpp | compile/pr88347.c | target-specific DejaGnu test outside smoke target model
+execute | internal-cpp | execute/memclr.c | internal-cpp expensive stress test
+execute | internal-cpp | execute/memcpy-a1.c | internal-cpp expensive stress test
+execute | internal-cpp | execute/memcpy-a2.c | internal-cpp expensive stress test
+execute | internal-cpp | execute/memcpy-a4.c | internal-cpp expensive stress test
+execute | internal-cpp | execute/memcpy-a8.c | internal-cpp expensive stress test

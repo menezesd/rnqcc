@@ -170,3 +170,8 @@ regression-tested against the platform ABI.
 `scripts/real_project_corpus.py` compiles a manifest of representative
 translation units with `--internal-cpp` and supports expected-failure entries so
 external project reductions can be tracked as a compatibility ratchet.
+`scripts/gcc_torture_smoke.py` exercises deterministic GCC C torture slices.
+Known failures and skips are tracked separately in
+`tests/fixtures/gcc_torture_expected_failures.txt` and
+`tests/fixtures/gcc_torture_expected_skips.txt`; both fixtures should shrink as
+the compiler and internal preprocessor improve.

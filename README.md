@@ -106,3 +106,16 @@ response files:
 ```sh
 sh scripts/real_project_smoke.sh
 ```
+
+Additional deterministic smoke harnesses live under `scripts/`:
+
+```sh
+python3 scripts/fuzz_smoke.py --seed 31337 --cases 12 --target x86_64-linux
+python3 scripts/fuzz_smoke.py --seed 4242 --cases 6 --target x86_64-linux --compare-runtime
+python3 scripts/layout_oracle.py
+python3 scripts/gcc_torture_smoke.py --mode compile --limit 100
+```
+
+The GCC torture runner supports expected-failure and expected-skip fixtures
+under `tests/fixtures/` so compiler frontiers are ratcheted instead of silently
+drifting.

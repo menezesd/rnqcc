@@ -34,6 +34,11 @@ struct InvocationArgs {
     next_index: usize,
 }
 
+struct BalancedTokens {
+    tokens: Vec<PpToken>,
+    next_index: usize,
+}
+
 pub fn expand_macros(tokens: &[PpToken], macros: &MacroTable) -> Result<Vec<PpToken>, String> {
     expand_macros_with_hooks(tokens, macros, &mut NoMacroExpansionHooks)
 }
@@ -251,11 +256,11 @@ fn process_va_opt_tokens(body: &[PpToken], has_variadic_args: bool) -> Vec<PpTok
         if is_ident(body.get(index), "__VA_OPT__") {
             let open = skip_ws(body, index + 1);
             if is_punct(body.get(open), "(") {
-                if let Some((inside, next)) = collect_balanced(body, open) {
+                if let Some(balanced) = collect_balanced(body, open) {
                     if has_variadic_args {
-                        out.extend(inside);
+                        out.extend(balanced.tokens);
                     }
-                    index = next;
+                    index = balanced.next_index;
                     continue;
                 }
             }
@@ -266,7 +271,7 @@ fn process_va_opt_tokens(body: &[PpToken], has_variadic_args: bool) -> Vec<PpTok
     out
 }
 
-fn collect_balanced(tokens: &[PpToken], open_index: usize) -> Option<(Vec<PpToken>, usize)> {
+fn collect_balanced(tokens: &[PpToken], open_index: usize) -> Option<BalancedTokens> {
     let mut depth = 0usize;
     let mut out = Vec::new();
     for (index, token) in tokens.iter().enumerate().skip(open_index + 1) {
@@ -275,7 +280,10 @@ fn collect_balanced(tokens: &[PpToken], open_index: usize) -> Option<(Vec<PpToke
             out.push(token.clone());
         } else if is_punct(Some(token), ")") {
             if depth == 0 {
-                return Some((out, index + 1));
+                return Some(BalancedTokens {
+                    tokens: out,
+                    next_index: index + 1,
+                });
             }
             depth -= 1;
             out.push(token.clone());

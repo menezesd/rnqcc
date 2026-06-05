@@ -1,19 +1,7 @@
 use clap::{App, Arg};
 
-mod backend;
-mod cfg;
-mod compile;
-mod diagnostic;
-mod lex;
-mod optimize;
-mod parse;
-mod preprocess;
-mod resolve;
-mod tacky;
-mod tempfile;
-mod types;
-
-use crate::types::*;
+use rnqcc::types::*;
+use rnqcc::{compile, optimize, preprocess, tempfile};
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};

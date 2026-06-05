@@ -359,8 +359,14 @@ fn normalize_driver_arg_text(text: &str) -> Vec<OsString> {
     match text {
         "-Wall" => normalized.push(OsString::from("--Wall")),
         "-Werror" => normalized.push(OsString::from("--Werror")),
+        "-Wcompare-distinct-pointer-types" => {
+            normalized.push(OsString::from("--Wcompare-distinct-pointer-types"));
+        }
         "-Wno-unreachable" => normalized.push(OsString::from("--Wno-unreachable")),
         "-Wno-missing-return" => normalized.push(OsString::from("--Wno-missing-return")),
+        "-Wno-compare-distinct-pointer-types" => {
+            normalized.push(OsString::from("--Wno-compare-distinct-pointer-types"));
+        }
         "-Wextra" | "-Wpedantic" | "-pedantic" | "-pipe" => {}
         "-O" | "-O1" | "-O2" | "-O3" | "-Os" | "-Oz" | "-Og" | "-Ofast" => {
             normalized.push(OsString::from("--optimize"));
@@ -4794,7 +4800,12 @@ fn internal_has_extension(name: &str) -> bool {
 fn internal_has_warning(name: &str) -> bool {
     matches!(
         name,
-        "-Wall" | "-Wunreachable" | "-Wmissing-return" | "-Werror" | "-Wunknown-pragmas"
+        "-Wall"
+            | "-Wunreachable"
+            | "-Wmissing-return"
+            | "-Werror"
+            | "-Wunknown-pragmas"
+            | "-Wcompare-distinct-pointer-types"
     )
 }
 
@@ -6737,6 +6748,18 @@ fn real_main() -> Result<(), String> {
                 .help("Disable missing return warnings"),
         )
         .arg(
+            Arg::with_name("wcompare_distinct_pointer_types")
+                .long("Wcompare-distinct-pointer-types")
+                .takes_value(false)
+                .help("Enable distinct pointer comparison warnings"),
+        )
+        .arg(
+            Arg::with_name("wno_compare_distinct_pointer_types")
+                .long("Wno-compare-distinct-pointer-types")
+                .takes_value(false)
+                .help("Disable distinct pointer comparison warnings"),
+        )
+        .arg(
             Arg::with_name("keep_temps")
                 .long("keep-temps")
                 .takes_value(false)
@@ -6952,6 +6975,7 @@ fn real_main() -> Result<(), String> {
         enabled: true,
         unreachable: !matches.is_present("wno_unreachable"),
         missing_return: !matches.is_present("wno_missing_return"),
+        compare_distinct_pointer_types: !matches.is_present("wno_compare_distinct_pointer_types"),
         error: matches.is_present("werror"),
     };
     let permissive = matches.is_present("permissive");

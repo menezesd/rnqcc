@@ -22,6 +22,7 @@ pub struct WarningOptions {
     pub enabled: bool,
     pub unreachable: bool,
     pub missing_return: bool,
+    pub compare_distinct_pointer_types: bool,
     pub error: bool,
 }
 
@@ -47,6 +48,7 @@ impl Default for WarningOptions {
             enabled: true,
             unreachable: true,
             missing_return: true,
+            compare_distinct_pointer_types: true,
             error: false,
         }
     }
@@ -61,6 +63,9 @@ impl WarningOptions {
             crate::diagnostic::WarningKind::UnreachableStatement { .. } => self.unreachable,
             crate::diagnostic::WarningKind::MissingReturn { .. } => self.missing_return,
             crate::diagnostic::WarningKind::NegativeShiftCount => true,
+            crate::diagnostic::WarningKind::CompareDistinctPointerTypes => {
+                self.compare_distinct_pointer_types
+            }
         }
     }
 }
@@ -374,13 +379,25 @@ pub fn compile(stage: &Stage, src_file: &str, options: CompileOptions<'_>) -> Re
     }
 
     // Generate TACKY IR
-    let mut tacky_program = tacky::generate_with_target_options(
+    let tacky_output = tacky::generate_with_target_options_and_warnings(
         resolved_ast,
         *target,
         instrument_functions,
         compatibility.permissive,
     )
     .map_err(|err| Diagnostic::tacky(err).render())?;
+    let active_warnings: Vec<_> = tacky_output
+        .warnings
+        .iter()
+        .filter(|warning| warnings.allows(warning))
+        .collect();
+    for warning in &active_warnings {
+        eprintln!("rnqcc: {}", warning.render());
+    }
+    if warnings.error && !active_warnings.is_empty() {
+        return Err("warnings treated as errors".to_string());
+    }
+    let mut tacky_program = tacky_output.program;
     validate_tacky_program(&tacky_program).map_err(|err| Diagnostic::tacky(err).render())?;
     if dumps.tacky_pre_opt {
         eprintln!("{:#?}", tacky_program);

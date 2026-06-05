@@ -147,7 +147,11 @@ def rnqcc_options_for_test(src: Path) -> list[str]:
     options: list[str] = []
     for quoted in re.findall(r"dg-(?:additional-)?options\s+\"([^\"]*)\"", text):
         for option in shlex.split(quoted):
-            if option in {"-finstrument-functions", "-fpermissive"}:
+            if option in {
+                "-finstrument-functions",
+                "-fpermissive",
+                "-Wcompare-distinct-pointer-types",
+            }:
                 options.append(option)
     return options
 
@@ -164,6 +168,11 @@ def rnqcc_target_for_test(src: Path) -> str | None:
 def required_warning_for_test(src: Path) -> str | None:
     if src.parent.name == "compile" and src.name == "pr103314-1.c":
         return "shift count is negative"
+    if src.parent.name == "compile" and src.name in {
+        "pr106537-1.c",
+        "pr106537-2.c",
+    }:
+        return "comparison of distinct pointer types"
     return None
 
 

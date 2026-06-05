@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use crate::diagnostic::{Phase, Warning, WarningKind};
 use crate::types::*;
 use std::collections::{HashMap, HashSet};
 
@@ -14,6 +15,11 @@ type BuiltinFunctionInfo = (
     Option<(CType, usize)>,
 );
 pub type TackyResult<T> = Result<T, String>;
+
+pub struct TackyOutput {
+    pub program: TackyProgram,
+    pub warnings: Vec<Warning>,
+}
 
 const VLA_STATIC_SCALE_FALLBACK: usize = 16;
 const INLINE_ZERO_INIT_LIMIT: usize = 128;
@@ -222,6 +228,7 @@ struct TackyGen {
     nested_capture_slots: HashMap<String, Vec<(String, String)>>,
     current_nonlocal_label_envs: HashMap<String, String>,
     current_parent_label_env_slots: HashMap<String, String>,
+    warnings: Vec<Warning>,
 }
 
 impl TackyGen {
@@ -274,6 +281,7 @@ impl TackyGen {
             nested_capture_slots: HashMap::new(),
             current_nonlocal_label_envs: HashMap::new(),
             current_parent_label_env_slots: HashMap::new(),
+            warnings: Vec::new(),
         }
     }
 
@@ -1352,6 +1360,38 @@ impl TackyGen {
             }
             _ => self.compatible_full_types(dst, src),
         }
+    }
+
+    fn is_void_full_type(ft: &FullType) -> bool {
+        matches!(ft, FullType::Scalar(CType::Void))
+    }
+
+    fn should_warn_compare_distinct_pointer_types(
+        op: &BinaryOp,
+        left: &FullType,
+        right: &FullType,
+    ) -> bool {
+        let (FullType::Pointer(left_inner), FullType::Pointer(right_inner)) = (left, right) else {
+            return false;
+        };
+        if left_inner == right_inner {
+            return false;
+        }
+        if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual)
+            && (Self::is_void_full_type(left_inner) || Self::is_void_full_type(right_inner))
+        {
+            return false;
+        }
+        true
+    }
+
+    fn warn_compare_distinct_pointer_types(&mut self) {
+        self.warnings.push(Warning {
+            phase: Phase::Tacky,
+            kind: WarningKind::CompareDistinctPointerTypes,
+            message: "comparison of distinct pointer types".to_string(),
+            span: None,
+        });
     }
 
     fn has_unspecified_function_params(params: &[FullType], variadic: bool) -> bool {
@@ -9003,6 +9043,11 @@ impl TackyGen {
         let common = CType::common(l_type, r_type);
         let l_conv = self.convert_to(l, l_type, common);
         let r_conv = self.convert_to(r, r_type, common);
+        if is_comparison_op(&op)
+            && Self::should_warn_compare_distinct_pointer_types(&op, &l_full, &r_full)
+        {
+            self.warn_compare_distinct_pointer_types();
+        }
         let result_type = if is_comparison_op(&op) {
             CType::Int
         } else {
@@ -13948,6 +13993,16 @@ pub fn generate_with_target_options(
     instrument_functions: bool,
     permissive: bool,
 ) -> TackyResult<TackyProgram> {
+    generate_with_target_options_and_warnings(program, target, instrument_functions, permissive)
+        .map(|output| output.program)
+}
+
+pub fn generate_with_target_options_and_warnings(
+    program: Program,
+    target: Target,
+    instrument_functions: bool,
+    permissive: bool,
+) -> TackyResult<TackyOutput> {
     let mut gen = TackyGen::new_for_target(target);
     gen.instrument_functions = instrument_functions;
     gen.permissive = permissive;
@@ -14608,15 +14663,18 @@ pub fn generate_with_target_options(
         }
     }
 
-    Ok(TackyProgram {
-        top_level,
-        global_vars,
-        thread_local_vars,
-        symbol_types: gen.symbol_types,
-        symbol_alignments: gen.symbol_alignments,
-        array_sizes: gen.array_sizes,
-        struct_defs: gen.struct_defs,
-        var_struct_tags,
+    Ok(TackyOutput {
+        program: TackyProgram {
+            top_level,
+            global_vars,
+            thread_local_vars,
+            symbol_types: gen.symbol_types,
+            symbol_alignments: gen.symbol_alignments,
+            array_sizes: gen.array_sizes,
+            struct_defs: gen.struct_defs,
+            var_struct_tags,
+        },
+        warnings: gen.warnings,
     })
 }
 

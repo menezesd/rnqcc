@@ -27,6 +27,7 @@ pub enum WarningKind {
     UnreachableStatement { after: String },
     MissingReturn { function: String },
     NegativeShiftCount,
+    CompareDistinctPointerTypes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +51,9 @@ impl Warning {
                 )
             }
             WarningKind::NegativeShiftCount => "shift count is negative".to_string(),
+            WarningKind::CompareDistinctPointerTypes => {
+                "comparison of distinct pointer types".to_string()
+            }
         };
         Self {
             phase: Phase::Resolve,

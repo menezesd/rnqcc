@@ -5554,6 +5554,93 @@ fn warning_controls_can_disable_or_promote_warnings() {
 }
 
 #[test]
+fn warns_on_comparison_of_distinct_pointer_types() {
+    let src = temp_file("distinct-pointer-comparison-warning", "i");
+    let out = temp_file("distinct-pointer-comparison-warning", "s");
+    std::fs::write(
+        &src,
+        "int f(int *ip, long *lp, void *vp) {\n\
+         int warnings = 0;\n\
+         if (ip > vp) warnings++;\n\
+         if (vp == ip) warnings++;\n\
+         if (ip != lp) warnings++;\n\
+         return warnings;\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-S")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let warning_stderr = stderr(output);
+    assert_eq!(
+        warning_stderr
+            .matches("comparison of distinct pointer types")
+            .count(),
+        2,
+        "{warning_stderr}"
+    );
+
+    let promoted = Command::new(rnqcc())
+        .arg("--Werror")
+        .arg("-S")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+    assert!(!promoted.status.success());
+    let promoted_stderr = stderr(promoted);
+    assert!(
+        promoted_stderr.contains("comparison of distinct pointer types"),
+        "{promoted_stderr}"
+    );
+    assert!(
+        promoted_stderr.contains("warnings treated as errors"),
+        "{promoted_stderr}"
+    );
+
+    let disabled = Command::new(rnqcc())
+        .arg("-Wno-compare-distinct-pointer-types")
+        .arg("-S")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+    assert!(disabled.status.success(), "{}", stderr(disabled));
+    let disabled_stderr = stderr(disabled);
+    assert!(
+        !disabled_stderr.contains("comparison of distinct pointer types"),
+        "{disabled_stderr}"
+    );
+
+    let enabled = Command::new(rnqcc())
+        .arg("-Wcompare-distinct-pointer-types")
+        .arg("-S")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+    assert!(enabled.status.success(), "{}", stderr(enabled));
+    let enabled_stderr = stderr(enabled);
+    assert!(
+        enabled_stderr.contains("comparison of distinct pointer types"),
+        "{enabled_stderr}"
+    );
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn warns_on_missing_return_in_non_void_function() {
     let src = temp_file("missing-return-warning", "i");
     std::fs::write(

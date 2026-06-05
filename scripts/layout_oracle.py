@@ -93,6 +93,51 @@ CASES: list[tuple[str, str]] = [
         }
         """,
     ),
+    (
+        "bitfields-with-tail",
+        """
+        struct S { unsigned a:3; unsigned b:5; unsigned c:9; char tail; };
+        int main(void) {
+            return (sizeof(struct S) + _Alignof(struct S) +
+                    __builtin_offsetof(struct S, tail)) & 255;
+        }
+        """,
+    ),
+    (
+        "nested-union-array",
+        """
+        union U { char c; double d; };
+        struct S { char tag; union U slots[2]; int tail; };
+        int main(void) {
+            return (sizeof(struct S) + _Alignof(struct S) +
+                    __builtin_offsetof(struct S, slots) +
+                    __builtin_offsetof(struct S, tail)) & 255;
+        }
+        """,
+    ),
+    (
+        "long-double-field",
+        """
+        struct S { char c; long double ld; char tail; };
+        int main(void) {
+            return (sizeof(struct S) + _Alignof(struct S) +
+                    __builtin_offsetof(struct S, ld) +
+                    __builtin_offsetof(struct S, tail)) & 255;
+        }
+        """,
+    ),
+    (
+        "transparent-union-layout",
+        """
+        union __attribute__((transparent_union)) U { int i; long l; };
+        struct S { char c; union U u; char tail; };
+        int main(void) {
+            return (sizeof(struct S) + _Alignof(struct S) +
+                    __builtin_offsetof(struct S, u) +
+                    __builtin_offsetof(struct S, tail)) & 255;
+        }
+        """,
+    ),
 ]
 
 

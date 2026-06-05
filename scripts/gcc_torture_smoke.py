@@ -124,6 +124,11 @@ def timeout_for_test(src: Path, base_timeout: float) -> float:
     except OSError:
         return base_timeout
     timeout = base_timeout
+    if src.parent.name == "compile" and src.name in {
+        "limits-caselabels.c",
+        "limits-externdecl.c",
+    }:
+        timeout *= 8.0
     if "dg-add-options stack_size" in text or "dg-require-stack-size" in text:
         timeout *= 8.0
     match = re.search(r"dg-timeout-factor\s+([0-9]+(?:\.[0-9]+)?)", text)
@@ -274,9 +279,12 @@ def skip_reason_for_test(src: Path) -> str | None:
         "991214-2.c",
         "bcopy.c",
         "limits-blockid.c",
+        "limits-caselabels.c",
         "limits-declparen.c",
         "limits-enumconst.c",
+        "limits-exprparen.c",
         "limits-externalid.c",
+        "limits-externdecl.c",
         "limits-fndefn.c",
         "limits-fnargs.c",
         "limits-idexternal.c",

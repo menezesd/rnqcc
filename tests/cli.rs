@@ -6182,7 +6182,8 @@ fn emits_aarch64_assembly_for_integer_if_else() {
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains("cmp w9, w10"));
     assert!(asm.contains("cset w9, gt"));
-    assert!(asm.contains("b.eq .Lif_else"));
+    assert!(asm.contains("b.ne 1f"));
+    assert!(asm.contains("b .Lif_else"));
     assert!(asm.contains(".Lif_else"));
 
     let _ = std::fs::remove_file(out);

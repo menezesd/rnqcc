@@ -4257,7 +4257,11 @@ impl Parser {
             if self.peek().is_none() {
                 return Err(self.format_error("expected CloseBrace but found end of input"));
             }
-            let item = self.parse_block_item()?;
+            let item = if self.is_block_label_start() {
+                BlockItem::Statement(self.parse_block_label_statement()?)
+            } else {
+                self.parse_block_item()?
+            };
             items.append(&mut self.pending_pre_block_items);
             // Emit any pending struct/union definitions from type specifier parsing
             for sd in self.pending_struct_decls.drain(..) {
@@ -4268,6 +4272,40 @@ impl Parser {
             items.append(&mut self.pending_block_items);
         }
         Ok(items)
+    }
+
+    fn is_block_label_start(&self) -> bool {
+        matches!(self.peek(), Some(Token::KWCase | Token::KWDefault))
+    }
+
+    fn parse_block_label_statement(&mut self) -> ParseResult<Statement> {
+        match self.peek() {
+            Some(Token::KWCase) => {
+                self.advance()?;
+                let value = self.parse_expression()?;
+                let end_value = if self.eat(&Token::Ellipsis) {
+                    Some(self.parse_expression()?)
+                } else {
+                    None
+                };
+                self.expect_token(Token::Colon)?;
+                Ok(Statement::Case {
+                    value,
+                    end_value,
+                    body: Box::new(Statement::Null),
+                    label: String::new(),
+                })
+            }
+            Some(Token::KWDefault) => {
+                self.advance()?;
+                self.expect_token(Token::Colon)?;
+                Ok(Statement::Default {
+                    body: Box::new(Statement::Null),
+                    label: String::new(),
+                })
+            }
+            other => Err(self.format_error(&format!("expected block label, found {:?}", other))),
+        }
     }
 
     fn parse_block_with_values(
@@ -5917,6 +5955,9 @@ impl Parser {
                 {
                     return self.parse_statement_expression();
                 }
+                if let Some(exp) = self.parse_parenthesized_literal()? {
+                    return Ok(exp);
+                }
                 self.advance()?;
                 let exp = self.parse_expression()?;
                 self.expect_token(Token::CloseParen)?;
@@ -5924,6 +5965,53 @@ impl Parser {
             }
             other => Err(self.format_error(&format!("expected expression, found {:?}", other))),
         }
+    }
+
+    fn parse_parenthesized_literal(&mut self) -> ParseResult<Option<Exp>> {
+        let save = self.pos;
+        let mut scan = self.pos;
+        let mut parens = 0;
+        while matches!(self.tokens.get(scan), Some(Token::OpenParen)) {
+            if matches!(self.tokens.get(scan + 1), Some(Token::OpenBrace)) {
+                self.pos = save;
+                return Ok(None);
+            }
+            parens += 1;
+            scan += 1;
+        }
+        let Some(literal) = self.tokens.get(scan).cloned() else {
+            self.pos = save;
+            return Ok(None);
+        };
+        for offset in 1..=parens {
+            if !matches!(self.tokens.get(scan + offset), Some(Token::CloseParen)) {
+                self.pos = save;
+                return Ok(None);
+            }
+        }
+        self.pos = scan + parens + 1;
+        let exp = match literal {
+            Token::IntLiteral(val) if val >= i32::MIN as i64 && val <= i32::MAX as i64 => {
+                Exp::Constant(val)
+            }
+            Token::IntLiteral(val) => Exp::LongConstant(val),
+            Token::LongLiteral(val) => Exp::LongConstant(val),
+            Token::Int128Literal(val) => Exp::Int128Constant(val),
+            Token::UIntLiteral(val) if val > u32::MAX as i64 => Exp::ULongConstant(val),
+            Token::UIntLiteral(val) => Exp::UIntConstant(val),
+            Token::ULongLiteral(val) => Exp::ULongConstant(val),
+            Token::UInt128Literal(val) => Exp::UInt128Constant(val),
+            Token::DoubleLiteral(val) => Exp::DoubleConstant(val),
+            Token::LongDoubleLiteral(val) => Exp::LongDoubleConstant(val),
+            Token::ImaginaryIntLiteral(val) => Exp::ImaginaryIntConstant(val),
+            Token::ImaginaryDoubleLiteral(val) => Exp::ImaginaryDoubleConstant(val),
+            Token::CharLiteral(val) => Exp::Constant(val),
+            _ => {
+                self.pos = save;
+                return Ok(None);
+            }
+        };
+        Ok(Some(exp))
     }
 
     fn parse_arg_list(&mut self) -> ParseResult<Vec<Exp>> {

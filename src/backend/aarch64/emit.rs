@@ -237,6 +237,22 @@ fn condition_name(cc: &CondCode) -> &'static str {
     }
 }
 
+fn inverse_condition_name(cc: &CondCode) -> &'static str {
+    match cc {
+        CondCode::E => "ne",
+        CondCode::NE => "eq",
+        CondCode::L => "ge",
+        CondCode::LE => "gt",
+        CondCode::G => "le",
+        CondCode::GE => "lt",
+        CondCode::A => "ls",
+        CondCode::AE => "lo",
+        CondCode::B => "hs",
+        CondCode::BE => "hi",
+        CondCode::P | CondCode::NP => unreachable!("x86 parity condition in AArch64 emitter"),
+    }
+}
+
 fn stack_addr(offset: i32) -> String {
     if offset == 0 {
         "[sp]".to_string()
@@ -1646,7 +1662,11 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, target: &Target) -> std
             let reg = load_operand(w, target, AsmType::Quadword, target_op, Reg::R10)?;
             writeln!(w, "\tbr {}", reg)
         }
-        AsmInstr::JmpCC(cc, label) => writeln!(w, "\tb.{} .L{}", condition_name(cc), label),
+        AsmInstr::JmpCC(cc, label) => {
+            writeln!(w, "\tb.{} 1f", inverse_condition_name(cc))?;
+            writeln!(w, "\tb .L{}", label)?;
+            writeln!(w, "1:")
+        }
         AsmInstr::SetCC(cc, dst) => {
             writeln!(w, "\tcset w9, {}", condition_name(cc))?;
             store_operand(w, target, AsmType::Longword, "w9", dst)

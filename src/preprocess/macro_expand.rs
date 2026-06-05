@@ -29,7 +29,10 @@ struct NoMacroExpansionHooks;
 
 impl MacroExpansionHooks for NoMacroExpansionHooks {}
 
-type InvocationArgs = (Vec<Vec<PpToken>>, usize);
+struct InvocationArgs {
+    args: Vec<Vec<PpToken>>,
+    next_index: usize,
+}
 
 pub fn expand_macros(tokens: &[PpToken], macros: &MacroTable) -> Result<Vec<PpToken>, String> {
     expand_macros_with_hooks(tokens, macros, &mut NoMacroExpansionHooks)
@@ -76,15 +79,15 @@ fn expand_macros_inner(
                 variadic,
                 body,
             }) => {
-                let Some((args, next_index)) = parse_invocation_args(tokens, index + 1)? else {
+                let Some(invocation) = parse_invocation_args(tokens, index + 1)? else {
                     out.push(token.clone());
                     index += 1;
                     continue;
                 };
-                let args = if args.is_empty() && !*variadic && params.len() == 1 {
+                let args = if invocation.args.is_empty() && !*variadic && params.len() == 1 {
                     vec![Vec::new()]
                 } else {
-                    args
+                    invocation.args
                 };
                 if (!variadic && args.len() != params.len())
                     || (*variadic && args.len() < params.len())
@@ -98,7 +101,7 @@ fn expand_macros_inner(
                 disabled.push(name.clone());
                 out.extend(expand_macros_inner(&replacement, macros, hooks, disabled)?);
                 disabled.pop();
-                index = next_index;
+                index = invocation.next_index;
             }
             None => {
                 if let Some(replacement) = hooks.expand_unknown_ident(token, name)? {
@@ -134,7 +137,10 @@ fn parse_invocation_args(
                 if !current.is_empty() || !args.is_empty() {
                     args.push(trim_tokens(&current));
                 }
-                return Ok(Some((args, index + 1)));
+                return Ok(Some(InvocationArgs {
+                    args,
+                    next_index: index + 1,
+                }));
             }
             depth -= 1;
             current.push(tokens[index].clone());

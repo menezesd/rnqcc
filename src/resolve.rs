@@ -374,6 +374,7 @@ impl Resolver {
                     params: Vec::new(),
                     param_full_types: signature.param_full_types.clone(),
                     param_vla_bounds: Vec::new(),
+                    deprecated_params: Vec::new(),
                     variadic: signature.variadic,
                     zero_fixed_variadic: false,
                     old_style: signature.old_style,
@@ -975,9 +976,22 @@ impl Resolver {
                 let saved_goto_targets = std::mem::take(&mut self.goto_targets);
                 self.function_depth += 1;
                 let mut resolved_params = Vec::new();
+                let mut resolved_param_names = std::collections::HashMap::new();
                 for (name, ptype, pi) in &func.params {
-                    resolved_params.push((self.declare_var(name)?, *ptype, *pi));
+                    let resolved_name = self.declare_var(name)?;
+                    resolved_param_names.insert(name.clone(), resolved_name.clone());
+                    resolved_params.push((resolved_name, *ptype, *pi));
                 }
+                let deprecated_params = func
+                    .deprecated_params
+                    .into_iter()
+                    .map(|(name, message)| {
+                        (
+                            resolved_param_names.get(&name).cloned().unwrap_or(name),
+                            message,
+                        )
+                    })
+                    .collect();
                 let resolved_body = self.resolve_block(body)?;
                 if func.name != "main"
                     && func.return_type != CType::Void
@@ -1006,6 +1020,7 @@ impl Resolver {
                     storage_class: func.storage_class,
                     param_full_types: resolved_pfts,
                     param_vla_bounds: func.param_vla_bounds,
+                    deprecated_params,
                     variadic: func.variadic,
                     zero_fixed_variadic: func.zero_fixed_variadic,
                     old_style: func.old_style,

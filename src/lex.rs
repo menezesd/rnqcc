@@ -317,6 +317,62 @@ impl Lexer {
         None
     }
 
+    fn parse_deprecated_attribute(text: &str) -> Option<Option<String>> {
+        let chars: Vec<char> = text.chars().collect();
+        let mut pos = 0;
+        while pos < chars.len() {
+            if chars[pos].is_ascii_alphabetic() || chars[pos] == '_' {
+                let start = pos;
+                pos += 1;
+                while pos < chars.len() && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_')
+                {
+                    pos += 1;
+                }
+                let name: String = chars[start..pos].iter().collect();
+                if !matches!(name.as_str(), "deprecated" | "__deprecated__") {
+                    continue;
+                }
+                while pos < chars.len() && chars[pos].is_whitespace() {
+                    pos += 1;
+                }
+                if chars.get(pos) != Some(&'(') {
+                    return Some(None);
+                }
+                pos += 1;
+                while pos < chars.len() && chars[pos].is_whitespace() {
+                    pos += 1;
+                }
+                if chars.get(pos) != Some(&'"') {
+                    return Some(None);
+                }
+                pos += 1;
+                let mut message = String::new();
+                while pos < chars.len() {
+                    match chars[pos] {
+                        '"' => return Some(Some(message)),
+                        '\\' if pos + 1 < chars.len() => {
+                            pos += 1;
+                            match chars[pos] {
+                                'n' | 't' | 'r' => {
+                                    message.push('.');
+                                    message.push(chars[pos]);
+                                }
+                                other => message.push(other),
+                            }
+                        }
+                        ch if ch.is_control() => message.push('.'),
+                        ch => message.push(ch),
+                    }
+                    pos += 1;
+                }
+                return Some(Some(message));
+            } else {
+                pos += 1;
+            }
+        }
+        None
+    }
+
     fn contains_noreturn_attribute(text: &str) -> bool {
         Self::contains_named_attribute(text, &["noreturn", "__noreturn__"])
     }
@@ -989,6 +1045,7 @@ impl Lexer {
                     return Ok(Token::AttributeMode(mode));
                 }
                 let vector_size = Self::parse_vector_size_attribute(&text);
+                let deprecated = Self::parse_deprecated_attribute(&text);
                 let alignment = Self::parse_aligned_attribute(&text);
                 let noreturn = Self::contains_noreturn_attribute(&text);
                 let no_instrument_function = Self::contains_no_instrument_function_attribute(&text);
@@ -1023,6 +1080,9 @@ impl Lexer {
                 }
                 if reverse_scalar_storage_order {
                     return Ok(Token::AttributeScalarStorageOrderReverse);
+                }
+                if let Some(message) = deprecated {
+                    return Ok(Token::AttributeDeprecated(message));
                 }
                 if noreturn {
                     return Ok(Token::AttributeNoreturn);

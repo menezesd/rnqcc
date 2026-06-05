@@ -24,10 +24,18 @@ pub enum DiagnosticKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WarningKind {
-    UnreachableStatement { after: String },
-    MissingReturn { function: String },
+    UnreachableStatement {
+        after: String,
+    },
+    MissingReturn {
+        function: String,
+    },
     NegativeShiftCount,
     CompareDistinctPointerTypes,
+    DeprecatedDeclaration {
+        name: String,
+        message: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +62,10 @@ impl Warning {
             WarningKind::CompareDistinctPointerTypes => {
                 "comparison of distinct pointer types".to_string()
             }
+            WarningKind::DeprecatedDeclaration { name, message } => match message {
+                Some(message) => format!("'{}' is deprecated: {}", name, message),
+                None => format!("'{}' is deprecated", name),
+            },
         };
         Self {
             phase: Phase::Resolve,

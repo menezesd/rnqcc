@@ -23,6 +23,7 @@ pub struct WarningOptions {
     pub unreachable: bool,
     pub missing_return: bool,
     pub compare_distinct_pointer_types: bool,
+    pub deprecated_declarations: bool,
     pub error: bool,
 }
 
@@ -49,6 +50,7 @@ impl Default for WarningOptions {
             unreachable: true,
             missing_return: true,
             compare_distinct_pointer_types: true,
+            deprecated_declarations: true,
             error: false,
         }
     }
@@ -65,6 +67,9 @@ impl WarningOptions {
             crate::diagnostic::WarningKind::NegativeShiftCount => true,
             crate::diagnostic::WarningKind::CompareDistinctPointerTypes => {
                 self.compare_distinct_pointer_types
+            }
+            crate::diagnostic::WarningKind::DeprecatedDeclaration { .. } => {
+                self.deprecated_declarations
             }
         }
     }

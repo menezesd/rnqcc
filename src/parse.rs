@@ -39,6 +39,7 @@ enum Declarator {
     Function(
         Vec<ParamDecl>,
         Vec<FullType>,
+        Vec<(String, Option<String>)>,
         bool,
         bool,
         bool,
@@ -51,6 +52,7 @@ enum Declarator {
 struct FunctionDeclaratorInfo {
     params: Vec<ParamDecl>,
     param_full_types: Vec<FullType>,
+    deprecated_params: Vec<(String, Option<String>)>,
     variadic: bool,
     zero_fixed_variadic: bool,
     old_style: bool,
@@ -138,6 +140,8 @@ pub struct Parser {
     pending_noreturn: bool,
     /// True when declaration attributes disable function instrumentation.
     pending_no_instrument_function: bool,
+    /// Deprecated attribute collected while parsing the current declarator.
+    pending_deprecated_param: Option<Option<String>>,
     /// True when declaration attributes mark the current union typedef transparent.
     pending_transparent_union: bool,
     /// GNU alias attribute collected for the next object declaration.
@@ -307,6 +311,7 @@ impl Parser {
             pending_auto_type: false,
             pending_noreturn: false,
             pending_no_instrument_function: false,
+            pending_deprecated_param: None,
             pending_transparent_union: false,
             pending_alias: None,
             pending_inline: false,
@@ -432,6 +437,7 @@ impl Parser {
                 | Some(Token::AttributeAlignedNoreturn(_))
                 | Some(Token::AttributeNoreturn)
                 | Some(Token::AttributeNoInstrumentFunction)
+                | Some(Token::AttributeDeprecated(_))
                 | Some(Token::AttributePacked)
                 | Some(Token::AttributePackedAligned(_))
                 | Some(Token::AttributePackedAlignedNoreturn(_))
@@ -448,6 +454,9 @@ impl Parser {
         while self.is_declarator_qualifier() {
             if self.at(&Token::AttributeTransparentUnion) {
                 self.pending_transparent_union = true;
+            }
+            if let Some(Token::AttributeDeprecated(message)) = self.peek().cloned() {
+                self.pending_deprecated_param = Some(message);
             }
             self.advance()?;
         }
@@ -1393,6 +1402,7 @@ impl Parser {
                 }
                 Some(Token::AttributeMode(_))
                 | Some(Token::AttributeVectorSize(_))
+                | Some(Token::AttributeDeprecated(_))
                 | Some(Token::AttributeScalarStorageOrderReverse) => {
                     self.advance()?;
                 }
@@ -1459,7 +1469,9 @@ impl Parser {
                     alignment = Self::merge_alignment(alignment, value);
                     noreturn = true;
                 }
-                Some(Token::AttributeMode(_)) | Some(Token::AttributeScalarStorageOrderReverse) => {
+                Some(Token::AttributeMode(_))
+                | Some(Token::AttributeDeprecated(_))
+                | Some(Token::AttributeScalarStorageOrderReverse) => {
                     self.advance()?;
                 }
                 Some(Token::AttributeVectorSize(expression)) => {
@@ -1522,7 +1534,9 @@ impl Parser {
                     attrs.alignment = Self::merge_alignment(attrs.alignment, value);
                     attrs.packed = true;
                 }
-                Some(Token::AttributeMode(_)) | Some(Token::AttributeVectorSize(_)) => {
+                Some(Token::AttributeMode(_))
+                | Some(Token::AttributeVectorSize(_))
+                | Some(Token::AttributeDeprecated(_)) => {
                     self.advance()?;
                 }
                 Some(Token::AttributeScalarStorageOrderReverse) => {
@@ -2036,6 +2050,10 @@ impl Parser {
                     self.advance()?;
                     continue;
                 }
+                Some(Token::AttributeDeprecated(_)) => {
+                    self.advance()?;
+                    continue;
+                }
                 Some(Token::AttributeNoInstrumentFunction) => {
                     self.pending_no_instrument_function = true;
                     self.advance()?;
@@ -2389,7 +2407,8 @@ impl Parser {
                     | Token::AttributeAlignedNoreturn(_)
                     | Token::AttributePacked
                     | Token::AttributePackedAligned(_)
-                    | Token::AttributePackedAlignedNoreturn(_),
+                    | Token::AttributePackedAlignedNoreturn(_)
+                    | Token::AttributeDeprecated(_),
                 ) => {
                     self.advance()?;
                 }
@@ -2694,6 +2713,7 @@ impl Parser {
             | Token::AttributeAlignedNoreturn(_)
             | Token::AttributeNoreturn
             | Token::AttributeNoInstrumentFunction
+            | Token::AttributeDeprecated(_)
             | Token::AttributeMode(_)
             | Token::AttributeVectorSize(_)
             | Token::AttributeScalarStorageOrderReverse
@@ -2734,6 +2754,7 @@ impl Parser {
             Declarator::Function(
                 params,
                 pfts,
+                deprecated_params,
                 variadic,
                 zero_fixed_variadic,
                 old_style,
@@ -2747,6 +2768,7 @@ impl Parser {
                         Some(FunctionDeclaratorInfo {
                             params: params.clone(),
                             param_full_types: pfts.clone(),
+                            deprecated_params: deprecated_params.clone(),
                             variadic: *variadic,
                             zero_fixed_variadic: *zero_fixed_variadic,
                             old_style: *old_style,
@@ -2785,6 +2807,7 @@ impl Parser {
             Declarator::Function(
                 params,
                 pfts,
+                deprecated_params,
                 variadic,
                 zero_fixed_variadic,
                 old_style,
@@ -2799,6 +2822,7 @@ impl Parser {
                         Some(FunctionDeclaratorInfo {
                             params: params.clone(),
                             param_full_types: pfts.clone(),
+                            deprecated_params: deprecated_params.clone(),
                             variadic: *variadic,
                             zero_fixed_variadic: *zero_fixed_variadic,
                             old_style: *old_style,
@@ -2926,12 +2950,20 @@ impl Parser {
         // Trailing suffixes: (params) or [size]
         if self.at(&Token::OpenParen) {
             self.expect_token(Token::OpenParen)?;
-            let (params, param_fts, variadic, zero_fixed_variadic, old_style, bounds) =
-                self.parse_param_list()?;
+            let (
+                params,
+                param_fts,
+                deprecated_params,
+                variadic,
+                zero_fixed_variadic,
+                old_style,
+                bounds,
+            ) = self.parse_param_list()?;
             self.expect_token(Token::CloseParen)?;
             decl = Declarator::Function(
                 params,
                 param_fts,
+                deprecated_params,
                 variadic,
                 zero_fixed_variadic,
                 old_style,
@@ -2993,7 +3025,7 @@ impl Parser {
 
         if self.at(&Token::OpenParen) {
             self.expect_token(Token::OpenParen)?;
-            let (_, param_fts, variadic, _, _, _) = self.parse_param_list()?;
+            let (_, param_fts, _, variadic, _, _, _) = self.parse_param_list()?;
             self.expect_token(Token::CloseParen)?;
             decl = AbstractDecl::Function(param_fts, variadic, Box::new(decl));
         }
@@ -3490,6 +3522,7 @@ impl Parser {
                 let (
                     params,
                     param_full_types,
+                    deprecated_params,
                     variadic,
                     zero_fixed_variadic,
                     old_style,
@@ -3499,6 +3532,7 @@ impl Parser {
                 let func_info = FunctionDeclaratorInfo {
                     params,
                     param_full_types,
+                    deprecated_params,
                     variadic,
                     zero_fixed_variadic,
                     old_style,
@@ -3536,6 +3570,7 @@ impl Parser {
                     storage_class: None,
                     param_full_types: func_info.param_full_types,
                     param_vla_bounds: func_info.param_vla_bounds,
+                    deprecated_params: func_info.deprecated_params,
                     variadic: func_info.variadic,
                     zero_fixed_variadic: func_info.zero_fixed_variadic,
                     old_style: func_info.old_style,
@@ -3736,6 +3771,7 @@ impl Parser {
                                 storage_class: sc.clone(),
                                 param_full_types: func_info2.param_full_types,
                                 param_vla_bounds: func_info2.param_vla_bounds,
+                                deprecated_params: func_info2.deprecated_params,
                                 variadic: func_info2.variadic,
                                 zero_fixed_variadic: func_info2.zero_fixed_variadic,
                                 old_style: func_info2.old_style,
@@ -3783,6 +3819,7 @@ impl Parser {
                 storage_class: sc,
                 param_full_types: func_info.param_full_types,
                 param_vla_bounds: func_info.param_vla_bounds,
+                deprecated_params: func_info.deprecated_params,
                 variadic: func_info.variadic,
                 zero_fixed_variadic: func_info.zero_fixed_variadic,
                 old_style: func_info.old_style,
@@ -3795,12 +3832,20 @@ impl Parser {
         // Check for function (in case declarator didn't catch params)
         if self.at(&Token::OpenParen) {
             self.expect_token(Token::OpenParen)?;
-            let (params, param_fts, variadic, zero_fixed_variadic, old_style, param_vla_bounds) =
-                self.parse_param_list()?;
+            let (
+                params,
+                param_fts,
+                deprecated_params,
+                variadic,
+                zero_fixed_variadic,
+                old_style,
+                param_vla_bounds,
+            ) = self.parse_param_list()?;
             self.expect_token(Token::CloseParen)?;
             let func_info = FunctionDeclaratorInfo {
                 params,
                 param_full_types: param_fts,
+                deprecated_params,
                 variadic,
                 zero_fixed_variadic,
                 old_style,
@@ -3862,6 +3907,7 @@ impl Parser {
                                 storage_class: sc.clone(),
                                 param_full_types: func_info2.param_full_types,
                                 param_vla_bounds: func_info2.param_vla_bounds,
+                                deprecated_params: func_info2.deprecated_params,
                                 variadic: func_info2.variadic,
                                 zero_fixed_variadic: func_info2.zero_fixed_variadic,
                                 old_style: func_info2.old_style,
@@ -3909,6 +3955,7 @@ impl Parser {
                 storage_class: sc,
                 param_full_types: func_info.param_full_types,
                 param_vla_bounds: func_info.param_vla_bounds,
+                deprecated_params: func_info.deprecated_params,
                 variadic: func_info.variadic,
                 zero_fixed_variadic: func_info.zero_fixed_variadic,
                 old_style: func_info.old_style,
@@ -3963,6 +4010,7 @@ impl Parser {
                         storage_class: sc.clone(),
                         param_full_types: func_info2.param_full_types,
                         param_vla_bounds: func_info2.param_vla_bounds,
+                        deprecated_params: func_info2.deprecated_params,
                         variadic: func_info2.variadic,
                         zero_fixed_variadic: func_info2.zero_fixed_variadic,
                         old_style: func_info2.old_style,
@@ -4074,20 +4122,52 @@ impl Parser {
     #[allow(clippy::type_complexity)]
     fn parse_param_list(
         &mut self,
-    ) -> ParseResult<(Vec<ParamDecl>, Vec<FullType>, bool, bool, bool, Vec<Exp>)> {
+    ) -> ParseResult<(
+        Vec<ParamDecl>,
+        Vec<FullType>,
+        Vec<(String, Option<String>)>,
+        bool,
+        bool,
+        bool,
+        Vec<Exp>,
+    )> {
         // "void" or empty or "int x, long y, ..."
         if self.at(&Token::KWVoid)
             && self.pos + 1 < self.tokens.len()
             && self.tokens[self.pos + 1] == Token::CloseParen
         {
             self.advance()?;
-            return Ok((Vec::new(), Vec::new(), false, false, false, Vec::new()));
+            return Ok((
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                false,
+                false,
+                false,
+                Vec::new(),
+            ));
         }
         if self.at(&Token::CloseParen) {
-            return Ok((Vec::new(), Vec::new(), true, false, false, Vec::new()));
+            return Ok((
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                false,
+                false,
+                Vec::new(),
+            ));
         }
         if self.eat(&Token::Ellipsis) {
-            return Ok((Vec::new(), Vec::new(), true, true, false, Vec::new()));
+            return Ok((
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                true,
+                false,
+                Vec::new(),
+            ));
         }
         if let Some(Token::Identifier(name)) = self.peek().cloned() {
             if !self.is_type_keyword(&Token::Identifier(name.clone())) {
@@ -4101,67 +4181,80 @@ impl Parser {
                         break;
                     }
                 }
-                return Ok((params, param_fts, false, false, true, Vec::new()));
+                return Ok((
+                    params,
+                    param_fts,
+                    Vec::new(),
+                    false,
+                    false,
+                    true,
+                    Vec::new(),
+                ));
             }
         }
         let mut params = Vec::new();
         let mut param_fts = Vec::new();
+        let mut deprecated_params = Vec::new();
         let mut param_vla_bounds = Vec::new();
-        let parse_one_param = |s: &mut Self,
-                               fts: &mut Vec<FullType>,
-                               vla_bounds: &mut Vec<Exp>|
-         -> ParseResult<ParamDecl> {
-            s.param_parse_depth += 1;
-            let base = s.parse_type()?;
-            // Use abstract declarator parsing (name optional) for params
-            let tree = s.parse_declarator_tree_inner(true)?;
-            s.consume_declarator_qualifiers()?;
-            s.param_parse_depth -= 1;
-            let td_ft = s.last_typedef_full_type.take();
-            let (name, full_type, decl_params) =
-                Self::process_declarator(&tree, base, td_ft.as_ref());
-            let full_type = decl_params
-                .as_ref()
-                .map(|info| Self::function_full_type(full_type.clone(), info))
-                .unwrap_or(full_type);
-            if let Some(bound) = s.pending_vla_bound.take() {
-                vla_bounds.push(bound);
-            }
-            // Generate a dummy name for unnamed params
-            let name = if name.is_empty() {
-                format!("__unnamed_{}", s.pos)
-            } else {
-                name
-            };
-            // Replace Scalar(Struct) with FullType::Struct(tag)
-            let full_type = if base == CType::Struct {
-                if let Some(ref tag) = s.last_struct_tag {
-                    Self::replace_scalar_struct(&full_type, tag)
+        let parse_one_param =
+            |s: &mut Self,
+             fts: &mut Vec<FullType>,
+             vla_bounds: &mut Vec<Exp>|
+             -> ParseResult<(ParamDecl, Option<(String, Option<String>)>)> {
+                s.pending_deprecated_param = None;
+                s.param_parse_depth += 1;
+                let base = s.parse_type()?;
+                // Use abstract declarator parsing (name optional) for params
+                let tree = s.parse_declarator_tree_inner(true)?;
+                s.consume_declarator_qualifiers()?;
+                s.param_parse_depth -= 1;
+                let deprecated_message = s.pending_deprecated_param.take();
+                let td_ft = s.last_typedef_full_type.take();
+                let (name, full_type, decl_params) =
+                    Self::process_declarator(&tree, base, td_ft.as_ref());
+                let full_type = decl_params
+                    .as_ref()
+                    .map(|info| Self::function_full_type(full_type.clone(), info))
+                    .unwrap_or(full_type);
+                if let Some(bound) = s.pending_vla_bound.take() {
+                    vla_bounds.push(bound);
+                }
+                // Generate a dummy name for unnamed params
+                let name = if name.is_empty() {
+                    format!("__unnamed_{}", s.pos)
+                } else {
+                    name
+                };
+                let deprecated = deprecated_message.map(|message| (name.clone(), message));
+                // Replace Scalar(Struct) with FullType::Struct(tag)
+                let full_type = if base == CType::Struct {
+                    if let Some(ref tag) = s.last_struct_tag {
+                        Self::replace_scalar_struct(&full_type, tag)
+                    } else {
+                        full_type
+                    }
                 } else {
                     full_type
-                }
-            } else {
-                full_type
+                };
+                // Array parameters decay to pointers (first dimension dropped)
+                let ft = match full_type {
+                    FullType::Array { elem, .. } => FullType::Pointer(elem),
+                    FullType::Function { .. } => FullType::Pointer(Box::new(full_type)),
+                    other => other,
+                };
+                fts.push(ft.clone());
+                let t = ft.to_ctype();
+                let pi = match &ft {
+                    FullType::Pointer(inner) => Some(ptr_info_from_full(inner)),
+                    _ => None,
+                };
+                Ok(((name, t, pi), deprecated))
             };
-            // Array parameters decay to pointers (first dimension dropped)
-            let ft = match full_type {
-                FullType::Array { elem, .. } => FullType::Pointer(elem),
-                FullType::Function { .. } => FullType::Pointer(Box::new(full_type)),
-                other => other,
-            };
-            fts.push(ft.clone());
-            let t = ft.to_ctype();
-            let pi = match &ft {
-                FullType::Pointer(inner) => Some(ptr_info_from_full(inner)),
-                _ => None,
-            };
-            Ok((name, t, pi))
-        };
-        params.push(parse_one_param(
-            self,
-            &mut param_fts,
-            &mut param_vla_bounds,
-        )?);
+        let (param, deprecated) = parse_one_param(self, &mut param_fts, &mut param_vla_bounds)?;
+        if let Some(deprecated) = deprecated {
+            deprecated_params.push(deprecated);
+        }
+        params.push(param);
         let mut variadic = false;
         while self.eat(&Token::Comma) {
             // Check for ... (variadic)
@@ -4169,13 +4262,21 @@ impl Parser {
                 variadic = true;
                 break;
             }
-            params.push(parse_one_param(
-                self,
-                &mut param_fts,
-                &mut param_vla_bounds,
-            )?);
+            let (param, deprecated) = parse_one_param(self, &mut param_fts, &mut param_vla_bounds)?;
+            if let Some(deprecated) = deprecated {
+                deprecated_params.push(deprecated);
+            }
+            params.push(param);
         }
-        Ok((params, param_fts, variadic, false, false, param_vla_bounds))
+        Ok((
+            params,
+            param_fts,
+            deprecated_params,
+            variadic,
+            false,
+            false,
+            param_vla_bounds,
+        ))
     }
 
     fn parse_old_style_param_declarations(
@@ -4669,6 +4770,7 @@ impl Parser {
                     let (
                         params,
                         param_full_types,
+                        deprecated_params,
                         variadic,
                         zero_fixed_variadic,
                         old_style,
@@ -4678,6 +4780,7 @@ impl Parser {
                     FunctionDeclaratorInfo {
                         params,
                         param_full_types,
+                        deprecated_params,
                         variadic,
                         zero_fixed_variadic,
                         old_style,
@@ -4744,6 +4847,7 @@ impl Parser {
                                         storage_class: sc.clone(),
                                         param_full_types: func_info2.param_full_types,
                                         param_vla_bounds: func_info2.param_vla_bounds,
+                                        deprecated_params: func_info2.deprecated_params,
                                         variadic: func_info2.variadic,
                                         zero_fixed_variadic: func_info2.zero_fixed_variadic,
                                         old_style: func_info2.old_style,
@@ -4787,6 +4891,7 @@ impl Parser {
                         storage_class: sc,
                         param_full_types: func_info.param_full_types,
                         param_vla_bounds: func_info.param_vla_bounds,
+                        deprecated_params: func_info.deprecated_params,
                         variadic: func_info.variadic,
                         zero_fixed_variadic: func_info.zero_fixed_variadic,
                         old_style: func_info.old_style,
@@ -4836,6 +4941,7 @@ impl Parser {
                                     storage_class: sc.clone(),
                                     param_full_types: func_info2.param_full_types,
                                     param_vla_bounds: func_info2.param_vla_bounds,
+                                    deprecated_params: func_info2.deprecated_params,
                                     variadic: func_info2.variadic,
                                     zero_fixed_variadic: func_info2.zero_fixed_variadic,
                                     old_style: func_info2.old_style,

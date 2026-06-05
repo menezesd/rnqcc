@@ -1349,6 +1349,58 @@ fn gcc_torture_smoke_requires_verified_warning_output() -> Result<(), String> {
 
 #[cfg(unix)]
 #[test]
+fn gcc_torture_smoke_requires_verified_failure_output() -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let suite = TempPath::new("gcc-smoke-verified-failure-suite", "dir");
+    let compile_dir = suite.path().join("compile");
+    std::fs::create_dir_all(&compile_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(
+        compile_dir.join("pr48767.c"),
+        "int main(void) { return 0; } /* { dg-error \"void value\" } */\n",
+    )
+    .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+    let fake_rnqcc = TempPath::new("gcc-smoke-verified-failure-rnqcc", "sh");
+    std::fs::write(fake_rnqcc.path(), "#!/bin/sh\nexit 0\n")
+        .map_err(|err| format!("failed to write fake rnqcc: {err}"))?;
+    let mut perms = std::fs::metadata(fake_rnqcc.path())
+        .map_err(|err| format!("failed to stat fake rnqcc: {err}"))?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(fake_rnqcc.path(), perms)
+        .map_err(|err| format!("failed to chmod fake rnqcc: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/gcc_torture_smoke.py")
+        .arg("--rnqcc")
+        .arg(fake_rnqcc.path())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--mode")
+        .arg("compile")
+        .arg("--limit")
+        .arg("1")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+    };
+
+    let success = output.status.success();
+    let out = stdout(output);
+    assert!(!success, "{out}");
+    assert!(
+        out.contains("missing expected diagnostic: __builtin_va_arg cannot read a void value"),
+        "{out}"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn gcc_torture_smoke_materializes_tmpnam_fileio_tests() -> Result<(), String> {
     let suite = TempPath::new("gcc-smoke-tmpnam-fileio-suite", "dir");
     let execute_dir = suite.path().join("execute");
@@ -5634,6 +5686,72 @@ fn warns_on_comparison_of_distinct_pointer_types() {
     assert!(
         enabled_stderr.contains("comparison of distinct pointer types"),
         "{enabled_stderr}"
+    );
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn warns_on_deprecated_parameter_declarations() {
+    let src = temp_file("deprecated-parameter-warning", "i");
+    let out = temp_file("deprecated-parameter-warning", "s");
+    std::fs::write(
+        &src,
+        "int f(int i __attribute__((deprecated(\"foo\\n\\t\\rbar\")))) {\n\
+         return 0 ? i : 0;\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-Wdeprecated-declarations")
+        .arg("-S")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+    assert!(output.status.success(), "{}", stderr(output));
+    let warning_stderr = stderr(output);
+    assert!(
+        warning_stderr.contains("'i' is deprecated: foo.n.t.rbar"),
+        "{warning_stderr}"
+    );
+
+    let disabled = Command::new(rnqcc())
+        .arg("-Wno-deprecated-declarations")
+        .arg("-S")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+    assert!(disabled.status.success(), "{}", stderr(disabled));
+    let disabled_stderr = stderr(disabled);
+    assert!(
+        !disabled_stderr.contains("is deprecated"),
+        "{disabled_stderr}"
+    );
+
+    let promoted = Command::new(rnqcc())
+        .arg("--Werror")
+        .arg("-Wdeprecated-declarations")
+        .arg("-S")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+    assert!(!promoted.status.success());
+    let promoted_stderr = stderr(promoted);
+    assert!(
+        promoted_stderr.contains("'i' is deprecated: foo.n.t.rbar"),
+        "{promoted_stderr}"
+    );
+    assert!(
+        promoted_stderr.contains("warnings treated as errors"),
+        "{promoted_stderr}"
     );
 
     let _ = std::fs::remove_file(src);

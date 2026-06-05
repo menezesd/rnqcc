@@ -151,6 +151,7 @@ def rnqcc_options_for_test(src: Path) -> list[str]:
                 "-finstrument-functions",
                 "-fpermissive",
                 "-Wcompare-distinct-pointer-types",
+                "-Wdeprecated-declarations",
             }:
                 options.append(option)
     return options
@@ -173,7 +174,21 @@ def required_warning_for_test(src: Path) -> str | None:
         "pr106537-2.c",
     }:
         return "comparison of distinct pointer types"
+    if src.parent.name == "compile" and src.name == "pr84195.c":
+        return "'i' is deprecated: foo.n.t.rbar"
     return None
+
+
+def required_failure_for_test(src: Path) -> str | None:
+    if src.parent.name != "compile":
+        return None
+    required = {
+        "20030305-1.c": "initialization of flexible array member",
+        "pr28865.c": "initialization of flexible array member",
+        "pr48767.c": "__builtin_va_arg cannot read a void value",
+        "pr83547.c": "void value not ignored as it ought to be",
+    }
+    return required.get(src.name)
 
 
 def uses_tmpnam_fileio(src: Path) -> bool:
@@ -654,7 +669,13 @@ def main() -> int:
                     out = tmpdir / f"{stem}.o"
                     cmd = [*common, "-c", str(compile_src), "-o", str(out)]
                 result = run(cmd, timeout)
+                required_failure = required_failure_for_test(src)
                 if result.returncode == 0:
+                    if required_failure is not None:
+                        failure = f"missing expected diagnostic: {required_failure}"
+                        failures.append((src, failure))
+                        save_failure_artifact(args.artifact_dir, suite, idx, src, cmd, result)
+                        continue
                     required_warning = required_warning_for_test(src)
                     if required_warning is not None and required_warning not in (
                         (result.stderr or "") + (result.stdout or "")
@@ -667,6 +688,17 @@ def main() -> int:
                         if rel in expected_failures:
                             stale_expected.append((rel, expected_failures[rel]))
                 else:
+                    if required_failure is not None:
+                        output = (result.stderr or "") + (result.stdout or "")
+                        if required_failure in output:
+                            passed += 1
+                            if rel in expected_failures:
+                                stale_expected.append((rel, expected_failures[rel]))
+                        else:
+                            failure = short_failure(result)
+                            failures.append((src, failure))
+                            save_failure_artifact(args.artifact_dir, suite, idx, src, cmd, result)
+                        continue
                     failure = short_failure(result)
                     expected = expected_failures.get(rel)
                     if expected is not None and failure_matches_expected(result, expected):

@@ -228,6 +228,8 @@ struct TackyGen {
     nested_capture_slots: HashMap<String, Vec<(String, String)>>,
     current_nonlocal_label_envs: HashMap<String, String>,
     current_parent_label_env_slots: HashMap<String, String>,
+    deprecated_vars: HashMap<String, Option<String>>,
+    warned_deprecated_vars: HashSet<String>,
     warnings: Vec<Warning>,
 }
 
@@ -281,6 +283,8 @@ impl TackyGen {
             nested_capture_slots: HashMap::new(),
             current_nonlocal_label_envs: HashMap::new(),
             current_parent_label_env_slots: HashMap::new(),
+            deprecated_vars: HashMap::new(),
+            warned_deprecated_vars: HashSet::new(),
             warnings: Vec::new(),
         }
     }
@@ -1390,6 +1394,25 @@ impl TackyGen {
             phase: Phase::Tacky,
             kind: WarningKind::CompareDistinctPointerTypes,
             message: "comparison of distinct pointer types".to_string(),
+            span: None,
+        });
+    }
+
+    fn warn_deprecated_declaration(&mut self, name: &str, message: Option<String>) {
+        let display_name = name
+            .rsplit_once('.')
+            .filter(|(_, suffix)| suffix.chars().all(|ch| ch.is_ascii_digit()))
+            .map(|(base, _)| base)
+            .unwrap_or(name);
+        let kind = WarningKind::DeprecatedDeclaration {
+            name: display_name.to_string(),
+            message,
+        };
+        let message = Warning::resolve(kind.clone()).message;
+        self.warnings.push(Warning {
+            phase: Phase::Tacky,
+            kind,
+            message,
             span: None,
         });
     }
@@ -3647,6 +3670,11 @@ impl TackyGen {
     }
 
     fn emit_var(&mut self, name: String) -> TackyResult<(TackyVal, CType)> {
+        if let Some(message) = self.deprecated_vars.get(&name).cloned() {
+            if self.warned_deprecated_vars.insert(name.clone()) {
+                self.warn_deprecated_declaration(&name, message);
+            }
+        }
         if self.function_symbols.contains(&name) {
             self.emit_nested_capture_updates(&name);
             let (return_type, _, _, variadic) =
@@ -13294,6 +13322,10 @@ impl TackyGen {
         let saved_escaped_functions = std::mem::take(&mut self.current_escaped_functions);
         Self::collect_escaped_function_refs_block(&body, &mut self.current_escaped_functions);
         self.local_label_stack.push(local_labels);
+        let saved_deprecated_vars = std::mem::take(&mut self.deprecated_vars);
+        let saved_warned_deprecated_vars = std::mem::take(&mut self.warned_deprecated_vars);
+        self.deprecated_vars
+            .extend(func.deprecated_params.iter().cloned());
 
         // Check if return type requires hidden pointer
         let ret_needs_hidden_ptr = if let Some(ref ret_ft) = func.return_full_type {
@@ -13471,6 +13503,8 @@ impl TackyGen {
         self.current_label_bodies = saved_label_bodies;
         self.current_escaped_functions = saved_escaped_functions;
         self.current_nonlocal_label_envs = saved_nonlocal_label_envs;
+        self.deprecated_vars = saved_deprecated_vars;
+        self.warned_deprecated_vars = saved_warned_deprecated_vars;
         emit_result?;
         self.emit(TackyInstr::Return(TackyVal::Constant(0)));
         self.apply_function_instrumentation(func.no_instrument_function);

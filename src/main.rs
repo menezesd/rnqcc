@@ -362,10 +362,16 @@ fn normalize_driver_arg_text(text: &str) -> Vec<OsString> {
         "-Wcompare-distinct-pointer-types" => {
             normalized.push(OsString::from("--Wcompare-distinct-pointer-types"));
         }
+        "-Wdeprecated-declarations" => {
+            normalized.push(OsString::from("--Wdeprecated-declarations"));
+        }
         "-Wno-unreachable" => normalized.push(OsString::from("--Wno-unreachable")),
         "-Wno-missing-return" => normalized.push(OsString::from("--Wno-missing-return")),
         "-Wno-compare-distinct-pointer-types" => {
             normalized.push(OsString::from("--Wno-compare-distinct-pointer-types"));
+        }
+        "-Wno-deprecated-declarations" => {
+            normalized.push(OsString::from("--Wno-deprecated-declarations"));
         }
         "-Wextra" | "-Wpedantic" | "-pedantic" | "-pipe" => {}
         "-O" | "-O1" | "-O2" | "-O3" | "-Os" | "-Oz" | "-Og" | "-Ofast" => {
@@ -4806,6 +4812,7 @@ fn internal_has_warning(name: &str) -> bool {
             | "-Werror"
             | "-Wunknown-pragmas"
             | "-Wcompare-distinct-pointer-types"
+            | "-Wdeprecated-declarations"
     )
 }
 
@@ -6760,6 +6767,18 @@ fn real_main() -> Result<(), String> {
                 .help("Disable distinct pointer comparison warnings"),
         )
         .arg(
+            Arg::with_name("wdeprecated_declarations")
+                .long("Wdeprecated-declarations")
+                .takes_value(false)
+                .help("Enable deprecated declaration warnings"),
+        )
+        .arg(
+            Arg::with_name("wno_deprecated_declarations")
+                .long("Wno-deprecated-declarations")
+                .takes_value(false)
+                .help("Disable deprecated declaration warnings"),
+        )
+        .arg(
             Arg::with_name("keep_temps")
                 .long("keep-temps")
                 .takes_value(false)
@@ -6976,6 +6995,7 @@ fn real_main() -> Result<(), String> {
         unreachable: !matches.is_present("wno_unreachable"),
         missing_return: !matches.is_present("wno_missing_return"),
         compare_distinct_pointer_types: !matches.is_present("wno_compare_distinct_pointer_types"),
+        deprecated_declarations: !matches.is_present("wno_deprecated_declarations"),
         error: matches.is_present("werror"),
     };
     let permissive = matches.is_present("permissive");

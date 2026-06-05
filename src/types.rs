@@ -1213,6 +1213,7 @@ pub enum Token {
     AttributeTransparentUnion,
     AttributeNoreturn,
     AttributeNoInstrumentFunction,
+    AttributeDeprecated(Option<String>),
     AttributeAlias(String),
     AttributeMode(String),
     AttributeVectorSize(String),
@@ -1534,6 +1535,8 @@ pub struct FunctionDeclaration {
     pub param_full_types: Vec<FullType>,
     /// Runtime VLA bounds captured while parsing parameter declarators.
     pub param_vla_bounds: Vec<Exp>,
+    /// Parameter names annotated with deprecated and their optional message.
+    pub deprecated_params: Vec<(String, Option<String>)>,
     /// True if the prototype ends in `...`.
     pub variadic: bool,
     /// True for GNU/C23-style declarations with no fixed parameters: `f(...)`.

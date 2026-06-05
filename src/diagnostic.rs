@@ -26,6 +26,7 @@ pub enum DiagnosticKind {
 pub enum WarningKind {
     UnreachableStatement { after: String },
     MissingReturn { function: String },
+    NegativeShiftCount,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +49,7 @@ impl Warning {
                     function
                 )
             }
+            WarningKind::NegativeShiftCount => "shift count is negative".to_string(),
         };
         Self {
             phase: Phase::Resolve,

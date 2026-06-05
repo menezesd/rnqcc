@@ -180,9 +180,14 @@ def skip_reason_for_test(src: Path) -> str | None:
         return "unsupported GCC GIMPLE source extension"
     portable_expected_diagnostic_smoke = {
         "20030305-1.c",
+        "pr103314-1.c",
+        "pr106537-1.c",
+        "pr106537-2.c",
+        "pr28865.c",
+        "pr46534.c",
         "pr48767.c",
         "pr83547.c",
-        "pr28865.c",
+        "pr84195.c",
     }
     if (
         "dg-error" in text or "dg-warning" in text

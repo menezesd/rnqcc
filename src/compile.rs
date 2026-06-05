@@ -60,6 +60,7 @@ impl WarningOptions {
         match warning.kind {
             crate::diagnostic::WarningKind::UnreachableStatement { .. } => self.unreachable,
             crate::diagnostic::WarningKind::MissingReturn { .. } => self.missing_return,
+            crate::diagnostic::WarningKind::NegativeShiftCount => true,
         }
     }
 }

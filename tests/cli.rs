@@ -10278,6 +10278,33 @@ fn rejects_void_statement_expression_condition() {
 }
 
 #[test]
+fn warns_on_negative_shift_count() {
+    let src = temp_file("negative-shift-count", "c");
+    std::fs::write(
+        &src,
+        "int f(int t) {\n\
+             return t ? 1 >> (-1) : 0;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--stage")
+        .arg("validate")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    assert!(
+        stderr(output).contains("shift count is negative"),
+        "missing negative shift diagnostic"
+    );
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn x86_va_start_accounts_for_aligned_fixed_long_double_stack_parameters() {
     let src = temp_file("x86-va-start-fixed-long-double-stack", "c");
     let out = temp_file("x86-va-start-fixed-long-double-stack", "s");

@@ -201,6 +201,11 @@ impl Resolver {
             }));
     }
 
+    fn warn_negative_shift_count(&mut self) {
+        self.warnings
+            .push(Warning::resolve(WarningKind::NegativeShiftCount));
+    }
+
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.tag_scopes.push(HashMap::new());
@@ -519,11 +524,16 @@ impl Resolver {
                 Exp::Cast(t, resolved_ft, Box::new(self.resolve_exp(*inner)?))
             }
             Exp::Unary(op, inner) => Exp::Unary(op, Box::new(self.resolve_exp(*inner)?)),
-            Exp::Binary(op, left, right) => Exp::Binary(
-                op,
-                Box::new(self.resolve_exp(*left)?),
-                Box::new(self.resolve_exp(*right)?),
-            ),
+            Exp::Binary(op, left, right) => {
+                let left = self.resolve_exp(*left)?;
+                let right = self.resolve_exp(*right)?;
+                if matches!(op, BinaryOp::ShiftLeft | BinaryOp::ShiftRight)
+                    && eval_integer_constant_exp(&right).is_some_and(|count| count < 0)
+                {
+                    self.warn_negative_shift_count();
+                }
+                Exp::Binary(op, Box::new(left), Box::new(right))
+            }
             Exp::Assign(left, right) => Exp::Assign(
                 Box::new(self.resolve_exp(*left)?),
                 Box::new(self.resolve_exp(*right)?),

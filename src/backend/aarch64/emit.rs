@@ -371,9 +371,14 @@ fn data_label(target: &Target, name: &str) -> String {
     target.show_label(name)
 }
 
+struct DataOffset<'a> {
+    base: &'a str,
+    offset: i32,
+}
+
 fn offset_data_name(name: &str, add: i32) -> String {
-    if let Some((base, offset)) = split_data_offset(name) {
-        format!("{}+{}", base, offset + add)
+    if let Some(data_offset) = split_data_offset(name) {
+        format!("{}+{}", data_offset.base, data_offset.offset + add)
     } else {
         format!("{}+{}", name, add)
     }
@@ -392,10 +397,10 @@ fn offset_operand(op: &AsmOperand, add: i32) -> std::io::Result<AsmOperand> {
     }
 }
 
-fn split_data_offset(name: &str) -> Option<(&str, i32)> {
+fn split_data_offset(name: &str) -> Option<DataOffset<'_>> {
     let (base, offset) = name.rsplit_once('+')?;
     let offset = offset.parse().ok()?;
-    Some((base, offset))
+    Some(DataOffset { base, offset })
 }
 
 fn emit_add_immediate(
@@ -423,16 +428,16 @@ fn emit_load_macho_data_offset_address(
     name: &str,
     addr_reg: &'static str,
 ) -> std::io::Result<()> {
-    if let Some((base, offset)) = split_data_offset(name) {
-        let base_label = data_label(target, base);
+    if let Some(data_offset) = split_data_offset(name) {
+        let base_label = data_label(target, data_offset.base);
         writeln!(w, "\tadrp {}, {}@PAGE", addr_reg, base_label)?;
         writeln!(
             w,
             "\tadd {}, {}, {}@PAGEOFF",
             addr_reg, addr_reg, base_label
         )?;
-        if offset != 0 {
-            emit_add_immediate(w, addr_reg, offset)?;
+        if data_offset.offset != 0 {
+            emit_add_immediate(w, addr_reg, data_offset.offset)?;
         }
         Ok(())
     } else {

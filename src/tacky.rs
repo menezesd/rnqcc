@@ -6563,7 +6563,7 @@ impl TackyGen {
         then_exp: Exp,
         else_exp: Exp,
     ) -> TackyResult<(TackyVal, CType)> {
-        let (cond_val, _) = self.emit_exp(cond)?;
+        let cond_val = self.emit_condition_value(cond)?;
         let else_label = self.fresh_label("cond_else");
         let end_label = self.fresh_label("cond_end");
         self.emit(TackyInstr::JumpIfZero(cond_val, else_label.clone()));
@@ -6700,6 +6700,14 @@ impl TackyGen {
         });
         self.emit(TackyInstr::Label(end2_label));
         Ok((result, common))
+    }
+
+    fn emit_condition_value(&mut self, condition: Exp) -> TackyResult<TackyVal> {
+        let (cond_val, cond_type) = self.emit_exp(condition)?;
+        if cond_type == CType::Void {
+            return Err("void value not ignored as it ought to be".to_string());
+        }
+        Ok(cond_val)
     }
 
     fn emit_complex_lane_value(
@@ -9284,7 +9292,7 @@ impl TackyGen {
                         return Ok(());
                     }
                 }
-                let (cond_val, _) = self.emit_exp(cond)?;
+                let cond_val = self.emit_condition_value(cond)?;
                 match else_stmt {
                     None => {
                         let end_label = self.fresh_label("if_end");
@@ -9315,7 +9323,7 @@ impl TackyGen {
                 let continue_label = format!("continue_{}", label);
                 let break_label = format!("break_{}", label);
                 self.emit(TackyInstr::Label(continue_label.clone()));
-                let (cond_val, _) = self.emit_exp(condition)?;
+                let cond_val = self.emit_condition_value(condition)?;
                 self.emit(TackyInstr::JumpIfZero(cond_val, break_label.clone()));
                 self.emit_statement(*body)?;
                 self.emit(TackyInstr::Jump(continue_label));
@@ -9332,7 +9340,7 @@ impl TackyGen {
                 self.emit(TackyInstr::Label(start_label.clone()));
                 self.emit_statement(*body)?;
                 self.emit(TackyInstr::Label(continue_label));
-                let (cond_val, _) = self.emit_exp(condition)?;
+                let cond_val = self.emit_condition_value(condition)?;
                 self.emit(TackyInstr::JumpIfNotZero(cond_val, start_label));
                 self.emit(TackyInstr::Label(break_label));
             }
@@ -9358,7 +9366,7 @@ impl TackyGen {
                 }
                 self.emit(TackyInstr::Label(start_label.clone()));
                 if let Some(cond) = condition {
-                    let (cond_val, _) = self.emit_exp(cond)?;
+                    let cond_val = self.emit_condition_value(cond)?;
                     self.emit(TackyInstr::JumpIfZero(cond_val, break_label.clone()));
                 }
                 self.emit_statement(*body)?;

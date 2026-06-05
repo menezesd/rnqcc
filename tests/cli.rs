@@ -10226,6 +10226,58 @@ fn x86_va_start_skips_fixed_sse_stack_parameters() {
 }
 
 #[test]
+fn rejects_builtin_va_arg_void_type() {
+    let src = temp_file("va-arg-void", "c");
+    std::fs::write(
+        &src,
+        "void f(__builtin_va_list ap) {\n\
+             __builtin_va_arg(ap, void);\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-c")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success(), "unexpected success");
+    assert!(
+        stderr(output).contains("__builtin_va_arg cannot read a void value"),
+        "missing va_arg void diagnostic"
+    );
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn rejects_void_statement_expression_condition() {
+    let src = temp_file("void-statement-expression-condition", "c");
+    std::fs::write(
+        &src,
+        "void f(void) {\n\
+             if (({ })) ;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-c")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success(), "unexpected success");
+    assert!(
+        stderr(output).contains("void value not ignored as it ought to be"),
+        "missing void condition diagnostic"
+    );
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn x86_va_start_accounts_for_aligned_fixed_long_double_stack_parameters() {
     let src = temp_file("x86-va-start-fixed-long-double-stack", "c");
     let out = temp_file("x86-va-start-fixed-long-double-stack", "s");

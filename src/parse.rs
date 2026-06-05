@@ -5666,6 +5666,11 @@ impl Parser {
                         } else {
                             full_type
                         };
+                        if full_type == FullType::Scalar(CType::Void) {
+                            return Err(
+                                self.format_error("__builtin_va_arg cannot read a void value")
+                            );
+                        }
                         self.expect_token(Token::CloseParen)?;
                         let helper = match &full_type {
                             FullType::Struct(tag) => format!("__rnqcc_va_arg_struct_{}", tag),

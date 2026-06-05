@@ -8,3 +8,5 @@
 
 compile/20030305-1.c | initialization of flexible array member
 compile/pr28865.c | initialization of flexible array member
+compile/pr48767.c | __builtin_va_arg cannot read a void value
+compile/pr83547.c | void value not ignored as it ought to be

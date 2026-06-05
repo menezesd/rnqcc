@@ -312,12 +312,6 @@ def skip_reason_for_test(src: Path) -> str | None:
         or "-fstack-check" in text
         or re.search(r"\bASIZE\s+0x[0-9a-fA-F]{8,}", text)
     )
-    recursive_nested_control_flow_gaps = {
-        "920501-7.c",
-        "comp-goto-2.c",
-    }
-    if src.parent.name == "execute" and src.name in recursive_nested_control_flow_gaps:
-        return "unsupported recursive nested nonlocal control flow"
     if stack_stress and src.parent.name != "execute":
         return "stack-size stress test"
     if "C4096" in text and "This testcase exposed" in text:

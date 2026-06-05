@@ -23934,6 +23934,100 @@ nonlocal_lab:
 }
 
 #[test]
+fn recursive_nested_function_nonlocal_goto_unwinds_to_parent_label() {
+    let src = temp_file("recursive-nested-nonlocal-goto", "c");
+    let exe = temp_file("recursive-nested-nonlocal-goto", "bin");
+    std::fs::write(
+        &src,
+        r#"
+void abort(void);
+
+static int x(int a) {
+    __label__ xlab;
+
+    void y(int a) {
+        if (a == 0)
+            goto xlab;
+        y(a - 1);
+    }
+
+    y(a);
+xlab:
+    return a;
+}
+
+int main(void) {
+    return x(64) == 64 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn recursive_nested_function_nonlocal_goto_preserves_local_label_address() {
+    let src = temp_file("recursive-nested-nonlocal-goto-local-label", "c");
+    let exe = temp_file("recursive-nested-nonlocal-goto-local-label", "bin");
+    std::fs::write(
+        &src,
+        r#"
+void abort(void);
+
+static int x(int a) {
+    __label__ xlab;
+
+    void y(int a) {
+        void *local = &&llab;
+        if (a == -1)
+            goto *local;
+        if (a == 0)
+            goto xlab;
+llab:
+        y(a - 1);
+    }
+
+    y(a);
+xlab:
+    return a;
+}
+
+int main(void) {
+    return x(64) == 64 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn supports_narrow_static_label_difference_initializers() {
     let src = temp_file("narrow-label-diff-init", "c");
     let out = temp_file("narrow-label-diff-init", "o");

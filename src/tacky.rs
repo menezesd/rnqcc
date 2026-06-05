@@ -220,6 +220,8 @@ struct TackyGen {
     no_instrument_functions: std::collections::HashSet<String>,
     inline_va_arg_pack_functions: HashMap<String, FunctionDeclaration>,
     nested_capture_slots: HashMap<String, Vec<(String, String)>>,
+    current_nonlocal_label_envs: HashMap<String, String>,
+    current_parent_label_env_slots: HashMap<String, String>,
 }
 
 impl TackyGen {
@@ -270,6 +272,8 @@ impl TackyGen {
             no_instrument_functions: std::collections::HashSet::new(),
             inline_va_arg_pack_functions: HashMap::new(),
             nested_capture_slots: HashMap::new(),
+            current_nonlocal_label_envs: HashMap::new(),
+            current_parent_label_env_slots: HashMap::new(),
         }
     }
 
@@ -9386,6 +9390,11 @@ impl TackyGen {
                 let target = format!("label.{}.{}", target_function, label);
                 if local || target_function == self.current_function {
                     self.emit(TackyInstr::Jump(target));
+                } else if let Some(slot) = self.current_parent_label_env_slots.get(&label) {
+                    self.emit(TackyInstr::BuiltinLongjmp {
+                        buf: TackyVal::Var(slot.clone()),
+                        value: TackyVal::Constant(1),
+                    });
                 } else {
                     self.emit(TackyInstr::NonlocalJump(target));
                 }
@@ -12030,6 +12039,21 @@ impl TackyGen {
         if let Some(body) = fd.body.as_ref() {
             Self::collect_block_labels(body, &mut nested_labels);
         }
+        let mut parent_label_envs = HashMap::new();
+        if let Some(body) = fd.body.as_ref() {
+            let parent_labels: HashSet<String> =
+                self.current_nonlocal_label_envs.keys().cloned().collect();
+            let parent_gotos = Self::collect_parent_label_gotos_stmt(
+                &Statement::Block(body.clone()),
+                &nested_labels,
+                &parent_labels,
+            );
+            for label in parent_gotos {
+                if let Some(env) = self.current_nonlocal_label_envs.get(&label) {
+                    parent_label_envs.insert(label, env.clone());
+                }
+            }
+        }
         if self.current_escaped_functions.contains(&fd.name) {
             if let Some(body) = fd.body.take() {
                 fd.body = Some(Self::rewrite_parent_label_gotos_block(
@@ -12039,9 +12063,15 @@ impl TackyGen {
                 ));
             }
         }
-        let captures = self.collect_captures_for_nested(&fd);
+        let mut captures = self.collect_captures_for_nested(&fd);
+        for env in parent_label_envs.values() {
+            if !captures.iter().any(|capture| capture == env) {
+                captures.push(env.clone());
+            }
+        }
         let mut capture_map = HashMap::new();
         let mut capture_slots = Vec::new();
+        let mut parent_label_env_slots = HashMap::new();
         for capture in captures {
             let Some(captured_ft) = self.full_types.get(&capture).cloned() else {
                 continue;
@@ -12059,6 +12089,11 @@ impl TackyGen {
             capture_slots.push((capture.clone(), slot.clone()));
             capture_map.insert(capture, slot);
         }
+        for (label, env) in parent_label_envs {
+            if let Some(slot) = capture_map.get(&env) {
+                parent_label_env_slots.insert(label, slot.clone());
+            }
+        }
         self.nested_capture_slots
             .insert(fd.name.clone(), capture_slots);
         if let Some(body) = fd.body.take() {
@@ -12072,6 +12107,11 @@ impl TackyGen {
         let saved_label_function = self.label_address_function.take();
         let saved_label_bodies = std::mem::take(&mut self.current_label_bodies);
         let saved_escaped_functions = std::mem::take(&mut self.current_escaped_functions);
+        let saved_nonlocal_label_envs = std::mem::take(&mut self.current_nonlocal_label_envs);
+        let saved_parent_label_env_slots = std::mem::replace(
+            &mut self.current_parent_label_env_slots,
+            parent_label_env_slots,
+        );
         let saved_hidden_ret = self.hidden_ret_ptr.take();
         if !saved_current.is_empty() {
             self.label_address_function = Some(saved_current.clone());
@@ -12087,6 +12127,8 @@ impl TackyGen {
         self.label_address_function = saved_label_function;
         self.current_label_bodies = saved_label_bodies;
         self.current_escaped_functions = saved_escaped_functions;
+        self.current_nonlocal_label_envs = saved_nonlocal_label_envs;
+        self.current_parent_label_env_slots = saved_parent_label_env_slots;
         self.hidden_ret_ptr = saved_hidden_ret;
         Ok(())
     }
@@ -12765,6 +12807,142 @@ impl TackyGen {
         }
     }
 
+    fn collect_parent_label_gotos_stmt(
+        stmt: &Statement,
+        local_labels: &HashSet<String>,
+        parent_labels: &HashSet<String>,
+    ) -> HashSet<String> {
+        let mut labels = HashSet::new();
+        Self::collect_parent_label_gotos_stmt_into(stmt, local_labels, parent_labels, &mut labels);
+        labels
+    }
+
+    fn collect_parent_label_gotos_stmt_into(
+        stmt: &Statement,
+        local_labels: &HashSet<String>,
+        parent_labels: &HashSet<String>,
+        labels: &mut HashSet<String>,
+    ) {
+        match stmt {
+            Statement::Goto(label)
+                if !local_labels.contains(label) && parent_labels.contains(label) =>
+            {
+                labels.insert(label.clone());
+            }
+            Statement::If(_, then_stmt, else_stmt) => {
+                Self::collect_parent_label_gotos_stmt_into(
+                    then_stmt,
+                    local_labels,
+                    parent_labels,
+                    labels,
+                );
+                if let Some(else_stmt) = else_stmt {
+                    Self::collect_parent_label_gotos_stmt_into(
+                        else_stmt,
+                        local_labels,
+                        parent_labels,
+                        labels,
+                    );
+                }
+            }
+            Statement::Block(block) => {
+                for item in block {
+                    if let BlockItem::Statement(stmt) = item {
+                        Self::collect_parent_label_gotos_stmt_into(
+                            stmt,
+                            local_labels,
+                            parent_labels,
+                            labels,
+                        );
+                    }
+                }
+            }
+            Statement::While { body, .. }
+            | Statement::DoWhile { body, .. }
+            | Statement::For { body, .. }
+            | Statement::Label(_, body)
+            | Statement::Switch { body, .. }
+            | Statement::Case { body, .. }
+            | Statement::Default { body, .. } => Self::collect_parent_label_gotos_stmt_into(
+                body,
+                local_labels,
+                parent_labels,
+                labels,
+            ),
+            Statement::Return(_)
+            | Statement::Expression(_)
+            | Statement::Break(_)
+            | Statement::Continue(_)
+            | Statement::Goto(_)
+            | Statement::IndirectGoto(_)
+            | Statement::Null => {}
+        }
+    }
+
+    fn collect_nested_parent_label_gotos_block(
+        block: &Block,
+        parent_labels: &HashSet<String>,
+    ) -> HashSet<String> {
+        let mut labels = HashSet::new();
+        for item in block {
+            match item {
+                BlockItem::Declaration(Declaration::FunDecl(fd)) => {
+                    if let Some(body) = fd.body.as_ref() {
+                        let mut local_labels = HashSet::new();
+                        Self::collect_block_labels(body, &mut local_labels);
+                        labels.extend(Self::collect_parent_label_gotos_stmt(
+                            &Statement::Block(body.clone()),
+                            &local_labels,
+                            parent_labels,
+                        ));
+                    }
+                }
+                BlockItem::Statement(stmt) => {
+                    Self::collect_nested_parent_label_gotos_stmt(stmt, parent_labels, &mut labels);
+                }
+                _ => {}
+            }
+        }
+        labels
+    }
+
+    fn collect_nested_parent_label_gotos_stmt(
+        stmt: &Statement,
+        parent_labels: &HashSet<String>,
+        labels: &mut HashSet<String>,
+    ) {
+        match stmt {
+            Statement::Block(block) => {
+                labels.extend(Self::collect_nested_parent_label_gotos_block(
+                    block,
+                    parent_labels,
+                ));
+            }
+            Statement::If(_, then_stmt, else_stmt) => {
+                Self::collect_nested_parent_label_gotos_stmt(then_stmt, parent_labels, labels);
+                if let Some(else_stmt) = else_stmt {
+                    Self::collect_nested_parent_label_gotos_stmt(else_stmt, parent_labels, labels);
+                }
+            }
+            Statement::While { body, .. }
+            | Statement::DoWhile { body, .. }
+            | Statement::For { body, .. }
+            | Statement::Label(_, body)
+            | Statement::Switch { body, .. }
+            | Statement::Case { body, .. }
+            | Statement::Default { body, .. } => {
+                Self::collect_nested_parent_label_gotos_stmt(body, parent_labels, labels)
+            }
+            Statement::Return(_)
+            | Statement::Expression(_)
+            | Statement::Break(_)
+            | Statement::Continue(_)
+            | Statement::Goto(_)
+            | Statement::IndirectGoto(_)
+            | Statement::Null => {}
+        }
+    }
+
     fn collect_escaped_function_refs_exp(exp: &Exp, refs: &mut HashSet<String>) {
         match exp {
             Exp::Var(name) => {
@@ -12931,6 +13109,62 @@ impl TackyGen {
         }
     }
 
+    fn jump_env_full_type() -> FullType {
+        FullType::Array {
+            elem: Box::new(FullType::Scalar(CType::Char)),
+            size: 24,
+        }
+    }
+
+    fn prepare_nonlocal_label_envs(&mut self, labels: &HashSet<String>) -> HashMap<String, String> {
+        let mut envs = HashMap::new();
+        let mut sorted_labels: Vec<_> = labels.iter().cloned().collect();
+        sorted_labels.sort();
+        for label in sorted_labels {
+            let env = format!(
+                "__rnqcc_nonlocal_label_env_{}_{}",
+                self.current_function,
+                label.replace('.', "_")
+            );
+            self.register_var(&env, Self::jump_env_full_type());
+            self.current_function_locals.insert(env.clone());
+            envs.insert(label, env);
+        }
+        envs
+    }
+
+    fn emit_nonlocal_label_env_setup(&mut self) {
+        let mut envs: Vec<_> = self
+            .current_nonlocal_label_envs
+            .iter()
+            .map(|(label, env)| (label.clone(), env.clone()))
+            .collect();
+        envs.sort_by(|left, right| left.0.cmp(&right.0));
+        for (label, env) in envs {
+            let buf = self.fresh_tmp(CType::Pointer);
+            self.emit(TackyInstr::GetAddress {
+                src: TackyVal::Var(env),
+                dst: buf.clone(),
+            });
+            let jumped = self.fresh_tmp(CType::Int);
+            let resume_label = self.fresh_label("nonlocal_label_resume");
+            let end_label = self.fresh_label("nonlocal_label_setjmp_end");
+            self.emit(TackyInstr::BuiltinSetjmp {
+                buf,
+                dst: jumped.clone(),
+                label: resume_label,
+                end_label,
+            });
+            let normal_label = self.fresh_label("nonlocal_label_normal");
+            self.emit(TackyInstr::JumpIfZero(jumped, normal_label.clone()));
+            self.emit(TackyInstr::Jump(format!(
+                "label.{}.{}",
+                self.current_function, label
+            )));
+            self.emit(TackyInstr::Label(normal_label));
+        }
+    }
+
     fn emit_function(&mut self, func: FunctionDeclaration) -> TackyResult<Option<TackyFunction>> {
         self.function_symbols.insert(func.name.clone());
         let param_types: Vec<CType> = func.params.iter().map(|(_, t, _)| *t).collect();
@@ -12970,6 +13204,11 @@ impl TackyGen {
         self.instructions.clear();
         let mut local_labels = HashSet::new();
         Self::collect_block_labels(&body, &mut local_labels);
+        let nonlocal_label_targets =
+            Self::collect_nested_parent_label_gotos_block(&body, &local_labels);
+        let nonlocal_label_envs = self.prepare_nonlocal_label_envs(&nonlocal_label_targets);
+        let saved_nonlocal_label_envs =
+            std::mem::replace(&mut self.current_nonlocal_label_envs, nonlocal_label_envs);
         let saved_label_bodies = std::mem::take(&mut self.current_label_bodies);
         Self::collect_block_label_bodies(&body, &mut self.current_label_bodies);
         let saved_escaped_functions = std::mem::take(&mut self.current_escaped_functions);
@@ -13146,10 +13385,12 @@ impl TackyGen {
             }
         }
 
+        self.emit_nonlocal_label_env_setup();
         let emit_result = self.emit_block(body);
         self.local_label_stack.pop();
         self.current_label_bodies = saved_label_bodies;
         self.current_escaped_functions = saved_escaped_functions;
+        self.current_nonlocal_label_envs = saved_nonlocal_label_envs;
         emit_result?;
         self.emit(TackyInstr::Return(TackyVal::Constant(0)));
         self.apply_function_instrumentation(func.no_instrument_function);

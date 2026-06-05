@@ -3486,6 +3486,14 @@ fn replace_pseudos(func: &mut AsmFunction, ctx: &ReplacePseudoContext<'_>) -> i3
             AsmInstr::StoreIndirect(_, src, _) => {
                 replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx);
             }
+            AsmInstr::BuiltinSetjmp { buf, dst, .. } => {
+                replace_operand(buf, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
+            }
+            AsmInstr::BuiltinLongjmp { buf, value } => {
+                replace_operand(buf, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(value, &mut pseudo_map, &mut stack_offset, ctx);
+            }
             _ => {}
         }
     }

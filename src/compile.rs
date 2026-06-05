@@ -446,6 +446,15 @@ struct MappedSource {
     line_map: Vec<lex::SourceLineMapping>,
 }
 
+struct PreprocessorLineMarker {
+    line: usize,
+    file: Option<String>,
+}
+
+struct LineMarkerFilename {
+    file: String,
+}
+
 #[allow(dead_code)]
 fn strip_preprocessor_line_markers(source: &str) -> String {
     strip_preprocessor_line_markers_with_map(source).source
@@ -460,9 +469,9 @@ fn strip_preprocessor_line_markers_with_map(source: &str) -> MappedSource {
     for line in source.split_inclusive('\n') {
         let trimmed = line.trim_start();
         if is_preprocessor_line_marker(trimmed) {
-            if let Some((line, file)) = parse_preprocessor_line_marker(trimmed) {
-                next_logical_line = line;
-                if let Some(file) = file {
+            if let Some(marker) = parse_preprocessor_line_marker(trimmed) {
+                next_logical_line = marker.line;
+                if let Some(file) = marker.file {
                     logical_file = Some(file);
                 }
             }
@@ -504,7 +513,7 @@ fn is_preprocessor_line_marker(trimmed_line: &str) -> bool {
         .is_some_and(|ch| ch.is_ascii_digit())
 }
 
-fn parse_preprocessor_line_marker(trimmed_line: &str) -> Option<(usize, Option<String>)> {
+fn parse_preprocessor_line_marker(trimmed_line: &str) -> Option<PreprocessorLineMarker> {
     let rest = if let Some(rest) = trimmed_line.strip_prefix("#line") {
         rest
     } else {
@@ -523,14 +532,14 @@ fn parse_preprocessor_line_marker(trimmed_line: &str) -> Option<(usize, Option<S
     let rest = rest[digits_len..].trim_start();
     let file = rest
         .strip_prefix('"')
-        .and_then(|rest| parse_line_marker_filename(rest).map(|(file, _)| file));
-    Some((line, file))
+        .and_then(|rest| parse_line_marker_filename(rest).map(|filename| filename.file));
+    Some(PreprocessorLineMarker { line, file })
 }
 
-fn parse_line_marker_filename(rest: &str) -> Option<(String, &str)> {
+fn parse_line_marker_filename(rest: &str) -> Option<LineMarkerFilename> {
     let mut file = String::new();
     let mut escaped = false;
-    for (idx, ch) in rest.char_indices() {
+    for ch in rest.chars() {
         if escaped {
             file.push(ch);
             escaped = false;
@@ -538,7 +547,7 @@ fn parse_line_marker_filename(rest: &str) -> Option<(String, &str)> {
         }
         match ch {
             '\\' => escaped = true,
-            '"' => return Some((file, &rest[idx + ch.len_utf8()..])),
+            '"' => return Some(LineMarkerFilename { file }),
             _ => file.push(ch),
         }
     }

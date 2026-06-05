@@ -2105,6 +2105,13 @@ pub enum AsmInstr {
     /// AArch64-only save/restore of the link register in non-leaf functions.
     AArch64SaveLink(i32), // stack offset from sp
     AArch64RestoreLink(i32), // stack offset from sp
+    /// AArch64-only large local storage area support.
+    AArch64AllocateLargeStack(i64),
+    AArch64DeallocateLargeStack(i64),
+    AArch64StoreLargeLocalBase {
+        base_offset: i64,
+        dst_offset: i32,
+    },
     Unreachable,
     Ret,
     AllocateStack(i32),

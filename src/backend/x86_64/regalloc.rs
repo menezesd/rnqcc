@@ -393,6 +393,9 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
         | AsmInstr::AArch64Rem(..)
         | AsmInstr::AArch64SaveLink(..)
         | AsmInstr::AArch64RestoreLink(..)
+        | AsmInstr::AArch64AllocateLargeStack(..)
+        | AsmInstr::AArch64DeallocateLargeStack(..)
+        | AsmInstr::AArch64StoreLargeLocalBase { .. }
         | AsmInstr::AtomicFence => (vec![], vec![]),
     }
 }

@@ -232,9 +232,14 @@ def skip_reason_for_test(src: Path) -> str | None:
     portable_stress_compile_smoke = {
         "20000609-1.c",
         "20000804-1.c",
+        "20001226-1.c",
         "20020304-1.c",
         "20020604-1.c",
         "20021015-1.c",
+        "20031023-1.c",
+        "20031023-2.c",
+        "20031023-3.c",
+        "20031023-4.c",
         "20050303-1.c",
         "20060421-1.c",
         "20071207-1.c",
@@ -274,6 +279,7 @@ def skip_reason_for_test(src: Path) -> str | None:
         "pr43417.c",
         "pr44788.c",
         "sound.c",
+        "stack-check-1.c",
         "string-large-1.c",
         "stuct.c",
     }

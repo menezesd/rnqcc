@@ -323,6 +323,34 @@ fn emit_stack_pointer_adjust(w: &mut dyn Write, op: &str, bytes: i32) -> std::io
     }
 }
 
+fn emit_large_stack_pointer_adjust(w: &mut dyn Write, op: &str, bytes: i64) -> std::io::Result<()> {
+    if bytes <= 0 {
+        return Ok(());
+    }
+    if bytes <= 4095 {
+        writeln!(w, "\t{} sp, sp, #{}", op, bytes)
+    } else {
+        emit_load_immediate(w, AsmType::Quadword, "x16", bytes)?;
+        writeln!(w, "\t{} sp, sp, x16", op)
+    }
+}
+
+fn emit_store_large_local_base(
+    w: &mut dyn Write,
+    base_offset: i64,
+    dst_offset: i32,
+) -> std::io::Result<()> {
+    if base_offset == 0 {
+        writeln!(w, "\tmov x16, sp")?;
+    } else if base_offset <= 4095 {
+        writeln!(w, "\tadd x16, sp, #{}", base_offset)?;
+    } else {
+        emit_load_immediate(w, AsmType::Quadword, "x16", base_offset)?;
+        writeln!(w, "\tadd x16, sp, x16")?;
+    }
+    emit_store_stack(w, AsmType::Quadword, "x16", dst_offset)
+}
+
 fn data_label(target: &Target, name: &str) -> String {
     target.show_label(name)
 }
@@ -1680,6 +1708,16 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, target: &Target) -> std
         AsmInstr::AArch64RestoreLink(offset) => {
             emit_load_stack(w, AsmType::Quadword, "x30", *offset)
         }
+        AsmInstr::AArch64AllocateLargeStack(bytes) => {
+            emit_large_stack_pointer_adjust(w, "sub", *bytes)
+        }
+        AsmInstr::AArch64DeallocateLargeStack(bytes) => {
+            emit_large_stack_pointer_adjust(w, "add", *bytes)
+        }
+        AsmInstr::AArch64StoreLargeLocalBase {
+            base_offset,
+            dst_offset,
+        } => emit_store_large_local_base(w, *base_offset, *dst_offset),
         AsmInstr::AtomicFence => writeln!(w, "\tdmb ish"),
         AsmInstr::AllocateStack(bytes) if *bytes > 0 => emit_stack_pointer_adjust(w, "sub", *bytes),
         AsmInstr::DeallocateStack(bytes) if *bytes > 0 => {

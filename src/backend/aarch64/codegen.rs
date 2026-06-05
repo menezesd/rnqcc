@@ -25,6 +25,21 @@ const STACK_ALIGNMENT: i32 = 16;
 const STACK_SLOT_SIZE: i32 = 8;
 const MIN_STACK_SLOT_SIZE: i32 = 4;
 const LINK_REGISTER_SAVE_SIZE: i32 = 16;
+const LARGE_LOCAL_ALIGNMENT: usize = 16;
+
+#[derive(Debug, Clone)]
+struct LargeLocal {
+    name: String,
+    size: usize,
+    base_slot: i32,
+}
+
+#[derive(Debug)]
+struct StackLayout {
+    slots: HashMap<String, i32>,
+    local_stack_size: i32,
+    large_locals: Vec<LargeLocal>,
+}
 
 fn align_to(value: i32, alignment: i32) -> i32 {
     if value == 0 {
@@ -46,6 +61,26 @@ fn compute_link_register_offset(frame_size: i32) -> i32 {
     frame_size - STACK_SLOT_SIZE
 }
 
+fn align_usize_to(value: usize, alignment: usize) -> Result<usize, String> {
+    if alignment == 0 {
+        return Ok(value);
+    }
+    value
+        .checked_add(alignment - 1)
+        .map(|rounded| rounded & !(alignment - 1))
+        .ok_or_else(|| "AArch64 backend large local alignment overflow".to_string())
+}
+
+fn align_i64_to(value: i64, alignment: i64) -> Result<i64, String> {
+    if alignment <= 0 {
+        return Ok(value);
+    }
+    value
+        .checked_add(alignment - 1)
+        .map(|rounded| rounded & !(alignment - 1))
+        .ok_or_else(|| "AArch64 backend large stack alignment overflow".to_string())
+}
+
 fn stack_arg_offset(base: i32, index: usize) -> i32 {
     base + (index as i32 * STACK_SLOT_SIZE)
 }
@@ -57,6 +92,7 @@ fn outgoing_stack_size(stack_arg_count: usize) -> i32 {
 fn emit_epilogue(
     instructions: &mut Vec<AsmInstr>,
     frame_size: i32,
+    large_stack_size: i64,
     link_register_offset: Option<i32>,
 ) {
     if let Some(offset) = link_register_offset {
@@ -64,6 +100,9 @@ fn emit_epilogue(
     }
     if frame_size > 0 {
         instructions.push(AsmInstr::DeallocateStack(frame_size));
+    }
+    if large_stack_size > 0 {
+        instructions.push(AsmInstr::AArch64DeallocateLargeStack(large_stack_size));
     }
     instructions.push(AsmInstr::Ret);
 }
@@ -570,11 +609,25 @@ fn rewrite_long_double_immediates(instructions: &mut [AsmInstr], pool: &mut Vec<
     }
 }
 
-fn collect_var(val: &TackyVal, vars: &mut Vec<String>, global_vars: &HashSet<String>) {
+fn collect_name(
+    name: &str,
+    vars: &mut Vec<String>,
+    seen_vars: &mut HashSet<String>,
+    global_vars: &HashSet<String>,
+) {
+    if !global_vars.contains(name) && seen_vars.insert(name.to_string()) {
+        vars.push(name.to_string());
+    }
+}
+
+fn collect_var(
+    val: &TackyVal,
+    vars: &mut Vec<String>,
+    seen_vars: &mut HashSet<String>,
+    global_vars: &HashSet<String>,
+) {
     if let TackyVal::Var(name) = val {
-        if !global_vars.contains(name) && !vars.contains(name) {
-            vars.push(name.clone());
-        }
+        collect_name(name, vars, seen_vars, global_vars);
     }
 }
 
@@ -922,32 +975,29 @@ fn collect_stack_slots(
     struct_defs: &HashMap<String, StructDef>,
     global_vars: &HashSet<String>,
     alignments: &HashMap<String, usize>,
-) -> Result<(HashMap<String, i32>, i32), String> {
+) -> Result<StackLayout, String> {
     let mut vars = Vec::new();
+    let mut seen_vars = HashSet::new();
     for param in &function.params {
-        if !vars.contains(param) {
-            vars.push(param.clone());
-        }
+        collect_name(param, &mut vars, &mut seen_vars, global_vars);
     }
     for (_, name, _) in &function.memory_param_blocks {
-        if !global_vars.contains(name) && !vars.contains(name) {
-            vars.push(name.clone());
-        }
+        collect_name(name, &mut vars, &mut seen_vars, global_vars);
     }
 
     for instr in &function.body {
         match instr {
-            TackyInstr::Return(val) => collect_var(val, &mut vars, global_vars),
+            TackyInstr::Return(val) => collect_var(val, &mut vars, &mut seen_vars, global_vars),
             TackyInstr::Unary { src, dst, .. } => {
-                collect_var(src, &mut vars, global_vars);
-                collect_var(dst, &mut vars, global_vars);
+                collect_var(src, &mut vars, &mut seen_vars, global_vars);
+                collect_var(dst, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::Binary {
                 left, right, dst, ..
             } => {
-                collect_var(left, &mut vars, global_vars);
-                collect_var(right, &mut vars, global_vars);
-                collect_var(dst, &mut vars, global_vars);
+                collect_var(left, &mut vars, &mut seen_vars, global_vars);
+                collect_var(right, &mut vars, &mut seen_vars, global_vars);
+                collect_var(dst, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::Copy { src, dst }
             | TackyInstr::SignExtend { src, dst }
@@ -963,27 +1013,27 @@ fn collect_stack_slots(
             | TackyInstr::FloatToUInt { src, dst }
             | TackyInstr::FloatToDouble { src, dst }
             | TackyInstr::DoubleToFloat { src, dst } => {
-                collect_var(src, &mut vars, global_vars);
-                collect_var(dst, &mut vars, global_vars);
+                collect_var(src, &mut vars, &mut seen_vars, global_vars);
+                collect_var(dst, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::JumpIfZero(val, _)
             | TackyInstr::JumpIfNotZero(val, _)
             | TackyInstr::JumpIndirect(val) => {
-                collect_var(val, &mut vars, global_vars);
+                collect_var(val, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::LoadLabelAddress(_, dst) => {
-                collect_var(dst, &mut vars, global_vars);
+                collect_var(dst, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::FrameAddress { dst } => {
-                collect_var(dst, &mut vars, global_vars);
+                collect_var(dst, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::BuiltinSetjmp { buf, dst, .. } => {
-                collect_var(buf, &mut vars, global_vars);
-                collect_var(dst, &mut vars, global_vars);
+                collect_var(buf, &mut vars, &mut seen_vars, global_vars);
+                collect_var(dst, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::BuiltinLongjmp { buf, value } => {
-                collect_var(buf, &mut vars, global_vars);
-                collect_var(value, &mut vars, global_vars);
+                collect_var(buf, &mut vars, &mut seen_vars, global_vars);
+                collect_var(value, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::FunCall {
                 name,
@@ -992,38 +1042,38 @@ fn collect_stack_slots(
                 indirect,
                 ..
             } => {
-                if *indirect && !global_vars.contains(name) && !vars.contains(name) {
-                    vars.push(name.clone());
+                if *indirect {
+                    collect_name(name, &mut vars, &mut seen_vars, global_vars);
                 }
                 for arg in args {
-                    collect_var(arg, &mut vars, global_vars);
+                    collect_var(arg, &mut vars, &mut seen_vars, global_vars);
                 }
-                collect_var(dst, &mut vars, global_vars);
+                collect_var(dst, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::VaStart { dst } => {
-                collect_var(dst, &mut vars, global_vars);
+                collect_var(dst, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::GetAddress { src, dst } => {
-                collect_var(src, &mut vars, global_vars);
-                collect_var(dst, &mut vars, global_vars);
+                collect_var(src, &mut vars, &mut seen_vars, global_vars);
+                collect_var(dst, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::Load { src_ptr, dst } => {
-                collect_var(src_ptr, &mut vars, global_vars);
-                collect_var(dst, &mut vars, global_vars);
+                collect_var(src_ptr, &mut vars, &mut seen_vars, global_vars);
+                collect_var(dst, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::Store { src, dst_ptr } => {
-                collect_var(src, &mut vars, global_vars);
-                collect_var(dst_ptr, &mut vars, global_vars);
+                collect_var(src, &mut vars, &mut seen_vars, global_vars);
+                collect_var(dst_ptr, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::AtomicFetch { ptr, arg, dst, .. } => {
-                collect_var(ptr, &mut vars, global_vars);
-                collect_var(arg, &mut vars, global_vars);
-                collect_var(dst, &mut vars, global_vars);
+                collect_var(ptr, &mut vars, &mut seen_vars, global_vars);
+                collect_var(arg, &mut vars, &mut seen_vars, global_vars);
+                collect_var(dst, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::AtomicExchange { ptr, value, dst } => {
-                collect_var(ptr, &mut vars, global_vars);
-                collect_var(value, &mut vars, global_vars);
-                collect_var(dst, &mut vars, global_vars);
+                collect_var(ptr, &mut vars, &mut seen_vars, global_vars);
+                collect_var(value, &mut vars, &mut seen_vars, global_vars);
+                collect_var(dst, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::AtomicCompareExchange {
                 ptr,
@@ -1031,10 +1081,10 @@ fn collect_stack_slots(
                 desired,
                 dst,
             } => {
-                collect_var(ptr, &mut vars, global_vars);
-                collect_var(expected, &mut vars, global_vars);
-                collect_var(desired, &mut vars, global_vars);
-                collect_var(dst, &mut vars, global_vars);
+                collect_var(ptr, &mut vars, &mut seen_vars, global_vars);
+                collect_var(expected, &mut vars, &mut seen_vars, global_vars);
+                collect_var(desired, &mut vars, &mut seen_vars, global_vars);
+                collect_var(dst, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::AtomicCompareSwap {
                 ptr,
@@ -1043,37 +1093,29 @@ fn collect_stack_slots(
                 dst,
                 ..
             } => {
-                collect_var(ptr, &mut vars, global_vars);
-                collect_var(expected, &mut vars, global_vars);
-                collect_var(desired, &mut vars, global_vars);
-                collect_var(dst, &mut vars, global_vars);
+                collect_var(ptr, &mut vars, &mut seen_vars, global_vars);
+                collect_var(expected, &mut vars, &mut seen_vars, global_vars);
+                collect_var(desired, &mut vars, &mut seen_vars, global_vars);
+                collect_var(dst, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::AddPtr {
                 ptr, index, dst, ..
             } => {
-                collect_var(ptr, &mut vars, global_vars);
-                collect_var(index, &mut vars, global_vars);
-                collect_var(dst, &mut vars, global_vars);
+                collect_var(ptr, &mut vars, &mut seen_vars, global_vars);
+                collect_var(index, &mut vars, &mut seen_vars, global_vars);
+                collect_var(dst, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::CopyToOffset { src, dst_name, .. } => {
-                collect_var(src, &mut vars, global_vars);
-                if !global_vars.contains(dst_name) && !vars.contains(dst_name) {
-                    vars.push(dst_name.clone());
-                }
+                collect_var(src, &mut vars, &mut seen_vars, global_vars);
+                collect_name(dst_name, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::CopyFromOffset { src_name, dst, .. } => {
-                if !global_vars.contains(src_name) && !vars.contains(src_name) {
-                    vars.push(src_name.clone());
-                }
-                collect_var(dst, &mut vars, global_vars);
+                collect_name(src_name, &mut vars, &mut seen_vars, global_vars);
+                collect_var(dst, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::CopyStruct { src_name, dst_name } => {
-                if !global_vars.contains(src_name) && !vars.contains(src_name) {
-                    vars.push(src_name.clone());
-                }
-                if !global_vars.contains(dst_name) && !vars.contains(dst_name) {
-                    vars.push(dst_name.clone());
-                }
+                collect_name(src_name, &mut vars, &mut seen_vars, global_vars);
+                collect_name(dst_name, &mut vars, &mut seen_vars, global_vars);
             }
             TackyInstr::Jump(_)
             | TackyInstr::NonlocalJump(_)
@@ -1085,12 +1127,25 @@ fn collect_stack_slots(
     }
 
     let mut slots = HashMap::new();
+    let mut large_locals = Vec::new();
     let mut offset = 0i32;
     for var in vars {
         let size =
             if let Some(size) = aggregate_size(&var, array_sizes, var_struct_tags, struct_defs) {
-                i32::try_from(size)
-                    .map_err(|_| format!("AArch64 backend local array too large: {}", var))?
+                if size > i32::MAX as usize {
+                    offset = align_to(offset, STACK_SLOT_SIZE);
+                    let base_slot = offset;
+                    slots.insert(var.clone(), base_slot);
+                    offset += STACK_SLOT_SIZE;
+                    large_locals.push(LargeLocal {
+                        name: var,
+                        size,
+                        base_slot,
+                    });
+                    continue;
+                } else {
+                    size as i32
+                }
             } else {
                 match types.get(&var).copied().unwrap_or(CType::Int) {
                     CType::Char | CType::SChar | CType::UChar | CType::Bool => 1,
@@ -1122,8 +1177,11 @@ fn collect_stack_slots(
         offset += size.max(MIN_STACK_SLOT_SIZE);
     }
 
-    let stack_size = align_to(offset, STACK_ALIGNMENT);
-    Ok((slots, stack_size))
+    Ok(StackLayout {
+        slots,
+        local_stack_size: align_to(offset, STACK_ALIGNMENT),
+        large_locals,
+    })
 }
 
 fn convert_binary_op(op: &TackyBinaryOp) -> Result<AsmBinaryOp, String> {
@@ -1307,7 +1365,7 @@ fn convert_function(
     let struct_defs = &program.struct_defs;
     let global_vars = &program.global_vars;
     let alignments = &program.symbol_alignments;
-    let (stack_slots, stack_size) = collect_stack_slots(
+    let stack_layout = collect_stack_slots(
         function,
         types,
         array_sizes,
@@ -1316,6 +1374,8 @@ fn convert_function(
         global_vars,
         alignments,
     )?;
+    let stack_slots = stack_layout.slots;
+    let stack_size = stack_layout.local_stack_size;
     let saves_link_register = function.body.iter().any(|instr| match instr {
         TackyInstr::FunCall { .. } => true,
         TackyInstr::Binary {
@@ -1342,12 +1402,51 @@ fn convert_function(
     let frame_size = compute_frame_size(stack_size, saves_link_register);
     let link_register_offset =
         saves_link_register.then(|| compute_link_register_offset(frame_size));
+    let mut large_local_offsets = HashMap::new();
+    let mut large_stack_size = 0i64;
+    for local in &stack_layout.large_locals {
+        let base_offset = frame_size as i64 + large_stack_size;
+        large_local_offsets.insert(local.name.clone(), (local.base_slot, base_offset));
+        let aligned_size = align_usize_to(local.size, LARGE_LOCAL_ALIGNMENT)?;
+        let aligned_size = i64::try_from(aligned_size)
+            .map_err(|_| format!("AArch64 backend large local too large: {}", local.name))?;
+        large_stack_size = large_stack_size
+            .checked_add(aligned_size)
+            .ok_or_else(|| "AArch64 backend large stack allocation overflow".to_string())?;
+    }
+    large_stack_size = align_i64_to(large_stack_size, STACK_ALIGNMENT as i64)?;
+    if large_stack_size > 0
+        && (!function.stack_params.is_empty()
+            || !function.memory_param_blocks.is_empty()
+            || function.params.len() > ARG_REGS.len()
+            || function
+                .body
+                .iter()
+                .any(|instr| matches!(instr, TackyInstr::VaStart { .. })))
+    {
+        return Err(format!(
+            "AArch64 backend does not yet support large local arrays with incoming stack arguments in {}",
+            function.name
+        ));
+    }
     let mut instructions = Vec::new();
+    if large_stack_size > 0 {
+        instructions.push(AsmInstr::AArch64AllocateLargeStack(large_stack_size));
+    }
     if frame_size > 0 {
         instructions.push(AsmInstr::AllocateStack(frame_size));
     }
     if let Some(offset) = link_register_offset {
         instructions.push(AsmInstr::AArch64SaveLink(offset));
+    }
+    for local in &stack_layout.large_locals {
+        let Some((base_slot, base_offset)) = large_local_offsets.get(&local.name).copied() else {
+            continue;
+        };
+        instructions.push(AsmInstr::AArch64StoreLargeLocalBase {
+            base_offset,
+            dst_offset: base_slot,
+        });
     }
     let param_groups: HashMap<usize, (usize, Vec<bool>)> = function
         .struct_param_groups
@@ -1658,7 +1757,12 @@ fn convert_function(
                             global_vars,
                         )?;
                     }
-                    emit_epilogue(&mut instructions, frame_size, link_register_offset);
+                    emit_epilogue(
+                        &mut instructions,
+                        frame_size,
+                        large_stack_size,
+                        link_register_offset,
+                    );
                     continue;
                 }
                 let ty = match val {
@@ -1667,7 +1771,12 @@ fn convert_function(
                 };
                 if ty == AsmType::Octword {
                     emit_i128_return(&mut instructions, val, &stack_slots, global_vars)?;
-                    emit_epilogue(&mut instructions, frame_size, link_register_offset);
+                    emit_epilogue(
+                        &mut instructions,
+                        frame_size,
+                        large_stack_size,
+                        link_register_offset,
+                    );
                     continue;
                 }
                 let ret_dst =
@@ -1682,7 +1791,12 @@ fn convert_function(
                     val_operand(val, &stack_slots, global_vars)?
                 };
                 instructions.push(AsmInstr::Mov(ty, src, ret_dst));
-                emit_epilogue(&mut instructions, frame_size, link_register_offset);
+                emit_epilogue(
+                    &mut instructions,
+                    frame_size,
+                    large_stack_size,
+                    link_register_offset,
+                );
             }
             TackyInstr::Copy { src, dst } => {
                 let ty = asm_type_for_val(dst, types)?;
@@ -2078,6 +2192,9 @@ fn convert_function(
                 if frame_size > 0 {
                     instructions.push(AsmInstr::DeallocateStack(frame_size));
                 }
+                if large_stack_size > 0 {
+                    instructions.push(AsmInstr::AArch64DeallocateLargeStack(large_stack_size));
+                }
                 instructions.push(AsmInstr::NonlocalJmp(label.clone()));
             }
             TackyInstr::JumpIndirect(target) => {
@@ -2155,10 +2272,18 @@ fn convert_function(
                         "AArch64 backend can only take addresses of local variables".to_string()
                     );
                 };
-                instructions.push(AsmInstr::Lea(
-                    stack_or_data_operand(name, 0, &stack_slots, global_vars)?,
-                    val_operand(dst, &stack_slots, global_vars)?,
-                ));
+                if let Some((base_slot, _)) = large_local_offsets.get(name) {
+                    instructions.push(AsmInstr::Mov(
+                        AsmType::Quadword,
+                        AsmOperand::Stack(*base_slot),
+                        val_operand(dst, &stack_slots, global_vars)?,
+                    ));
+                } else {
+                    instructions.push(AsmInstr::Lea(
+                        stack_or_data_operand(name, 0, &stack_slots, global_vars)?,
+                        val_operand(dst, &stack_slots, global_vars)?,
+                    ));
+                }
             }
             TackyInstr::Load { src_ptr, dst } => {
                 let dst_ty = asm_type_for_val(dst, types)?;
@@ -3141,6 +3266,46 @@ mod tests {
             matches!(
                 instr,
                 AsmInstr::Lea(AsmOperand::Data(name), _) if name == "inc"
+            )
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn huge_local_array_uses_saved_large_stack_base() -> Result<(), String> {
+        let program = codegen_source(
+            "extern int sink(char *);\n\
+             int f(void) { char s[0x10000000000UL]; return sink(s); }\n",
+        )?;
+        let function = function(&program, "f")?;
+        assert!(function.instructions.iter().any(|instr| {
+            matches!(
+                instr,
+                AsmInstr::AArch64AllocateLargeStack(bytes) if *bytes == 0x10000000000
+            )
+        }));
+        let base_slot = function.instructions.iter().find_map(|instr| {
+            if let AsmInstr::AArch64StoreLargeLocalBase { dst_offset, .. } = instr {
+                Some(*dst_offset)
+            } else {
+                None
+            }
+        });
+        let Some(base_slot) = base_slot else {
+            return Err("expected saved large local base".to_string());
+        };
+        assert!(function.instructions.iter().any(|instr| {
+            matches!(
+                instr,
+                AsmInstr::Mov(AsmType::Quadword, AsmOperand::Stack(slot), _)
+                    if *slot == base_slot
+            )
+        }));
+        assert!(!function.instructions.iter().any(|instr| {
+            matches!(
+                instr,
+                AsmInstr::Lea(AsmOperand::Stack(slot), _)
+                    if *slot == base_slot
             )
         }));
         Ok(())

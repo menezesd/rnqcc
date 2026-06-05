@@ -168,7 +168,10 @@ def use_internal_cpp_for_test(src: Path) -> bool:
         text = src.read_text(errors="ignore")
     except OSError:
         return False
-    return re.search(r"\bva_start\s*\(\s*[^,\)]+\s*\)", text) is not None
+    return (
+        re.search(r"\bva_start\s*\(\s*[^,\)]+\s*\)", text) is not None
+        or "#cpu(" in text
+    )
 
 
 def skip_reason_for_test(src: Path) -> str | None:
@@ -234,8 +237,6 @@ def skip_reason_for_test(src: Path) -> str | None:
         "../../gcc.target/" in text or "../../gcc.dg/" in text
     ) and not (src.parent.name == "execute" and src.name in portable_target_execute_smoke):
         return "target-specific included GCC test"
-    if "#if empty#cpu" in text:
-        return "invalid preprocessor token-paste edge test"
     complex_compile_gaps: dict[str, str] = {}
     complex_execute_gaps: dict[str, str] = {}
     if src.parent.name == "compile" and src.name in complex_compile_gaps:

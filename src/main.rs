@@ -4143,6 +4143,26 @@ impl<'a> IfExprParser<'a> {
             }
             return Ok(value);
         }
+        if self.eat("#") {
+            let Some(_predicate) = self.ident() else {
+                return Err("expected assertion predicate after # in #if expression".to_string());
+            };
+            if self.eat("(") {
+                let mut depth = 1usize;
+                while self.pos < self.chars.len() && depth > 0 {
+                    match self.chars[self.pos] {
+                        '(' => depth += 1,
+                        ')' => depth -= 1,
+                        _ => {}
+                    }
+                    self.pos += 1;
+                }
+                if depth != 0 {
+                    return Err("missing ')' in #if assertion predicate".to_string());
+                }
+            }
+            return Ok(0);
+        }
         if let Some(number) = self.number()? {
             return Ok(number);
         }

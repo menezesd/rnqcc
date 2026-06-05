@@ -12186,6 +12186,34 @@ fn internal_cpp_handles_conditional_directives() {
 }
 
 #[test]
+fn internal_cpp_handles_gcc_assertion_predicate_if_expression() {
+    let src = temp_file("internal-cpp-assertion-predicate", "c");
+    std::fs::write(
+        &src,
+        "#define empty\n\
+         #if empty#cpu(m68k)\n\
+         int skipped = 1;\n\
+         #endif\n\
+         int kept = 2;\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(!stdout.contains("int skipped"), "{stdout}");
+    assert!(stdout.contains("int kept = 2;"), "{stdout}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn internal_cpp_ignores_malformed_nonconditional_directives_in_skipped_groups() {
     let src = temp_file("internal-cpp-skipped-bad-directives", "c");
     std::fs::write(

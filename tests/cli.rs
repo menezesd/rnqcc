@@ -15178,6 +15178,7 @@ fn internal_cpp_provides_minimal_immintrin_virtual_header() {
 
     let output = Command::new(rnqcc())
         .arg("--internal-cpp")
+        .arg("-nostdinc")
         .arg("--target")
         .arg("x86_64-linux")
         .arg("-S")

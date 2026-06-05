@@ -34,6 +34,12 @@ struct FileScopeVarInfo {
     var_type: CType,
 }
 
+struct StaticStringAddress<'a> {
+    value: &'a str,
+    offset: i64,
+    elem_size: i64,
+}
+
 struct StaticInitBuilder {
     pieces: Vec<(usize, StaticInit)>,
 }
@@ -466,17 +472,19 @@ impl TackyGen {
     }
 
     fn static_same_string_lvalue_diff(left: &Exp, right: &Exp) -> Option<i64> {
-        let (left_value, left_offset, elem_size) = Self::static_string_lvalue_address(left)?;
-        let (right_value, right_offset, right_elem_size) =
-            Self::static_string_lvalue_address(right)?;
-        if left_value != right_value || elem_size != right_elem_size || elem_size == 0 {
+        let left_addr = Self::static_string_lvalue_address(left)?;
+        let right_addr = Self::static_string_lvalue_address(right)?;
+        if left_addr.value != right_addr.value
+            || left_addr.elem_size != right_addr.elem_size
+            || left_addr.elem_size == 0
+        {
             return None;
         }
-        let byte_diff = left_offset - right_offset;
-        (byte_diff % elem_size == 0).then_some(byte_diff / elem_size)
+        let byte_diff = left_addr.offset - right_addr.offset;
+        (byte_diff % left_addr.elem_size == 0).then_some(byte_diff / left_addr.elem_size)
     }
 
-    fn static_string_lvalue_address(exp: &Exp) -> Option<(&str, i64, i64)> {
+    fn static_string_lvalue_address(exp: &Exp) -> Option<StaticStringAddress<'_>> {
         match exp {
             Exp::Unary(UnaryOp::AddrOf, inner) => Self::static_string_lvalue_address(inner),
             Exp::Cast(_, _, inner) => Self::static_string_lvalue_address(inner),
@@ -487,7 +495,11 @@ impl TackyGen {
                     _ => return None,
                 };
                 let (index, _, _) = eval_static_integer_constant_exp(idx)?;
-                Some((value, index * elem_size, elem_size))
+                Some(StaticStringAddress {
+                    value,
+                    offset: index * elem_size,
+                    elem_size,
+                })
             }
             _ => None,
         }

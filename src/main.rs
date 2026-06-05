@@ -6345,8 +6345,29 @@ fn driver(options: DriverOptions<'_>) -> Result<(), String> {
     Ok(())
 }
 
+const DRIVER_STACK_SIZE: usize = 256 * 1024 * 1024;
+
 fn main() {
-    if let Err(err) = real_main() {
+    let result = std::thread::Builder::new()
+        .name("rnqcc-driver".to_string())
+        .stack_size(DRIVER_STACK_SIZE)
+        .spawn(real_main)
+        .and_then(|handle| {
+            handle.join().map_err(|panic| {
+                if let Some(message) = panic.downcast_ref::<&'static str>() {
+                    std::io::Error::other(*message)
+                } else if let Some(message) = panic.downcast_ref::<String>() {
+                    std::io::Error::other(message.clone())
+                } else {
+                    std::io::Error::other("compiler thread panicked")
+                }
+            })
+        });
+    let result = match result {
+        Ok(result) => result,
+        Err(err) => Err(format!("failed to run compiler driver: {err}")),
+    };
+    if let Err(err) = result {
         eprintln!("rnqcc: {}", err);
         std::process::exit(1);
     }

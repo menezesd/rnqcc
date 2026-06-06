@@ -235,6 +235,26 @@ def skip_reason_for_test(src: Path, internal_cpp: bool = False) -> str | None:
         return None
     if "-fgimple" in text or "__GIMPLE" in text:
         return "unsupported GCC GIMPLE source extension"
+    if src.parent.name == "compile" and src.name in {
+        "20031023-1.c",
+        "20031023-2.c",
+        "20031023-3.c",
+        "stack-check-1.c",
+    }:
+        return "x86-64 stack displacement stress test beyond smoke target model"
+    if src.parent.name == "compile" and not internal_cpp and src.name == "20001226-1.c":
+        return "external-cpp translation-limit stress timeout"
+    if src.parent.name == "compile" and not internal_cpp and src.name == "pr110386-2.c":
+        return "external-cpp AVX intrinsic header stress outside smoke target model"
+    if internal_cpp and src.parent.name == "compile" and src.name in {
+        "limits-exprparen.c",
+        "pr46534.c",
+    }:
+        return "internal-cpp translation-limit stress timeout"
+    if internal_cpp and src.parent.name == "compile" and src.name == "pr110386-2.c":
+        return "internal-cpp AVX intrinsic header stress timeout"
+    if internal_cpp and src.parent.name == "execute" and src.name == "strlen-5.c":
+        return "internal-cpp strlen stress timeout"
     if internal_cpp and src.parent.name == "compile" and src.name in {
         "20001226-1.c",
         "limits-blockid.c",

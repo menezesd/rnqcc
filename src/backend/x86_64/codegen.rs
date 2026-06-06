@@ -3629,6 +3629,9 @@ fn fixup_instructions(func: &mut AsmFunction, stack_size: i64, callee_saved: &[R
                 new_instructions.push(AsmInstr::Mov(t, src.clone(), AsmOperand::Reg(Reg::R10)));
                 new_instructions.push(AsmInstr::Mov(t, AsmOperand::Reg(Reg::R10), dst.clone()));
             }
+            AsmInstr::Movsx(st, dt, ref src, ref dst) if st == dt => {
+                new_instructions.push(AsmInstr::Mov(dt, src.clone(), dst.clone()));
+            }
             // movsx with memory dst (movslq can't write to memory)
             AsmInstr::Movsx(st, dt, ref src, ref dst) if is_memory(dst) => {
                 new_instructions.push(AsmInstr::Movsx(
@@ -3676,6 +3679,39 @@ fn fixup_instructions(func: &mut AsmFunction, stack_size: i64, callee_saved: &[R
                 new_instructions.push(AsmInstr::Div(t, AsmOperand::Reg(Reg::R10)));
             }
             // mul with memory dst (integer only)
+            AsmInstr::Binary(AsmType::Byte, AsmBinaryOp::Mul, ref src, ref dst) => {
+                new_instructions.push(AsmInstr::Mov(
+                    AsmType::Longword,
+                    AsmOperand::Imm(0),
+                    AsmOperand::Reg(Reg::R10),
+                ));
+                new_instructions.push(AsmInstr::Mov(
+                    AsmType::Longword,
+                    AsmOperand::Imm(0),
+                    AsmOperand::Reg(Reg::R11),
+                ));
+                new_instructions.push(AsmInstr::Mov(
+                    AsmType::Byte,
+                    src.clone(),
+                    AsmOperand::Reg(Reg::R10),
+                ));
+                new_instructions.push(AsmInstr::Mov(
+                    AsmType::Byte,
+                    dst.clone(),
+                    AsmOperand::Reg(Reg::R11),
+                ));
+                new_instructions.push(AsmInstr::Binary(
+                    AsmType::Longword,
+                    AsmBinaryOp::Mul,
+                    AsmOperand::Reg(Reg::R10),
+                    AsmOperand::Reg(Reg::R11),
+                ));
+                new_instructions.push(AsmInstr::Mov(
+                    AsmType::Byte,
+                    AsmOperand::Reg(Reg::R11),
+                    dst.clone(),
+                ));
+            }
             AsmInstr::Binary(t, AsmBinaryOp::Mul, ref src, ref dst)
                 if is_memory(dst) && !matches!(t, AsmType::Float | AsmType::Double) =>
             {

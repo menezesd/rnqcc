@@ -668,13 +668,20 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
         }
         AsmInstr::Movsx(src_t, dst_t, src, dst) => {
             let mnemonic = match (src_t, dst_t) {
+                (AsmType::Byte, AsmType::Byte) => "movb",
                 (AsmType::Byte, AsmType::Word) => "movsbw",
                 (AsmType::Byte, AsmType::Longword) => "movsbl",
                 (AsmType::Byte, AsmType::Quadword) => "movsbq",
+                (AsmType::Word, AsmType::Word) => "movw",
                 (AsmType::Word, AsmType::Longword) => "movswl",
                 (AsmType::Word, AsmType::Quadword) => "movswq",
+                (AsmType::Longword, AsmType::Longword) => "movl",
                 (AsmType::Longword, AsmType::Quadword) => "movslq",
-                _ => "movslq", // fallback
+                (_, AsmType::Byte) => "movb",
+                (_, AsmType::Word) => "movw",
+                (_, AsmType::Longword) => "movl",
+                (_, AsmType::Quadword) => "movq",
+                _ => return invalid_input("unsupported x86-64 sign-extension conversion"),
             };
             let src_str = if *src_t == AsmType::Byte {
                 show_operand_byte_or_imm(src, platform)?
@@ -1542,6 +1549,9 @@ fn emit_alias(
     alias_target: &str,
     platform: &Target,
 ) -> std::io::Result<()> {
+    if alias_target.is_empty() {
+        return Ok(());
+    }
     let name = platform.show_label(name);
     let alias_target = platform.show_label(alias_target);
     writeln!(w, "\t.globl {}", name)?;

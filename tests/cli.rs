@@ -1477,7 +1477,7 @@ fn gcc_torture_smoke_uses_assembly_for_cross_target_compile() -> Result<(), Stri
     std::fs::create_dir_all(&compile_dir)
         .map_err(|err| format!("failed to create fake suite: {err}"))?;
     std::fs::write(
-        compile_dir.join("pr110386-2.c"),
+        compile_dir.join("pr88423.c"),
         "/* { dg-do compile { target i?86-*-* x86_64-*-* } } */\n\
          int value;\n",
     )
@@ -1527,7 +1527,7 @@ fn gcc_torture_smoke_uses_assembly_for_cross_target_compile() -> Result<(), Stri
             "--target",
             "x86_64-linux",
             "-S",
-            "pr110386-2.c",
+            "pr88423.c",
             "-o",
         ],
     )?;

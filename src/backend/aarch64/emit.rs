@@ -2050,6 +2050,9 @@ fn emit_alias(
     alias_target: &str,
     target: &Target,
 ) -> std::io::Result<()> {
+    if alias_target.is_empty() {
+        return Ok(());
+    }
     let name = target.show_label(name);
     let alias_target = target.show_label(alias_target);
     writeln!(w, "\t.globl {}", name)?;

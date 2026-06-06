@@ -5,4 +5,3 @@
 #
 # Keep this file as small as possible. By default the runner fails if an
 # expected failure starts passing, so entries can be removed as rnqcc improves.
-execute/20011008-3.c | exit status -11

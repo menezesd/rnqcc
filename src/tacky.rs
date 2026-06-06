@@ -834,7 +834,7 @@ impl TackyGen {
 
     fn next_tmp_name(&mut self) -> String {
         loop {
-            let name = format!("__tmp.{}", self.tmp_counter);
+            let name = format!("__rnqcc_tmp.{}", self.tmp_counter);
             self.tmp_counter += 1;
             if !self.symbol_types.contains_key(&name)
                 && !self.var_types.contains_key(&name)

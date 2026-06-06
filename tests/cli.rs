@@ -4632,6 +4632,44 @@ Test1 func2(void) {
 }
 
 #[test]
+fn tacky_temporaries_do_not_collide_with_user_dunder_tmp_names() {
+    let src = temp_file("tacky-dunder-temp-user-name-collision", "c");
+    let out = temp_file("tacky-dunder-temp-user-name-collision", "s");
+    std::fs::write(
+        &src,
+        "struct L { int ntxns; int maxn; int *p; };\n\
+         struct E { int type; union { struct L l; } u; };\n\
+         int f(struct E *e, unsigned flags) {\n\
+             struct L __tmp;\n\
+             __tmp.ntxns = 7;\n\
+             return (!(flags & 1) ? __tmp.ntxns : e->u.l.ntxns);\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(
+        !asm.contains("movl %eax, -16(%rbp)\n\tmovq -16(%rbp), %r11"),
+        "{asm}"
+    );
+    assert!(
+        asm.contains("addq $8, %rdi\n\tmovq %rdi, %r11\n\tmovl (%r11), %eax"),
+        "{asm}"
+    );
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn x86_64_typedef_alignment_applies_to_static_object() {
     let src = temp_file("x86-typedef-alignment-static", "c");
     let out = temp_file("x86-typedef-alignment-static", "s");

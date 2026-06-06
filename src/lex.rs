@@ -1566,27 +1566,38 @@ impl Lexer {
 
                 '\'' => self.read_char_constant(false)?,
                 '"' => self.read_string_literal()?,
-                'L' | 'u' | 'U' if self.peek() == Some('\'') => {
-                    let wide = c == 'L';
-                    self.advance();
-                    self.read_char_constant(wide)?
+                'u' if self.peek() == Some('8') && self.peek_ahead(1) == Some('\'') => {
+                    return Err("unsupported UTF-8 character literal prefix: u8".to_string());
                 }
-                'L' | 'u' | 'U' if self.peek() == Some('"') => {
-                    let wide = c == 'L';
+                'u' if self.peek() == Some('8') && self.peek_ahead(1) == Some('"') => {
+                    self.advance();
+                    self.advance();
+                    self.read_string_literal()?
+                }
+                'u' | 'U' if self.peek() == Some('\'') => {
+                    return Err(format!(
+                        "unsupported UTF-16/UTF-32 character literal prefix: {c}"
+                    ));
+                }
+                'u' | 'U' if self.peek() == Some('"') => {
+                    return Err(format!(
+                        "unsupported UTF-16/UTF-32 string literal prefix: {c}"
+                    ));
+                }
+                'L' if self.peek() == Some('\'') => {
+                    self.advance();
+                    self.read_char_constant(true)?
+                }
+                'L' if self.peek() == Some('"') => {
                     self.advance();
                     match self.read_string_literal()? {
-                        Token::StringLiteral(s) if wide => {
+                        Token::StringLiteral(s) => {
                             let chars: Vec<u32> = s.chars().map(|ch| ch as u32).collect();
                             let s = Self::decode_utf8_byte_chars(&chars).unwrap_or(s);
                             Token::WideStringLiteral(s)
                         }
                         tok => tok,
                     }
-                }
-                'u' if self.peek() == Some('8') && self.peek_ahead(1) == Some('"') => {
-                    self.advance();
-                    self.advance();
-                    self.read_string_literal()?
                 }
 
                 // Float literal starting with '.' (e.g., .5)
@@ -1757,6 +1768,30 @@ mod tests {
         let err = require_err(lex("char *s = \"\\u0041\";"), "lexing should fail")?;
         assert!(err.contains("invalid universal character escape"));
         assert!(err.contains("basic character universal character"));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_unsupported_utf_literal_prefixes() -> Result<(), String> {
+        let err = require_err(lex("char *s = u\"hi\";"), "lexing should fail")?;
+        assert!(err.contains("unsupported UTF-16/UTF-32 string literal prefix: u"));
+
+        let err = require_err(lex("char *s = U\"hi\";"), "lexing should fail")?;
+        assert!(err.contains("unsupported UTF-16/UTF-32 string literal prefix: U"));
+
+        let err = require_err(lex("int c = u'a';"), "lexing should fail")?;
+        assert!(err.contains("unsupported UTF-16/UTF-32 character literal prefix: u"));
+
+        let err = require_err(lex("int c = U'a';"), "lexing should fail")?;
+        assert!(err.contains("unsupported UTF-16/UTF-32 character literal prefix: U"));
+
+        let err = require_err(lex("int c = u8'a';"), "lexing should fail")?;
+        assert!(err.contains("unsupported UTF-8 character literal prefix: u8"));
+
+        let tokens = lex("char *s = u8\"hi\"; int c = L'a'; int *w = L\"hi\";")?;
+        assert!(tokens.contains(&Token::StringLiteral("hi".to_string())));
+        assert!(tokens.contains(&Token::CharLiteral('a' as i64)));
+        assert!(tokens.contains(&Token::WideStringLiteral("hi".to_string())));
         Ok(())
     }
 

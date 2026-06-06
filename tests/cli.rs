@@ -25364,7 +25364,54 @@ fn rejects_invalid_unicode_ucns_with_both_preprocessors() {
             .arg(exe.path())
             .output()
             .expect("failed to run rnqcc");
-        assert!(!output.status.success(), "{mode} unexpectedly succeeded");
+        let status = output.status;
+        let stderr = stderr(output);
+        assert!(!status.success(), "{mode} unexpectedly succeeded");
+        if internal_cpp {
+            assert!(
+                stderr.contains("basic character universal character"),
+                "{mode}: {stderr}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rejects_unsupported_utf_literal_prefixes_under_internal_cpp() {
+    for (prefix, kind) in [
+        ("u", "string"),
+        ("U", "string"),
+        ("u", "character"),
+        ("U", "character"),
+        ("u8", "character"),
+    ] {
+        let src = TempPath::new(&format!("unsupported-{prefix}-{kind}-literal"), "c");
+        let exe = TempPath::new(&format!("unsupported-{prefix}-{kind}-literal"), "bin");
+        let literal = if kind == "string" {
+            format!("{prefix}\"x\"")
+        } else {
+            format!("{prefix}'x'")
+        };
+        std::fs::write(
+            src.path(),
+            format!("int main(void) {{ return {literal}[0]; }}\n"),
+        )
+        .expect("failed to write input");
+
+        let output = Command::new(rnqcc())
+            .arg("--internal-cpp")
+            .arg(src.path())
+            .arg("-o")
+            .arg(exe.path())
+            .output()
+            .expect("failed to run rnqcc");
+        let status = output.status;
+        let stderr = stderr(output);
+        assert!(!status.success(), "{prefix} {kind} unexpectedly succeeded");
+        assert!(
+            stderr.contains("unsupported UTF"),
+            "{prefix} {kind}: {stderr}"
+        );
     }
 }
 

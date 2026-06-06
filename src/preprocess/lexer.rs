@@ -340,11 +340,11 @@ impl Lexer {
 }
 
 pub(crate) fn is_ident_start(ch: char) -> bool {
-    ch == '_' || ch.is_alphabetic()
+    ch == '_' || unicode_ident::is_xid_start(ch)
 }
 
 pub(crate) fn is_ident_continue(ch: char) -> bool {
-    ch == '_' || ch.is_alphanumeric()
+    ch == '_' || unicode_ident::is_xid_continue(ch)
 }
 
 fn starts_string_or_char_literal(ch: char, next: Option<char>, after_next: Option<char>) -> bool {

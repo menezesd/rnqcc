@@ -42,11 +42,11 @@ struct FloatSuffixes {
 }
 
 fn is_ident_start(ch: char) -> bool {
-    ch == '_' || ch.is_alphabetic()
+    ch == '_' || unicode_ident::is_xid_start(ch)
 }
 
 fn is_ident_continue(ch: char) -> bool {
-    ch == '_' || ch.is_alphanumeric()
+    ch == '_' || unicode_ident::is_xid_continue(ch)
 }
 
 fn hex_value(ch: char) -> Option<u32> {

@@ -9,3 +9,4 @@ license = "MIT"
 
 [dependencies]
 clap = "3.0"
+unicode-ident = "1.0"

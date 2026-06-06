@@ -73,7 +73,9 @@ impl Target {
     }
 
     pub fn show_label(&self, name: &str) -> String {
-        let name = mangle_assembly_label(name);
+        let (name, offset) = split_assembly_label_offset(name);
+        let mut name = mangle_assembly_label(name);
+        name.push_str(offset);
         match self.os {
             TargetOs::MacOs => format!("_{}", name),
             TargetOs::Linux => name,
@@ -129,12 +131,27 @@ fn is_assembly_label_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '.')
 }
 
+fn split_assembly_label_offset(name: &str) -> (&str, &str) {
+    match name.rfind('+') {
+        Some(pos) if pos > 0 && name[pos + 1..].chars().all(|ch| ch.is_ascii_digit()) => {
+            (&name[..pos], &name[pos..])
+        }
+        _ => (name, ""),
+    }
+}
+
 fn mangle_assembly_label(name: &str) -> String {
-    if name.chars().all(is_assembly_label_char) {
+    if name.chars().all(is_assembly_label_char) && !name.starts_with("__rnqcc_u") {
         return name.to_string();
     }
 
-    let mut out = String::from("__rnqcc_m");
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in name.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+
+    let mut out = String::from("__rnqcc_u");
     for ch in name.chars() {
         if ch.is_ascii_alphanumeric() {
             out.push(ch);
@@ -146,6 +163,8 @@ fn mangle_assembly_label(name: &str) -> String {
             out.push('_');
         }
     }
+    out.push_str("_h");
+    out.push_str(&format!("{hash:016x}"));
     out
 }
 
@@ -2244,11 +2263,36 @@ mod tests {
     fn show_label_mangles_unicode_symbol_names() {
         assert_eq!(
             Target::x86_64_linux().show_label("αβ_global"),
-            "__rnqcc_m_x3b1__x3b2___global"
+            "__rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe"
         );
         assert_eq!(
             Target::x86_64_macos().show_label("αβ_global"),
-            "___rnqcc_m_x3b1__x3b2___global"
+            "___rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe"
+        );
+    }
+
+    #[test]
+    fn show_label_preserves_data_offsets() {
+        assert_eq!(Target::x86_64_linux().show_label("origin+4"), "origin+4");
+        assert_eq!(
+            Target::x86_64_linux().show_label("αβ_global+4"),
+            "__rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe+4"
+        );
+        assert_eq!(
+            Target::x86_64_macos().show_label("αβ_global+4"),
+            "___rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe+4"
+        );
+    }
+
+    #[test]
+    fn show_label_does_not_collide_with_ascii_lookalikes() {
+        assert_eq!(
+            Target::x86_64_linux().show_label("__rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe"),
+            "__rnqcc_u____rnqcc__u__x3b1____x3b2______global__h80d54a5cf5297ffe_h96ccdba34d0da6e9"
+        );
+        assert_ne!(
+            Target::x86_64_linux().show_label("αβ_global"),
+            Target::x86_64_linux().show_label("__rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe")
         );
     }
 

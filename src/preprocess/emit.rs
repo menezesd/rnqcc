@@ -3,21 +3,28 @@ use super::token::{PpToken, PpTokenKind};
 pub fn emit_tokens(tokens: &[PpToken]) -> String {
     let mut out = String::with_capacity(tokens.iter().map(|token| token.text().len()).sum());
     let mut previous: Option<&PpToken> = None;
+    let mut previous_emitted_whitespace = false;
     for token in tokens {
-        if should_insert_space(previous, token, &out) {
+        if should_insert_space(previous, token, previous_emitted_whitespace) {
             out.push(' ');
         }
-        out.push_str(token.text());
+        let text = token.text();
+        out.push_str(text);
+        previous_emitted_whitespace = text.chars().last().is_some_and(char::is_whitespace);
         previous = Some(token);
     }
     out
 }
 
-fn should_insert_space(previous: Option<&PpToken>, current: &PpToken, out: &str) -> bool {
+fn should_insert_space(
+    previous: Option<&PpToken>,
+    current: &PpToken,
+    previous_emitted_whitespace: bool,
+) -> bool {
     let Some(previous) = previous else {
         return false;
     };
-    if out.ends_with(char::is_whitespace) {
+    if previous_emitted_whitespace {
         return false;
     }
     if matches!(

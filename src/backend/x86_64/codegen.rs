@@ -1678,7 +1678,7 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
         }
         TackyInstr::VaStart { dst } => {
             out.push(AsmInstr::Lea(
-                AsmOperand::Stack(va_start_stack_offset),
+                AsmOperand::Stack(i64::from(va_start_stack_offset)),
                 convert_val(dst),
             ));
         }
@@ -3210,25 +3210,25 @@ fn convert_function(
             if t == AsmType::LongDouble {
                 stack_param_instructions.push(AsmInstr::X87Load(
                     AsmType::LongDouble,
-                    AsmOperand::Stack(offset),
+                    AsmOperand::Stack(i64::from(offset)),
                 ));
                 stack_param_instructions
                     .push(AsmInstr::X87Store(AsmOperand::Pseudo(param.clone())));
             } else if t == AsmType::Octword {
                 stack_param_instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
-                    AsmOperand::Stack(offset),
+                    AsmOperand::Stack(i64::from(offset)),
                     AsmOperand::PseudoMem(param.clone(), 0),
                 ));
                 stack_param_instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
-                    AsmOperand::Stack(offset + 8),
+                    AsmOperand::Stack(i64::from(offset + 8)),
                     AsmOperand::PseudoMem(param.clone(), 8),
                 ));
             } else {
                 stack_param_instructions.push(AsmInstr::Mov(
                     t,
-                    AsmOperand::Stack(offset),
+                    AsmOperand::Stack(i64::from(offset)),
                     AsmOperand::Pseudo(param.clone()),
                 ));
             }
@@ -3242,7 +3242,7 @@ fn convert_function(
             let offset = 16 + stack_arg_offset as i32;
             stack_param_instructions.push(AsmInstr::X87Load(
                 AsmType::LongDouble,
-                AsmOperand::Stack(offset),
+                AsmOperand::Stack(i64::from(offset)),
             ));
             stack_param_instructions.push(AsmInstr::X87Store(AsmOperand::Pseudo(param.clone())));
             stack_arg_offset += layout.size;
@@ -3260,7 +3260,7 @@ fn convert_function(
                 let offset = 16 + stack_arg_offset as i32;
                 stack_param_instructions.push(AsmInstr::Mov(
                     t,
-                    AsmOperand::Stack(offset),
+                    AsmOperand::Stack(i64::from(offset)),
                     AsmOperand::Pseudo(param.clone()),
                 ));
                 stack_arg_offset += layout.size;
@@ -3284,12 +3284,12 @@ fn convert_function(
                 let offset = 16 + stack_arg_offset as i32;
                 stack_param_instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
-                    AsmOperand::Stack(offset),
+                    AsmOperand::Stack(i64::from(offset)),
                     AsmOperand::PseudoMem(param.clone(), 0),
                 ));
                 stack_param_instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
-                    AsmOperand::Stack(offset + 8),
+                    AsmOperand::Stack(i64::from(offset + 8)),
                     AsmOperand::PseudoMem(param.clone(), 8),
                 ));
                 stack_arg_offset += layout.size;
@@ -3308,7 +3308,7 @@ fn convert_function(
                 let offset = 16 + stack_arg_offset as i32;
                 stack_param_instructions.push(AsmInstr::Mov(
                     t,
-                    AsmOperand::Stack(offset),
+                    AsmOperand::Stack(i64::from(offset)),
                     AsmOperand::Pseudo(param.clone()),
                 ));
                 stack_arg_offset += layout.size;
@@ -3358,7 +3358,7 @@ struct ReplacePseudoContext<'a> {
 }
 
 fn replace_pseudos(func: &mut AsmFunction, ctx: &ReplacePseudoContext<'_>) -> Result<i64, String> {
-    let mut pseudo_map: HashMap<String, i32> = HashMap::new();
+    let mut pseudo_map: HashMap<String, i64> = HashMap::new();
     let mut stack_offset: i64 = 0;
 
     fn stack_size_for_name(name: &str, ctx: &ReplacePseudoContext<'_>) -> Result<i64, String> {
@@ -3404,10 +3404,10 @@ fn replace_pseudos(func: &mut AsmFunction, ctx: &ReplacePseudoContext<'_>) -> Re
 
     fn allocate_stack_slot(
         name: &str,
-        map: &mut HashMap<String, i32>,
+        map: &mut HashMap<String, i64>,
         offset: &mut i64,
         ctx: &ReplacePseudoContext<'_>,
-    ) -> Result<i32, String> {
+    ) -> Result<i64, String> {
         if let Some(&o) = map.get(name) {
             return Ok(o);
         }
@@ -3418,19 +3418,13 @@ fn replace_pseudos(func: &mut AsmFunction, ctx: &ReplacePseudoContext<'_>) -> Re
             .checked_sub(size)
             .ok_or_else(|| format!("stack frame for `{}` is too large", name))?;
         *offset &= -align;
-        let stack_offset = i32::try_from(*offset).map_err(|_| {
-            format!(
-                "stack slot for `{}` exceeds x86-64 displacement range",
-                name
-            )
-        })?;
-        map.insert(name.to_string(), stack_offset);
-        Ok(stack_offset)
+        map.insert(name.to_string(), *offset);
+        Ok(*offset)
     }
 
     fn replace_operand(
         op: &mut AsmOperand,
-        map: &mut HashMap<String, i32>,
+        map: &mut HashMap<String, i64>,
         offset: &mut i64,
         ctx: &ReplacePseudoContext<'_>,
     ) -> Result<(), String> {
@@ -3461,7 +3455,7 @@ fn replace_pseudos(func: &mut AsmFunction, ctx: &ReplacePseudoContext<'_>) -> Re
                 } else {
                     let base_off = allocate_stack_slot(&name, map, offset, ctx)?;
                     let stack_off = base_off
-                        .checked_add(mem_off)
+                        .checked_add(i64::from(mem_off))
                         .ok_or_else(|| format!("stack access for `{}` overflows", name))?;
                     *op = AsmOperand::Stack(stack_off);
                 }
@@ -3579,6 +3573,31 @@ fn is_memory(op: &AsmOperand) -> bool {
     )
 }
 
+fn stack_offset_exceeds_disp32(op: &AsmOperand) -> Option<i64> {
+    match op {
+        AsmOperand::Stack(offset)
+            if *offset > i64::from(i32::MAX) || *offset < i64::from(i32::MIN) =>
+        {
+            Some(*offset)
+        }
+        _ => None,
+    }
+}
+
+fn materialize_stack_address(out: &mut Vec<AsmInstr>, offset: i64, scratch: Reg) {
+    out.push(AsmInstr::Mov(
+        AsmType::Quadword,
+        AsmOperand::Imm(offset),
+        AsmOperand::Reg(scratch),
+    ));
+    out.push(AsmInstr::Binary(
+        AsmType::Quadword,
+        AsmBinaryOp::Add,
+        AsmOperand::Reg(Reg::BP),
+        AsmOperand::Reg(scratch),
+    ));
+}
+
 fn fixup_instructions(func: &mut AsmFunction, stack_size: i64, callee_saved: &[Reg]) {
     let num_cs = callee_saved.len() as i64;
     let total_aligned = (stack_size + 8 * num_cs + 15) & !15;
@@ -3596,6 +3615,118 @@ fn fixup_instructions(func: &mut AsmFunction, stack_size: i64, callee_saved: &[R
 
     for instr in old_instructions {
         match instr {
+            AsmInstr::Lea(AsmOperand::Stack(offset), ref dst)
+                if stack_offset_exceeds_disp32(&AsmOperand::Stack(offset)).is_some() =>
+            {
+                materialize_stack_address(&mut new_instructions, offset, Reg::R10);
+                new_instructions.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    AsmOperand::Reg(Reg::R10),
+                    dst.clone(),
+                ));
+            }
+            AsmInstr::Mov(t, ref src, ref dst)
+                if stack_offset_exceeds_disp32(src).is_some()
+                    || stack_offset_exceeds_disp32(dst).is_some() =>
+            {
+                match (
+                    stack_offset_exceeds_disp32(src),
+                    stack_offset_exceeds_disp32(dst),
+                ) {
+                    (Some(src_offset), Some(dst_offset)) => {
+                        materialize_stack_address(&mut new_instructions, src_offset, Reg::R10);
+                        materialize_stack_address(&mut new_instructions, dst_offset, Reg::R11);
+                        if matches!(t, AsmType::Float | AsmType::Double) {
+                            new_instructions.push(AsmInstr::LoadIndirect(
+                                t,
+                                Reg::R10,
+                                AsmOperand::Xmm(XmmReg::XMM14),
+                            ));
+                            new_instructions.push(AsmInstr::StoreIndirect(
+                                t,
+                                AsmOperand::Xmm(XmmReg::XMM14),
+                                Reg::R11,
+                            ));
+                        } else {
+                            new_instructions.push(AsmInstr::LoadIndirect(
+                                t,
+                                Reg::R10,
+                                AsmOperand::Reg(Reg::R10),
+                            ));
+                            new_instructions.push(AsmInstr::StoreIndirect(
+                                t,
+                                AsmOperand::Reg(Reg::R10),
+                                Reg::R11,
+                            ));
+                        }
+                    }
+                    (Some(src_offset), None) => {
+                        materialize_stack_address(&mut new_instructions, src_offset, Reg::R10);
+                        if is_memory(dst) {
+                            if matches!(t, AsmType::Float | AsmType::Double) {
+                                new_instructions.push(AsmInstr::LoadIndirect(
+                                    t,
+                                    Reg::R10,
+                                    AsmOperand::Xmm(XmmReg::XMM14),
+                                ));
+                                new_instructions.push(AsmInstr::Mov(
+                                    t,
+                                    AsmOperand::Xmm(XmmReg::XMM14),
+                                    dst.clone(),
+                                ));
+                            } else {
+                                new_instructions.push(AsmInstr::LoadIndirect(
+                                    t,
+                                    Reg::R10,
+                                    AsmOperand::Reg(Reg::R10),
+                                ));
+                                new_instructions.push(AsmInstr::Mov(
+                                    t,
+                                    AsmOperand::Reg(Reg::R10),
+                                    dst.clone(),
+                                ));
+                            }
+                        } else {
+                            new_instructions.push(AsmInstr::LoadIndirect(t, Reg::R10, dst.clone()));
+                        }
+                    }
+                    (None, Some(dst_offset)) => {
+                        materialize_stack_address(&mut new_instructions, dst_offset, Reg::R11);
+                        if is_memory(src) {
+                            if matches!(t, AsmType::Float | AsmType::Double) {
+                                new_instructions.push(AsmInstr::Mov(
+                                    t,
+                                    src.clone(),
+                                    AsmOperand::Xmm(XmmReg::XMM14),
+                                ));
+                                new_instructions.push(AsmInstr::StoreIndirect(
+                                    t,
+                                    AsmOperand::Xmm(XmmReg::XMM14),
+                                    Reg::R11,
+                                ));
+                            } else {
+                                new_instructions.push(AsmInstr::Mov(
+                                    t,
+                                    src.clone(),
+                                    AsmOperand::Reg(Reg::R10),
+                                ));
+                                new_instructions.push(AsmInstr::StoreIndirect(
+                                    t,
+                                    AsmOperand::Reg(Reg::R10),
+                                    Reg::R11,
+                                ));
+                            }
+                        } else {
+                            new_instructions.push(AsmInstr::StoreIndirect(
+                                t,
+                                src.clone(),
+                                Reg::R11,
+                            ));
+                        }
+                    }
+                    (None, None) => unreachable!(),
+                }
+            }
             // mov mem, mem
             AsmInstr::Mov(t @ (AsmType::Float | AsmType::Double), ref src, ref dst)
                 if is_memory(src) && is_memory(dst) =>
@@ -4056,6 +4187,12 @@ fn assert_no_pseudo_operand(op: &AsmOperand, instr: &AsmInstr) -> Result<(), Str
         return Err(format!(
             "unlowered pseudo operand in final assembly: {:?} in {:?}",
             op, instr
+        ));
+    }
+    if let Some(offset) = stack_offset_exceeds_disp32(op) {
+        return Err(format!(
+            "unencodable x86-64 stack displacement {} after fixup: {:?}",
+            offset, instr
         ));
     }
     Ok(())

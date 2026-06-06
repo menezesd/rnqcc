@@ -25201,6 +25201,46 @@ void f(void)
 }
 
 #[test]
+fn x86_linux_huge_stack_slot_access_materializes_address() {
+    let src = TempPath::new("x86-linux-huge-stack-slot-access", "c");
+    let asm = TempPath::new("x86-linux-huge-stack-slot-access", "s");
+    std::fs::write(
+        src.path(),
+        r#"
+void sink(char *);
+
+void f(void)
+{
+    char s[0x10000000000UL];
+    s[0] = 'a';
+    s[0x10000000000UL - 1] = 'b';
+    sink(s);
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(asm.path())
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm_text = std::fs::read_to_string(asm.path()).expect("failed to read assembly");
+    assert_contains_in_order(
+        &asm_text,
+        &["movq $-1099511627776, %r10", "addq %rbp, %r10"],
+    )
+    .expect("huge stack slot store did not materialize address");
+    assert!(
+        !asm_text.contains("-1099511627776(%rbp)"),
+        "assembly used an unencodable x86-64 stack displacement:\n{asm_text}"
+    );
+}
+
+#[test]
 fn x86_linux_promotes_small_integer_division_to_longword() {
     let src = TempPath::new("x86-linux-small-div", "c");
     let asm = TempPath::new("x86-linux-small-div", "s");

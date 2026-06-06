@@ -1965,7 +1965,7 @@ pub enum AsmOperand {
     Pseudo(String),
     /// Aggregate object at byte offset (for arrays/structs)
     PseudoMem(String, i32),
-    Stack(i32),
+    Stack(i64),
     StackArg(i32),
     Data(String),
     TlsData(String, i32),

@@ -386,7 +386,7 @@ fn offset_data_name(name: &str, add: i32) -> String {
 
 fn offset_operand(op: &AsmOperand, add: i32) -> std::io::Result<AsmOperand> {
     match op {
-        AsmOperand::Stack(offset) => Ok(AsmOperand::Stack(offset + add)),
+        AsmOperand::Stack(offset) => Ok(AsmOperand::Stack(*offset + i64::from(add))),
         AsmOperand::Data(name) => Ok(AsmOperand::Data(offset_data_name(name, add))),
         AsmOperand::Reg(Reg::AX) if add == 8 => Ok(AsmOperand::Reg(Reg::DI)),
         AsmOperand::Reg(reg) if add == 0 => Ok(AsmOperand::Reg(*reg)),
@@ -395,6 +395,15 @@ fn offset_operand(op: &AsmOperand, add: i32) -> std::io::Result<AsmOperand> {
             other, add
         )),
     }
+}
+
+fn stack_offset_i32(offset: i64) -> std::io::Result<i32> {
+    i32::try_from(offset).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("AArch64 stack offset {} is out of range", offset),
+        )
+    })
 }
 
 fn split_data_offset(name: &str) -> Option<DataOffset<'_>> {
@@ -907,7 +916,7 @@ fn load_operand(
         AsmOperand::Reg(reg) => return reg_name(*reg, ty),
         AsmOperand::Xmm(reg) => return fp_name_typed(*reg, ty),
         AsmOperand::Stack(offset) => {
-            emit_load_stack(w, ty, reg, *offset)?;
+            emit_load_stack(w, ty, reg, stack_offset_i32(*offset)?)?;
         }
         AsmOperand::Data(name) => emit_load_data(w, target, ty, name, reg)?,
         AsmOperand::TlsData(name, offset) => emit_load_tls_data(w, target, ty, name, *offset, reg)?,
@@ -937,7 +946,7 @@ fn store_operand(
             q_reg_to_vector_name(src_reg)?
         ),
         AsmOperand::Xmm(reg) => writeln!(w, "\tfmov {}, {}", fp_name_typed(*reg, ty)?, src_reg),
-        AsmOperand::Stack(offset) => emit_store_stack(w, ty, src_reg, *offset),
+        AsmOperand::Stack(offset) => emit_store_stack(w, ty, src_reg, stack_offset_i32(*offset)?),
         AsmOperand::Data(name) => emit_store_data(w, target, ty, src_reg, name),
         AsmOperand::TlsData(name, offset) => {
             emit_store_tls_data(w, target, ty, src_reg, name, *offset)
@@ -1001,12 +1010,12 @@ fn emit_mov(
         (AsmOperand::Stack(offset), AsmOperand::Xmm(reg))
             if matches!(ty, AsmType::Float | AsmType::Double | AsmType::LongDouble) =>
         {
-            emit_load_stack(w, ty, fp_name_typed(*reg, ty)?, *offset)
+            emit_load_stack(w, ty, fp_name_typed(*reg, ty)?, stack_offset_i32(*offset)?)
         }
         (AsmOperand::Xmm(reg), AsmOperand::Stack(offset))
             if matches!(ty, AsmType::Float | AsmType::Double | AsmType::LongDouble) =>
         {
-            emit_store_stack(w, ty, fp_name_typed(*reg, ty)?, *offset)
+            emit_store_stack(w, ty, fp_name_typed(*reg, ty)?, stack_offset_i32(*offset)?)
         }
         (AsmOperand::Data(name), AsmOperand::Xmm(reg))
             if matches!(ty, AsmType::Float | AsmType::Double | AsmType::LongDouble) =>
@@ -1032,10 +1041,10 @@ fn emit_mov(
             writeln!(w, "\tmov {}, {}", reg_name(*dst, ty)?, reg_name(*src, ty)?)
         }
         (AsmOperand::Stack(offset), AsmOperand::Reg(reg)) => {
-            emit_load_stack(w, ty, reg_name(*reg, ty)?, *offset)
+            emit_load_stack(w, ty, reg_name(*reg, ty)?, stack_offset_i32(*offset)?)
         }
         (AsmOperand::Reg(reg), AsmOperand::Stack(offset)) => {
-            emit_store_stack(w, ty, reg_name(*reg, ty)?, *offset)
+            emit_store_stack(w, ty, reg_name(*reg, ty)?, stack_offset_i32(*offset)?)
         }
         (AsmOperand::Data(name), AsmOperand::Reg(reg)) => {
             emit_load_data(w, target, ty, name, reg_name(*reg, ty)?)
@@ -1069,10 +1078,11 @@ fn emit_movsx(
     match src {
         AsmOperand::Stack(offset) => {
             let mnemonic = signed_load_mnemonic(src_ty, dst_ty)?;
-            if stack_offset_fits_unsigned(src_ty, *offset) {
-                writeln!(w, "\t{} {}, {}", mnemonic, dst_reg, stack_addr(*offset))?;
+            let offset = stack_offset_i32(*offset)?;
+            if stack_offset_fits_unsigned(src_ty, offset) {
+                writeln!(w, "\t{} {}, {}", mnemonic, dst_reg, stack_addr(offset))?;
             } else {
-                emit_stack_address_into(w, "x16", *offset)?;
+                emit_stack_address_into(w, "x16", offset)?;
                 writeln!(w, "\t{} {}, [x16]", mnemonic, dst_reg)?;
             }
         }
@@ -1330,7 +1340,7 @@ fn emit_lea(
             if *offset == 0 {
                 writeln!(w, "\tmov x9, sp")?;
             } else {
-                emit_stack_address_into(w, "x9", *offset)?;
+                emit_stack_address_into(w, "x9", stack_offset_i32(*offset)?)?;
             }
             store_operand(w, target, AsmType::Quadword, "x9", dst)
         }
@@ -1356,7 +1366,9 @@ fn emit_operand_address_into(
     dst_reg: &'static str,
 ) -> std::io::Result<()> {
     match src {
-        AsmOperand::Stack(offset) => emit_stack_address_into(w, dst_reg, *offset),
+        AsmOperand::Stack(offset) => {
+            emit_stack_address_into(w, dst_reg, stack_offset_i32(*offset)?)
+        }
         AsmOperand::Data(name) => emit_load_data_address(w, target, name, dst_reg),
         AsmOperand::TlsData(name, offset) => {
             emit_load_tls_address(w, target, name, *offset, dst_reg)
@@ -1485,7 +1497,12 @@ fn load_operand_rebased(
             } else {
                 reg_name(scratch, ty)?
             };
-            emit_load_stack(w, ty, reg, *offset + stack_rebase)?;
+            emit_load_stack(
+                w,
+                ty,
+                reg,
+                stack_offset_i32(*offset + i64::from(stack_rebase))?,
+            )?;
             Ok(reg)
         }
         _ => load_operand(w, target, ty, operand, scratch),

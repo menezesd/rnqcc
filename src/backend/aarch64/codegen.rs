@@ -149,7 +149,7 @@ fn high64_operand(op: &AsmOperand) -> Result<AsmOperand, String> {
 
 fn byte_offset_operand(op: &AsmOperand, offset: i32) -> Result<AsmOperand, String> {
     match op {
-        AsmOperand::Stack(base) => Ok(AsmOperand::Stack(base + offset)),
+        AsmOperand::Stack(base) => Ok(AsmOperand::Stack(*base + i64::from(offset))),
         AsmOperand::Data(name) => Ok(data_operand_with_offset(name, offset)),
         other => Err(format!(
             "AArch64 backend cannot address byte offset {} of {:?}",
@@ -542,7 +542,7 @@ fn val_operand(
                 stack_slots
                     .get(name)
                     .copied()
-                    .map(AsmOperand::Stack)
+                    .map(|offset| AsmOperand::Stack(i64::from(offset)))
                     .ok_or_else(|| format!("AArch64 backend missing stack slot for {}", name))
             }
         }
@@ -746,7 +746,7 @@ fn stack_or_data_operand(
         stack_slots
             .get(name)
             .copied()
-            .map(|base| AsmOperand::Stack(base + offset))
+            .map(|base| AsmOperand::Stack(i64::from(base + offset)))
             .ok_or_else(|| format!("AArch64 backend missing stack slot for {}", name))
     }
 }
@@ -1542,7 +1542,10 @@ fn convert_function(
                         src
                     }
                 } else {
-                    let src = AsmOperand::Stack(stack_arg_offset(frame_size, stack_param_count));
+                    let src = AsmOperand::Stack(i64::from(stack_arg_offset(
+                        frame_size,
+                        stack_param_count,
+                    )));
                     stack_param_count += 1;
                     src
                 };
@@ -1582,19 +1585,22 @@ fn convert_function(
                 let dst = val_operand(&TackyVal::Var(param.clone()), &stack_slots, global_vars)?;
                 instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
-                    AsmOperand::Stack(stack_arg_offset(frame_size, stack_param_count)),
+                    AsmOperand::Stack(i64::from(stack_arg_offset(frame_size, stack_param_count))),
                     low64_operand(&dst)?,
                 ));
                 instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
-                    AsmOperand::Stack(stack_arg_offset(frame_size, stack_param_count + 1)),
+                    AsmOperand::Stack(i64::from(stack_arg_offset(
+                        frame_size,
+                        stack_param_count + 1,
+                    ))),
                     high64_operand(&dst)?,
                 ));
                 stack_param_count += 2;
                 param_index += 1;
                 continue;
             }
-            let src = AsmOperand::Stack(stack_arg_offset(frame_size, stack_param_count));
+            let src = AsmOperand::Stack(i64::from(stack_arg_offset(frame_size, stack_param_count)));
             stack_param_count += 1;
             src
         } else if matches!(ty, AsmType::Float | AsmType::Double | AsmType::LongDouble) {
@@ -1603,7 +1609,8 @@ fn convert_function(
                 fp_param_count += 1;
                 src
             } else {
-                let src = AsmOperand::Stack(stack_arg_offset(frame_size, stack_param_count));
+                let src =
+                    AsmOperand::Stack(i64::from(stack_arg_offset(frame_size, stack_param_count)));
                 stack_param_count += if ty == AsmType::LongDouble { 2 } else { 1 };
                 src
             }
@@ -1617,18 +1624,27 @@ fn convert_function(
                 if ty == AsmType::LongDouble {
                     instructions.push(AsmInstr::Mov(
                         AsmType::LongDouble,
-                        AsmOperand::Stack(stack_arg_offset(frame_size, stack_param_count)),
+                        AsmOperand::Stack(i64::from(stack_arg_offset(
+                            frame_size,
+                            stack_param_count,
+                        ))),
                         dst,
                     ));
                 } else {
                     instructions.push(AsmInstr::Mov(
                         AsmType::Quadword,
-                        AsmOperand::Stack(stack_arg_offset(frame_size, stack_param_count)),
+                        AsmOperand::Stack(i64::from(stack_arg_offset(
+                            frame_size,
+                            stack_param_count,
+                        ))),
                         low64_operand(&dst)?,
                     ));
                     instructions.push(AsmInstr::Mov(
                         AsmType::Quadword,
-                        AsmOperand::Stack(stack_arg_offset(frame_size, stack_param_count + 1)),
+                        AsmOperand::Stack(i64::from(stack_arg_offset(
+                            frame_size,
+                            stack_param_count + 1,
+                        ))),
                         high64_operand(&dst)?,
                     ));
                 }
@@ -1636,7 +1652,7 @@ fn convert_function(
                 param_index += 1;
                 continue;
             }
-            let src = AsmOperand::Stack(stack_arg_offset(frame_size, stack_param_count));
+            let src = AsmOperand::Stack(i64::from(stack_arg_offset(frame_size, stack_param_count)));
             stack_param_count += 1;
             src
         };
@@ -2290,7 +2306,7 @@ fn convert_function(
             }
             TackyInstr::FrameAddress { dst } => {
                 instructions.push(AsmInstr::Lea(
-                    AsmOperand::Stack(frame_size),
+                    AsmOperand::Stack(i64::from(frame_size)),
                     val_operand(dst, &stack_slots, global_vars)?,
                 ));
             }
@@ -2322,7 +2338,7 @@ fn convert_function(
                 if let Some((base_slot, _)) = large_local_offsets.get(name) {
                     instructions.push(AsmInstr::Mov(
                         AsmType::Quadword,
-                        AsmOperand::Stack(*base_slot),
+                        AsmOperand::Stack(i64::from(*base_slot)),
                         val_operand(dst, &stack_slots, global_vars)?,
                     ));
                 } else {
@@ -2405,7 +2421,7 @@ fn convert_function(
             }
             TackyInstr::VaStart { dst } => {
                 instructions.push(AsmInstr::Lea(
-                    AsmOperand::Stack(va_start_stack_offset),
+                    AsmOperand::Stack(i64::from(va_start_stack_offset)),
                     val_operand(dst, &stack_slots, global_vars)?,
                 ));
             }
@@ -3345,14 +3361,14 @@ mod tests {
             matches!(
                 instr,
                 AsmInstr::Mov(AsmType::Quadword, AsmOperand::Stack(slot), _)
-                    if *slot == base_slot
+                    if *slot == i64::from(base_slot)
             )
         }));
         assert!(!function.instructions.iter().any(|instr| {
             matches!(
                 instr,
                 AsmInstr::Lea(AsmOperand::Stack(slot), _)
-                    if *slot == base_slot
+                    if *slot == i64::from(base_slot)
             )
         }));
         Ok(())

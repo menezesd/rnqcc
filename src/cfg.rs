@@ -1,8 +1,23 @@
 use crate::types::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-type InstrCopies = HashMap<(usize, usize), HashSet<CopyInstr>>;
-type InstrLiveAfter = HashMap<(usize, usize), HashSet<String>>;
+type InstrCopies = HashMap<InstrPosition, HashSet<CopyInstr>>;
+type InstrLiveAfter = HashMap<InstrPosition, HashSet<String>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct InstrPosition {
+    block_id: usize,
+    instr_index: usize,
+}
+
+impl InstrPosition {
+    fn new(block_id: usize, instr_index: usize) -> Self {
+        Self {
+            block_id,
+            instr_index,
+        }
+    }
+}
 
 // ============================================================
 // Control-Flow Graph
@@ -233,8 +248,8 @@ pub fn copy_propagation(
             }
         }
         // Update instruction annotations
-        for ((bid, iid), copies) in new_instr_reaching {
-            instr_reaching.insert((bid, iid), copies);
+        for (position, copies) in new_instr_reaching {
+            instr_reaching.insert(position, copies);
         }
     }
 
@@ -243,7 +258,7 @@ pub fn copy_propagation(
         let mut new_instrs = Vec::new();
         for (i, instr) in block.instructions.iter().enumerate() {
             let reaching = instr_reaching
-                .get(&(block.id, i))
+                .get(&InstrPosition::new(block.id, i))
                 .cloned()
                 .unwrap_or_default();
             if let Some(rewritten) = rewrite_instruction(instr, &reaching, types) {
@@ -340,7 +355,7 @@ fn transfer_copies(
     let mut annotations = HashMap::new();
 
     for (i, instr) in block.instructions.iter().enumerate() {
-        annotations.insert((block.id, i), current.clone());
+        annotations.insert(InstrPosition::new(block.id, i), current.clone());
 
         match instr {
             TackyInstr::Copy {
@@ -965,8 +980,8 @@ pub fn dead_store_elimination(
                 }
             }
         }
-        for ((bid, iid), live) in new_instr_live {
-            instr_live_after.insert((bid, iid), live);
+        for (position, live) in new_instr_live {
+            instr_live_after.insert(position, live);
         }
     }
 
@@ -977,7 +992,7 @@ pub fn dead_store_elimination(
             if is_dead_store(
                 instr,
                 &instr_live_after
-                    .get(&(block.id, i))
+                    .get(&InstrPosition::new(block.id, i))
                     .cloned()
                     .unwrap_or_default(),
             ) {
@@ -1023,7 +1038,7 @@ fn transfer_liveness(
 
     // Process instructions in reverse
     for (i, instr) in block.instructions.iter().enumerate().rev() {
-        annotations.insert((block.id, i), current.clone());
+        annotations.insert(InstrPosition::new(block.id, i), current.clone());
 
         // Kill destination, generate sources
         match instr {

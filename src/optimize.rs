@@ -8,6 +8,12 @@ pub struct OptimizationFlags {
     pub eliminate_dead_stores: bool,
 }
 
+#[derive(Clone)]
+struct KnownConstant {
+    value: TackyVal,
+    value_type: CType,
+}
+
 impl OptimizationFlags {
     pub fn any_enabled(&self) -> bool {
         self.fold_constants
@@ -144,7 +150,7 @@ fn constant_folding(
     types: &std::collections::HashMap<String, CType>,
 ) -> Vec<TackyInstr> {
     // Track which variables hold known constant values, along with their type
-    let mut const_map: std::collections::HashMap<String, (TackyVal, CType)> =
+    let mut const_map: std::collections::HashMap<String, KnownConstant> =
         std::collections::HashMap::new();
 
     instructions
@@ -196,7 +202,13 @@ fn constant_folding(
                     dst: TackyVal::Var(name),
                 } => {
                     let t = types.get(name).copied().unwrap_or(CType::Int);
-                    const_map.insert(name.clone(), (TackyVal::Constant(*c), t));
+                    const_map.insert(
+                        name.clone(),
+                        KnownConstant {
+                            value: TackyVal::Constant(*c),
+                            value_type: t,
+                        },
+                    );
                 }
                 TackyInstr::Copy {
                     src: TackyVal::DoubleConstant(d),
@@ -204,8 +216,13 @@ fn constant_folding(
                 } => {
                     let dst_type = types.get(name).copied().unwrap_or(CType::Double);
                     if matches!(dst_type, CType::Float | CType::Double) {
-                        const_map
-                            .insert(name.clone(), (TackyVal::DoubleConstant(*d), CType::Double));
+                        const_map.insert(
+                            name.clone(),
+                            KnownConstant {
+                                value: TackyVal::DoubleConstant(*d),
+                                value_type: CType::Double,
+                            },
+                        );
                     } else {
                         const_map.remove(name);
                     }
@@ -215,10 +232,10 @@ fn constant_folding(
                     dst: TackyVal::Var(name),
                 } => {
                     // If source has a known constant, propagate it
-                    if let Some((cval, ct)) = const_map.get(s).cloned() {
+                    if let Some(constant) = const_map.get(s).cloned() {
                         let dst_type = types.get(name).copied().unwrap_or(CType::Int);
-                        if same_copy_type(ct, dst_type) {
-                            const_map.insert(name.clone(), (cval, ct));
+                        if same_copy_type(constant.value_type, dst_type) {
+                            const_map.insert(name.clone(), constant);
                         } else {
                             const_map.remove(name);
                         }
@@ -245,7 +262,7 @@ fn same_copy_type(src: CType, dst: CType) -> bool {
 
 fn resolve_constants(
     instr: &TackyInstr,
-    const_map: &std::collections::HashMap<String, (TackyVal, CType)>,
+    const_map: &std::collections::HashMap<String, KnownConstant>,
 ) -> TackyInstr {
     // Replace variable operands with their known constant values
     match instr {
@@ -386,11 +403,11 @@ fn resolve_constants(
 
 fn resolve_val(
     val: &TackyVal,
-    const_map: &std::collections::HashMap<String, (TackyVal, CType)>,
+    const_map: &std::collections::HashMap<String, KnownConstant>,
 ) -> TackyVal {
     if let TackyVal::Var(name) = val {
-        if let Some((cval, _)) = const_map.get(name) {
-            return cval.clone();
+        if let Some(constant) = const_map.get(name) {
+            return constant.value.clone();
         }
     }
     val.clone()
@@ -398,12 +415,12 @@ fn resolve_val(
 
 fn resolve_val_type(
     val: &TackyVal,
-    const_map: &std::collections::HashMap<String, (TackyVal, CType)>,
+    const_map: &std::collections::HashMap<String, KnownConstant>,
     types: &std::collections::HashMap<String, CType>,
 ) -> CType {
     if let TackyVal::Var(name) = val {
-        if let Some((_, t)) = const_map.get(name) {
-            return *t;
+        if let Some(constant) = const_map.get(name) {
+            return constant.value_type;
         }
         if let Some(t) = types.get(name) {
             return *t;

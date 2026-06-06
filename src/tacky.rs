@@ -45,6 +45,11 @@ struct StaticAddressConstant {
     offset: i64,
 }
 
+struct IntegerRange {
+    min: i128,
+    max: i128,
+}
+
 struct DirectArrayStructElem<'a> {
     tag: &'a str,
     array_len: usize,
@@ -2081,17 +2086,41 @@ impl TackyGen {
         }
     }
 
-    fn integer_range_for_type(ty: CType) -> Option<(i128, i128)> {
+    fn integer_range_for_type(ty: CType) -> Option<IntegerRange> {
         match ty {
-            CType::Bool => Some((0, 1)),
-            CType::Char | CType::SChar => Some((i8::MIN as i128, i8::MAX as i128)),
-            CType::Short => Some((i16::MIN as i128, i16::MAX as i128)),
-            CType::Int => Some((i32::MIN as i128, i32::MAX as i128)),
-            CType::Long => Some((i64::MIN as i128, i64::MAX as i128)),
-            CType::UChar => Some((0, u8::MAX as i128)),
-            CType::UShort => Some((0, u16::MAX as i128)),
-            CType::UInt => Some((0, u32::MAX as i128)),
-            CType::ULong => Some((0, u64::MAX as i128)),
+            CType::Bool => Some(IntegerRange { min: 0, max: 1 }),
+            CType::Char | CType::SChar => Some(IntegerRange {
+                min: i8::MIN as i128,
+                max: i8::MAX as i128,
+            }),
+            CType::Short => Some(IntegerRange {
+                min: i16::MIN as i128,
+                max: i16::MAX as i128,
+            }),
+            CType::Int => Some(IntegerRange {
+                min: i32::MIN as i128,
+                max: i32::MAX as i128,
+            }),
+            CType::Long => Some(IntegerRange {
+                min: i64::MIN as i128,
+                max: i64::MAX as i128,
+            }),
+            CType::UChar => Some(IntegerRange {
+                min: 0,
+                max: u8::MAX as i128,
+            }),
+            CType::UShort => Some(IntegerRange {
+                min: 0,
+                max: u16::MAX as i128,
+            }),
+            CType::UInt => Some(IntegerRange {
+                min: 0,
+                max: u32::MAX as i128,
+            }),
+            CType::ULong => Some(IntegerRange {
+                min: 0,
+                max: u64::MAX as i128,
+            }),
             _ => None,
         }
     }
@@ -5459,7 +5488,7 @@ impl TackyGen {
         }
         if name == "__builtin_mul_overflow_p" && args.len() == 3 {
             let target_type = self.typeof_exp(&args[2]).to_ctype();
-            let Some((min, max)) = Self::integer_range_for_type(target_type) else {
+            let Some(range) = Self::integer_range_for_type(target_type) else {
                 return Ok((TackyVal::Constant(0), CType::Int));
             };
             let (left, left_ty) = self.emit_exp(args[0].clone())?;
@@ -5477,14 +5506,14 @@ impl TackyGen {
             self.emit(TackyInstr::Binary {
                 op: TackyBinaryOp::GreaterThan,
                 left: product_wide.clone(),
-                right: TackyVal::Int128Constant(max),
+                right: TackyVal::Int128Constant(range.max),
                 dst: high.clone(),
             });
             let low = self.fresh_tmp(CType::Int);
             self.emit(TackyInstr::Binary {
                 op: TackyBinaryOp::LessThan,
                 left: product_wide,
-                right: TackyVal::Int128Constant(min),
+                right: TackyVal::Int128Constant(range.min),
                 dst: low.clone(),
             });
             let dst = self.fresh_tmp(CType::Int);

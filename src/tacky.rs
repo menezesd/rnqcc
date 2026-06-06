@@ -92,8 +92,13 @@ struct FunctionSignature {
     variadic: bool,
 }
 
+struct StaticInitPiece {
+    offset: usize,
+    init: StaticInit,
+}
+
 struct StaticInitBuilder {
-    pieces: Vec<(usize, StaticInit)>,
+    pieces: Vec<StaticInitPiece>,
 }
 
 impl StaticInitBuilder {
@@ -107,26 +112,26 @@ impl StaticInitBuilder {
             return Ok(());
         }
         let end = offset + size;
-        if let Some(pos) = self.pieces.iter().position(|(existing_offset, existing)| {
-            *existing_offset == offset && TackyGen::static_init_size(existing) == size
+        if let Some(pos) = self.pieces.iter().position(|piece| {
+            piece.offset == offset && TackyGen::static_init_size(&piece.init) == size
         }) {
-            self.pieces[pos] = (offset, init);
+            self.pieces[pos] = StaticInitPiece { offset, init };
             return Ok(());
         }
-        if self.pieces.iter().any(|(existing_offset, existing)| {
-            let existing_end = *existing_offset + TackyGen::static_init_size(existing);
-            offset < existing_end && *existing_offset < end
+        if self.pieces.iter().any(|piece| {
+            let existing_end = piece.offset + TackyGen::static_init_size(&piece.init);
+            offset < existing_end && piece.offset < end
         }) {
             return Err("overlapping static initializer designators".to_string());
         }
-        self.pieces.push((offset, init));
+        self.pieces.push(StaticInitPiece { offset, init });
         Ok(())
     }
 
     fn required_bytes(&self) -> usize {
         self.pieces
             .iter()
-            .map(|(offset, init)| offset + TackyGen::static_init_size(init))
+            .map(|piece| piece.offset + TackyGen::static_init_size(&piece.init))
             .max()
             .unwrap_or(0)
     }
@@ -159,12 +164,12 @@ impl StaticInitBuilder {
         if mask == 0 {
             return Ok(());
         }
-        if let Some(pos) = self.pieces.iter().position(|(existing_offset, existing)| {
-            *existing_offset == offset && TackyGen::static_init_size(existing) == 1
+        if let Some(pos) = self.pieces.iter().position(|piece| {
+            piece.offset == offset && TackyGen::static_init_size(&piece.init) == 1
         }) {
-            let current = Self::init_to_u8(&self.pieces[pos].1)
+            let current = Self::init_to_u8(&self.pieces[pos].init)
                 .ok_or_else(|| "cannot merge byte static initializer".to_string())?;
-            self.pieces[pos].1 = StaticInit::UCharInit((current & !mask) | (value & mask));
+            self.pieces[pos].init = StaticInit::UCharInit((current & !mask) | (value & mask));
             return Ok(());
         }
         self.put(offset, StaticInit::UCharInit(value & mask))
@@ -206,22 +211,22 @@ impl StaticInitBuilder {
     }
 
     fn finish(mut self, total_bytes: usize) -> TackyResult<Vec<StaticInit>> {
-        self.pieces.sort_by_key(|(offset, _)| *offset);
+        self.pieces.sort_by_key(|piece| piece.offset);
         let mut out = Vec::new();
         let mut cursor = 0usize;
-        for (offset, init) in self.pieces {
-            if offset > total_bytes {
+        for piece in self.pieces {
+            if piece.offset > total_bytes {
                 break;
             }
-            if offset > cursor {
-                out.push(StaticInit::ZeroInit(offset - cursor));
-                cursor = offset;
+            if piece.offset > cursor {
+                out.push(StaticInit::ZeroInit(piece.offset - cursor));
+                cursor = piece.offset;
             }
-            let size = TackyGen::static_init_size(&init);
+            let size = TackyGen::static_init_size(&piece.init);
             if cursor + size > total_bytes {
                 return Err("static initializer exceeds object size".to_string());
             }
-            out.push(init);
+            out.push(piece.init);
             cursor += size;
         }
         if cursor < total_bytes {

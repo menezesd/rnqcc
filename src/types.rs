@@ -73,9 +73,10 @@ impl Target {
     }
 
     pub fn show_label(&self, name: &str) -> String {
+        let name = mangle_assembly_label(name);
         match self.os {
             TargetOs::MacOs => format!("_{}", name),
-            TargetOs::Linux => name.to_string(),
+            TargetOs::Linux => name,
         }
     }
 
@@ -122,6 +123,30 @@ impl Target {
             _ => 16,
         }
     }
+}
+
+fn is_assembly_label_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '.')
+}
+
+fn mangle_assembly_label(name: &str) -> String {
+    if name.chars().all(is_assembly_label_char) {
+        return name.to_string();
+    }
+
+    let mut out = String::from("__rnqcc_m");
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+        } else if ch == '_' {
+            out.push_str("__");
+        } else {
+            out.push_str("_x");
+            out.push_str(&format!("{:x}", ch as u32));
+            out.push('_');
+        }
+    }
+    out
 }
 
 #[derive(Debug, PartialEq)]
@@ -2203,6 +2228,28 @@ mod tests {
         assert!(!Stage::Lex.accepts_output());
         assert!(Stage::Assembly.output_requires_single_input());
         assert!(!Stage::Executable.output_requires_single_input());
+    }
+
+    #[test]
+    fn show_label_preserves_ascii_symbol_names() {
+        assert_eq!(Target::x86_64_linux().show_label("main"), "main");
+        assert_eq!(
+            Target::x86_64_linux().show_label("__double_const_0"),
+            "__double_const_0"
+        );
+        assert_eq!(Target::x86_64_macos().show_label("main"), "_main");
+    }
+
+    #[test]
+    fn show_label_mangles_unicode_symbol_names() {
+        assert_eq!(
+            Target::x86_64_linux().show_label("αβ_global"),
+            "__rnqcc_m_x3b1__x3b2___global"
+        );
+        assert_eq!(
+            Target::x86_64_macos().show_label("αβ_global"),
+            "___rnqcc_m_x3b1__x3b2___global"
+        );
     }
 
     #[test]

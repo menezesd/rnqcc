@@ -384,6 +384,18 @@ fn offset_data_name(name: &str, add: i32) -> String {
     }
 }
 
+fn data_label_expr(target: &Target, name: &str) -> String {
+    if let Some(data_offset) = split_data_offset(name) {
+        format!(
+            "{}+{}",
+            data_label(target, data_offset.base),
+            data_offset.offset
+        )
+    } else {
+        data_label(target, name)
+    }
+}
+
 fn offset_operand(op: &AsmOperand, add: i32) -> std::io::Result<AsmOperand> {
     match op {
         AsmOperand::Stack(offset) => Ok(AsmOperand::Stack(*offset + i64::from(add))),
@@ -741,6 +753,7 @@ fn emit_load_data(
     let addr_reg = "x16";
     match target.os {
         TargetOs::Linux => {
+            let label = data_label_expr(target, name);
             writeln!(w, "\tadrp {}, {}", addr_reg, label)?;
             writeln!(
                 w,
@@ -779,6 +792,7 @@ fn emit_store_data(
     let addr_reg = "x16";
     match target.os {
         TargetOs::Linux => {
+            let label = data_label_expr(target, name);
             writeln!(w, "\tadrp {}, {}", addr_reg, label)?;
             writeln!(
                 w,
@@ -819,6 +833,7 @@ fn emit_load_data_extended(
     let addr_reg = "x16";
     match target.os {
         TargetOs::Linux => {
+            let label = data_label_expr(target, name);
             writeln!(w, "\tadrp {}, {}", addr_reg, label)?;
             writeln!(
                 w,

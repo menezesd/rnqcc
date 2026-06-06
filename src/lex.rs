@@ -116,6 +116,10 @@ impl Lexer {
         self.peek_ucn_at(self.pos)
     }
 
+    fn starts_ucn_at(&self, pos: usize) -> bool {
+        self.chars.get(pos) == Some(&'\\') && matches!(self.chars.get(pos + 1), Some('u' | 'U'))
+    }
+
     fn peek_ident_continue(&self) -> Option<(char, usize)> {
         if let Some(ch) = self.peek().filter(|ch| is_ident_continue(*ch)) {
             Some((ch, 1))
@@ -1580,6 +1584,12 @@ impl Lexer {
                     self.pos -= 1; // unget
                     self.read_identifier_or_keyword()?
                 }
+                _ if c == '\\' && self.starts_ucn_at(self.pos - 1) => {
+                    return Err(format!(
+                        "invalid universal character name at position {}",
+                        self.pos - 1
+                    ));
+                }
 
                 _ => {
                     return Err(format!(
@@ -1663,6 +1673,19 @@ mod tests {
 
         let err = require_err(lex("double x = .5Lfoo;"), "lexing should fail")?;
         assert!(err.contains("invalid float literal suffix"));
+        Ok(())
+    }
+
+    #[test]
+    fn reports_invalid_universal_character_names() -> Result<(), String> {
+        let err = require_err(lex("int \\u12xz = 0;"), "lexing should fail")?;
+        assert!(err.contains("invalid universal character name"));
+
+        let err = require_err(lex("int \\U00110000 = 0;"), "lexing should fail")?;
+        assert!(err.contains("invalid universal character name"));
+
+        let err = require_err(lex("int \\u0030 = 0;"), "lexing should fail")?;
+        assert!(err.contains("invalid universal character name"));
         Ok(())
     }
 

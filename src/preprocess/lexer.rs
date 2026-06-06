@@ -114,6 +114,12 @@ impl Lexer {
                 Some('\\') if self.peek_ucn().is_some_and(|(ch, _)| is_ident_start(ch)) => {
                     self.read_ident()
                 }
+                Some('\\') if matches!(self.peek_ahead(1), Some('u' | 'U')) => {
+                    return Err(format!(
+                        "invalid universal character name at line {}, column {}",
+                        start.line, start.column
+                    ));
+                }
                 Some(ch)
                     if ch.is_ascii_digit()
                         || ch == '.' && self.peek_ahead(1).is_some_and(|c| c.is_ascii_digit()) =>
@@ -404,6 +410,19 @@ mod tests {
                 PpTokenKind::Ident("ε".to_string()),
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_universal_character_names() -> Result<(), String> {
+        let err = lex("\\u12xz").expect_err("lexing should fail");
+        assert!(err.contains("invalid universal character name"));
+
+        let err = lex("\\U00110000").expect_err("lexing should fail");
+        assert!(err.contains("invalid universal character name"));
+
+        let err = lex("\\u0030").expect_err("lexing should fail");
+        assert!(err.contains("invalid universal character name"));
         Ok(())
     }
 

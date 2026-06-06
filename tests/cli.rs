@@ -25180,6 +25180,43 @@ fn compiles_unicode_macro_identifiers_with_both_preprocessors() {
 }
 
 #[test]
+fn compiles_unicode_global_symbols_with_both_preprocessors() {
+    for internal_cpp in [false, true] {
+        let mode = if internal_cpp {
+            "internal-cpp"
+        } else {
+            "external-cpp"
+        };
+        let src = TempPath::new(&format!("unicode-global-symbols-{mode}"), "c");
+        let exe = TempPath::new(&format!("unicode-global-symbols-{mode}"), "bin");
+        std::fs::write(
+            src.path(),
+            "int αβ_global = 40;\n\
+             int γδ(void) { return 2; }\n\
+             int main(void) { return αβ_global + γδ(); }\n",
+        )
+        .expect("failed to write input");
+
+        let mut command = Command::new(rnqcc());
+        if internal_cpp {
+            command.arg("--internal-cpp");
+        }
+        let output = command
+            .arg(src.path())
+            .arg("-o")
+            .arg(exe.path())
+            .output()
+            .expect("failed to run rnqcc");
+        assert!(output.status.success(), "{mode}: {}", stderr(output));
+
+        let run = Command::new(exe.path())
+            .status()
+            .expect("failed to run output");
+        assert_eq!(run.code(), Some(42), "{mode}");
+    }
+}
+
+#[test]
 fn x86_linux_allows_zero_sized_variadic_memory_arg_block() {
     let src = temp_file("x86-linux-zero-vararg-struct", "c");
     let asm = temp_file("x86-linux-zero-vararg-struct", "s");

@@ -39,6 +39,69 @@ struct BalancedTokens {
     next_index: usize,
 }
 
+#[derive(Default)]
+struct MacroExpansionStats {
+    enabled: bool,
+    calls: usize,
+    input_tokens: usize,
+    output_tokens: usize,
+    object_expansions: usize,
+    function_expansions: usize,
+    hook_expansions: usize,
+    max_disabled_depth: usize,
+    by_name: HashMap<String, usize>,
+}
+
+impl MacroExpansionStats {
+    fn record_call(&mut self, tokens: &[PpToken], disabled_depth: usize) {
+        if !self.enabled {
+            return;
+        }
+        self.calls += 1;
+        self.input_tokens += tokens.len();
+        self.max_disabled_depth = self.max_disabled_depth.max(disabled_depth);
+    }
+
+    fn record_output(&mut self, tokens: &[PpToken]) {
+        if !self.enabled {
+            return;
+        }
+        self.output_tokens += tokens.len();
+    }
+
+    fn record_macro(&mut self, name: &str) {
+        if !self.enabled {
+            return;
+        }
+        *self.by_name.entry(name.to_string()).or_insert(0) += 1;
+    }
+
+    fn report(&self) {
+        if !self.enabled {
+            return;
+        }
+        let mut by_name: Vec<_> = self.by_name.iter().collect();
+        by_name.sort_by(|(left_name, left_count), (right_name, right_count)| {
+            right_count
+                .cmp(left_count)
+                .then_with(|| left_name.cmp(right_name))
+        });
+        eprintln!(
+            "rnqcc internal-cpp macro stats: calls={} input_tokens={} output_tokens={} object_expansions={} function_expansions={} hook_expansions={} max_disabled_depth={}",
+            self.calls,
+            self.input_tokens,
+            self.output_tokens,
+            self.object_expansions,
+            self.function_expansions,
+            self.hook_expansions,
+            self.max_disabled_depth
+        );
+        for (name, count) in by_name.into_iter().take(12) {
+            eprintln!("rnqcc internal-cpp macro stats: macro {name} expanded {count}");
+        }
+    }
+}
+
 pub fn expand_macros(tokens: &[PpToken], macros: &MacroTable) -> Result<Vec<PpToken>, String> {
     expand_macros_with_hooks(tokens, macros, &mut NoMacroExpansionHooks)
 }
@@ -48,7 +111,16 @@ pub fn expand_macros_with_hooks(
     macros: &MacroTable,
     hooks: &mut dyn MacroExpansionHooks,
 ) -> Result<Vec<PpToken>, String> {
-    expand_macros_inner(tokens, macros, hooks, &mut Vec::new())
+    let stats_enabled = std::env::var_os("RNQCC_INTERNAL_CPP_STATS").is_some();
+    let mut stats = MacroExpansionStats {
+        enabled: stats_enabled,
+        ..MacroExpansionStats::default()
+    };
+    let expanded = expand_macros_inner(tokens, macros, hooks, &mut Vec::new(), &mut stats)?;
+    if stats_enabled {
+        stats.report();
+    }
+    Ok(expanded)
 }
 
 fn expand_macros_inner(
@@ -56,7 +128,9 @@ fn expand_macros_inner(
     macros: &MacroTable,
     hooks: &mut dyn MacroExpansionHooks,
     disabled: &mut Vec<String>,
+    stats: &mut MacroExpansionStats,
 ) -> Result<Vec<PpToken>, String> {
+    stats.record_call(tokens, disabled.len());
     let mut out = Vec::new();
     let mut index = 0usize;
     while index < tokens.len() {
@@ -73,9 +147,17 @@ fn expand_macros_inner(
         }
         match macros.get(name) {
             Some(MacroDef::Object(replacement)) => {
+                stats.object_expansions += 1;
+                stats.record_macro(name);
                 let replacement = paste_tokens(replacement)?;
                 disabled.push(name.clone());
-                out.extend(expand_macros_inner(&replacement, macros, hooks, disabled)?);
+                out.extend(expand_macros_inner(
+                    &replacement,
+                    macros,
+                    hooks,
+                    disabled,
+                    stats,
+                )?);
                 disabled.pop();
                 index += 1;
             }
@@ -89,6 +171,8 @@ fn expand_macros_inner(
                     index += 1;
                     continue;
                 };
+                stats.function_expansions += 1;
+                stats.record_macro(name);
                 let args = if invocation.args.is_empty() && !*variadic && params.len() == 1 {
                     vec![Vec::new()]
                 } else {
@@ -104,13 +188,27 @@ fn expand_macros_inner(
                 let replacement =
                     substitute_function_macro(body, params, *variadic, &args, macros, hooks)?;
                 disabled.push(name.clone());
-                out.extend(expand_macros_inner(&replacement, macros, hooks, disabled)?);
+                out.extend(expand_macros_inner(
+                    &replacement,
+                    macros,
+                    hooks,
+                    disabled,
+                    stats,
+                )?);
                 disabled.pop();
                 index = invocation.next_index;
             }
             None => {
                 if let Some(replacement) = hooks.expand_unknown_ident(token, name)? {
-                    out.extend(expand_macros_inner(&replacement, macros, hooks, disabled)?);
+                    stats.hook_expansions += 1;
+                    stats.record_macro(name);
+                    out.extend(expand_macros_inner(
+                        &replacement,
+                        macros,
+                        hooks,
+                        disabled,
+                        stats,
+                    )?);
                 } else {
                     out.push(token.clone());
                 }
@@ -118,6 +216,7 @@ fn expand_macros_inner(
             }
         }
     }
+    stats.record_output(&out);
     Ok(out)
 }
 

@@ -22,6 +22,13 @@ struct MemberAttributes {
     packed: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct DeclarationAttributes {
+    alignment: Option<std::num::NonZeroUsize>,
+    noreturn: bool,
+    vector_size: Option<usize>,
+}
+
 #[derive(Debug)]
 enum AbstractDecl {
     Base,
@@ -1416,32 +1423,28 @@ impl Parser {
         Ok(self.consume_member_attributes()?.alignment)
     }
 
-    fn consume_declaration_attributes(
-        &mut self,
-    ) -> ParseResult<(Option<std::num::NonZeroUsize>, bool, Option<usize>)> {
-        let mut alignment = None;
-        let mut noreturn = false;
-        let mut vector_size = None;
+    fn consume_declaration_attributes(&mut self) -> ParseResult<DeclarationAttributes> {
+        let mut attrs = DeclarationAttributes::default();
         loop {
             match self.peek().cloned() {
                 Some(Token::KWAlignAs) => {
                     let value = self.parse_alignment_specifier()?;
-                    alignment = Self::merge_alignment(alignment, value);
+                    attrs.alignment = Self::merge_alignment(attrs.alignment, value);
                 }
                 Some(Token::AttributeAligned(expression)) => {
                     let value = self.parse_attribute_alignment(&expression)?;
                     self.advance()?;
-                    alignment = Self::merge_alignment(alignment, value);
+                    attrs.alignment = Self::merge_alignment(attrs.alignment, value);
                 }
                 Some(Token::AttributeAlignedNoreturn(expression)) => {
                     let value = self.parse_attribute_alignment(&expression)?;
                     self.advance()?;
-                    alignment = Self::merge_alignment(alignment, value);
-                    noreturn = true;
+                    attrs.alignment = Self::merge_alignment(attrs.alignment, value);
+                    attrs.noreturn = true;
                 }
                 Some(Token::AttributeNoreturn) | Some(Token::KWNoreturn) => {
                     self.advance()?;
-                    noreturn = true;
+                    attrs.noreturn = true;
                 }
                 Some(Token::AttributeNoInstrumentFunction) => {
                     self.advance()?;
@@ -1461,13 +1464,13 @@ impl Parser {
                 Some(Token::AttributePackedAligned(expression)) => {
                     let value = self.parse_attribute_alignment(&expression)?;
                     self.advance()?;
-                    alignment = Self::merge_alignment(alignment, value);
+                    attrs.alignment = Self::merge_alignment(attrs.alignment, value);
                 }
                 Some(Token::AttributePackedAlignedNoreturn(expression)) => {
                     let value = self.parse_attribute_alignment(&expression)?;
                     self.advance()?;
-                    alignment = Self::merge_alignment(alignment, value);
-                    noreturn = true;
+                    attrs.alignment = Self::merge_alignment(attrs.alignment, value);
+                    attrs.noreturn = true;
                 }
                 Some(Token::AttributeMode(_))
                 | Some(Token::AttributeDeprecated(_))
@@ -1475,13 +1478,13 @@ impl Parser {
                     self.advance()?;
                 }
                 Some(Token::AttributeVectorSize(expression)) => {
-                    vector_size = Some(self.parse_attribute_vector_size(&expression)?);
+                    attrs.vector_size = Some(self.parse_attribute_vector_size(&expression)?);
                     self.advance()?;
                 }
                 _ => break,
             }
         }
-        Ok((alignment, noreturn, vector_size))
+        Ok(attrs)
     }
 
     fn apply_vector_size_attr(&self, full_type: FullType, vector_size: Option<usize>) -> FullType {
@@ -3599,16 +3602,14 @@ impl Parser {
         };
         let base_typedef_full_type = self.last_typedef_full_type.clone();
 
-        let (pre_alignment, pre_noreturn, pre_vector_size) =
-            self.consume_declaration_attributes()?;
+        let pre_attrs = self.consume_declaration_attributes()?;
         let decl_tree = self.parse_declarator_tree()?;
-        let (post_alignment, post_noreturn, post_vector_size) =
-            self.consume_declaration_attributes()?;
-        let first_alignment = [decl_alignment, pre_alignment, post_alignment]
+        let post_attrs = self.consume_declaration_attributes()?;
+        let first_alignment = [decl_alignment, pre_attrs.alignment, post_attrs.alignment]
             .into_iter()
             .flatten()
             .max();
-        let first_noreturn = spec_noreturn || pre_noreturn || post_noreturn;
+        let first_noreturn = spec_noreturn || pre_attrs.noreturn || post_attrs.noreturn;
         let first_no_instrument =
             spec_no_instrument || std::mem::take(&mut self.pending_no_instrument_function);
         let decl_transparent_union = std::mem::take(&mut self.pending_transparent_union);
@@ -3616,8 +3617,8 @@ impl Parser {
         self.last_typedef_full_type = None;
         let (name, full_type, decl_params) =
             Self::process_declarator(&decl_tree, base_type, td_ft.as_ref());
-        let full_type =
-            self.apply_vector_size_attr(full_type, post_vector_size.or(pre_vector_size));
+        let full_type = self
+            .apply_vector_size_attr(full_type, post_attrs.vector_size.or(pre_attrs.vector_size));
 
         // Replace Scalar(Struct) with FullType::Struct(tag) if applicable
         let full_type = if base_type == CType::Struct {
@@ -3669,7 +3670,7 @@ impl Parser {
                 let decl_tree = self.parse_declarator_tree()?;
                 let (name2, full_type2, decl_params2) =
                     Self::process_declarator(&decl_tree, base_type, td_ft.as_ref());
-                let full_type2 = self.apply_vector_size_attr(full_type2, post_vector_size);
+                let full_type2 = self.apply_vector_size_attr(full_type2, post_attrs.vector_size);
                 let full_type2 = if base_type == CType::Struct {
                     if let Some(ref tag) = saved_struct_tag {
                         Self::replace_scalar_struct(&full_type2, tag)
@@ -4690,22 +4691,22 @@ impl Parser {
                 None
             };
             let base_typedef_full_type = self.last_typedef_full_type.clone();
-            let (pre_alignment, pre_noreturn, pre_vector_size) =
-                self.consume_declaration_attributes()?;
+            let pre_attrs = self.consume_declaration_attributes()?;
             let decl_tree = self.parse_declarator_tree()?;
             let td_ft = base_typedef_full_type;
             self.last_typedef_full_type = None;
             let (name, full_type, decl_params) =
                 Self::process_declarator(&decl_tree, base_type, td_ft.as_ref());
-            let (post_alignment, post_noreturn, post_vector_size) =
-                self.consume_declaration_attributes()?;
-            let full_type =
-                self.apply_vector_size_attr(full_type, post_vector_size.or(pre_vector_size));
-            let decl_alignment = [decl_alignment, pre_alignment, post_alignment]
+            let post_attrs = self.consume_declaration_attributes()?;
+            let full_type = self.apply_vector_size_attr(
+                full_type,
+                post_attrs.vector_size.or(pre_attrs.vector_size),
+            );
+            let decl_alignment = [decl_alignment, pre_attrs.alignment, post_attrs.alignment]
                 .into_iter()
                 .flatten()
                 .max();
-            let decl_noreturn = spec_noreturn || pre_noreturn || post_noreturn;
+            let decl_noreturn = spec_noreturn || pre_attrs.noreturn || post_attrs.noreturn;
             let decl_no_instrument =
                 spec_no_instrument || std::mem::take(&mut self.pending_no_instrument_function);
             let decl_transparent_union = std::mem::take(&mut self.pending_transparent_union);
@@ -4816,7 +4817,7 @@ impl Parser {
                             let (name2, full_type2, decl_params2) =
                                 Self::process_declarator(&decl_tree, base_type, td_ft.as_ref());
                             let full_type2 =
-                                self.apply_vector_size_attr(full_type2, post_vector_size);
+                                self.apply_vector_size_attr(full_type2, post_attrs.vector_size);
                             let full_type2 = if base_type == CType::Struct {
                                 if let Some(ref tag) = saved_struct_tag {
                                     Self::replace_scalar_struct(&full_type2, tag)

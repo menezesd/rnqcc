@@ -641,9 +641,17 @@ fn val_ctype(val: &TackyVal, types: &HashMap<String, CType>) -> Option<CType> {
     }
 }
 
-fn group_register_needs(is_sse: &[bool]) -> (usize, usize) {
+struct RegisterNeeds {
+    gp: usize,
+    fp: usize,
+}
+
+fn group_register_needs(is_sse: &[bool]) -> RegisterNeeds {
     let fp_needed = is_sse.iter().filter(|&&is_fp| is_fp).count();
-    (is_sse.len() - fp_needed, fp_needed)
+    RegisterNeeds {
+        gp: is_sse.len() - fp_needed,
+        fp: fp_needed,
+    }
 }
 
 fn data_operand_with_offset(name: &str, offset: i32) -> AsmOperand {
@@ -1517,9 +1525,9 @@ fn convert_function(
             continue;
         }
         if let Some((count, is_sse)) = param_groups.get(&param_index) {
-            let (gp_needed, fp_needed) = group_register_needs(is_sse);
-            let fits_registers = gp_param_count + gp_needed <= ARG_REGS.len()
-                && fp_param_count + fp_needed <= FP_ARG_REGS.len();
+            let needs = group_register_needs(is_sse);
+            let fits_registers = gp_param_count + needs.gp <= ARG_REGS.len()
+                && fp_param_count + needs.fp <= FP_ARG_REGS.len();
             for (group_offset, is_fp) in is_sse.iter().copied().enumerate().take(*count) {
                 let param = &function.params[param_index + group_offset];
                 let ty = asm_type_for_val(&TackyVal::Var(param.clone()), types)?;
@@ -2481,9 +2489,9 @@ fn convert_function(
                         let force_stack_for_darwin_vararg = *variadic
                             && target.os == TargetOs::MacOs
                             && arg_index >= *fixed_flat_arg_count;
-                        let (gp_needed, fp_needed) = group_register_needs(is_sse);
-                        let fits_registers = gp_arg_count + gp_needed <= ARG_REGS.len()
-                            && fp_arg_count + fp_needed <= FP_ARG_REGS.len();
+                        let needs = group_register_needs(is_sse);
+                        let fits_registers = gp_arg_count + needs.gp <= ARG_REGS.len()
+                            && fp_arg_count + needs.fp <= FP_ARG_REGS.len();
                         for (group_offset, is_fp) in is_sse.iter().copied().enumerate().take(*count)
                         {
                             let arg = &args[arg_index + group_offset];

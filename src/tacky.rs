@@ -40,6 +40,11 @@ struct StaticStringAddress<'a> {
     elem_size: i64,
 }
 
+struct StaticAddressConstant {
+    base: Option<String>,
+    offset: i64,
+}
+
 struct DirectArrayStructElem<'a> {
     tag: &'a str,
     array_len: usize,
@@ -381,10 +386,11 @@ impl TackyGen {
     }
 
     fn static_pointer_initializer(&mut self, init: &Exp) -> Option<StaticInit> {
-        match self.static_address_constant(init)? {
-            (Some(label), 0) => Some(StaticInit::PointerInit(label)),
-            (Some(label), offset) => Some(StaticInit::PointerInitOffset(label, offset)),
-            (None, offset) => Some(StaticInit::LongInit(offset)),
+        let address = self.static_address_constant(init)?;
+        match address.base {
+            Some(label) if address.offset == 0 => Some(StaticInit::PointerInit(label)),
+            Some(label) => Some(StaticInit::PointerInitOffset(label, address.offset)),
+            None => Some(StaticInit::LongInit(address.offset)),
         }
     }
 
@@ -396,10 +402,11 @@ impl TackyGen {
         if !matches!(ctype, CType::Long | CType::ULong) {
             return None;
         }
-        match self.static_address_constant(init)? {
-            (Some(label), 0) => Some(StaticInit::PointerInit(label)),
-            (Some(label), offset) => Some(StaticInit::PointerInitOffset(label, offset)),
-            (None, _) => None,
+        let address = self.static_address_constant(init)?;
+        match address.base {
+            Some(label) if address.offset == 0 => Some(StaticInit::PointerInit(label)),
+            Some(label) => Some(StaticInit::PointerInitOffset(label, address.offset)),
+            None => None,
         }
     }
 
@@ -464,9 +471,9 @@ impl TackyGen {
                 if let Some(diff) = Self::static_same_string_lvalue_diff(left, right) {
                     return Some(diff);
                 }
-                let (left_label, left_offset) = self.static_address_constant(left)?;
-                let (right_label, right_offset) = self.static_address_constant(right)?;
-                if left_label != right_label {
+                let left_address = self.static_address_constant(left)?;
+                let right_address = self.static_address_constant(right)?;
+                if left_address.base != right_address.base {
                     return None;
                 }
                 let elem_size = match self.static_exp_full_type(left) {
@@ -481,7 +488,7 @@ impl TackyGen {
                 if elem_size == 0 {
                     return None;
                 }
-                let byte_diff = left_offset - right_offset;
+                let byte_diff = left_address.offset - right_address.offset;
                 (byte_diff % elem_size == 0).then_some(byte_diff / elem_size)
             }
             _ => None,
@@ -522,19 +529,34 @@ impl TackyGen {
         }
     }
 
-    fn static_address_constant(&mut self, exp: &Exp) -> Option<(Option<String>, i64)> {
+    fn static_address_constant(&mut self, exp: &Exp) -> Option<StaticAddressConstant> {
         match exp {
-            Exp::Var(name) => Some((Some(name.clone()), 0)),
+            Exp::Var(name) => Some(StaticAddressConstant {
+                base: Some(name.clone()),
+                offset: 0,
+            }),
             Exp::LabelAddress(label) => {
                 let function = self
                     .label_address_function
                     .as_ref()
                     .unwrap_or(&self.current_function);
-                Some((Some(format!("label.{}.{}", function, label)), 0))
+                Some(StaticAddressConstant {
+                    base: Some(format!("label.{}.{}", function, label)),
+                    offset: 0,
+                })
             }
-            Exp::StringLiteral(s) => Some((Some(self.make_string_constant(s)), 0)),
-            Exp::Constant(value) | Exp::LongConstant(value) => Some((None, *value)),
-            Exp::UIntConstant(value) | Exp::ULongConstant(value) => Some((None, *value)),
+            Exp::StringLiteral(s) => Some(StaticAddressConstant {
+                base: Some(self.make_string_constant(s)),
+                offset: 0,
+            }),
+            Exp::Constant(value) | Exp::LongConstant(value) => Some(StaticAddressConstant {
+                base: None,
+                offset: *value,
+            }),
+            Exp::UIntConstant(value) | Exp::ULongConstant(value) => Some(StaticAddressConstant {
+                base: None,
+                offset: *value,
+            }),
             Exp::Cast(_, _, inner) => self.static_address_constant(inner),
             Exp::Unary(UnaryOp::AddrOf, inner) => self.static_lvalue_address_constant(inner),
             Exp::Unary(UnaryOp::Deref, inner) => self.static_address_constant(inner),
@@ -556,8 +578,8 @@ impl TackyGen {
         address: &Exp,
         constant: &Exp,
         sign: i64,
-    ) -> Option<(Option<String>, i64)> {
-        let (base, offset) = self.static_address_constant(address)?;
+    ) -> Option<StaticAddressConstant> {
+        let address_constant = self.static_address_constant(address)?;
         let (value, _, _) = eval_static_integer_constant_exp_with_context(
             constant,
             &self.struct_defs,
@@ -568,7 +590,10 @@ impl TackyGen {
             Some(FullType::Pointer(pointee)) => pointee.byte_size_with(&self.struct_defs) as i64,
             _ => 1,
         };
-        Some((base, offset + sign * value * scale))
+        Some(StaticAddressConstant {
+            base: address_constant.base,
+            offset: address_constant.offset + sign * value * scale,
+        })
     }
 
     fn static_exp_full_type(&self, exp: &Exp) -> Option<FullType> {
@@ -629,15 +654,21 @@ impl TackyGen {
             .map(|m| m.member_full_type.clone())
     }
 
-    fn static_lvalue_address_constant(&mut self, exp: &Exp) -> Option<(Option<String>, i64)> {
+    fn static_lvalue_address_constant(&mut self, exp: &Exp) -> Option<StaticAddressConstant> {
         match exp {
-            Exp::Var(name) => Some((Some(name.clone()), 0)),
+            Exp::Var(name) => Some(StaticAddressConstant {
+                base: Some(name.clone()),
+                offset: 0,
+            }),
             Exp::Cast(_, Some(ft), inner) if matches!(inner.as_ref(), Exp::ArrayInit(_)) => {
                 let label = self.make_static_compound_literal(ft, inner).ok()?;
-                Some((Some(label), 0))
+                Some(StaticAddressConstant {
+                    base: Some(label),
+                    offset: 0,
+                })
             }
             Exp::Dot(inner, member) => {
-                let (base, offset) = self.static_lvalue_address_constant(inner)?;
+                let address = self.static_lvalue_address_constant(inner)?;
                 let tag = match self.static_exp_full_type(inner)? {
                     FullType::Struct(tag) => tag,
                     _ => return None,
@@ -649,10 +680,13 @@ impl TackyGen {
                     .iter()
                     .find(|m| m.name == *member)?
                     .offset as i64;
-                Some((base, offset + member_offset))
+                Some(StaticAddressConstant {
+                    base: address.base,
+                    offset: address.offset + member_offset,
+                })
             }
             Exp::Arrow(inner, member) => {
-                let (base, offset) = self.static_address_constant(inner)?;
+                let address = self.static_address_constant(inner)?;
                 let tag = match self.static_exp_full_type(inner)? {
                     FullType::Pointer(pointee) => match *pointee {
                         FullType::Struct(tag) => tag,
@@ -671,10 +705,13 @@ impl TackyGen {
                     .iter()
                     .find(|m| m.name == *member)?
                     .offset as i64;
-                Some((base, offset + member_offset))
+                Some(StaticAddressConstant {
+                    base: address.base,
+                    offset: address.offset + member_offset,
+                })
             }
             Exp::Subscript(arr, idx) => {
-                let (base, offset) = self
+                let address = self
                     .static_address_constant(arr)
                     .or_else(|| self.static_lvalue_address_constant(arr))?;
                 let elem_size = match self.static_exp_full_type(arr)? {
@@ -687,7 +724,10 @@ impl TackyGen {
                     &self.struct_defs,
                     &self.full_types,
                 )?;
-                Some((base, offset + index * elem_size))
+                Some(StaticAddressConstant {
+                    base: address.base,
+                    offset: address.offset + index * elem_size,
+                })
             }
             Exp::Unary(UnaryOp::Deref, inner) => self.static_address_constant(inner),
             Exp::Cast(_, _, inner) => self.static_lvalue_address_constant(inner),

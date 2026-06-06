@@ -8532,6 +8532,57 @@ fn emits_aarch64_linux_static_strings_and_pointer_init() {
 }
 
 #[test]
+fn emits_linux_utf_static_string_data_for_x86_and_aarch64() {
+    for target in ["x86_64-linux", "aarch64-linux"] {
+        let src = TempPath::new(&format!("{target}-utf-static-strings"), "i");
+        let out = TempPath::new(&format!("{target}-utf-static-strings"), "s");
+        std::fs::write(
+            src.path(),
+            "unsigned short s16[] = u\"a\\U0001f600\";\n\
+             unsigned int s32[] = U\"\\u03c0\" \"x\";\n\
+             unsigned short *p16 = u\"z\";\n\
+             unsigned int *p32 = U\"z\";\n\
+             int main(void) { return 0; }\n",
+        )
+        .expect("failed to write input");
+
+        let output = Command::new(rnqcc())
+            .args(["--target", target, "-S", "-o"])
+            .arg(out.path())
+            .arg(src.path())
+            .output()
+            .expect("failed to run rnqcc");
+
+        assert!(output.status.success(), "{target}: {}", stderr(output));
+        let asm = std::fs::read_to_string(out.path()).expect("failed to read assembly output");
+        assert!(
+            asm.contains("s16:\n\t.short 97\n\t.short 55357\n\t.short 56832\n\t.zero 2"),
+            "{target}:\n{asm}"
+        );
+        assert!(
+            asm.contains("s32:\n\t.long 960\n\t.long 120\n\t.zero 4"),
+            "{target}:\n{asm}"
+        );
+        assert!(
+            asm.contains("p16:\n\t.quad __string_const_0"),
+            "{target}:\n{asm}"
+        );
+        assert!(
+            asm.contains("p32:\n\t.quad __string_const_1"),
+            "{target}:\n{asm}"
+        );
+        assert!(
+            asm.contains("__string_const_0:\n\t.byte 122, 0, 0, 0"),
+            "{target}:\n{asm}"
+        );
+        assert!(
+            asm.contains("__string_const_1:\n\t.byte 122, 0, 0, 0, 0, 0, 0, 0"),
+            "{target}:\n{asm}"
+        );
+    }
+}
+
+#[test]
 fn emits_aarch64_macos_static_data_sections_and_labels() {
     let src = temp_file("aarch64-macos-static-data", "i");
     let out = temp_file("aarch64-macos-static-data", "s");
@@ -25469,6 +25520,10 @@ fn compiles_utf_string_literals_with_both_preprocessors() {
              int main(void) {\n\
                  unsigned short *s16 = u\"a\\U0001f600\";\n\
                  unsigned int *s32 = U\"\\u03c0\";\n\
+                 unsigned short s16_local[] = u\"b\\U0001f600\";\n\
+                 unsigned int s32_local[] = U\"\\u03c0\" \"y\";\n\
+                 int generic16 = _Generic(u\"x\", unsigned short *: 1, default: 0);\n\
+                 int generic32 = _Generic(U\"x\", unsigned int *: 1, default: 0);\n\
                  return s16[0] == 0x61\n\
                      && s16[1] == 0xd83d\n\
                      && s16[2] == 0xde00\n\
@@ -25482,8 +25537,19 @@ fn compiles_utf_string_literals_with_both_preprocessors() {
                      && s32_static[0] == 0x03c0\n\
                      && s32_static[1] == 0x78\n\
                      && s32_static[2] == 0\n\
+                     && s16_local[0] == 0x62\n\
+                     && s16_local[1] == 0xd83d\n\
+                     && s16_local[2] == 0xde00\n\
+                     && s16_local[3] == 0\n\
+                     && s32_local[0] == 0x03c0\n\
+                     && s32_local[1] == 0x79\n\
+                     && s32_local[2] == 0\n\
                      && sizeof(s16_static) == 8\n\
-                     && sizeof(s32_static) == 12 ? 42 : 1;\n\
+                     && sizeof(s32_static) == 12\n\
+                     && sizeof(s16_local) == 8\n\
+                     && sizeof(s32_local) == 12\n\
+                     && generic16\n\
+                     && generic32 ? 42 : 1;\n\
              }\n",
         )
         .expect("failed to write input");
@@ -25534,6 +25600,40 @@ fn rejects_mixed_prefixed_string_concatenation() {
         stderr.contains("cannot concatenate differently-prefixed string literals"),
         "{stderr}"
     );
+}
+
+#[test]
+fn rejects_incompatible_utf_string_pointer_assignments() {
+    for (name, source) in [
+        (
+            "char-from-utf16",
+            "char *p = u\"x\";\nint main(void) { return p != 0; }\n",
+        ),
+        (
+            "utf16-from-utf32",
+            "unsigned short *p = U\"x\";\nint main(void) { return p != 0; }\n",
+        ),
+        (
+            "utf32-from-utf16",
+            "unsigned int *p = u\"x\";\nint main(void) { return p != 0; }\n",
+        ),
+    ] {
+        let src = TempPath::new(&format!("bad-utf-string-pointer-{name}"), "c");
+        let exe = TempPath::new(&format!("bad-utf-string-pointer-{name}"), "bin");
+        std::fs::write(src.path(), source).expect("failed to write input");
+
+        let output = Command::new(rnqcc())
+            .arg("--internal-cpp")
+            .arg(src.path())
+            .arg("-o")
+            .arg(exe.path())
+            .output()
+            .expect("failed to run rnqcc");
+        let status = output.status;
+        let stderr = stderr(output);
+        assert!(!status.success(), "{name} unexpectedly succeeded");
+        assert!(stderr.contains("incompatible types"), "{name}: {stderr}");
+    }
 }
 
 #[test]

@@ -467,6 +467,51 @@ impl TackyGen {
         }
     }
 
+    fn static_address_constant_candidate(init: &Exp) -> bool {
+        match init {
+            Exp::Var(_)
+            | Exp::LabelAddress(_)
+            | Exp::StringLiteral(_)
+            | Exp::WideStringLiteral(_)
+            | Exp::Utf16StringLiteral(_)
+            | Exp::Utf32StringLiteral(_)
+            | Exp::Constant(_)
+            | Exp::LongConstant(_)
+            | Exp::UIntConstant(_)
+            | Exp::ULongConstant(_) => true,
+            Exp::Cast(_, _, inner)
+            | Exp::Unary(UnaryOp::AddrOf, inner)
+            | Exp::Unary(UnaryOp::Deref, inner) => Self::static_address_constant_candidate(inner),
+            Exp::Subscript(arr, _) | Exp::Dot(arr, _) | Exp::Arrow(arr, _) => {
+                Self::static_address_constant_candidate(arr)
+            }
+            Exp::Binary(BinaryOp::Add | BinaryOp::Sub, left, right) => {
+                Self::static_address_constant_candidate(left)
+                    || Self::static_address_constant_candidate(right)
+            }
+            _ => false,
+        }
+    }
+
+    fn static_pointer_initializer_candidate(init: &Exp) -> bool {
+        Self::static_address_constant_candidate(init)
+    }
+
+    fn assert_static_pointer_initializer_assignable(
+        &self,
+        target: &FullType,
+        init: &Exp,
+    ) -> TackyResult<()> {
+        if let Some(src) = eval_static_expr_full_type(init, &self.full_types) {
+            self.assert_assignable_exp_full_type(target, &src, init, "initializer")?;
+        }
+        Ok(())
+    }
+
+    fn declaration_is_pointer(vd: &VarDeclaration) -> bool {
+        matches!(vd.decl_full_type, Some(FullType::Pointer(_))) || vd.var_type == CType::Pointer
+    }
+
     fn static_symbol_offset_integer_initializer(
         &mut self,
         init: &Exp,
@@ -1725,12 +1770,12 @@ impl TackyGen {
                     || matches!(
                         src_inner.as_ref(),
                         FullType::Array { elem, .. }
-                            if self.compatible_full_types(dst_inner, elem)
+                            if self.compatible_pointer_pointees(dst_inner, elem)
                     )
                     || self.compatible_pointer_pointees(dst_inner, src_inner)
             }
             (FullType::Pointer(pointee), FullType::Array { elem, .. }) => {
-                Self::is_void_pointer(dst) || self.compatible_full_types(pointee, elem)
+                Self::is_void_pointer(dst) || self.compatible_pointer_pointees(pointee, elem)
             }
             (FullType::Struct(a), FullType::Struct(b)) => a == b,
             _ => false,
@@ -10341,6 +10386,33 @@ impl TackyGen {
                                 });
                             }
                         }
+                        Exp::WideStringLiteral(s) => {
+                            self.emit_string_units_to_local_array(
+                                arr_name,
+                                s.chars().map(|ch| ch as i64),
+                                scalar_type,
+                                elem_offset,
+                                this_elem_size as usize,
+                            );
+                        }
+                        Exp::Utf16StringLiteral(s) => {
+                            self.emit_string_units_to_local_array(
+                                arr_name,
+                                s.encode_utf16().map(i64::from),
+                                scalar_type,
+                                elem_offset,
+                                this_elem_size as usize,
+                            );
+                        }
+                        Exp::Utf32StringLiteral(s) => {
+                            self.emit_string_units_to_local_array(
+                                arr_name,
+                                s.chars().map(|ch| ch as i64),
+                                scalar_type,
+                                elem_offset,
+                                this_elem_size as usize,
+                            );
+                        }
                         _ => {
                             let (val, val_type) = self.emit_exp(elem.clone())?;
                             let val_conv = self.convert_to(val, val_type, scalar_type);
@@ -10375,6 +10447,33 @@ impl TackyGen {
                     });
                 }
             }
+            Exp::WideStringLiteral(s) => {
+                self.emit_string_units_to_local_array(
+                    arr_name,
+                    s.chars().map(|ch| ch as i64),
+                    scalar_type,
+                    base_offset,
+                    self.local_array_remaining_bytes(arr_name, base_offset),
+                );
+            }
+            Exp::Utf16StringLiteral(s) => {
+                self.emit_string_units_to_local_array(
+                    arr_name,
+                    s.encode_utf16().map(i64::from),
+                    scalar_type,
+                    base_offset,
+                    self.local_array_remaining_bytes(arr_name, base_offset),
+                );
+            }
+            Exp::Utf32StringLiteral(s) => {
+                self.emit_string_units_to_local_array(
+                    arr_name,
+                    s.chars().map(|ch| ch as i64),
+                    scalar_type,
+                    base_offset,
+                    self.local_array_remaining_bytes(arr_name, base_offset),
+                );
+            }
             _ => {
                 let (val, val_type) = self.emit_exp(init.clone())?;
                 let val_conv = self.convert_to(val, val_type, scalar_type);
@@ -10386,6 +10485,43 @@ impl TackyGen {
             }
         }
         Ok(())
+    }
+
+    fn emit_string_units_to_local_array(
+        &mut self,
+        arr_name: &str,
+        units: impl IntoIterator<Item = i64>,
+        scalar_type: CType,
+        base_offset: i64,
+        max_bytes: usize,
+    ) {
+        let elem_size = scalar_type.size() as usize;
+        if elem_size == 0 {
+            return;
+        }
+        let max_units = max_bytes / elem_size;
+        for (i, unit) in units.into_iter().take(max_units).enumerate() {
+            let src = self.fresh_tmp(scalar_type);
+            self.emit(TackyInstr::Copy {
+                src: TackyVal::Constant(unit),
+                dst: src.clone(),
+            });
+            self.emit(TackyInstr::CopyToOffset {
+                src,
+                dst_name: arr_name.to_string(),
+                offset: base_offset + (i * elem_size) as i64,
+            });
+        }
+    }
+
+    fn local_array_remaining_bytes(&self, arr_name: &str, base_offset: i64) -> usize {
+        let total = self
+            .array_sizes
+            .get(arr_name)
+            .copied()
+            .unwrap_or(usize::MAX);
+        let offset = usize::try_from(base_offset).unwrap_or(usize::MAX);
+        total.saturating_sub(offset)
     }
 
     fn direct_array_struct_elem(ft: &FullType) -> Option<DirectArrayStructElem<'_>> {
@@ -12177,6 +12313,9 @@ impl TackyGen {
             self.array_sizes
                 .insert(vd.name.clone(), ft.byte_size_with(&self.struct_defs));
         }
+        let target_ft = ft.clone();
+        let declaration_is_pointer =
+            matches!(target_ft, FullType::Pointer(_)) || vd.var_type == CType::Pointer;
         let init = match vd.init {
             Some(Exp::ArrayInit(mut elems)) if elems.len() == 1 => Some(elems.remove(0)),
             Some(Exp::ArrayInit(elems)) if elems.is_empty() => Some(Exp::Constant(0)),
@@ -12189,7 +12328,11 @@ impl TackyGen {
             .is_some_and(StorageClass::is_static)
         {
             // Static pointer initialized with string literal: static char *p = "hello";
-            if let Some(Exp::StringLiteral(ref s)) = init {
+            if let (true, Some(Exp::StringLiteral(ref s))) = (declaration_is_pointer, &init) {
+                self.assert_static_pointer_initializer_assignable(
+                    &target_ft,
+                    init.as_ref().expect("string initializer exists"),
+                )?;
                 let str_label = self.make_string_constant(s);
                 let align = std::cmp::max(vd.var_type.size() as usize, 1);
                 let align = vd.alignment.map_or(align, |a| a.get().max(align));
@@ -12202,23 +12345,22 @@ impl TackyGen {
                 });
                 return Ok(());
             }
-            if let Some(ptr_init) = (vd.var_type == CType::Pointer)
-                .then(|| {
-                    init.as_ref()
-                        .and_then(|init| self.static_pointer_initializer(init))
-                })
-                .flatten()
-            {
-                let align = std::cmp::max(vd.var_type.size() as usize, 1);
-                let align = vd.alignment.map_or(align, |a| a.get().max(align));
-                self.static_vars.push(TackyStaticVar {
-                    name: vd.name,
-                    global: false,
-                    thread_local: is_thread_local,
-                    alignment: align,
-                    init_values: vec![ptr_init],
-                });
-                return Ok(());
+            if declaration_is_pointer {
+                if let Some(init) = init.as_ref() {
+                    self.assert_static_pointer_initializer_assignable(&target_ft, init)?;
+                    if let Some(ptr_init) = self.static_pointer_initializer(init) {
+                        let align = std::cmp::max(vd.var_type.size() as usize, 1);
+                        let align = vd.alignment.map_or(align, |a| a.get().max(align));
+                        self.static_vars.push(TackyStaticVar {
+                            name: vd.name,
+                            global: false,
+                            thread_local: is_thread_local,
+                            alignment: align,
+                            init_values: vec![ptr_init],
+                        });
+                        return Ok(());
+                    }
+                }
             }
             let raw_val = self.eval_static_constant_init(&init)?;
             let init_val = convert_init_value(raw_val, vd.var_type);
@@ -14735,8 +14877,8 @@ pub fn generate_with_target_options_and_warnings(
                     | Exp::Utf32StringLiteral(_),
                 ) => None, // String init handled separately
                 Some(exp)
-                    if vd.var_type == CType::Pointer
-                        && gen.static_pointer_initializer(exp).is_some() =>
+                    if TackyGen::declaration_is_pointer(vd)
+                        && TackyGen::static_pointer_initializer_candidate(exp) =>
                 {
                     None
                 }
@@ -15018,6 +15160,14 @@ pub fn generate_with_target_options_and_warnings(
             }
             // Global pointer initialized with string literal: char *p = "hello";
             if let (None, Some(Exp::StringLiteral(ref s))) = (&vd.array_dims, &vd.init) {
+                let target_ft = vd
+                    .decl_full_type
+                    .clone()
+                    .unwrap_or_else(|| FullType::from_decl(vd.var_type, vd.ptr_info, &None));
+                gen.assert_static_pointer_initializer_assignable(
+                    &target_ft,
+                    vd.init.as_ref().expect("string initializer exists"),
+                )?;
                 let str_label = gen.make_string_constant(s);
                 let is_global = *linkage.get(&vd.name).unwrap_or(&true);
                 let align = std::cmp::max(vd.var_type.size() as usize, 1);
@@ -15041,29 +15191,34 @@ pub fn generate_with_target_options_and_warnings(
                 }
                 continue;
             }
-            if let (None, true, Some(ptr_init)) = (
+            if let (None, true, Some(init)) = (
                 &vd.array_dims,
-                vd.var_type == CType::Pointer,
-                vd.init
-                    .as_ref()
-                    .and_then(|init| gen.static_pointer_initializer(init)),
+                TackyGen::declaration_is_pointer(vd),
+                vd.init.as_ref(),
             ) {
-                let is_global = *linkage.get(&vd.name).unwrap_or(&true);
-                let align = std::cmp::max(vd.var_type.size() as usize, 1);
-                let align = vd.alignment.map_or(align, |a| a.get().max(align));
-                top_level.push(TackyTopLevel::StaticVar(TackyStaticVar {
-                    name: vd.name.clone(),
-                    global: is_global,
-                    thread_local: vd
-                        .storage_class
-                        .as_ref()
-                        .is_some_and(StorageClass::is_thread_local),
-                    alignment: align,
-                    init_values: vec![ptr_init],
-                }));
-                file_scope_vars.remove(&vd.name);
-                global_array_names.insert(vd.name.clone());
-                continue;
+                let target_ft = vd
+                    .decl_full_type
+                    .clone()
+                    .unwrap_or_else(|| FullType::from_decl(vd.var_type, vd.ptr_info, &None));
+                gen.assert_static_pointer_initializer_assignable(&target_ft, init)?;
+                if let Some(ptr_init) = gen.static_pointer_initializer(init) {
+                    let is_global = *linkage.get(&vd.name).unwrap_or(&true);
+                    let align = std::cmp::max(vd.var_type.size() as usize, 1);
+                    let align = vd.alignment.map_or(align, |a| a.get().max(align));
+                    top_level.push(TackyTopLevel::StaticVar(TackyStaticVar {
+                        name: vd.name.clone(),
+                        global: is_global,
+                        thread_local: vd
+                            .storage_class
+                            .as_ref()
+                            .is_some_and(StorageClass::is_thread_local),
+                        alignment: align,
+                        init_values: vec![ptr_init],
+                    }));
+                    file_scope_vars.remove(&vd.name);
+                    global_array_names.insert(vd.name.clone());
+                    continue;
+                }
             }
             if let (Some(_), Some(init_exp)) = (
                 &vd.array_dims,

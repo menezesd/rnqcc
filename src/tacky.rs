@@ -4,7 +4,6 @@ use crate::diagnostic::{Phase, Warning, WarningKind};
 use crate::types::*;
 use std::collections::{HashMap, HashSet};
 
-type StaticScalarValue = (i64, bool, bool);
 type StaticComplexValue = (StaticScalarValue, StaticScalarValue);
 type BuiltinFunctionInfo = (&'static str, CType, FullType, Vec<CType>, Option<PtrInfo>);
 pub type TackyResult<T> = Result<T, String>;
@@ -35,6 +34,31 @@ struct FileScopeVarInfo {
 }
 
 #[derive(Copy, Clone)]
+struct StaticScalarValue {
+    value: i64,
+    source_is_double: bool,
+    source_is_unsigned: bool,
+}
+
+impl StaticScalarValue {
+    fn integer(value: i64) -> Self {
+        Self {
+            value,
+            source_is_double: false,
+            source_is_unsigned: false,
+        }
+    }
+
+    fn double_bits(value: f64) -> Self {
+        Self {
+            value: value.to_bits() as i64,
+            source_is_double: true,
+            source_is_unsigned: false,
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
 struct StaticIntegerConstant {
     value: i64,
     is_double: bool,
@@ -43,7 +67,11 @@ struct StaticIntegerConstant {
 
 impl StaticIntegerConstant {
     fn as_scalar_value(self) -> StaticScalarValue {
-        (self.value, self.is_double, self.is_unsigned)
+        StaticScalarValue {
+            value: self.value,
+            source_is_double: self.is_double,
+            source_is_unsigned: self.is_unsigned,
+        }
     }
 }
 
@@ -10822,25 +10850,23 @@ impl TackyGen {
             match init {
                 Exp::ArrayInit(elems) => {
                     if let Some(first) = elems.first() {
-                        let (v, is_dbl, is_uns) =
-                            self.eval_static_constant_init(&Some(first.clone()))?;
-                        let cv = convert_init_value(v, elem_type, is_dbl, is_uns);
+                        let v = self.eval_static_constant_init(&Some(first.clone()))?;
+                        let cv = convert_init_value(v, elem_type);
                         builder.put(base_offset, make_static_init(cv, elem_type))?;
                     }
                     if let Some(second) = elems.get(1) {
-                        let (v, is_dbl, is_uns) =
-                            self.eval_static_constant_init(&Some(second.clone()))?;
-                        let cv = convert_init_value(v, elem_type, is_dbl, is_uns);
+                        let v = self.eval_static_constant_init(&Some(second.clone()))?;
+                        let cv = convert_init_value(v, elem_type);
                         builder.put(base_offset + elem_size, make_static_init(cv, elem_type))?;
                     }
                 }
                 _ => {
-                    let ((real, real_dbl, real_uns), (imag, imag_dbl, imag_uns)) = self
+                    let (real, imag) = self
                         .eval_static_complex_constant_init(init)
                         .ok_or_else(|| "Static complex initializer must be constant".to_string())?;
-                    let cv = convert_init_value(real, elem_type, real_dbl, real_uns);
+                    let cv = convert_init_value(real, elem_type);
                     builder.put(base_offset, make_static_init(cv, elem_type))?;
-                    let cv = convert_init_value(imag, elem_type, imag_dbl, imag_uns);
+                    let cv = convert_init_value(imag, elem_type);
                     builder.put(base_offset + elem_size, make_static_init(cv, elem_type))?;
                 }
             }
@@ -10858,9 +10884,8 @@ impl TackyGen {
                     .find_member(name)
                     .ok_or_else(|| format!("struct '{}' has no member '{}'", tag, name))?;
                 if let Some(width) = mem.bit_width {
-                    let (raw, is_dbl, is_uns) =
-                        self.eval_static_constant_init(&Some(value.as_ref().clone()))?;
-                    let converted = convert_init_value(raw, mem.member_type, is_dbl, is_uns);
+                    let raw = self.eval_static_constant_init(&Some(value.as_ref().clone()))?;
+                    let converted = convert_init_value(raw, mem.member_type);
                     builder.put_bit_field(
                         base_offset + mem.offset,
                         mem.member_type,
@@ -11123,9 +11148,8 @@ impl TackyGen {
                         (member, elem_init.clone())
                     };
                     if let Some(width) = member.bit_width {
-                        let (raw, is_dbl, is_uns) =
-                            self.eval_static_constant_init(&Some(value.clone()))?;
-                        let converted = convert_init_value(raw, member.member_type, is_dbl, is_uns);
+                        let raw = self.eval_static_constant_init(&Some(value.clone()))?;
+                        let converted = convert_init_value(raw, member.member_type);
                         builder.put_bit_field(
                             base_offset + member.offset,
                             member.member_type,
@@ -11162,9 +11186,8 @@ impl TackyGen {
                 if let Some(ptr_init) = self.static_pointer_initializer(init) {
                     builder.put(base_offset, ptr_init)?;
                 } else {
-                    let (v, is_dbl, is_uns) =
-                        self.eval_static_constant_init(&Some(init.clone()))?;
-                    let cv = convert_init_value(v, CType::Pointer, is_dbl, is_uns);
+                    let v = self.eval_static_constant_init(&Some(init.clone()))?;
+                    let cv = convert_init_value(v, CType::Pointer);
                     builder.put(base_offset, make_static_init(cv, CType::Pointer))?;
                 }
             }
@@ -11177,8 +11200,8 @@ impl TackyGen {
                     builder.put(base_offset, make_static_init(pointer_diff, *ctype))?;
                     return Ok(());
                 }
-                let (v, is_dbl, is_uns) = self.eval_static_constant_init(&Some(init.clone()))?;
-                let cv = convert_init_value(v, *ctype, is_dbl, is_uns);
+                let v = self.eval_static_constant_init(&Some(init.clone()))?;
+                let cv = convert_init_value(v, *ctype);
                 builder.put(base_offset, make_static_init(cv, *ctype))?;
             }
             _ => {
@@ -11204,7 +11227,7 @@ impl TackyGen {
         builder.finish(total_bytes)
     }
 
-    fn eval_static_constant_init(&self, init: &Option<Exp>) -> TackyResult<(i64, bool, bool)> {
+    fn eval_static_constant_init(&self, init: &Option<Exp>) -> TackyResult<StaticScalarValue> {
         if let Some(exp) = init {
             eval_static_integer_constant_exp_with_context_and_values(
                 exp,
@@ -11215,16 +11238,16 @@ impl TackyGen {
             .map(StaticIntegerConstant::as_scalar_value)
             .ok_or_else(|| "Static variable initializer must be a constant".to_string())
         } else {
-            Ok((0, false, false))
+            Ok(StaticScalarValue::integer(0))
         }
     }
 
     fn eval_static_complex_constant_init(&self, init: &Exp) -> Option<StaticComplexValue> {
-        let zero = (0, false, false);
+        let zero = StaticScalarValue::integer(0);
         match init {
-            Exp::ImaginaryIntConstant(value) => Some((zero, (*value, false, false))),
+            Exp::ImaginaryIntConstant(value) => Some((zero, StaticScalarValue::integer(*value))),
             Exp::ImaginaryDoubleConstant(value) => {
-                Some((zero, (value.to_bits() as i64, true, false)))
+                Some((zero, StaticScalarValue::double_bits(*value)))
             }
             Exp::Unary(UnaryOp::Negate, inner) => {
                 let (real, imag) = self.eval_static_complex_constant_init(inner)?;
@@ -11258,8 +11281,8 @@ impl TackyGen {
                     _ => unreachable!(),
                 };
                 Some((
-                    (real.to_bits() as i64, true, false),
-                    (imag.to_bits() as i64, true, false),
+                    StaticScalarValue::double_bits(real),
+                    StaticScalarValue::double_bits(imag),
                 ))
             }
             _ => {
@@ -11371,12 +11394,11 @@ impl TackyGen {
                     }
                     let elem_init = &elems[*index];
                     if let Some(width) = mem.bit_width {
-                        let (value, _, _) =
-                            self.eval_static_constant_init(&Some(elem_init.clone()))?;
+                        let value = self.eval_static_constant_init(&Some(elem_init.clone()))?;
                         builder.put_bit_field(
                             base_offset + mem.offset,
                             mem.member_type,
-                            value,
+                            value.value,
                             mem.bit_offset,
                             width,
                         )?;
@@ -12015,8 +12037,8 @@ impl TackyGen {
                 });
                 return Ok(());
             }
-            let (raw_val, is_dbl, is_uns) = self.eval_static_constant_init(&init)?;
-            let init_val = convert_init_value(raw_val, vd.var_type, is_dbl, is_uns);
+            let raw_val = self.eval_static_constant_init(&init)?;
+            let init_val = convert_init_value(raw_val, vd.var_type);
             let align = if vd.var_type == CType::Double {
                 16
             } else {
@@ -13703,12 +13725,11 @@ fn is_comparison_op(op: &BinaryOp) -> bool {
 }
 
 /// Truncate/convert a constant value to the target type's bit width
-fn convert_init_value(
-    val: i64,
-    target: CType,
-    source_is_double: bool,
-    source_is_unsigned: bool,
-) -> i64 {
+fn convert_init_value(init_value: StaticScalarValue, target: CType) -> i64 {
+    let val = init_value.value;
+    let source_is_double = init_value.source_is_double;
+    let source_is_unsigned = init_value.source_is_unsigned;
+
     if target == CType::Float && source_is_double {
         let d = f64::from_bits(val as u64) as f32;
         return d.to_bits() as i64;
@@ -13768,23 +13789,25 @@ fn convert_init_value(
     }
 }
 
-fn static_init_value_to_f64((val, source_is_double, source_is_unsigned): StaticScalarValue) -> f64 {
-    if source_is_double {
-        f64::from_bits(val as u64)
-    } else if source_is_unsigned {
-        val as u64 as f64
+fn static_init_value_to_f64(value: StaticScalarValue) -> f64 {
+    if value.source_is_double {
+        f64::from_bits(value.value as u64)
+    } else if value.source_is_unsigned {
+        value.value as u64 as f64
     } else {
-        val as f64
+        value.value as f64
     }
 }
 
-fn neg_static_init_value(
-    (val, source_is_double, source_is_unsigned): StaticScalarValue,
-) -> StaticScalarValue {
-    if source_is_double {
-        ((-f64::from_bits(val as u64)).to_bits() as i64, true, false)
+fn neg_static_init_value(value: StaticScalarValue) -> StaticScalarValue {
+    if value.source_is_double {
+        StaticScalarValue::double_bits(-f64::from_bits(value.value as u64))
     } else {
-        (val.wrapping_neg(), false, source_is_unsigned)
+        StaticScalarValue {
+            value: value.value.wrapping_neg(),
+            source_is_double: false,
+            source_is_unsigned: value.source_is_unsigned,
+        }
     }
 }
 
@@ -13873,11 +13896,13 @@ fn eval_static_integer_constant_exp_with_context_and_values(
         Exp::DoubleConstant(d) | Exp::LongDoubleConstant(d) => {
             Some(static_integer_constant(d.to_bits() as i64, true, false))
         }
-        Exp::Var(name) => static_const_values
-            .get(name)
-            .map(|(value, is_double, is_unsigned)| {
-                static_integer_constant(*value, *is_double, *is_unsigned)
-            }),
+        Exp::Var(name) => static_const_values.get(name).map(|value| {
+            static_integer_constant(
+                value.value,
+                value.source_is_double,
+                value.source_is_unsigned,
+            )
+        }),
         Exp::SizeOf(inner) => {
             let ft = eval_static_expr_full_type(inner, full_types)?;
             Some(static_integer_constant(
@@ -13960,7 +13985,14 @@ fn eval_static_integer_constant_exp_with_context_and_values(
                             | CType::UInt128
                     );
                     Some(static_integer_constant(
-                        convert_init_value(constant.value, *target, false, constant.is_unsigned),
+                        convert_init_value(
+                            StaticScalarValue {
+                                value: constant.value,
+                                source_is_double: false,
+                                source_is_unsigned: constant.is_unsigned,
+                            },
+                            *target,
+                        ),
                         false,
                         target_unsigned,
                     ))
@@ -14469,7 +14501,7 @@ pub fn generate_with_target_options_and_warnings(
                 }
                 Some(exp) if gen.static_pointer_diff_integer(exp).is_some() => gen
                     .static_pointer_diff_integer(exp)
-                    .map(|v| (v, false, false)),
+                    .map(StaticScalarValue::integer),
                 Some(exp) => Some(
                     eval_static_integer_constant_exp_with_context_and_values(
                         exp,
@@ -14895,8 +14927,10 @@ pub fn generate_with_target_options_and_warnings(
         let Some(info) = file_scope_vars.remove(&name) else {
             continue;
         };
-        let (raw_init, is_dbl, is_uns) = info.init_val.unwrap_or((0, false, false));
-        let converted_init = convert_init_value(raw_init, info.var_type, is_dbl, is_uns);
+        let raw_init = info
+            .init_val
+            .unwrap_or_else(|| StaticScalarValue::integer(0));
+        let converted_init = convert_init_value(raw_init, info.var_type);
         let align = if info.var_type == CType::Double {
             16
         } else {

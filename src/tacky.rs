@@ -637,6 +637,8 @@ impl TackyGen {
                 let (value, elem_size) = match arr.as_ref() {
                     Exp::StringLiteral(s) => (s.as_str(), 1),
                     Exp::WideStringLiteral(s) => (s.as_str(), CType::Int.size() as i64),
+                    Exp::Utf16StringLiteral(s) => (s.as_str(), CType::UShort.size() as i64),
+                    Exp::Utf32StringLiteral(s) => (s.as_str(), CType::UInt.size() as i64),
                     _ => return None,
                 };
                 let index = eval_static_integer_constant_exp(idx)?.value;
@@ -10386,28 +10388,12 @@ impl TackyGen {
                                 });
                             }
                         }
-                        Exp::WideStringLiteral(s) => {
-                            self.emit_string_units_to_local_array(
+                        Exp::WideStringLiteral(_)
+                        | Exp::Utf16StringLiteral(_)
+                        | Exp::Utf32StringLiteral(_) => {
+                            self.emit_prefixed_string_to_local_array(
                                 arr_name,
-                                s.chars().map(|ch| ch as i64),
-                                scalar_type,
-                                elem_offset,
-                                this_elem_size as usize,
-                            );
-                        }
-                        Exp::Utf16StringLiteral(s) => {
-                            self.emit_string_units_to_local_array(
-                                arr_name,
-                                s.encode_utf16().map(i64::from),
-                                scalar_type,
-                                elem_offset,
-                                this_elem_size as usize,
-                            );
-                        }
-                        Exp::Utf32StringLiteral(s) => {
-                            self.emit_string_units_to_local_array(
-                                arr_name,
-                                s.chars().map(|ch| ch as i64),
+                                elem,
                                 scalar_type,
                                 elem_offset,
                                 this_elem_size as usize,
@@ -10447,28 +10433,10 @@ impl TackyGen {
                     });
                 }
             }
-            Exp::WideStringLiteral(s) => {
-                self.emit_string_units_to_local_array(
+            Exp::WideStringLiteral(_) | Exp::Utf16StringLiteral(_) | Exp::Utf32StringLiteral(_) => {
+                self.emit_prefixed_string_to_local_array(
                     arr_name,
-                    s.chars().map(|ch| ch as i64),
-                    scalar_type,
-                    base_offset,
-                    self.local_array_remaining_bytes(arr_name, base_offset),
-                );
-            }
-            Exp::Utf16StringLiteral(s) => {
-                self.emit_string_units_to_local_array(
-                    arr_name,
-                    s.encode_utf16().map(i64::from),
-                    scalar_type,
-                    base_offset,
-                    self.local_array_remaining_bytes(arr_name, base_offset),
-                );
-            }
-            Exp::Utf32StringLiteral(s) => {
-                self.emit_string_units_to_local_array(
-                    arr_name,
-                    s.chars().map(|ch| ch as i64),
+                    init,
                     scalar_type,
                     base_offset,
                     self.local_array_remaining_bytes(arr_name, base_offset),
@@ -10511,6 +10479,37 @@ impl TackyGen {
                 dst_name: arr_name.to_string(),
                 offset: base_offset + (i * elem_size) as i64,
             });
+        }
+    }
+
+    fn emit_prefixed_string_to_local_array(
+        &mut self,
+        arr_name: &str,
+        init: &Exp,
+        scalar_type: CType,
+        base_offset: i64,
+        max_bytes: usize,
+    ) {
+        match init {
+            Exp::WideStringLiteral(s) | Exp::Utf32StringLiteral(s) => {
+                self.emit_string_units_to_local_array(
+                    arr_name,
+                    s.chars().map(|ch| ch as i64),
+                    scalar_type,
+                    base_offset,
+                    max_bytes,
+                );
+            }
+            Exp::Utf16StringLiteral(s) => {
+                self.emit_string_units_to_local_array(
+                    arr_name,
+                    s.encode_utf16().map(i64::from),
+                    scalar_type,
+                    base_offset,
+                    max_bytes,
+                );
+            }
+            _ => {}
         }
     }
 

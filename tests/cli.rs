@@ -8542,6 +8542,12 @@ fn emits_linux_utf_static_string_data_for_x86_and_aarch64() {
              unsigned int s32[] = U\"\\u03c0\" \"x\";\n\
              unsigned short *p16 = u\"z\";\n\
              unsigned int *p32 = U\"z\";\n\
+             int *pw_off = L\"abcd\" + 2;\n\
+             unsigned short *p16_off = u\"abcd\" + 2;\n\
+             unsigned int *p32_addr = &U\"abcd\"[1];\n\
+             int dw = &L\"abcd\"[3] - &L\"abcd\"[1];\n\
+             int d16 = &u\"abcd\"[3] - &u\"abcd\"[1];\n\
+             int d32 = &U\"abcd\"[3] - &U\"abcd\"[1];\n\
              int main(void) { return 0; }\n",
         )
         .expect("failed to write input");
@@ -8572,11 +8578,42 @@ fn emits_linux_utf_static_string_data_for_x86_and_aarch64() {
             "{target}:\n{asm}"
         );
         assert!(
+            asm.contains("pw_off:\n\t.quad __string_const_2+8"),
+            "{target}:\n{asm}"
+        );
+        assert!(
+            asm.contains("p16_off:\n\t.quad __string_const_3+4"),
+            "{target}:\n{asm}"
+        );
+        assert!(
+            asm.contains("p32_addr:\n\t.quad __string_const_4+4"),
+            "{target}:\n{asm}"
+        );
+        assert!(asm.contains("dw:\n\t.long 2"), "{target}:\n{asm}");
+        assert!(asm.contains("d16:\n\t.long 2"), "{target}:\n{asm}");
+        assert!(asm.contains("d32:\n\t.long 2"), "{target}:\n{asm}");
+        assert!(
             asm.contains("__string_const_0:\n\t.byte 122, 0, 0, 0"),
             "{target}:\n{asm}"
         );
         assert!(
             asm.contains("__string_const_1:\n\t.byte 122, 0, 0, 0, 0, 0, 0, 0"),
+            "{target}:\n{asm}"
+        );
+        assert!(
+            asm.contains(
+                "__string_const_2:\n\t.byte 97, 0, 0, 0, 98, 0, 0, 0, 99, 0, 0, 0, 100, 0, 0, 0"
+            ) && asm.contains("\t.byte 0, 0, 0, 0"),
+            "{target}:\n{asm}"
+        );
+        assert!(
+            asm.contains("__string_const_3:\n\t.byte 97, 0, 98, 0, 99, 0, 100, 0, 0, 0"),
+            "{target}:\n{asm}"
+        );
+        assert!(
+            asm.contains(
+                "__string_const_4:\n\t.byte 97, 0, 0, 0, 98, 0, 0, 0, 99, 0, 0, 0, 100, 0, 0, 0"
+            ) && asm.contains("\t.byte 0, 0, 0, 0"),
             "{target}:\n{asm}"
         );
     }
@@ -25522,6 +25559,12 @@ fn compiles_utf_string_literals_with_both_preprocessors() {
                  unsigned int *s32 = U\"\\u03c0\";\n\
                  unsigned short s16_local[] = u\"b\\U0001f600\";\n\
                  unsigned int s32_local[] = U\"\\u03c0\" \"y\";\n\
+                 unsigned short *s16_base = u\"abcd\";\n\
+                 unsigned int *s32_base = U\"abcd\";\n\
+                 unsigned short *s16_mid = u\"abcd\" + 2;\n\
+                 unsigned int *s32_mid = &U\"abcd\"[2];\n\
+                 int diff16 = &s16_base[3] - &s16_base[1];\n\
+                 int diff32 = &s32_base[3] - &s32_base[1];\n\
                  int generic16 = _Generic(u\"x\", unsigned short *: 1, default: 0);\n\
                  int generic32 = _Generic(U\"x\", unsigned int *: 1, default: 0);\n\
                  return s16[0] == 0x61\n\
@@ -25548,6 +25591,10 @@ fn compiles_utf_string_literals_with_both_preprocessors() {
                      && sizeof(s32_static) == 12\n\
                      && sizeof(s16_local) == 8\n\
                      && sizeof(s32_local) == 12\n\
+                     && s16_mid[0] == 0x63\n\
+                     && s32_mid[0] == 0x63\n\
+                     && diff16 == 2\n\
+                     && diff32 == 2\n\
                      && generic16\n\
                      && generic32 ? 42 : 1;\n\
              }\n",
@@ -25616,6 +25663,18 @@ fn rejects_incompatible_utf_string_pointer_assignments() {
         (
             "utf32-from-utf16",
             "unsigned int *p = u\"x\";\nint main(void) { return p != 0; }\n",
+        ),
+        (
+            "char-from-wide",
+            "char *p = L\"x\";\nint main(void) { return p != 0; }\n",
+        ),
+        (
+            "int-from-utf16",
+            "int *p = u\"x\";\nint main(void) { return p != 0; }\n",
+        ),
+        (
+            "utf16-from-wide",
+            "unsigned short *p = L\"x\";\nint main(void) { return p != 0; }\n",
         ),
     ] {
         let src = TempPath::new(&format!("bad-utf-string-pointer-{name}"), "c");

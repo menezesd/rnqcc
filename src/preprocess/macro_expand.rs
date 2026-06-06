@@ -168,28 +168,28 @@ fn substitute_function_macro(
     macros: &MacroTable,
     hooks: &mut dyn MacroExpansionHooks,
 ) -> Result<Vec<PpToken>, String> {
-    let mut param_names = params.to_vec();
-    let mut macro_args = args[..params.len()].to_vec();
+    let fixed_args = &args[..params.len()];
     let variadic_args = if variadic {
-        args[params.len()..].to_vec()
+        &args[params.len()..]
+    } else {
+        &[][..]
+    };
+    let variadic_args_missing = variadic && args.len() == params.len();
+    let has_variadic_args = variadic_args.iter().any(|arg| !arg.is_empty());
+    let body = process_va_opt_tokens(body, has_variadic_args);
+    let joined_variadic_args = if variadic {
+        join_variadic_args(variadic_args)
     } else {
         Vec::new()
     };
-    let variadic_args_missing = variadic && args.len() == params.len();
-    if variadic {
-        param_names.push("__VA_ARGS__".to_string());
-        macro_args.push(join_variadic_args(&variadic_args));
-    }
-    let has_variadic_args = variadic_args.iter().any(|arg| !arg.is_empty());
-    let body = process_va_opt_tokens(body, has_variadic_args);
     let mut out = Vec::new();
     let mut index = 0usize;
     while index < body.len() {
-        if let Some((param_index, arg_index)) = comma_va_args_paste(&body, index, &param_names) {
+        if let Some(arg_index) = comma_va_args_paste(&body, index, params, variadic) {
             if !variadic_args_missing {
                 out.push(body[index].clone());
                 out.extend(expand_macros_with_hooks(
-                    &macro_args[param_index],
+                    &joined_variadic_args,
                     macros,
                     hooks,
                 )?);
@@ -199,15 +199,19 @@ fn substitute_function_macro(
         }
         if is_punct(body.get(index), "#") {
             let ident_index = skip_ws(&body, index + 1);
-            if let Some((param_index, _name)) = param_at(&body, ident_index, &param_names) {
-                out.push(stringify_arg(&body[index], &macro_args[param_index]));
+            if let Some(param_index) = param_index_at(&body, ident_index, params, variadic) {
+                out.push(stringify_arg(
+                    &body[index],
+                    macro_arg(param_index, fixed_args, &joined_variadic_args),
+                ));
                 index = ident_index + 1;
                 continue;
             }
         }
-        if let Some((param_index, _name)) = param_at(&body, index, &param_names) {
+        if let Some(param_index) = param_index_at(&body, index, params, variadic) {
+            let macro_arg = macro_arg(param_index, fixed_args, &joined_variadic_args);
             if adjacent_to_paste(&body, index) {
-                if macro_args[param_index].is_empty() {
+                if macro_arg.is_empty() {
                     while matches!(
                         out.last().map(|token| &token.kind),
                         Some(PpTokenKind::Whitespace(_))
@@ -232,13 +236,9 @@ fn substitute_function_macro(
                     index += 1;
                     continue;
                 }
-                out.extend(macro_args[param_index].clone());
+                out.extend_from_slice(macro_arg);
             } else {
-                out.extend(expand_macros_with_hooks(
-                    &macro_args[param_index],
-                    macros,
-                    hooks,
-                )?);
+                out.extend(expand_macros_with_hooks(macro_arg, macros, hooks)?);
             }
             index += 1;
         } else {
@@ -360,7 +360,8 @@ fn comma_va_args_paste(
     tokens: &[PpToken],
     index: usize,
     params: &[String],
-) -> Option<(usize, usize)> {
+    variadic: bool,
+) -> Option<usize> {
     if !is_punct(tokens.get(index), ",") {
         return None;
     }
@@ -369,9 +370,13 @@ fn comma_va_args_paste(
         return None;
     }
     let arg_index = skip_ws(tokens, paste_index + 1);
-    match param_at(tokens, arg_index, params) {
-        Some((param_index, "__VA_ARGS__")) => Some((param_index, arg_index)),
-        _ => None,
+    if variadic
+        && is_ident(tokens.get(arg_index), "__VA_ARGS__")
+        && !params.iter().any(|param| param == "__VA_ARGS__")
+    {
+        Some(arg_index)
+    } else {
+        None
     }
 }
 
@@ -445,18 +450,31 @@ fn skip_ws(tokens: &[PpToken], mut index: usize) -> usize {
     index
 }
 
-fn param_at<'a>(
-    tokens: &'a [PpToken],
+fn param_index_at(
+    tokens: &[PpToken],
     index: usize,
-    params: &'a [String],
-) -> Option<(usize, &'a str)> {
+    params: &[String],
+    variadic: bool,
+) -> Option<usize> {
     let PpTokenKind::Ident(name) = &tokens.get(index)?.kind else {
         return None;
     };
-    params
-        .iter()
-        .position(|param| param == name)
-        .map(|param_index| (param_index, name.as_str()))
+    if variadic && name == "__VA_ARGS__" && !params.iter().any(|param| param == "__VA_ARGS__") {
+        Some(params.len())
+    } else {
+        params.iter().position(|param| param == name)
+    }
+}
+
+fn macro_arg<'a>(
+    param_index: usize,
+    fixed_args: &'a [Vec<PpToken>],
+    joined_variadic_args: &'a [PpToken],
+) -> &'a [PpToken] {
+    fixed_args
+        .get(param_index)
+        .map(Vec::as_slice)
+        .unwrap_or(joined_variadic_args)
 }
 
 fn adjacent_to_paste(tokens: &[PpToken], index: usize) -> bool {

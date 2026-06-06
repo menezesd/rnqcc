@@ -111,6 +111,9 @@ impl Lexer {
                     self.read_string_or_char()?
                 }
                 Some(ch) if is_ident_start(ch) => self.read_ident(),
+                Some('\\') if self.peek_ucn().is_some_and(|(ch, _)| is_ident_start(ch)) => {
+                    self.read_ident()
+                }
                 Some(ch)
                     if ch.is_ascii_digit()
                         || ch == '.' && self.peek_ahead(1).is_some_and(|c| c.is_ascii_digit()) =>
@@ -145,6 +148,30 @@ impl Lexer {
 
     fn peek_ahead(&self, offset: usize) -> Option<char> {
         self.chars.get(self.pos + offset).copied()
+    }
+
+    fn peek_ucn(&self) -> Option<(char, usize)> {
+        if self.peek() != Some('\\') {
+            return None;
+        }
+        let (digits, len) = match self.peek_ahead(1)? {
+            'u' => (4, 6),
+            'U' => (8, 10),
+            _ => return None,
+        };
+        let mut value = 0u32;
+        for offset in 0..digits {
+            value = (value << 4) | self.peek_ahead(2 + offset)?.to_digit(16)?;
+        }
+        char::from_u32(value).map(|ch| (ch, len))
+    }
+
+    fn peek_ident_continue(&self) -> Option<(char, usize)> {
+        if let Some(ch) = self.peek().filter(|ch| is_ident_continue(*ch)) {
+            Some((ch, 1))
+        } else {
+            self.peek_ucn().filter(|(ch, _)| is_ident_continue(*ch))
+        }
     }
 
     fn advance(&mut self) -> Option<char> {
@@ -258,12 +285,10 @@ impl Lexer {
 
     fn read_ident(&mut self) -> PpTokenKind {
         let mut text = String::new();
-        while let Some(ch) = self.peek() {
-            if is_ident_continue(ch) {
-                text.push(ch);
+        while let Some((ch, len)) = self.peek_ident_continue() {
+            text.push(ch);
+            for _ in 0..len {
                 self.advance();
-            } else {
-                break;
             }
         }
         PpTokenKind::Ident(text)
@@ -364,7 +389,7 @@ mod tests {
 
     #[test]
     fn lexes_unicode_identifier_letters() -> Result<(), String> {
-        let got = kinds("α β2 _γ")?;
+        let got = kinds("α β2 _γ \\U000003b4 \\u03b5")?;
         assert_eq!(
             got,
             vec![
@@ -373,6 +398,10 @@ mod tests {
                 PpTokenKind::Ident("β2".to_string()),
                 PpTokenKind::Whitespace(" ".to_string()),
                 PpTokenKind::Ident("_γ".to_string()),
+                PpTokenKind::Whitespace(" ".to_string()),
+                PpTokenKind::Ident("δ".to_string()),
+                PpTokenKind::Whitespace(" ".to_string()),
+                PpTokenKind::Ident("ε".to_string()),
             ]
         );
         Ok(())

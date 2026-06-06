@@ -459,7 +459,11 @@ def short_failure(result: subprocess.CompletedProcess[str]) -> str:
 
 
 def failure_matches_expected(result: subprocess.CompletedProcess[str], expected: str) -> bool:
-    return expected in (result.stderr or "") or expected in (result.stdout or "")
+    return (
+        expected in (result.stderr or "")
+        or expected in (result.stdout or "")
+        or expected in short_failure(result)
+    )
 
 
 def test_path_for_log(suite: Path, src: Path) -> str:

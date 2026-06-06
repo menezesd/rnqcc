@@ -34,6 +34,31 @@ struct FileScopeVarInfo {
     var_type: CType,
 }
 
+#[derive(Copy, Clone)]
+struct StaticIntegerConstant {
+    value: i64,
+    is_double: bool,
+    is_unsigned: bool,
+}
+
+impl StaticIntegerConstant {
+    fn as_scalar_value(self) -> StaticScalarValue {
+        (self.value, self.is_double, self.is_unsigned)
+    }
+}
+
+fn static_integer_constant(
+    value: i64,
+    is_double: bool,
+    is_unsigned: bool,
+) -> StaticIntegerConstant {
+    StaticIntegerConstant {
+        value,
+        is_double,
+        is_unsigned,
+    }
+}
+
 struct StaticStringAddress<'a> {
     value: &'a str,
     offset: i64,
@@ -223,7 +248,7 @@ struct TackyGen {
     hidden_ret_ptr: Option<String>,
     static_vars: Vec<TackyStaticVar>,
     static_constants: Vec<TackyStaticConstant>,
-    static_const_values: HashMap<String, (i64, bool, bool)>,
+    static_const_values: HashMap<String, StaticScalarValue>,
     extern_vars: Vec<String>,
     /// CType for each variable/temporary (for codegen output)
     symbol_types: HashMap<String, CType>,
@@ -447,30 +472,33 @@ impl TackyGen {
             Exp::Cast(_, _, inner) => self.static_pointer_diff_integer(inner),
             Exp::Binary(BinaryOp::Add, left, right) => {
                 if let Some(diff) = self.static_pointer_diff_integer(left) {
-                    let (value, _, _) = eval_static_integer_constant_exp_with_context(
+                    let value = eval_static_integer_constant_exp_with_context(
                         right,
                         &self.struct_defs,
                         &self.full_types,
-                    )?;
+                    )?
+                    .value;
                     return Some(diff.wrapping_add(value));
                 }
                 if let Some(diff) = self.static_pointer_diff_integer(right) {
-                    let (value, _, _) = eval_static_integer_constant_exp_with_context(
+                    let value = eval_static_integer_constant_exp_with_context(
                         left,
                         &self.struct_defs,
                         &self.full_types,
-                    )?;
+                    )?
+                    .value;
                     return Some(value.wrapping_add(diff));
                 }
                 None
             }
             Exp::Binary(BinaryOp::Sub, left, right) => {
                 if let Some(diff) = self.static_pointer_diff_integer(left) {
-                    let (value, _, _) = eval_static_integer_constant_exp_with_context(
+                    let value = eval_static_integer_constant_exp_with_context(
                         right,
                         &self.struct_defs,
                         &self.full_types,
-                    )?;
+                    )?
+                    .value;
                     return Some(diff.wrapping_sub(value));
                 }
                 if let Some(diff) = Self::static_same_string_lvalue_diff(left, right) {
@@ -523,7 +551,7 @@ impl TackyGen {
                     Exp::WideStringLiteral(s) => (s.as_str(), CType::Int.size() as i64),
                     _ => return None,
                 };
-                let (index, _, _) = eval_static_integer_constant_exp(idx)?;
+                let index = eval_static_integer_constant_exp(idx)?.value;
                 Some(StaticStringAddress {
                     value,
                     offset: index * elem_size,
@@ -585,11 +613,12 @@ impl TackyGen {
         sign: i64,
     ) -> Option<StaticAddressConstant> {
         let address_constant = self.static_address_constant(address)?;
-        let (value, _, _) = eval_static_integer_constant_exp_with_context(
+        let value = eval_static_integer_constant_exp_with_context(
             constant,
             &self.struct_defs,
             &self.full_types,
-        )?;
+        )?
+        .value;
         let scale = match self.static_exp_full_type(address) {
             Some(FullType::Array { elem, .. }) => elem.byte_size_with(&self.struct_defs) as i64,
             Some(FullType::Pointer(pointee)) => pointee.byte_size_with(&self.struct_defs) as i64,
@@ -724,11 +753,12 @@ impl TackyGen {
                     FullType::Pointer(pointee) => pointee.byte_size_with(&self.struct_defs),
                     _ => return None,
                 } as i64;
-                let (index, _, _) = eval_static_integer_constant_exp_with_context(
+                let index = eval_static_integer_constant_exp_with_context(
                     idx,
                     &self.struct_defs,
                     &self.full_types,
-                )?;
+                )?
+                .value;
                 Some(StaticAddressConstant {
                     base: address.base,
                     offset: address.offset + index * elem_size,
@@ -5618,7 +5648,7 @@ impl TackyGen {
                 &self.struct_defs,
                 &self.full_types,
             )
-            .and_then(|(size, _, _)| usize::try_from(size).ok());
+            .and_then(|constant| usize::try_from(constant.value).ok());
             let Some(size) = size else {
                 let _ = self.emit_exp(args[0].clone())?;
                 let name = format!("__alloca_dynamic.{}", self.current_function);
@@ -6692,11 +6722,13 @@ impl TackyGen {
 
     fn emit_subscript(&mut self, arr: Exp, idx: Exp) -> TackyResult<(TackyVal, CType)> {
         if let FullType::Scalar(elem_type) = self.typeof_exp(&arr) {
-            if let Some((index, _, _)) = eval_static_integer_constant_exp_with_context(
+            if let Some(index) = eval_static_integer_constant_exp_with_context(
                 &idx,
                 &self.struct_defs,
                 &self.full_types,
-            ) {
+            )
+            .map(|constant| constant.value)
+            {
                 let (arr_val, arr_type) = self.emit_exp(arr)?;
                 if index == 0 {
                     return Ok((self.convert_to(arr_val, arr_type, elem_type), elem_type));
@@ -9456,11 +9488,13 @@ impl TackyGen {
                         .as_deref()
                         .is_some_and(Self::statement_contains_label);
                 if !branch_has_label {
-                    if let Some((value, _, _)) = eval_static_integer_constant_exp_with_context(
+                    if let Some(value) = eval_static_integer_constant_exp_with_context(
                         &cond,
                         &self.struct_defs,
                         &self.full_types,
-                    ) {
+                    )
+                    .map(|constant| constant.value)
+                    {
                         if value != 0 {
                             self.emit_statement(*then_stmt)?;
                         } else if let Some(else_s) = else_stmt {
@@ -9468,11 +9502,13 @@ impl TackyGen {
                         }
                         return Ok(());
                     }
-                } else if let Some((value, _, _)) = eval_static_integer_constant_exp_with_context(
+                } else if let Some(value) = eval_static_integer_constant_exp_with_context(
                     &cond,
                     &self.struct_defs,
                     &self.full_types,
-                ) {
+                )
+                .map(|constant| constant.value)
+                {
                     if value == 0 && else_stmt.is_none() {
                         let end_label = self.fresh_label("if_end");
                         self.emit(TackyInstr::Jump(end_label.clone()));
@@ -11171,6 +11207,7 @@ impl TackyGen {
                 &self.full_types,
                 &self.static_const_values,
             )
+            .map(StaticIntegerConstant::as_scalar_value)
             .ok_or_else(|| "Static variable initializer must be a constant".to_string())
         } else {
             Ok((0, false, false))
@@ -13803,7 +13840,7 @@ fn eval_static_integer_constant_exp_with_context(
     exp: &Exp,
     struct_defs: &HashMap<String, StructDef>,
     full_types: &HashMap<String, FullType>,
-) -> Option<(i64, bool, bool)> {
+) -> Option<StaticIntegerConstant> {
     eval_static_integer_constant_exp_with_context_and_values(
         exp,
         struct_defs,
@@ -13816,23 +13853,41 @@ fn eval_static_integer_constant_exp_with_context_and_values(
     exp: &Exp,
     struct_defs: &HashMap<String, StructDef>,
     full_types: &HashMap<String, FullType>,
-    static_const_values: &HashMap<String, (i64, bool, bool)>,
-) -> Option<(i64, bool, bool)> {
+    static_const_values: &HashMap<String, StaticScalarValue>,
+) -> Option<StaticIntegerConstant> {
     match exp {
-        Exp::Constant(c) | Exp::LongConstant(c) => Some((*c, false, false)),
-        Exp::UIntConstant(c) | Exp::ULongConstant(c) => Some((*c, false, true)),
-        Exp::Int128Constant(c) => Some((*c as i64, false, false)),
-        Exp::UInt128Constant(c) => Some((*c as i64, false, true)),
-        Exp::DoubleConstant(d) | Exp::LongDoubleConstant(d) => {
-            Some((d.to_bits() as i64, true, false))
+        Exp::Constant(c) | Exp::LongConstant(c) => Some(static_integer_constant(*c, false, false)),
+        Exp::UIntConstant(c) | Exp::ULongConstant(c) => {
+            Some(static_integer_constant(*c, false, true))
         }
-        Exp::Var(name) => static_const_values.get(name).copied(),
+        Exp::Int128Constant(c) => Some(static_integer_constant(*c as i64, false, false)),
+        Exp::UInt128Constant(c) => Some(static_integer_constant(*c as i64, false, true)),
+        Exp::DoubleConstant(d) | Exp::LongDoubleConstant(d) => {
+            Some(static_integer_constant(d.to_bits() as i64, true, false))
+        }
+        Exp::Var(name) => static_const_values
+            .get(name)
+            .map(|(value, is_double, is_unsigned)| {
+                static_integer_constant(*value, *is_double, *is_unsigned)
+            }),
         Exp::SizeOf(inner) => {
             let ft = eval_static_expr_full_type(inner, full_types)?;
-            Some((ft.byte_size_with(struct_defs) as i64, false, true))
+            Some(static_integer_constant(
+                ft.byte_size_with(struct_defs) as i64,
+                false,
+                true,
+            ))
         }
-        Exp::SizeOfType(_, ft) => Some((ft.byte_size_with(struct_defs) as i64, false, true)),
-        Exp::AlignOfType(ft) => Some((ft.alignment_with(struct_defs) as i64, false, true)),
+        Exp::SizeOfType(_, ft) => Some(static_integer_constant(
+            ft.byte_size_with(struct_defs) as i64,
+            false,
+            true,
+        )),
+        Exp::AlignOfType(ft) => Some(static_integer_constant(
+            ft.alignment_with(struct_defs) as i64,
+            false,
+            true,
+        )),
         Exp::Cast(target, _, inner) => {
             if let Exp::ArrayInit(elems) = inner.as_ref() {
                 let [value] = elems.as_slice() else {
@@ -13845,29 +13900,32 @@ fn eval_static_integer_constant_exp_with_context_and_values(
                     static_const_values,
                 )
             } else {
-                let (value, is_double, is_unsigned) =
-                    eval_static_integer_constant_exp_with_context_and_values(
-                        inner,
-                        struct_defs,
-                        full_types,
-                        static_const_values,
-                    )?;
+                let constant = eval_static_integer_constant_exp_with_context_and_values(
+                    inner,
+                    struct_defs,
+                    full_types,
+                    static_const_values,
+                )?;
                 if target.is_floating() {
-                    let value = if is_double {
-                        f64::from_bits(value as u64)
-                    } else if is_unsigned {
-                        value as u64 as f64
+                    let value = if constant.is_double {
+                        f64::from_bits(constant.value as u64)
+                    } else if constant.is_unsigned {
+                        constant.value as u64 as f64
                     } else {
-                        value as f64
+                        constant.value as f64
                     };
                     let value = if *target == CType::Float {
                         value as f32 as f64
                     } else {
                         value
                     };
-                    Some((value.to_bits() as i64, true, *target == CType::Float))
-                } else if is_double {
-                    let value = f64::from_bits(value as u64);
+                    Some(static_integer_constant(
+                        value.to_bits() as i64,
+                        true,
+                        *target == CType::Float,
+                    ))
+                } else if constant.is_double {
+                    let value = f64::from_bits(constant.value as u64);
                     let target_unsigned = matches!(
                         target,
                         CType::Bool
@@ -13882,7 +13940,7 @@ fn eval_static_integer_constant_exp_with_context_and_values(
                     } else {
                         value as i64
                     };
-                    Some((raw, false, target_unsigned))
+                    Some(static_integer_constant(raw, false, target_unsigned))
                 } else {
                     let target_unsigned = matches!(
                         target,
@@ -13893,8 +13951,8 @@ fn eval_static_integer_constant_exp_with_context_and_values(
                             | CType::ULong
                             | CType::UInt128
                     );
-                    Some((
-                        convert_init_value(value, *target, false, is_unsigned),
+                    Some(static_integer_constant(
+                        convert_init_value(constant.value, *target, false, constant.is_unsigned),
                         false,
                         target_unsigned,
                     ))
@@ -13902,108 +13960,161 @@ fn eval_static_integer_constant_exp_with_context_and_values(
             }
         }
         Exp::Unary(op, inner) => {
-            let (value, is_double, is_unsigned) =
-                eval_static_integer_constant_exp_with_context_and_values(
-                    inner,
-                    struct_defs,
-                    full_types,
-                    static_const_values,
-                )?;
+            let constant = eval_static_integer_constant_exp_with_context_and_values(
+                inner,
+                struct_defs,
+                full_types,
+                static_const_values,
+            )?;
             match op {
-                UnaryOp::Negate if is_double => {
-                    let d = -f64::from_bits(value as u64);
-                    Some((d.to_bits() as i64, true, false))
+                UnaryOp::Negate if constant.is_double => {
+                    let d = -f64::from_bits(constant.value as u64);
+                    Some(static_integer_constant(d.to_bits() as i64, true, false))
                 }
-                UnaryOp::Negate => Some((value.wrapping_neg(), false, is_unsigned)),
-                UnaryOp::Complement if !is_double => Some((!value, false, is_unsigned)),
-                UnaryOp::LogicalNot if !is_double => Some(((value == 0) as i64, false, false)),
+                UnaryOp::Negate => Some(static_integer_constant(
+                    constant.value.wrapping_neg(),
+                    false,
+                    constant.is_unsigned,
+                )),
+                UnaryOp::Complement if !constant.is_double => Some(static_integer_constant(
+                    !constant.value,
+                    false,
+                    constant.is_unsigned,
+                )),
+                UnaryOp::LogicalNot if !constant.is_double => Some(static_integer_constant(
+                    (constant.value == 0) as i64,
+                    false,
+                    false,
+                )),
                 _ => None,
             }
         }
         Exp::Binary(op, left, right) => {
-            let (left, left_double, left_unsigned) =
-                eval_static_integer_constant_exp_with_context_and_values(
-                    left,
-                    struct_defs,
-                    full_types,
-                    static_const_values,
-                )?;
-            let (right, right_double, right_unsigned) =
-                eval_static_integer_constant_exp_with_context_and_values(
-                    right,
-                    struct_defs,
-                    full_types,
-                    static_const_values,
-                )?;
-            if left_double || right_double {
-                let use_float =
-                    (left_unsigned || !left_double) && (right_unsigned || !right_double);
-                let left = if left_double {
-                    f64::from_bits(left as u64)
+            let left = eval_static_integer_constant_exp_with_context_and_values(
+                left,
+                struct_defs,
+                full_types,
+                static_const_values,
+            )?;
+            let right = eval_static_integer_constant_exp_with_context_and_values(
+                right,
+                struct_defs,
+                full_types,
+                static_const_values,
+            )?;
+            if left.is_double || right.is_double {
+                let use_float = (left.is_unsigned || !left.is_double)
+                    && (right.is_unsigned || !right.is_double);
+                let left_value = if left.is_double {
+                    f64::from_bits(left.value as u64)
                 } else if use_float {
-                    left as f32 as f64
+                    left.value as f32 as f64
                 } else {
-                    left as f64
+                    left.value as f64
                 };
-                let right = if right_double {
-                    f64::from_bits(right as u64)
+                let right_value = if right.is_double {
+                    f64::from_bits(right.value as u64)
                 } else if use_float {
-                    right as f32 as f64
+                    right.value as f32 as f64
                 } else {
-                    right as f64
+                    right.value as f64
                 };
                 return match op {
                     BinaryOp::Add => {
                         let value = if use_float {
-                            (left + right) as f32 as f64
+                            (left_value + right_value) as f32 as f64
                         } else {
-                            left + right
+                            left_value + right_value
                         };
-                        Some((value.to_bits() as i64, true, use_float))
+                        Some(static_integer_constant(
+                            value.to_bits() as i64,
+                            true,
+                            use_float,
+                        ))
                     }
                     BinaryOp::Sub => {
                         let value = if use_float {
-                            (left - right) as f32 as f64
+                            (left_value - right_value) as f32 as f64
                         } else {
-                            left - right
+                            left_value - right_value
                         };
-                        Some((value.to_bits() as i64, true, use_float))
+                        Some(static_integer_constant(
+                            value.to_bits() as i64,
+                            true,
+                            use_float,
+                        ))
                     }
                     BinaryOp::Mul => {
                         let value = if use_float {
-                            (left * right) as f32 as f64
+                            (left_value * right_value) as f32 as f64
                         } else {
-                            left * right
+                            left_value * right_value
                         };
-                        Some((value.to_bits() as i64, true, use_float))
+                        Some(static_integer_constant(
+                            value.to_bits() as i64,
+                            true,
+                            use_float,
+                        ))
                     }
                     BinaryOp::Div => {
                         let value = if use_float {
-                            (left / right) as f32 as f64
+                            (left_value / right_value) as f32 as f64
                         } else {
-                            left / right
+                            left_value / right_value
                         };
-                        Some((value.to_bits() as i64, true, use_float))
+                        Some(static_integer_constant(
+                            value.to_bits() as i64,
+                            true,
+                            use_float,
+                        ))
                     }
-                    BinaryOp::LogicalAnd => {
-                        Some(((left != 0.0 && right != 0.0) as i64, false, false))
-                    }
-                    BinaryOp::LogicalOr => {
-                        Some(((left != 0.0 || right != 0.0) as i64, false, false))
-                    }
-                    BinaryOp::Equal => Some(((left == right) as i64, false, false)),
-                    BinaryOp::NotEqual => Some(((left != right) as i64, false, false)),
-                    BinaryOp::LessThan => Some(((left < right) as i64, false, false)),
-                    BinaryOp::GreaterThan => Some(((left > right) as i64, false, false)),
-                    BinaryOp::LessEqual => Some(((left <= right) as i64, false, false)),
-                    BinaryOp::GreaterEqual => Some(((left >= right) as i64, false, false)),
+                    BinaryOp::LogicalAnd => Some(static_integer_constant(
+                        (left_value != 0.0 && right_value != 0.0) as i64,
+                        false,
+                        false,
+                    )),
+                    BinaryOp::LogicalOr => Some(static_integer_constant(
+                        (left_value != 0.0 || right_value != 0.0) as i64,
+                        false,
+                        false,
+                    )),
+                    BinaryOp::Equal => Some(static_integer_constant(
+                        (left_value == right_value) as i64,
+                        false,
+                        false,
+                    )),
+                    BinaryOp::NotEqual => Some(static_integer_constant(
+                        (left_value != right_value) as i64,
+                        false,
+                        false,
+                    )),
+                    BinaryOp::LessThan => Some(static_integer_constant(
+                        (left_value < right_value) as i64,
+                        false,
+                        false,
+                    )),
+                    BinaryOp::GreaterThan => Some(static_integer_constant(
+                        (left_value > right_value) as i64,
+                        false,
+                        false,
+                    )),
+                    BinaryOp::LessEqual => Some(static_integer_constant(
+                        (left_value <= right_value) as i64,
+                        false,
+                        false,
+                    )),
+                    BinaryOp::GreaterEqual => Some(static_integer_constant(
+                        (left_value >= right_value) as i64,
+                        false,
+                        false,
+                    )),
                     _ => None,
                 };
             }
-            let is_unsigned = left_unsigned || right_unsigned;
+            let is_unsigned = left.is_unsigned || right.is_unsigned;
             if is_unsigned {
-                let left_u = left as u64;
-                let right_u = right as u64;
+                let left_u = left.value as u64;
+                let right_u = right.value as u64;
                 let value = match op {
                     BinaryOp::BitwiseAnd => (left_u & right_u) as i64,
                     BinaryOp::BitwiseNand => (!(left_u & right_u)) as i64,
@@ -14033,11 +14144,11 @@ fn eval_static_integer_constant_exp_with_context_and_values(
                                 left_u % right_u
                             }
                             BinaryOp::ShiftLeft => {
-                                let amount = u32::try_from(right).ok()?;
+                                let amount = u32::try_from(right.value).ok()?;
                                 left_u.checked_shl(amount)?
                             }
                             BinaryOp::ShiftRight => {
-                                let amount = u32::try_from(right).ok()?;
+                                let amount = u32::try_from(right.value).ok()?;
                                 left_u.checked_shr(amount)?
                             }
                             BinaryOp::LogicalAnd => (left_u != 0 && right_u != 0) as u64,
@@ -14047,58 +14158,58 @@ fn eval_static_integer_constant_exp_with_context_and_values(
                         value as i64
                     }
                 };
-                return Some((value, false, true));
+                return Some(static_integer_constant(value, false, true));
             }
             let value = match op {
-                BinaryOp::Add => left.wrapping_add(right),
-                BinaryOp::Sub => left.wrapping_sub(right),
-                BinaryOp::Mul => left.wrapping_mul(right),
+                BinaryOp::Add => left.value.wrapping_add(right.value),
+                BinaryOp::Sub => left.value.wrapping_sub(right.value),
+                BinaryOp::Mul => left.value.wrapping_mul(right.value),
                 BinaryOp::Div => {
-                    if right == 0 {
+                    if right.value == 0 {
                         return None;
                     }
-                    left.checked_div(right)?
+                    left.value.checked_div(right.value)?
                 }
                 BinaryOp::Mod => {
-                    if right == 0 {
+                    if right.value == 0 {
                         return None;
                     }
-                    left.checked_rem(right)?
+                    left.value.checked_rem(right.value)?
                 }
-                BinaryOp::BitwiseAnd => left & right,
-                BinaryOp::BitwiseNand => !(left & right),
-                BinaryOp::BitwiseOr => left | right,
-                BinaryOp::BitwiseXor => left ^ right,
+                BinaryOp::BitwiseAnd => left.value & right.value,
+                BinaryOp::BitwiseNand => !(left.value & right.value),
+                BinaryOp::BitwiseOr => left.value | right.value,
+                BinaryOp::BitwiseXor => left.value ^ right.value,
                 BinaryOp::ShiftLeft => {
-                    let amount = u32::try_from(right).ok()?;
-                    left.checked_shl(amount)?
+                    let amount = u32::try_from(right.value).ok()?;
+                    left.value.checked_shl(amount)?
                 }
                 BinaryOp::ShiftRight => {
-                    let amount = u32::try_from(right).ok()?;
-                    left.checked_shr(amount)?
+                    let amount = u32::try_from(right.value).ok()?;
+                    left.value.checked_shr(amount)?
                 }
-                BinaryOp::LogicalAnd => (left != 0 && right != 0) as i64,
-                BinaryOp::LogicalOr => (left != 0 || right != 0) as i64,
-                BinaryOp::Equal => (left == right) as i64,
-                BinaryOp::NotEqual => (left != right) as i64,
-                BinaryOp::LessThan => (left < right) as i64,
-                BinaryOp::GreaterThan => (left > right) as i64,
-                BinaryOp::LessEqual => (left <= right) as i64,
-                BinaryOp::GreaterEqual => (left >= right) as i64,
+                BinaryOp::LogicalAnd => (left.value != 0 && right.value != 0) as i64,
+                BinaryOp::LogicalOr => (left.value != 0 || right.value != 0) as i64,
+                BinaryOp::Equal => (left.value == right.value) as i64,
+                BinaryOp::NotEqual => (left.value != right.value) as i64,
+                BinaryOp::LessThan => (left.value < right.value) as i64,
+                BinaryOp::GreaterThan => (left.value > right.value) as i64,
+                BinaryOp::LessEqual => (left.value <= right.value) as i64,
+                BinaryOp::GreaterEqual => (left.value >= right.value) as i64,
             };
-            Some((value, false, is_unsigned))
+            Some(static_integer_constant(value, false, is_unsigned))
         }
         Exp::Conditional(cond, then_exp, else_exp) => {
-            let (cond, is_double, _) = eval_static_integer_constant_exp_with_context_and_values(
+            let cond = eval_static_integer_constant_exp_with_context_and_values(
                 cond,
                 struct_defs,
                 full_types,
                 static_const_values,
             )?;
-            if is_double {
+            if cond.is_double {
                 return None;
             }
-            if cond != 0 {
+            if cond.value != 0 {
                 eval_static_integer_constant_exp_with_context_and_values(
                     then_exp,
                     struct_defs,
@@ -14118,7 +14229,7 @@ fn eval_static_integer_constant_exp_with_context_and_values(
     }
 }
 
-fn eval_static_integer_constant_exp(exp: &Exp) -> Option<(i64, bool, bool)> {
+fn eval_static_integer_constant_exp(exp: &Exp) -> Option<StaticIntegerConstant> {
     eval_static_integer_constant_exp_with_context(exp, &HashMap::new(), &HashMap::new())
 }
 
@@ -14358,6 +14469,7 @@ pub fn generate_with_target_options_and_warnings(
                         &gen.full_types,
                         &gen.static_const_values,
                     )
+                    .map(StaticIntegerConstant::as_scalar_value)
                     .ok_or_else(|| "Global initializer must be constant".to_string())?,
                 ),
                 None => None,

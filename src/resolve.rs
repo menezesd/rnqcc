@@ -985,11 +985,12 @@ impl Resolver {
                 let deprecated_params = func
                     .deprecated_params
                     .into_iter()
-                    .map(|(name, message)| {
-                        (
-                            resolved_param_names.get(&name).cloned().unwrap_or(name),
-                            message,
-                        )
+                    .map(|param| DeprecatedParam {
+                        name: resolved_param_names
+                            .get(&param.name)
+                            .cloned()
+                            .unwrap_or(param.name),
+                        message: param.message,
                     })
                     .collect();
                 let resolved_body = self.resolve_block(body)?;

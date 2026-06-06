@@ -334,6 +334,12 @@ pub type PtrInfo = (CType, usize);
 pub type ParamDecl = (String, CType, Option<PtrInfo>);
 pub type FunctionTypeInfo = (CType, Vec<CType>, Option<PtrInfo>, bool);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeprecatedParam {
+    pub name: String,
+    pub message: Option<String>,
+}
+
 // ============================================================
 // Full Type (rich type representation for type checking)
 // ============================================================
@@ -1535,8 +1541,8 @@ pub struct FunctionDeclaration {
     pub param_full_types: Vec<FullType>,
     /// Runtime VLA bounds captured while parsing parameter declarators.
     pub param_vla_bounds: Vec<Exp>,
-    /// Parameter names annotated with deprecated and their optional message.
-    pub deprecated_params: Vec<(String, Option<String>)>,
+    /// Parameters annotated with deprecated and their optional message.
+    pub deprecated_params: Vec<DeprecatedParam>,
     /// True if the prototype ends in `...`.
     pub variadic: bool,
     /// True for GNU/C23-style declarations with no fixed parameters: `f(...)`.

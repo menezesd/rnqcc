@@ -13484,8 +13484,11 @@ impl TackyGen {
         self.local_label_stack.push(local_labels);
         let saved_deprecated_vars = std::mem::take(&mut self.deprecated_vars);
         let saved_warned_deprecated_vars = std::mem::take(&mut self.warned_deprecated_vars);
-        self.deprecated_vars
-            .extend(func.deprecated_params.iter().cloned());
+        self.deprecated_vars.extend(
+            func.deprecated_params
+                .iter()
+                .map(|param| (param.name.clone(), param.message.clone())),
+        );
 
         // Check if return type requires hidden pointer
         let ret_needs_hidden_ptr = if let Some(ref ret_ft) = func.return_full_type {

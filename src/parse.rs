@@ -46,7 +46,7 @@ enum Declarator {
     Function(
         Vec<ParamDecl>,
         Vec<FullType>,
-        Vec<(String, Option<String>)>,
+        Vec<DeprecatedParam>,
         bool,
         bool,
         bool,
@@ -59,7 +59,7 @@ enum Declarator {
 struct FunctionDeclaratorInfo {
     params: Vec<ParamDecl>,
     param_full_types: Vec<FullType>,
-    deprecated_params: Vec<(String, Option<String>)>,
+    deprecated_params: Vec<DeprecatedParam>,
     variadic: bool,
     zero_fixed_variadic: bool,
     old_style: bool,
@@ -4126,7 +4126,7 @@ impl Parser {
     ) -> ParseResult<(
         Vec<ParamDecl>,
         Vec<FullType>,
-        Vec<(String, Option<String>)>,
+        Vec<DeprecatedParam>,
         bool,
         bool,
         bool,
@@ -4197,60 +4197,62 @@ impl Parser {
         let mut param_fts = Vec::new();
         let mut deprecated_params = Vec::new();
         let mut param_vla_bounds = Vec::new();
-        let parse_one_param =
-            |s: &mut Self,
-             fts: &mut Vec<FullType>,
-             vla_bounds: &mut Vec<Exp>|
-             -> ParseResult<(ParamDecl, Option<(String, Option<String>)>)> {
-                s.pending_deprecated_param = None;
-                s.param_parse_depth += 1;
-                let base = s.parse_type()?;
-                // Use abstract declarator parsing (name optional) for params
-                let tree = s.parse_declarator_tree_inner(true)?;
-                s.consume_declarator_qualifiers()?;
-                s.param_parse_depth -= 1;
-                let deprecated_message = s.pending_deprecated_param.take();
-                let td_ft = s.last_typedef_full_type.take();
-                let (name, full_type, decl_params) =
-                    Self::process_declarator(&tree, base, td_ft.as_ref());
-                let full_type = decl_params
-                    .as_ref()
-                    .map(|info| Self::function_full_type(full_type.clone(), info))
-                    .unwrap_or(full_type);
-                if let Some(bound) = s.pending_vla_bound.take() {
-                    vla_bounds.push(bound);
-                }
-                // Generate a dummy name for unnamed params
-                let name = if name.is_empty() {
-                    format!("__unnamed_{}", s.pos)
-                } else {
-                    name
-                };
-                let deprecated = deprecated_message.map(|message| (name.clone(), message));
-                // Replace Scalar(Struct) with FullType::Struct(tag)
-                let full_type = if base == CType::Struct {
-                    if let Some(ref tag) = s.last_struct_tag {
-                        Self::replace_scalar_struct(&full_type, tag)
-                    } else {
-                        full_type
-                    }
+        let parse_one_param = |s: &mut Self,
+                               fts: &mut Vec<FullType>,
+                               vla_bounds: &mut Vec<Exp>|
+         -> ParseResult<(ParamDecl, Option<DeprecatedParam>)> {
+            s.pending_deprecated_param = None;
+            s.param_parse_depth += 1;
+            let base = s.parse_type()?;
+            // Use abstract declarator parsing (name optional) for params
+            let tree = s.parse_declarator_tree_inner(true)?;
+            s.consume_declarator_qualifiers()?;
+            s.param_parse_depth -= 1;
+            let deprecated_message = s.pending_deprecated_param.take();
+            let td_ft = s.last_typedef_full_type.take();
+            let (name, full_type, decl_params) =
+                Self::process_declarator(&tree, base, td_ft.as_ref());
+            let full_type = decl_params
+                .as_ref()
+                .map(|info| Self::function_full_type(full_type.clone(), info))
+                .unwrap_or(full_type);
+            if let Some(bound) = s.pending_vla_bound.take() {
+                vla_bounds.push(bound);
+            }
+            // Generate a dummy name for unnamed params
+            let name = if name.is_empty() {
+                format!("__unnamed_{}", s.pos)
+            } else {
+                name
+            };
+            let deprecated = deprecated_message.map(|message| DeprecatedParam {
+                name: name.clone(),
+                message,
+            });
+            // Replace Scalar(Struct) with FullType::Struct(tag)
+            let full_type = if base == CType::Struct {
+                if let Some(ref tag) = s.last_struct_tag {
+                    Self::replace_scalar_struct(&full_type, tag)
                 } else {
                     full_type
-                };
-                // Array parameters decay to pointers (first dimension dropped)
-                let ft = match full_type {
-                    FullType::Array { elem, .. } => FullType::Pointer(elem),
-                    FullType::Function { .. } => FullType::Pointer(Box::new(full_type)),
-                    other => other,
-                };
-                fts.push(ft.clone());
-                let t = ft.to_ctype();
-                let pi = match &ft {
-                    FullType::Pointer(inner) => Some(ptr_info_from_full(inner)),
-                    _ => None,
-                };
-                Ok(((name, t, pi), deprecated))
+                }
+            } else {
+                full_type
             };
+            // Array parameters decay to pointers (first dimension dropped)
+            let ft = match full_type {
+                FullType::Array { elem, .. } => FullType::Pointer(elem),
+                FullType::Function { .. } => FullType::Pointer(Box::new(full_type)),
+                other => other,
+            };
+            fts.push(ft.clone());
+            let t = ft.to_ctype();
+            let pi = match &ft {
+                FullType::Pointer(inner) => Some(ptr_info_from_full(inner)),
+                _ => None,
+            };
+            Ok(((name, t, pi), deprecated))
+        };
         let (param, deprecated) = parse_one_param(self, &mut param_fts, &mut param_vla_bounds)?;
         if let Some(deprecated) = deprecated {
             deprecated_params.push(deprecated);

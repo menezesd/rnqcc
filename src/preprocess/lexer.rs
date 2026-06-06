@@ -1,5 +1,5 @@
 use super::token::{PpLocation, PpSpan, PpToken, PpTokenKind};
-use crate::types::is_valid_universal_character_value;
+use crate::types::{universal_character_name_error, validate_universal_character_value};
 
 pub fn lex(input: &str) -> Result<Vec<PpToken>, String> {
     Lexer::new(&splice_continued_lines(&replace_trigraphs(input))).lex_all()
@@ -116,9 +116,12 @@ impl Lexer {
                     self.read_ident()
                 }
                 Some('\\') if matches!(self.peek_ahead(1), Some('u' | 'U')) => {
+                    let reason = self
+                        .peek_ucn_result()
+                        .expect_err("invalid UCN branch must report an error");
                     return Err(format!(
-                        "invalid universal character name at line {}, column {}",
-                        start.line, start.column
+                        "{} at line {}, column {}",
+                        reason, start.line, start.column
                     ));
                 }
                 Some(ch)
@@ -158,22 +161,35 @@ impl Lexer {
     }
 
     fn peek_ucn(&self) -> Option<(char, usize)> {
+        self.peek_ucn_result().ok().flatten()
+    }
+
+    fn peek_ucn_result(&self) -> Result<Option<(char, usize)>, String> {
         if self.peek() != Some('\\') {
-            return None;
+            return Ok(None);
         }
-        let (digits, len) = match self.peek_ahead(1)? {
-            'u' => (4, 6),
-            'U' => (8, 10),
-            _ => return None,
+        let (digits, len) = match self.peek_ahead(1) {
+            Some('u') => (4, 6),
+            Some('U') => (8, 10),
+            Some(_) => return Ok(None),
+            None => return Ok(None),
         };
         let mut value = 0u32;
         for offset in 0..digits {
-            value = (value << 4) | self.peek_ahead(2 + offset)?.to_digit(16)?;
+            let Some(ch) = self.peek_ahead(2 + offset) else {
+                return Err(universal_character_name_error("incomplete spelling"));
+            };
+            let Some(digit) = ch.to_digit(16) else {
+                return Err(universal_character_name_error("malformed hex digits"));
+            };
+            value = (value << 4) | digit;
         }
-        if !is_valid_universal_character_value(value) {
-            return None;
+        if let Err(reason) = validate_universal_character_value(value) {
+            return Err(universal_character_name_error(reason));
         }
-        char::from_u32(value).map(|ch| (ch, len))
+        char::from_u32(value)
+            .map(|ch| Some((ch, len)))
+            .ok_or_else(|| universal_character_name_error("out-of-range universal character"))
     }
 
     fn peek_ident_continue(&self) -> Option<(char, usize)> {
@@ -421,15 +437,19 @@ mod tests {
     fn rejects_invalid_universal_character_names() -> Result<(), String> {
         let err = lex("\\u12xz").expect_err("lexing should fail");
         assert!(err.contains("invalid universal character name"));
+        assert!(err.contains("malformed hex digits"));
 
         let err = lex("\\U00110000").expect_err("lexing should fail");
         assert!(err.contains("invalid universal character name"));
+        assert!(err.contains("out-of-range universal character"));
 
         let err = lex("\\u0030").expect_err("lexing should fail");
         assert!(err.contains("invalid universal character name"));
+        assert!(err.contains("basic character universal character"));
 
         let err = lex("\\u0041").expect_err("lexing should fail");
         assert!(err.contains("invalid universal character name"));
+        assert!(err.contains("basic character universal character"));
         Ok(())
     }
 

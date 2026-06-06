@@ -86,7 +86,7 @@ impl Target {
         name
     }
 
-    pub fn show_label_expr(&self, name: &str) -> String {
+    pub fn show_data_label_expr(&self, name: &str) -> String {
         let Some(offset) = split_data_offset(name) else {
             return self.show_symbol(name);
         };
@@ -169,9 +169,32 @@ pub fn assembly_offset_suffix(offset: i64) -> String {
 }
 
 pub fn is_valid_universal_character_value(value: u32) -> bool {
-    matches!(value, 0x24 | 0x40 | 0x60)
+    validate_universal_character_value(value).is_ok()
+}
+
+pub fn validate_universal_character_value(value: u32) -> Result<(), &'static str> {
+    if matches!(value, 0x24 | 0x40 | 0x60)
         || (0xA0..=0xD7FF).contains(&value)
         || (0xE000..=0x10FFFF).contains(&value)
+    {
+        Ok(())
+    } else if value > 0x10FFFF || (0xD800..=0xDFFF).contains(&value) {
+        Err("out-of-range universal character")
+    } else {
+        Err("basic character universal character")
+    }
+}
+
+pub fn universal_character_error_message(context: &str, reason: &str) -> String {
+    format!("invalid {context}: {reason}")
+}
+
+pub fn universal_character_escape_error(reason: &str) -> String {
+    universal_character_error_message("universal character escape", reason)
+}
+
+pub fn universal_character_name_error(reason: &str) -> String {
+    universal_character_error_message("universal character name", reason)
 }
 
 fn mangle_assembly_label(name: &str) -> String {
@@ -2306,25 +2329,25 @@ mod tests {
     }
 
     #[test]
-    fn show_label_expr_preserves_data_offsets() {
+    fn show_data_label_expr_preserves_data_offsets() {
         assert_eq!(
-            Target::x86_64_linux().show_label_expr("origin+4"),
+            Target::x86_64_linux().show_data_label_expr("origin+4"),
             "origin+4"
         );
         assert_eq!(
-            Target::x86_64_linux().show_label_expr("origin-4"),
+            Target::x86_64_linux().show_data_label_expr("origin-4"),
             "origin-4"
         );
         assert_eq!(
-            Target::x86_64_linux().show_label_expr("αβ_global+4"),
+            Target::x86_64_linux().show_data_label_expr("αβ_global+4"),
             "__rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe+4"
         );
         assert_eq!(
-            Target::x86_64_linux().show_label_expr("αβ_global-4"),
+            Target::x86_64_linux().show_data_label_expr("αβ_global-4"),
             "__rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe-4"
         );
         assert_eq!(
-            Target::x86_64_macos().show_label_expr("αβ_global+4"),
+            Target::x86_64_macos().show_data_label_expr("αβ_global+4"),
             "___rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe+4"
         );
         assert_eq!(

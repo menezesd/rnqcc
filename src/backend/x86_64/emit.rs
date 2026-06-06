@@ -122,7 +122,7 @@ fn show_operand(op: &AsmOperand, t: AsmType, target: &Target) -> io::Result<Stri
         }
         AsmOperand::Stack(offset) => Ok(format!("{}(%rbp)", offset)),
         AsmOperand::StackArg(offset) => Ok(format!("{}(%rsp)", offset)),
-        AsmOperand::Data(name) => Ok(format!("{}(%rip)", target.show_label_expr(name))),
+        AsmOperand::Data(name) => Ok(format!("{}(%rip)", target.show_data_label_expr(name))),
         AsmOperand::TlsData(name, offset) => show_tls_operand(name, *offset, target),
         AsmOperand::Indexed(base, index, scale) => Ok(format!(
             "({}, {}, {})",
@@ -138,7 +138,7 @@ fn show_operand_byte(op: &AsmOperand, target: &Target) -> io::Result<String> {
         AsmOperand::Reg(reg) => Ok(reg_name(reg, AsmType::Byte)?.to_string()),
         AsmOperand::Stack(offset) => Ok(format!("{}(%rbp)", offset)),
         AsmOperand::StackArg(offset) => Ok(format!("{}(%rsp)", offset)),
-        AsmOperand::Data(name) => Ok(format!("{}(%rip)", target.show_label_expr(name))),
+        AsmOperand::Data(name) => Ok(format!("{}(%rip)", target.show_data_label_expr(name))),
         AsmOperand::TlsData(name, offset) => show_tls_operand(name, *offset, target),
         other => invalid_input(format!("Cannot get byte-sized version of {:?}", other)),
     }

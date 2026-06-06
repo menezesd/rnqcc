@@ -20287,36 +20287,38 @@ int main(void) {
 }
 
 #[test]
-fn static_pointer_initializer_emits_normalized_negative_label_offset() {
-    let src = temp_file("static-negative-label-offset", "c");
-    let asm = temp_file("static-negative-label-offset", "s");
-    std::fs::write(
-        &src,
-        "int a[4];\n\
-         int *p = &a[-1];\n",
-    )
-    .expect("failed to write input");
+fn static_pointer_initializer_emits_normalized_negative_label_offsets() {
+    for target in ["x86_64-linux", "aarch64-linux"] {
+        let src = temp_file(&format!("static-negative-label-offset-{target}"), "c");
+        let asm = temp_file(&format!("static-negative-label-offset-{target}"), "s");
+        std::fs::write(
+            &src,
+            "int a[4];\n\
+             int *p = &a[-1];\n",
+        )
+        .expect("failed to write input");
 
-    let output = Command::new(rnqcc())
-        .args(["--target", "x86_64-linux", "-S", "-o"])
-        .arg(&asm)
-        .arg(&src)
-        .output()
-        .expect("failed to run rnqcc");
+        let output = Command::new(rnqcc())
+            .args(["--target", target, "-S", "-o"])
+            .arg(&asm)
+            .arg(&src)
+            .output()
+            .expect("failed to run rnqcc");
 
-    assert!(output.status.success(), "{}", stderr(output));
-    let asm_text = std::fs::read_to_string(&asm).expect("failed to read assembly");
-    assert!(
-        asm_text.contains("\t.quad a-4"),
-        "missing normalized negative offset:\n{asm_text}"
-    );
-    assert!(
-        !asm_text.contains("+-"),
-        "assembly still contains plus-minus offset:\n{asm_text}"
-    );
+        assert!(output.status.success(), "{target}: {}", stderr(output));
+        let asm_text = std::fs::read_to_string(&asm).expect("failed to read assembly");
+        assert!(
+            asm_text.contains("\t.quad a-4"),
+            "{target}: missing normalized negative offset:\n{asm_text}"
+        );
+        assert!(
+            !asm_text.contains("+-"),
+            "{target}: assembly still contains plus-minus offset:\n{asm_text}"
+        );
 
-    let _ = std::fs::remove_file(src);
-    let _ = std::fs::remove_file(asm);
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(asm);
+    }
 }
 
 #[test]

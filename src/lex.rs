@@ -1,4 +1,7 @@
-use crate::types::{is_valid_universal_character_value, Token};
+use crate::types::{
+    universal_character_escape_error, universal_character_name_error,
+    validate_universal_character_value, Token,
+};
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,22 +100,35 @@ impl Lexer {
     }
 
     fn peek_ucn_at(&self, pos: usize) -> Option<(char, usize)> {
+        self.peek_ucn_at_result(pos).ok().flatten()
+    }
+
+    fn peek_ucn_at_result(&self, pos: usize) -> Result<Option<(char, usize)>, String> {
         if self.chars.get(pos) != Some(&'\\') {
-            return None;
+            return Ok(None);
         }
-        let (digits, len) = match self.chars.get(pos + 1).copied()? {
-            'u' => (4, 6),
-            'U' => (8, 10),
-            _ => return None,
+        let (digits, len) = match self.chars.get(pos + 1).copied() {
+            Some('u') => (4, 6),
+            Some('U') => (8, 10),
+            Some(_) => return Ok(None),
+            None => return Ok(None),
         };
         let mut value = 0u32;
         for offset in 0..digits {
-            value = (value << 4) | hex_value(*self.chars.get(pos + 2 + offset)?)?;
+            let Some(ch) = self.chars.get(pos + 2 + offset).copied() else {
+                return Err(universal_character_name_error("incomplete spelling"));
+            };
+            let Some(digit) = hex_value(ch) else {
+                return Err(universal_character_name_error("malformed hex digits"));
+            };
+            value = (value << 4) | digit;
         }
-        if !is_valid_universal_character_value(value) {
-            return None;
+        if let Err(reason) = validate_universal_character_value(value) {
+            return Err(universal_character_name_error(reason));
         }
-        char::from_u32(value).map(|ch| (ch, len))
+        char::from_u32(value)
+            .map(|ch| Some((ch, len)))
+            .ok_or_else(|| universal_character_name_error("out-of-range universal character"))
     }
 
     fn peek_ucn(&self) -> Option<(char, usize)> {
@@ -903,16 +919,17 @@ impl Lexer {
         for _ in 0..digits {
             let c = self
                 .advance()
-                .ok_or_else(|| "incomplete universal character escape".to_string())?;
+                .ok_or_else(|| universal_character_escape_error("incomplete spelling"))?;
             let digit = c
                 .to_digit(16)
-                .ok_or_else(|| "invalid universal character escape".to_string())?;
+                .ok_or_else(|| universal_character_escape_error("malformed hex digits"))?;
             value = (value << 4) | digit;
         }
-        if !is_valid_universal_character_value(value) {
-            return Err("invalid universal character escape".to_string());
+        if let Err(reason) = validate_universal_character_value(value) {
+            return Err(universal_character_escape_error(reason));
         }
-        char::from_u32(value).ok_or_else(|| "invalid universal character escape".to_string())
+        char::from_u32(value)
+            .ok_or_else(|| universal_character_escape_error("out-of-range universal character"))
     }
 
     fn decode_utf8_byte_chars(chars: &[u32]) -> Option<String> {
@@ -1607,10 +1624,10 @@ impl Lexer {
                     self.read_identifier_or_keyword()?
                 }
                 _ if c == '\\' && self.starts_ucn_at(self.pos - 1) => {
-                    return Err(format!(
-                        "invalid universal character name at position {}",
-                        self.pos - 1
-                    ));
+                    let reason = self
+                        .peek_ucn_at_result(self.pos - 1)
+                        .expect_err("invalid UCN branch must report an error");
+                    return Err(format!("{reason} at position {}", self.pos - 1));
                 }
 
                 _ => {
@@ -1702,15 +1719,19 @@ mod tests {
     fn reports_invalid_universal_character_names() -> Result<(), String> {
         let err = require_err(lex("int \\u12xz = 0;"), "lexing should fail")?;
         assert!(err.contains("invalid universal character name"));
+        assert!(err.contains("malformed hex digits"));
 
         let err = require_err(lex("int \\U00110000 = 0;"), "lexing should fail")?;
         assert!(err.contains("invalid universal character name"));
+        assert!(err.contains("out-of-range universal character"));
 
         let err = require_err(lex("int \\u0030 = 0;"), "lexing should fail")?;
         assert!(err.contains("invalid universal character name"));
+        assert!(err.contains("basic character universal character"));
 
         let err = require_err(lex("int \\u0041 = 0;"), "lexing should fail")?;
         assert!(err.contains("invalid universal character name"));
+        assert!(err.contains("basic character universal character"));
         Ok(())
     }
 
@@ -1731,9 +1752,11 @@ mod tests {
 
         let err = require_err(lex("char *s = \"\\u12xz\";"), "lexing should fail")?;
         assert!(err.contains("invalid universal character escape"));
+        assert!(err.contains("malformed hex digits"));
 
         let err = require_err(lex("char *s = \"\\u0041\";"), "lexing should fail")?;
         assert!(err.contains("invalid universal character escape"));
+        assert!(err.contains("basic character universal character"));
         Ok(())
     }
 

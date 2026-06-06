@@ -233,7 +233,16 @@ fn operand_writes(op: &AsmOperand) -> Vec<RegId> {
     }
 }
 
-fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
+struct RegEffects {
+    used: Vec<RegId>,
+    updated: Vec<RegId>,
+}
+
+fn reg_effects(used: Vec<RegId>, updated: Vec<RegId>) -> RegEffects {
+    RegEffects { used, updated }
+}
+
+fn find_used_and_updated(instr: &AsmInstr) -> RegEffects {
     match instr {
         AsmInstr::Mov(_, src, dst) => {
             let mut used = operand_reads(src);
@@ -242,32 +251,32 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
                 used.push(RegId::Gp(*base));
                 used.push(RegId::Gp(*idx));
             }
-            (used, operand_writes(dst))
+            reg_effects(used, operand_writes(dst))
         }
         AsmInstr::Movsx(_, _, src, dst) | AsmInstr::MovZeroExtend(_, _, src, dst) => {
-            (operand_reads(src), operand_writes(dst))
+            reg_effects(operand_reads(src), operand_writes(dst))
         }
         AsmInstr::Binary(_, _, src, dst) => {
             let mut used = operand_reads(src);
             used.extend(operand_reads(dst));
-            (used, operand_writes(dst))
+            reg_effects(used, operand_writes(dst))
         }
-        AsmInstr::Unary(_, _, dst) => (operand_reads(dst), operand_writes(dst)),
+        AsmInstr::Unary(_, _, dst) => reg_effects(operand_reads(dst), operand_writes(dst)),
         AsmInstr::Cmp(_, src, dst) => {
             let mut used = operand_reads(src);
             used.extend(operand_reads(dst));
-            (used, vec![])
+            reg_effects(used, vec![])
         }
-        AsmInstr::SetCC(_, dst) => (vec![], operand_writes(dst)),
-        AsmInstr::Push(val) => (operand_reads(val), vec![]),
-        AsmInstr::Pop(reg) => (vec![], vec![RegId::Gp(*reg)]),
+        AsmInstr::SetCC(_, dst) => reg_effects(vec![], operand_writes(dst)),
+        AsmInstr::Push(val) => reg_effects(operand_reads(val), vec![]),
+        AsmInstr::Pop(reg) => reg_effects(vec![], vec![RegId::Gp(*reg)]),
         AsmInstr::MulFull(_, divisor) | AsmInstr::Idiv(_, divisor) | AsmInstr::Div(_, divisor) => {
             let mut used = operand_reads(divisor);
             used.push(RegId::Gp(Reg::AX));
             used.push(RegId::Gp(Reg::DX));
-            (used, vec![RegId::Gp(Reg::AX), RegId::Gp(Reg::DX)])
+            reg_effects(used, vec![RegId::Gp(Reg::AX), RegId::Gp(Reg::DX)])
         }
-        AsmInstr::Cdq(_) => (vec![RegId::Gp(Reg::AX)], vec![RegId::Gp(Reg::DX)]),
+        AsmInstr::Cdq(_) => reg_effects(vec![RegId::Gp(Reg::AX)], vec![RegId::Gp(Reg::DX)]),
         AsmInstr::Call(_, int_regs, sse_regs, _, _) => {
             let mut used = Vec::new();
             for reg in ARG_INT_REGS.iter().take(*int_regs) {
@@ -283,11 +292,11 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
             for x in &ALL_XMM {
                 updated.push(RegId::Xmm(*x));
             }
-            (used, updated)
+            reg_effects(used, updated)
         }
-        AsmInstr::X86SetVarargsXmmCount(_) => (vec![], vec![RegId::Gp(Reg::AX)]),
-        AsmInstr::JmpIndirect(target) => (operand_reads(target), vec![]),
-        AsmInstr::LoadLabelAddress(_, dst) => (vec![], operand_writes(dst)),
+        AsmInstr::X86SetVarargsXmmCount(_) => reg_effects(vec![], vec![RegId::Gp(Reg::AX)]),
+        AsmInstr::JmpIndirect(target) => reg_effects(operand_reads(target), vec![]),
+        AsmInstr::LoadLabelAddress(_, dst) => reg_effects(vec![], operand_writes(dst)),
         AsmInstr::Cvtsi2sd(_, src, dst)
         | AsmInstr::Cvtsi2ss(_, src, dst)
         | AsmInstr::Cvttsd2si(_, src, dst)
@@ -295,19 +304,25 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
         | AsmInstr::AArch64UIntToDouble(_, src, dst)
         | AsmInstr::AArch64UIntToFloat(_, src, dst)
         | AsmInstr::AArch64DoubleToUInt(_, src, dst)
-        | AsmInstr::AArch64FloatToUInt(_, src, dst) => (operand_reads(src), operand_writes(dst)),
+        | AsmInstr::AArch64FloatToUInt(_, src, dst) => {
+            reg_effects(operand_reads(src), operand_writes(dst))
+        }
         AsmInstr::Cvtss2sd(src, dst)
         | AsmInstr::Cvtsd2ss(src, dst)
         | AsmInstr::AArch64FloatToDouble(src, dst)
-        | AsmInstr::AArch64DoubleToFloat(src, dst) => (operand_reads(src), operand_writes(dst)),
-        AsmInstr::X87Load(_, src) => (operand_reads(src), vec![]),
-        AsmInstr::X87Store(dst) => (vec![], operand_writes(dst)),
-        AsmInstr::X87StoreFloat(_, _) => (vec![], vec![]),
-        AsmInstr::X87StoreInt(_, dst) => (vec![], operand_writes(dst)),
-        AsmInstr::X87LoadIndirect(_, reg) | AsmInstr::X87StoreIndirect(reg) => {
-            (vec![RegId::Gp(*reg)], vec![])
+        | AsmInstr::AArch64DoubleToFloat(src, dst) => {
+            reg_effects(operand_reads(src), operand_writes(dst))
         }
-        AsmInstr::X87UnaryNeg | AsmInstr::X87Binary(_) | AsmInstr::X87Compare => (vec![], vec![]),
+        AsmInstr::X87Load(_, src) => reg_effects(operand_reads(src), vec![]),
+        AsmInstr::X87Store(dst) => reg_effects(vec![], operand_writes(dst)),
+        AsmInstr::X87StoreFloat(_, _) => reg_effects(vec![], vec![]),
+        AsmInstr::X87StoreInt(_, dst) => reg_effects(vec![], operand_writes(dst)),
+        AsmInstr::X87LoadIndirect(_, reg) | AsmInstr::X87StoreIndirect(reg) => {
+            reg_effects(vec![RegId::Gp(*reg)], vec![])
+        }
+        AsmInstr::X87UnaryNeg | AsmInstr::X87Binary(_) | AsmInstr::X87Compare => {
+            reg_effects(vec![], vec![])
+        }
         AsmInstr::Lea(src, dst) => {
             // Lea reads address components from src, writes result to dst
             let used = match src {
@@ -316,30 +331,34 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
                 AsmOperand::Stack(_) => vec![],
                 _ => operand_reads(src),
             };
-            (used, operand_writes(dst))
+            reg_effects(used, operand_writes(dst))
         }
-        AsmInstr::LoadIndirect(_, reg, dst) => (vec![RegId::Gp(*reg)], operand_writes(dst)),
+        AsmInstr::LoadIndirect(_, reg, dst) => {
+            reg_effects(vec![RegId::Gp(*reg)], operand_writes(dst))
+        }
         AsmInstr::StoreIndirect(_, src, reg) => {
             let mut used = operand_reads(src);
             used.push(RegId::Gp(*reg));
-            (used, vec![])
+            reg_effects(used, vec![])
         }
         AsmInstr::CopyToStackArg { src_ptr, .. } => {
             let used = operand_reads(src_ptr);
-            (
+            reg_effects(
                 used,
                 vec![RegId::Gp(Reg::SI), RegId::Gp(Reg::DI), RegId::Gp(Reg::CX)],
             )
         }
-        AsmInstr::CopyFromStackArg { .. } => (
+        AsmInstr::CopyFromStackArg { .. } => reg_effects(
             vec![],
             vec![RegId::Gp(Reg::SI), RegId::Gp(Reg::DI), RegId::Gp(Reg::CX)],
         ),
-        AsmInstr::BuiltinSetjmp { buf, dst, .. } => (operand_reads(buf), operand_writes(dst)),
+        AsmInstr::BuiltinSetjmp { buf, dst, .. } => {
+            reg_effects(operand_reads(buf), operand_writes(dst))
+        }
         AsmInstr::BuiltinLongjmp { buf, value } => {
             let mut used = operand_reads(buf);
             used.extend(operand_reads(value));
-            (used, vec![])
+            reg_effects(used, vec![])
         }
         AsmInstr::AtomicRmw(_, _, return_old, dst) => {
             let used = vec![RegId::Gp(Reg::R10), RegId::Gp(Reg::R11)];
@@ -348,11 +367,11 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
                 updated.push(RegId::Gp(Reg::AX));
                 updated.push(RegId::Gp(Reg::R12));
             }
-            (used, updated)
+            reg_effects(used, updated)
         }
         AsmInstr::AtomicExchange(_, dst) => {
             let used = vec![RegId::Gp(Reg::R10), RegId::Gp(Reg::R11)];
-            (used, operand_writes(dst))
+            reg_effects(used, operand_writes(dst))
         }
         AsmInstr::AtomicCompareExchange(_, dst) => {
             let used = vec![
@@ -363,7 +382,7 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
             let mut updated = operand_writes(dst);
             updated.push(RegId::Gp(Reg::AX));
             updated.push(RegId::Gp(Reg::R10));
-            (used, updated)
+            reg_effects(used, updated)
         }
         AsmInstr::AtomicCompareSwap(_, return_old, dst) => {
             let used = vec![
@@ -376,7 +395,7 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
             if !return_old {
                 updated.push(RegId::Gp(Reg::R10));
             }
-            (used, updated)
+            reg_effects(used, updated)
         }
         // Terminators and others: no register effects for liveness
         AsmInstr::Ret
@@ -396,7 +415,7 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
         | AsmInstr::AArch64AllocateLargeStack(..)
         | AsmInstr::AArch64DeallocateLargeStack(..)
         | AsmInstr::AArch64StoreLargeLocalBase { .. }
-        | AsmInstr::AtomicFence => (vec![], vec![]),
+        | AsmInstr::AtomicFence => reg_effects(vec![], vec![]),
     }
 }
 
@@ -458,11 +477,11 @@ fn liveness_analysis(instrs: &[AsmInstr], exit_live: &HashSet<RegId>) -> Vec<Has
         // Transfer: backward through instructions
         let mut live = live_out;
         for i in (blocks[bi].start..blocks[bi].end).rev() {
-            let (used, updated) = find_used_and_updated(&instrs[i]);
-            for u in &updated {
+            let effects = find_used_and_updated(&instrs[i]);
+            for u in &effects.updated {
                 live.remove(u);
             }
-            for u in &used {
+            for u in &effects.used {
                 live.insert(u.clone());
             }
         }
@@ -493,11 +512,11 @@ fn liveness_analysis(instrs: &[AsmInstr], exit_live: &HashSet<RegId>) -> Vec<Has
         // Backward pass to fill live_after
         for i in (blocks[bi].start..blocks[bi].end).rev() {
             live_after[i] = live.clone();
-            let (used, updated) = find_used_and_updated(&instrs[i]);
-            for u in &updated {
+            let effects = find_used_and_updated(&instrs[i]);
+            for u in &effects.updated {
                 live.remove(u);
             }
-            for u in &used {
+            for u in &effects.used {
                 live.insert(u.clone());
             }
         }
@@ -580,8 +599,8 @@ fn build_interference_graph(
     // Count occurrences for spill cost
     let mut occurrence_count: HashMap<String, f64> = HashMap::new();
     for instr in instrs {
-        let (used, updated) = find_used_and_updated(instr);
-        for id in used.iter().chain(updated.iter()) {
+        let effects = find_used_and_updated(instr);
+        for id in effects.used.iter().chain(effects.updated.iter()) {
             if let RegId::Pseudo(name) = id {
                 if candidates.contains(name) {
                     *occurrence_count.entry(name.clone()).or_default() += 1.0;
@@ -601,11 +620,11 @@ fn build_interference_graph(
 
     // Add interference edges from liveness
     for (i, instr) in instrs.iter().enumerate() {
-        let (_, updated) = find_used_and_updated(instr);
+        let effects = find_used_and_updated(instr);
         let is_mov = mov_operands(instr);
         let mov_src = is_mov.as_ref().map(|mov| &mov.src);
 
-        for u in &updated {
+        for u in &effects.updated {
             if !graph.has_node(u) {
                 continue;
             }
@@ -1193,8 +1212,8 @@ pub fn allocate_registers(
 
     // Scan instructions for all pseudo names
     for instr in &func.instructions {
-        let (used, updated) = find_used_and_updated(instr);
-        for id in used.iter().chain(updated.iter()) {
+        let effects = find_used_and_updated(instr);
+        for id in effects.used.iter().chain(effects.updated.iter()) {
             if let RegId::Pseudo(name) = id {
                 if aliased.contains(name)
                     || arr_sizes.contains_key(name)

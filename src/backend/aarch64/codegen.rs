@@ -1222,14 +1222,37 @@ fn long_double_helper(op: &TackyBinaryOp) -> Option<&'static str> {
     }
 }
 
-fn long_double_comparison_helper(op: &TackyBinaryOp) -> Option<(&'static str, CondCode)> {
+struct LongDoubleComparison {
+    helper: &'static str,
+    condition: CondCode,
+}
+
+fn long_double_comparison_helper(op: &TackyBinaryOp) -> Option<LongDoubleComparison> {
     match op {
-        TackyBinaryOp::Equal => Some(("__eqtf2", CondCode::E)),
-        TackyBinaryOp::NotEqual => Some(("__netf2", CondCode::NE)),
-        TackyBinaryOp::LessThan => Some(("__lttf2", CondCode::L)),
-        TackyBinaryOp::LessEqual => Some(("__letf2", CondCode::LE)),
-        TackyBinaryOp::GreaterThan => Some(("__gttf2", CondCode::G)),
-        TackyBinaryOp::GreaterEqual => Some(("__getf2", CondCode::GE)),
+        TackyBinaryOp::Equal => Some(LongDoubleComparison {
+            helper: "__eqtf2",
+            condition: CondCode::E,
+        }),
+        TackyBinaryOp::NotEqual => Some(LongDoubleComparison {
+            helper: "__netf2",
+            condition: CondCode::NE,
+        }),
+        TackyBinaryOp::LessThan => Some(LongDoubleComparison {
+            helper: "__lttf2",
+            condition: CondCode::L,
+        }),
+        TackyBinaryOp::LessEqual => Some(LongDoubleComparison {
+            helper: "__letf2",
+            condition: CondCode::LE,
+        }),
+        TackyBinaryOp::GreaterThan => Some(LongDoubleComparison {
+            helper: "__gttf2",
+            condition: CondCode::G,
+        }),
+        TackyBinaryOp::GreaterEqual => Some(LongDoubleComparison {
+            helper: "__getf2",
+            condition: CondCode::GE,
+        }),
         _ => None,
     }
 }
@@ -1264,14 +1287,13 @@ fn emit_long_double_helper_call(
 
 fn emit_long_double_comparison(
     instructions: &mut Vec<AsmInstr>,
-    comparison: (&str, CondCode),
+    comparison: LongDoubleComparison,
     left: &TackyVal,
     right: &TackyVal,
     dst: &TackyVal,
     stack_slots: &HashMap<String, i32>,
     global_vars: &HashSet<String>,
 ) -> Result<(), String> {
-    let (helper, cc) = comparison;
     instructions.push(AsmInstr::Mov(
         AsmType::LongDouble,
         val_operand(left, stack_slots, global_vars)?,
@@ -1282,14 +1304,20 @@ fn emit_long_double_comparison(
         val_operand(right, stack_slots, global_vars)?,
         AsmOperand::Xmm(XmmReg::XMM1),
     ));
-    instructions.push(AsmInstr::Call(helper.to_string(), 0, 2, false, false));
+    instructions.push(AsmInstr::Call(
+        comparison.helper.to_string(),
+        0,
+        2,
+        false,
+        false,
+    ));
     instructions.push(AsmInstr::Cmp(
         AsmType::Longword,
         AsmOperand::Imm(0),
         AsmOperand::Reg(Reg::AX),
     ));
     instructions.push(AsmInstr::SetCC(
-        cc,
+        comparison.condition,
         val_operand(dst, stack_slots, global_vars)?,
     ));
     Ok(())
@@ -2675,10 +2703,10 @@ fn convert_function(
                 if asm_type_for_val(left, types)? == AsmType::LongDouble
                     || asm_type_for_val(right, types)? == AsmType::LongDouble
                 {
-                    if let Some((helper, cc)) = long_double_comparison_helper(op) {
+                    if let Some(comparison) = long_double_comparison_helper(op) {
                         emit_long_double_comparison(
                             &mut instructions,
-                            (helper, cc),
+                            comparison,
                             left,
                             right,
                             dst,

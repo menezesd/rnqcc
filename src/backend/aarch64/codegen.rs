@@ -654,14 +654,25 @@ fn data_operand_with_offset(name: &str, offset: i32) -> AsmOperand {
     }
 }
 
-fn tls_name_offset(name: &str, tls_vars: &HashSet<String>) -> Option<(String, i32)> {
+struct TlsNameOffset {
+    base: String,
+    offset: i32,
+}
+
+fn tls_name_offset(name: &str, tls_vars: &HashSet<String>) -> Option<TlsNameOffset> {
     if tls_vars.contains(name) {
-        return Some((name.to_string(), 0));
+        return Some(TlsNameOffset {
+            base: name.to_string(),
+            offset: 0,
+        });
     }
     let (base, offset) = name.rsplit_once('+')?;
     if tls_vars.contains(base) {
         let offset = offset.parse().ok()?;
-        Some((base.to_string(), offset))
+        Some(TlsNameOffset {
+            base: base.to_string(),
+            offset,
+        })
     } else {
         None
     }
@@ -669,8 +680,8 @@ fn tls_name_offset(name: &str, tls_vars: &HashSet<String>) -> Option<(String, i3
 
 fn rewrite_tls_operand(op: &mut AsmOperand, tls_vars: &HashSet<String>) {
     if let AsmOperand::Data(name) = op {
-        if let Some((base, offset)) = tls_name_offset(name, tls_vars) {
-            *op = AsmOperand::TlsData(base, offset);
+        if let Some(tls_offset) = tls_name_offset(name, tls_vars) {
+            *op = AsmOperand::TlsData(tls_offset.base, tls_offset.offset);
         }
     }
 }

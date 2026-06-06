@@ -20287,6 +20287,39 @@ int main(void) {
 }
 
 #[test]
+fn static_pointer_initializer_emits_normalized_negative_label_offset() {
+    let src = temp_file("static-negative-label-offset", "c");
+    let asm = temp_file("static-negative-label-offset", "s");
+    std::fs::write(
+        &src,
+        "int a[4];\n\
+         int *p = &a[-1];\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&asm)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm_text = std::fs::read_to_string(&asm).expect("failed to read assembly");
+    assert!(
+        asm_text.contains("\t.quad a-4"),
+        "missing normalized negative offset:\n{asm_text}"
+    );
+    assert!(
+        !asm_text.contains("+-"),
+        "assembly still contains plus-minus offset:\n{asm_text}"
+    );
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(asm);
+}
+
+#[test]
 fn global_pointer_initializer_accepts_array_index_and_nested_member_offsets() {
     let src = temp_file("global-array-nested-ptr-init", "c");
     let exe = temp_file("global-array-nested-ptr-init", "bin");

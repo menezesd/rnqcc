@@ -72,10 +72,6 @@ impl Target {
         }
     }
 
-    pub fn show_label(&self, name: &str) -> String {
-        self.show_symbol(name)
-    }
-
     pub fn show_symbol(&self, name: &str) -> String {
         let name = mangle_assembly_label(name);
         match self.os {
@@ -91,15 +87,10 @@ impl Target {
     }
 
     pub fn show_label_expr(&self, name: &str) -> String {
-        let Some((name, offset)) = split_assembly_label_offset(name) else {
+        let Some(offset) = split_data_offset(name) else {
             return self.show_symbol(name);
         };
-        let mut name = mangle_assembly_label(name);
-        name.push_str(&assembly_offset_suffix(offset));
-        match self.os {
-            TargetOs::MacOs => format!("_{}", name),
-            TargetOs::Linux => name,
-        }
+        self.show_symbol_with_offset(offset.base, offset.offset)
     }
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -151,14 +142,22 @@ fn is_assembly_label_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '.')
 }
 
-fn split_assembly_label_offset(name: &str) -> Option<(&str, i64)> {
+pub struct DataOffset<'a> {
+    pub base: &'a str,
+    pub offset: i64,
+}
+
+pub fn split_data_offset(name: &str) -> Option<DataOffset<'_>> {
     let pos = name
         .char_indices()
         .rev()
         .find(|(idx, ch)| *idx > 0 && matches!(ch, '+' | '-'))?
         .0;
     let offset = name[pos..].parse().ok()?;
-    Some((&name[..pos], offset))
+    Some(DataOffset {
+        base: &name[..pos],
+        offset,
+    })
 }
 
 pub fn assembly_offset_suffix(offset: i64) -> String {
@@ -2286,7 +2285,7 @@ mod tests {
 
     #[test]
     fn show_label_preserves_ascii_symbol_names() {
-        assert_eq!(Target::x86_64_linux().show_label("main"), "main");
+        assert_eq!(Target::x86_64_linux().show_symbol("main"), "main");
         assert_eq!(
             Target::x86_64_linux().show_symbol("__double_const_0"),
             "__double_const_0"

@@ -371,18 +371,10 @@ fn data_label(target: &Target, name: &str) -> String {
     target.show_symbol(name)
 }
 
-struct DataOffset<'a> {
-    base: &'a str,
-    offset: i32,
-}
-
 fn offset_data_name(name: &str, add: i32) -> String {
     if let Some(data_offset) = split_data_offset(name) {
-        format!(
-            "{}{}",
-            data_offset.base,
-            assembly_offset_suffix(i64::from(data_offset.offset + add))
-        )
+        let offset = data_offset.offset + i64::from(add);
+        format!("{}{}", data_offset.base, assembly_offset_suffix(offset))
     } else {
         format!("{}{}", name, assembly_offset_suffix(i64::from(add)))
     }
@@ -390,7 +382,7 @@ fn offset_data_name(name: &str, add: i32) -> String {
 
 fn data_label_expr(target: &Target, name: &str) -> String {
     if let Some(data_offset) = split_data_offset(name) {
-        target.show_symbol_with_offset(data_offset.base, i64::from(data_offset.offset))
+        target.show_symbol_with_offset(data_offset.base, data_offset.offset)
     } else {
         data_label(target, name)
     }
@@ -416,17 +408,6 @@ fn stack_offset_i32(offset: i64) -> std::io::Result<i32> {
             format!("AArch64 stack offset {} is out of range", offset),
         )
     })
-}
-
-fn split_data_offset(name: &str) -> Option<DataOffset<'_>> {
-    let pos = name
-        .char_indices()
-        .rev()
-        .find(|(idx, ch)| *idx > 0 && matches!(ch, '+' | '-'))?
-        .0;
-    let base = &name[..pos];
-    let offset = name[pos..].parse().ok()?;
-    Some(DataOffset { base, offset })
 }
 
 fn emit_add_immediate(
@@ -463,7 +444,7 @@ fn emit_load_macho_data_offset_address(
             addr_reg, addr_reg, base_label
         )?;
         if data_offset.offset != 0 {
-            emit_add_immediate(w, addr_reg, data_offset.offset)?;
+            emit_add_immediate(w, addr_reg, data_offset_i32(data_offset.offset)?)?;
         }
         Ok(())
     } else {
@@ -471,6 +452,15 @@ fn emit_load_macho_data_offset_address(
         writeln!(w, "\tadrp {}, {}@PAGE", addr_reg, label)?;
         writeln!(w, "\tadd {}, {}, {}@PAGEOFF", addr_reg, addr_reg, label)
     }
+}
+
+fn data_offset_i32(offset: i64) -> std::io::Result<i32> {
+    i32::try_from(offset).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("AArch64 data offset {} is out of range", offset),
+        )
+    })
 }
 
 fn emit_load_data_address(

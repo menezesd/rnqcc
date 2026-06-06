@@ -40,6 +40,8 @@ const XMM_COLOR_ORDER: [XmmReg; 14] = [
     XmmReg::XMM13,
 ];
 const XMM_K: usize = 14;
+const COALESCING_INSTRUCTION_LIMIT: usize = 50_000;
+const COALESCING_MOVE_LIMIT: usize = 20_000;
 
 pub const GP_CALLEE_SAVED: [Reg; 5] = [Reg::BX, Reg::R12, Reg::R13, Reg::R14, Reg::R15];
 
@@ -1287,13 +1289,16 @@ fn allocate_one_pass(
         return;
     }
 
+    let skip_coalescing =
+        no_coalescing || coalescing_would_be_too_expensive(instrs, COALESCING_MOVE_LIMIT);
+
     // Build-coalesce loop
     let mut graph;
     loop {
         let live_after = liveness_analysis(instrs, exit_live);
         graph = build_interference_graph(instrs, &live_after, candidates, hard_reg_ids, k);
 
-        if no_coalescing {
+        if skip_coalescing {
             break;
         }
 
@@ -1310,6 +1315,16 @@ fn allocate_one_pass(
     // Build register map and apply
     let color_map = build_color_map(&graph, hard_reg_ids);
     apply_register_map(instrs, &color_map);
+}
+
+fn coalescing_would_be_too_expensive(instrs: &[AsmInstr], move_limit: usize) -> bool {
+    instrs.len() > COALESCING_INSTRUCTION_LIMIT
+        || instrs
+            .iter()
+            .filter(|instr| mov_operands(instr).is_some())
+            .take(move_limit + 1)
+            .count()
+            > move_limit
 }
 
 fn visit_operands<F: FnMut(&AsmOperand)>(instr: &AsmInstr, mut f: F) {
@@ -1453,5 +1468,50 @@ mod tests {
         let live_after = liveness_analysis(&instrs, &HashSet::new());
 
         assert!(live_after[1].contains(&RegId::Pseudo("base".to_string())));
+    }
+
+    #[test]
+    fn coalescing_cutoff_keeps_ordinary_functions_enabled() {
+        let instrs = vec![AsmInstr::Mov(
+            AsmType::Longword,
+            AsmOperand::Pseudo("a".to_string()),
+            AsmOperand::Pseudo("b".to_string()),
+        )];
+
+        assert!(!coalescing_would_be_too_expensive(
+            &instrs,
+            COALESCING_MOVE_LIMIT
+        ));
+    }
+
+    #[test]
+    fn coalescing_cutoff_trips_on_large_instruction_streams() {
+        let instrs = vec![
+            AsmInstr::Mov(
+                AsmType::Longword,
+                AsmOperand::Imm(0),
+                AsmOperand::Pseudo("a".to_string()),
+            );
+            COALESCING_INSTRUCTION_LIMIT + 1
+        ];
+
+        assert!(coalescing_would_be_too_expensive(
+            &instrs,
+            COALESCING_MOVE_LIMIT
+        ));
+    }
+
+    #[test]
+    fn coalescing_cutoff_trips_on_many_move_candidates() {
+        let instrs = vec![
+            AsmInstr::Mov(
+                AsmType::Longword,
+                AsmOperand::Pseudo("a".to_string()),
+                AsmOperand::Pseudo("b".to_string()),
+            );
+            3
+        ];
+
+        assert!(coalescing_would_be_too_expensive(&instrs, 2));
     }
 }

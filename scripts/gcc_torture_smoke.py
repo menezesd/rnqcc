@@ -236,8 +236,6 @@ def skip_reason_for_test(src: Path, internal_cpp: bool = False) -> str | None:
         return None
     if "-fgimple" in text or "__GIMPLE" in text:
         return "unsupported GCC GIMPLE source extension"
-    if src.parent.name == "compile" and not internal_cpp and src.name == "20001226-1.c":
-        return "external-cpp translation-limit stress timeout"
     if internal_cpp and src.parent.name == "compile" and src.name in {
         "limits-exprparen.c",
     }:

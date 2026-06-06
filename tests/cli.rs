@@ -25121,3 +25121,74 @@ void call(void)
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(asm);
 }
+
+#[test]
+fn x86_linux_large_stack_frame_uses_materialized_adjustment() {
+    let src = TempPath::new("x86-linux-large-stack-frame", "c");
+    let asm = TempPath::new("x86-linux-large-stack-frame", "s");
+    std::fs::write(
+        src.path(),
+        r#"
+void sink(char *);
+
+void f(void)
+{
+    char s[0x80000000UL];
+    s[0] = 'a';
+    s[0x80000000UL - 1] = 'b';
+    sink(s);
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(asm.path())
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm_text = std::fs::read_to_string(asm.path()).expect("failed to read assembly");
+    assert_contains_in_order(
+        &asm_text,
+        &[
+            "movq $2147483648, %r10",
+            "subq %r10, %rsp",
+            "leaq -2147483648(%rbp)",
+        ],
+    )
+    .expect("large stack frame did not use materialized adjustment");
+}
+
+#[test]
+fn x86_linux_promotes_small_integer_division_to_longword() {
+    let src = TempPath::new("x86-linux-small-div", "c");
+    let asm = TempPath::new("x86-linux-small-div", "s");
+    std::fs::write(
+        src.path(),
+        r#"
+int f(signed char a, signed char b, short c, short d)
+{
+    return (a / b) + (a % b) + (c / d) + (c % d);
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(asm.path())
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm_text = std::fs::read_to_string(asm.path()).expect("failed to read assembly");
+    assert!(asm_text.contains("movsbl"), "{asm_text}");
+    assert!(asm_text.contains("movswl"), "{asm_text}");
+    assert!(asm_text.contains("idivl"), "{asm_text}");
+    assert!(!asm_text.contains("idivb"), "{asm_text}");
+    assert!(!asm_text.contains("idivw"), "{asm_text}");
+}

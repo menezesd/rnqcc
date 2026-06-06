@@ -2128,8 +2128,8 @@ pub enum AsmInstr {
     },
     Unreachable,
     Ret,
-    AllocateStack(i32),
-    DeallocateStack(i32),
+    AllocateStack(i64),
+    DeallocateStack(i64),
 }
 
 #[derive(Debug)]

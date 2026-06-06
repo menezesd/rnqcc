@@ -1216,14 +1216,24 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
         }
         AsmInstr::AllocateStack(size) => {
             if *size > 0 {
-                writeln!(w, "\tsubq ${}, %rsp", size)
+                if *size > i32::MAX as i64 {
+                    writeln!(w, "\tmovq ${}, %r10", size)?;
+                    writeln!(w, "\tsubq %r10, %rsp")
+                } else {
+                    writeln!(w, "\tsubq ${}, %rsp", size)
+                }
             } else {
                 Ok(())
             }
         }
         AsmInstr::DeallocateStack(size) => {
             if *size > 0 {
-                writeln!(w, "\taddq ${}, %rsp", size)
+                if *size > i32::MAX as i64 {
+                    writeln!(w, "\tmovq ${}, %r10", size)?;
+                    writeln!(w, "\taddq %r10, %rsp")
+                } else {
+                    writeln!(w, "\taddq ${}, %rsp", size)
+                }
             } else {
                 Ok(())
             }

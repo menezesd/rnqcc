@@ -1244,6 +1244,64 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                 ));
                 return Ok(());
             }
+            if matches!(t, AsmType::Byte | AsmType::Word) {
+                out.push(AsmInstr::Mov(
+                    t,
+                    convert_val(left),
+                    AsmOperand::Reg(Reg::AX),
+                ));
+                out.push(AsmInstr::Mov(
+                    t,
+                    convert_val(right),
+                    AsmOperand::Reg(Reg::R10),
+                ));
+                if is_unsigned {
+                    out.push(AsmInstr::MovZeroExtend(
+                        t,
+                        AsmType::Longword,
+                        AsmOperand::Reg(Reg::AX),
+                        AsmOperand::Reg(Reg::AX),
+                    ));
+                    out.push(AsmInstr::MovZeroExtend(
+                        t,
+                        AsmType::Longword,
+                        AsmOperand::Reg(Reg::R10),
+                        AsmOperand::Reg(Reg::R10),
+                    ));
+                    out.push(AsmInstr::Mov(
+                        AsmType::Longword,
+                        AsmOperand::Imm(0),
+                        AsmOperand::Reg(Reg::DX),
+                    ));
+                    out.push(AsmInstr::Div(AsmType::Longword, AsmOperand::Reg(Reg::R10)));
+                } else {
+                    out.push(AsmInstr::Movsx(
+                        t,
+                        AsmType::Longword,
+                        AsmOperand::Reg(Reg::AX),
+                        AsmOperand::Reg(Reg::AX),
+                    ));
+                    out.push(AsmInstr::Movsx(
+                        t,
+                        AsmType::Longword,
+                        AsmOperand::Reg(Reg::R10),
+                        AsmOperand::Reg(Reg::R10),
+                    ));
+                    out.push(AsmInstr::Cdq(AsmType::Longword));
+                    out.push(AsmInstr::Idiv(AsmType::Longword, AsmOperand::Reg(Reg::R10)));
+                }
+                let result_reg = if matches!(op, TackyBinaryOp::Mod) {
+                    Reg::DX
+                } else {
+                    Reg::AX
+                };
+                out.push(AsmInstr::Mov(
+                    t,
+                    AsmOperand::Reg(result_reg),
+                    convert_val(dst),
+                ));
+                return Ok(());
+            }
             out.push(AsmInstr::Mov(
                 t,
                 convert_val(left),
@@ -2255,7 +2313,7 @@ fn convert_funcall(call: &FuncallArgs<'_>, ctx: &mut FuncallContext<'_>) -> Resu
         };
         let outgoing_bytes = stack_bytes_with_bridge + padding;
         if outgoing_bytes > 0 {
-            out.push(AsmInstr::AllocateStack(outgoing_bytes as i32));
+            out.push(AsmInstr::AllocateStack(outgoing_bytes as i64));
             let mut stack_offset = 0i32;
             for item in &stack_args_list {
                 let layout = item.layout();
@@ -2395,7 +2453,7 @@ fn convert_funcall(call: &FuncallArgs<'_>, ctx: &mut FuncallContext<'_>) -> Resu
             indirect,
             !indirect && ctx.local_function_names.contains(name),
         ));
-        let bytes_to_dealloc = outgoing_bytes as i32;
+        let bytes_to_dealloc = outgoing_bytes as i64;
         if bytes_to_dealloc > 0 {
             out.push(AsmInstr::DeallocateStack(bytes_to_dealloc));
         }
@@ -3299,16 +3357,83 @@ struct ReplacePseudoContext<'a> {
     struct_defs: &'a HashMap<String, StructDef>,
 }
 
-fn replace_pseudos(func: &mut AsmFunction, ctx: &ReplacePseudoContext<'_>) -> i32 {
+fn replace_pseudos(func: &mut AsmFunction, ctx: &ReplacePseudoContext<'_>) -> Result<i64, String> {
     let mut pseudo_map: HashMap<String, i32> = HashMap::new();
-    let mut stack_offset: i32 = 0;
+    let mut stack_offset: i64 = 0;
+
+    fn stack_size_for_name(name: &str, ctx: &ReplacePseudoContext<'_>) -> Result<i64, String> {
+        if let Some(&arr_size) = ctx.arr_sizes.get(name) {
+            return i64::try_from(arr_size)
+                .map_err(|_| format!("stack object `{}` is too large", name));
+        }
+        let ct = ctx.types.get(name).copied().unwrap_or(CType::Int);
+        if ct == CType::Void {
+            Ok(4)
+        } else if ct == CType::Struct {
+            ctx.var_struct_tags
+                .get(name)
+                .and_then(|tag| ctx.struct_defs.get(tag))
+                .map(|def| {
+                    i64::try_from(def.size)
+                        .map_err(|_| format!("stack object `{}` is too large", name))
+                })
+                .unwrap_or(Ok(0))
+        } else {
+            Ok(i64::from(std::cmp::max(ct.size(), 1)))
+        }
+    }
+
+    fn stack_align_for_name(
+        name: &str,
+        size: i64,
+        ctx: &ReplacePseudoContext<'_>,
+    ) -> Result<i64, String> {
+        let align = if let Some(&decl_align) = ctx.alignments.get(name) {
+            decl_align
+        } else if let Some(&arr_size) = ctx.arr_sizes.get(name) {
+            if arr_size >= 16 {
+                16
+            } else {
+                std::cmp::max(size.min(16) as usize, 1)
+            }
+        } else {
+            std::cmp::max(size.min(16) as usize, 1)
+        };
+        i64::try_from(align).map_err(|_| format!("stack object `{}` alignment is too large", name))
+    }
+
+    fn allocate_stack_slot(
+        name: &str,
+        map: &mut HashMap<String, i32>,
+        offset: &mut i64,
+        ctx: &ReplacePseudoContext<'_>,
+    ) -> Result<i32, String> {
+        if let Some(&o) = map.get(name) {
+            return Ok(o);
+        }
+
+        let size = stack_size_for_name(name, ctx)?;
+        let align = stack_align_for_name(name, size, ctx)?;
+        *offset = offset
+            .checked_sub(size)
+            .ok_or_else(|| format!("stack frame for `{}` is too large", name))?;
+        *offset &= -align;
+        let stack_offset = i32::try_from(*offset).map_err(|_| {
+            format!(
+                "stack slot for `{}` exceeds x86-64 displacement range",
+                name
+            )
+        })?;
+        map.insert(name.to_string(), stack_offset);
+        Ok(stack_offset)
+    }
 
     fn replace_operand(
         op: &mut AsmOperand,
         map: &mut HashMap<String, i32>,
-        offset: &mut i32,
+        offset: &mut i64,
         ctx: &ReplacePseudoContext<'_>,
-    ) {
+    ) -> Result<(), String> {
         match op {
             AsmOperand::Pseudo(name) => {
                 let name = name.clone();
@@ -3317,43 +3442,7 @@ fn replace_pseudos(func: &mut AsmFunction, ctx: &ReplacePseudoContext<'_>) -> i3
                 } else if ctx.statics.contains(&name) {
                     *op = AsmOperand::Data(name);
                 } else {
-                    let off = if let Some(&o) = map.get(&name) {
-                        o
-                    } else {
-                        let size = if let Some(&arr_size) = ctx.arr_sizes.get(&name) {
-                            arr_size as i32
-                        } else {
-                            let ct = ctx.types.get(&name).copied().unwrap_or(CType::Int);
-                            // Void function results get stored as Longword (movl %eax, ...)
-                            // so ensure at least 4 bytes
-                            if ct == CType::Void {
-                                4
-                            } else if ct == CType::Struct {
-                                ctx.var_struct_tags
-                                    .get(&name)
-                                    .and_then(|tag| ctx.struct_defs.get(tag))
-                                    .map(|def| def.size as i32)
-                                    .unwrap_or(0)
-                            } else {
-                                std::cmp::max(ct.size(), 1)
-                            }
-                        };
-                        let align = if let Some(&decl_align) = ctx.alignments.get(&name) {
-                            decl_align
-                        } else if let Some(&arr_size) = ctx.arr_sizes.get(&name) {
-                            if arr_size >= 16 {
-                                16
-                            } else {
-                                std::cmp::max(size.min(16) as usize, 1)
-                            }
-                        } else {
-                            std::cmp::max(size.min(16) as usize, 1)
-                        };
-                        *offset -= size;
-                        *offset &= -(align as i32);
-                        map.insert(name, *offset);
-                        *offset
-                    };
+                    let off = allocate_stack_slot(&name, map, offset, ctx)?;
                     *op = AsmOperand::Stack(off);
                 }
             }
@@ -3370,135 +3459,110 @@ fn replace_pseudos(func: &mut AsmFunction, ctx: &ReplacePseudoContext<'_>) -> i3
                         *op = AsmOperand::Data(name);
                     }
                 } else {
-                    // Allocate if not yet allocated
-                    let base_off = if let Some(&o) = map.get(&name) {
-                        o
-                    } else {
-                        let size = if let Some(&arr_size) = ctx.arr_sizes.get(&name) {
-                            arr_size as i32
-                        } else {
-                            let ct = ctx.types.get(&name).copied().unwrap_or(CType::Int);
-                            if ct == CType::Struct {
-                                ctx.var_struct_tags
-                                    .get(&name)
-                                    .and_then(|tag| ctx.struct_defs.get(tag))
-                                    .map(|def| def.size as i32)
-                                    .unwrap_or(0)
-                            } else {
-                                ct.size()
-                            }
-                        };
-                        let align = if let Some(&decl_align) = ctx.alignments.get(&name) {
-                            decl_align
-                        } else if size >= 16 {
-                            16
-                        } else {
-                            std::cmp::max(size.min(16) as usize, 1)
-                        };
-                        *offset -= size;
-                        *offset &= -(align as i32);
-                        map.insert(name, *offset);
-                        *offset
-                    };
-                    *op = AsmOperand::Stack(base_off + mem_off);
+                    let base_off = allocate_stack_slot(&name, map, offset, ctx)?;
+                    let stack_off = base_off
+                        .checked_add(mem_off)
+                        .ok_or_else(|| format!("stack access for `{}` overflows", name))?;
+                    *op = AsmOperand::Stack(stack_off);
                 }
             }
             AsmOperand::StackArg(_) => {}
             _ => {}
         }
+        Ok(())
     }
 
     for instr in &mut func.instructions {
         match instr {
             AsmInstr::Mov(_, src, dst) | AsmInstr::Cmp(_, src, dst) => {
-                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx);
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx)?;
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::Movsx(_, _, src, dst) | AsmInstr::MovZeroExtend(_, _, src, dst) => {
-                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx);
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx)?;
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::Binary(_, _, src, dst) => {
-                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx);
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx)?;
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::Unary(_, _, op) => {
-                replace_operand(op, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(op, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::MulFull(_, op) | AsmInstr::Idiv(_, op) | AsmInstr::Div(_, op) => {
-                replace_operand(op, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(op, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::SetCC(_, op) => {
-                replace_operand(op, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(op, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::Push(op) => {
-                replace_operand(op, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(op, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::JmpIndirect(target) => {
-                replace_operand(target, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(target, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::Cvtsi2sd(_, src, dst)
             | AsmInstr::Cvtsi2ss(_, src, dst)
             | AsmInstr::Cvttsd2si(_, src, dst)
             | AsmInstr::Cvttss2si(_, src, dst) => {
-                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx);
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx)?;
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::Cvtss2sd(src, dst) | AsmInstr::Cvtsd2ss(src, dst) => {
-                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx);
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx)?;
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::X87Load(_, src) => {
-                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::X87Store(dst) => {
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::X87StoreFloat(_, dst) => {
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::X87StoreInt(_, dst) => {
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::X87LoadIndirect(_, _) | AsmInstr::X87StoreIndirect(_) => {}
             AsmInstr::Lea(src, dst) => {
-                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx);
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx)?;
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::LoadLabelAddress(_, dst) => {
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::AtomicRmw(_, _, _, dst)
             | AsmInstr::AtomicExchange(_, dst)
             | AsmInstr::AtomicCompareExchange(_, dst)
             | AsmInstr::AtomicCompareSwap(_, _, dst) => {
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::LoadIndirect(_, _, dst) => {
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::CopyToStackArg { src_ptr, .. } => {
-                replace_operand(src_ptr, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(src_ptr, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::CopyFromStackArg { dst, .. } => {
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::StoreIndirect(_, src, _) => {
-                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(src, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::BuiltinSetjmp { buf, dst, .. } => {
-                replace_operand(buf, &mut pseudo_map, &mut stack_offset, ctx);
-                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(buf, &mut pseudo_map, &mut stack_offset, ctx)?;
+                replace_operand(dst, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             AsmInstr::BuiltinLongjmp { buf, value } => {
-                replace_operand(buf, &mut pseudo_map, &mut stack_offset, ctx);
-                replace_operand(value, &mut pseudo_map, &mut stack_offset, ctx);
+                replace_operand(buf, &mut pseudo_map, &mut stack_offset, ctx)?;
+                replace_operand(value, &mut pseudo_map, &mut stack_offset, ctx)?;
             }
             _ => {}
         }
     }
 
-    -stack_offset
+    Ok(-stack_offset)
 }
 
 // ============================================================
@@ -3515,8 +3579,8 @@ fn is_memory(op: &AsmOperand) -> bool {
     )
 }
 
-fn fixup_instructions(func: &mut AsmFunction, stack_size: i32, callee_saved: &[Reg]) {
-    let num_cs = callee_saved.len() as i32;
+fn fixup_instructions(func: &mut AsmFunction, stack_size: i64, callee_saved: &[Reg]) {
+    let num_cs = callee_saved.len() as i64;
     let total_aligned = (stack_size + 8 * num_cs + 15) & !15;
     let adjusted_stack = total_aligned - 8 * num_cs;
     let old_instructions = std::mem::take(&mut func.instructions);
@@ -4194,7 +4258,7 @@ pub fn gen(
                     var_struct_tags: &program.var_struct_tags,
                     struct_defs: &program.struct_defs,
                 };
-                let stack_size = replace_pseudos(&mut asm_func, &replace_ctx);
+                let stack_size = replace_pseudos(&mut asm_func, &replace_ctx)?;
 
                 // Phase 3: fix up instructions + callee-saved register handling
                 fixup_instructions(&mut asm_func, stack_size, &allocation.callee_saved);

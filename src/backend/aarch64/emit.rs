@@ -330,11 +330,11 @@ fn emit_store_stack(
     }
 }
 
-fn emit_stack_pointer_adjust(w: &mut dyn Write, op: &str, bytes: i32) -> std::io::Result<()> {
+fn emit_stack_pointer_adjust(w: &mut dyn Write, op: &str, bytes: i64) -> std::io::Result<()> {
     if bytes <= 4095 {
         writeln!(w, "\t{} sp, sp, #{}", op, bytes)
     } else {
-        emit_load_immediate(w, AsmType::Quadword, "x16", bytes as i64)?;
+        emit_load_immediate(w, AsmType::Quadword, "x16", bytes)?;
         writeln!(w, "\t{} sp, sp, x16", op)
     }
 }

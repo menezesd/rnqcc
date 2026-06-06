@@ -99,7 +99,7 @@ fn emit_epilogue(
         instructions.push(AsmInstr::AArch64RestoreLink(offset));
     }
     if frame_size > 0 {
-        instructions.push(AsmInstr::DeallocateStack(frame_size));
+        instructions.push(AsmInstr::DeallocateStack(i64::from(frame_size)));
     }
     if large_stack_size > 0 {
         instructions.push(AsmInstr::AArch64DeallocateLargeStack(large_stack_size));
@@ -1481,7 +1481,7 @@ fn convert_function(
         instructions.push(AsmInstr::AArch64AllocateLargeStack(large_stack_size));
     }
     if frame_size > 0 {
-        instructions.push(AsmInstr::AllocateStack(frame_size));
+        instructions.push(AsmInstr::AllocateStack(i64::from(frame_size)));
     }
     if let Some(offset) = link_register_offset {
         instructions.push(AsmInstr::AArch64SaveLink(offset));
@@ -2237,7 +2237,7 @@ fn convert_function(
             }
             TackyInstr::NonlocalJump(label) => {
                 if frame_size > 0 {
-                    instructions.push(AsmInstr::DeallocateStack(frame_size));
+                    instructions.push(AsmInstr::DeallocateStack(i64::from(frame_size)));
                 }
                 if large_stack_size > 0 {
                     instructions.push(AsmInstr::AArch64DeallocateLargeStack(large_stack_size));
@@ -2569,7 +2569,7 @@ fn convert_function(
                 });
                 let outgoing_bytes = outgoing_stack_size(stack_arg_count);
                 if outgoing_bytes > 0 {
-                    instructions.push(AsmInstr::AllocateStack(outgoing_bytes));
+                    instructions.push(AsmInstr::AllocateStack(i64::from(outgoing_bytes)));
                     let mut stack_index = 0usize;
                     for arg in &stack_args {
                         stack_index = stack_index.next_multiple_of(arg.slot_alignment());
@@ -2647,7 +2647,7 @@ fn convert_function(
                     false,
                 ));
                 if outgoing_bytes > 0 {
-                    instructions.push(AsmInstr::DeallocateStack(outgoing_bytes));
+                    instructions.push(AsmInstr::DeallocateStack(i64::from(outgoing_bytes)));
                 }
                 if *hidden_return {
                     continue;

@@ -105,6 +105,12 @@ struct CompatTypeMeta {
     enum_typedef: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct StructMemberVlaElemSize {
+    member: String,
+    elem_size: Exp,
+}
+
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -118,7 +124,7 @@ pub struct Parser {
     struct_defs: std::collections::HashMap<String, StructDef>,
     /// Dynamic element sizes for struct members declared with VLA typedef element types.
     struct_member_vla_elem_sizes: std::collections::HashMap<(String, String), Exp>,
-    pending_struct_member_vla_elem_sizes: Vec<Vec<(String, Exp)>>,
+    pending_struct_member_vla_elem_sizes: Vec<Vec<StructMemberVlaElemSize>>,
     /// Full type from the last typedef used as a type specifier
     last_typedef_full_type: Option<FullType>,
     /// Dynamic byte-size expression from the last VLA typedef used as a type specifier.
@@ -801,10 +807,14 @@ impl Parser {
         Ok(())
     }
 
-    fn record_struct_member_vla_elem_sizes(&mut self, tag: &str, sizes: Vec<(String, Exp)>) {
-        for (member, size) in sizes {
+    fn record_struct_member_vla_elem_sizes(
+        &mut self,
+        tag: &str,
+        sizes: Vec<StructMemberVlaElemSize>,
+    ) {
+        for size in sizes {
             self.struct_member_vla_elem_sizes
-                .insert((tag.to_string(), member), size);
+                .insert((tag.to_string(), size.member), size.elem_size);
         }
     }
 
@@ -3325,7 +3335,10 @@ impl Parser {
                     && matches!(member_full_type, FullType::Array { .. })
                 {
                     if let Some(base_size) = base_typedef_vla_size.clone() {
-                        vla_elem_sizes.push((name.clone(), base_size));
+                        vla_elem_sizes.push(StructMemberVlaElemSize {
+                            member: name.clone(),
+                            elem_size: base_size,
+                        });
                     }
                 } else if !name.is_empty()
                     && matches!(
@@ -3339,7 +3352,10 @@ impl Parser {
                     if let Some(bound) = direct_vla_bound {
                         if let Some(size) = Self::vla_size_expr_from_bound(bound, &member_full_type)
                         {
-                            vla_elem_sizes.push((name.clone(), size));
+                            vla_elem_sizes.push(StructMemberVlaElemSize {
+                                member: name.clone(),
+                                elem_size: size,
+                            });
                         }
                     }
                 }

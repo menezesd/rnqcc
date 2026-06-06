@@ -17433,8 +17433,11 @@ fn internal_cpp_handles_stringification_token_pasting_and_source_macros() {
         &src,
         "#define STR(x) #x\n\
          #define CAT(a, b) a ## b\n\
+         #define UCAT(a, b) a ## b\n\
          int CAT(ma, in)(void) { return __LINE__; }\n\
          char *s = STR(hello   world);\n\
+         char *prefixed = STR(u\"hi\" U'\\u03c0');\n\
+         unsigned short pasted16 = UCAT(u, 'x');\n\
          char *f = __FILE__;\n",
     )
     .expect("failed to write source");
@@ -17448,8 +17451,16 @@ fn internal_cpp_handles_stringification_token_pasting_and_source_macros() {
 
     assert!(output.status.success(), "{}", stderr(output));
     let stdout = stdout(output);
-    assert!(stdout.contains("int main(void) { return 3; }"), "{stdout}");
+    assert!(stdout.contains("int main(void) { return 4; }"), "{stdout}");
     assert!(stdout.contains("char *s = \"hello world\";"), "{stdout}");
+    assert!(
+        stdout.contains("char *prefixed = \"u\\\"hi\\\" U'\\\\u03c0'\";"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("unsigned short pasted16 = u'x';"),
+        "{stdout}"
+    );
     assert!(
         stdout.contains(&format!("char *f = \"{}\";", src.display())),
         "{stdout}"
@@ -25405,34 +25416,6 @@ fn rejects_invalid_unicode_ucns_with_both_preprocessors() {
 }
 
 #[test]
-fn rejects_unsupported_utf_literal_prefixes_under_internal_cpp() {
-    for prefix in ["u", "U"] {
-        let src = TempPath::new(&format!("unsupported-{prefix}-string-literal"), "c");
-        let exe = TempPath::new(&format!("unsupported-{prefix}-string-literal"), "bin");
-        std::fs::write(
-            src.path(),
-            format!("int main(void) {{ return {prefix}\"x\"[0]; }}\n"),
-        )
-        .expect("failed to write input");
-
-        let output = Command::new(rnqcc())
-            .arg("--internal-cpp")
-            .arg(src.path())
-            .arg("-o")
-            .arg(exe.path())
-            .output()
-            .expect("failed to run rnqcc");
-        let status = output.status;
-        let stderr = stderr(output);
-        assert!(!status.success(), "{prefix} string unexpectedly succeeded");
-        assert!(
-            stderr.contains("unsupported UTF"),
-            "{prefix} string: {stderr}"
-        );
-    }
-}
-
-#[test]
 fn compiles_prefixed_character_literals_with_both_preprocessors() {
     for internal_cpp in [false, true] {
         let mode = if internal_cpp {
@@ -25467,6 +25450,90 @@ fn compiles_prefixed_character_literals_with_both_preprocessors() {
             .expect("failed to run output");
         assert_eq!(run.code(), Some(42), "{mode}");
     }
+}
+
+#[test]
+fn compiles_utf_string_literals_with_both_preprocessors() {
+    for internal_cpp in [false, true] {
+        let mode = if internal_cpp {
+            "internal-cpp"
+        } else {
+            "external-cpp"
+        };
+        let src = TempPath::new(&format!("utf-string-literals-{mode}"), "c");
+        let exe = TempPath::new(&format!("utf-string-literals-{mode}"), "bin");
+        std::fs::write(
+            src.path(),
+            "static unsigned short s16_static[] = u\"a\\U0001f600\";\n\
+             static unsigned int s32_static[] = U\"\\u03c0\" \"x\";\n\
+             int main(void) {\n\
+                 unsigned short *s16 = u\"a\\U0001f600\";\n\
+                 unsigned int *s32 = U\"\\u03c0\";\n\
+                 return s16[0] == 0x61\n\
+                     && s16[1] == 0xd83d\n\
+                     && s16[2] == 0xde00\n\
+                     && s16[3] == 0\n\
+                     && s16_static[0] == 0x61\n\
+                     && s16_static[1] == 0xd83d\n\
+                     && s16_static[2] == 0xde00\n\
+                     && s16_static[3] == 0\n\
+                     && s32[0] == 0x03c0\n\
+                     && s32[1] == 0\n\
+                     && s32_static[0] == 0x03c0\n\
+                     && s32_static[1] == 0x78\n\
+                     && s32_static[2] == 0\n\
+                     && sizeof(s16_static) == 8\n\
+                     && sizeof(s32_static) == 12 ? 42 : 1;\n\
+             }\n",
+        )
+        .expect("failed to write input");
+
+        let mut command = Command::new(rnqcc());
+        if internal_cpp {
+            command.arg("--internal-cpp");
+        }
+        let output = command
+            .arg(src.path())
+            .arg("-o")
+            .arg(exe.path())
+            .output()
+            .expect("failed to run rnqcc");
+        assert!(output.status.success(), "{mode}: {}", stderr(output));
+
+        let run = Command::new(exe.path())
+            .status()
+            .expect("failed to run output");
+        assert_eq!(run.code(), Some(42), "{mode}");
+    }
+}
+
+#[test]
+fn rejects_mixed_prefixed_string_concatenation() {
+    let src = TempPath::new("mixed-prefixed-string-concat", "c");
+    let exe = TempPath::new("mixed-prefixed-string-concat", "bin");
+    std::fs::write(
+        src.path(),
+        "int main(void) { return (U\"x\" u\"y\")[0]; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg(src.path())
+        .arg("-o")
+        .arg(exe.path())
+        .output()
+        .expect("failed to run rnqcc");
+    let status = output.status;
+    let stderr = stderr(output);
+    assert!(
+        !status.success(),
+        "mixed concatenation unexpectedly succeeded"
+    );
+    assert!(
+        stderr.contains("cannot concatenate differently-prefixed string literals"),
+        "{stderr}"
+    );
 }
 
 #[test]

@@ -1619,9 +1619,12 @@ impl Lexer {
                     self.read_char_constant(prefix)?
                 }
                 'u' | 'U' if self.peek() == Some('"') => {
-                    return Err(format!(
-                        "unsupported UTF-16/UTF-32 string literal prefix: {c}"
-                    ));
+                    self.advance();
+                    match self.read_string_literal()? {
+                        Token::StringLiteral(s) if c == 'u' => Token::Utf16StringLiteral(s),
+                        Token::StringLiteral(s) => Token::Utf32StringLiteral(s),
+                        tok => tok,
+                    }
                 }
                 'L' if self.peek() == Some('\'') => {
                     self.advance();
@@ -1811,12 +1814,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_utf_literal_prefixes() -> Result<(), String> {
-        let err = require_err(lex("char *s = u\"hi\";"), "lexing should fail")?;
-        assert!(err.contains("unsupported UTF-16/UTF-32 string literal prefix: u"));
-
-        let err = require_err(lex("char *s = U\"hi\";"), "lexing should fail")?;
-        assert!(err.contains("unsupported UTF-16/UTF-32 string literal prefix: U"));
+    fn lexes_utf_string_literal_prefixes() -> Result<(), String> {
+        let tokens = lex("unsigned short *a = u\"hi\"; unsigned int *b = U\"π\";")?;
+        assert!(tokens.contains(&Token::Utf16StringLiteral("hi".to_string())));
+        assert!(tokens.contains(&Token::Utf32StringLiteral("π".to_string())));
         Ok(())
     }
 

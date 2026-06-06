@@ -454,6 +454,8 @@ impl Resolver {
             | Exp::ImaginaryDoubleConstant(_)
             | Exp::StringLiteral(_)
             | Exp::WideStringLiteral(_)
+            | Exp::Utf16StringLiteral(_)
+            | Exp::Utf32StringLiteral(_)
             | Exp::Unreachable
             | Exp::AtomicFence => exp,
             Exp::AtomicFetch {

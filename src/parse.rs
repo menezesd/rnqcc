@@ -623,6 +623,8 @@ impl Parser {
         let inferred = match init {
             Exp::StringLiteral(s) if elem.to_ctype().is_char() => c_string_byte_len(s) + 1,
             Exp::WideStringLiteral(s) => s.chars().count() + 1,
+            Exp::Utf16StringLiteral(s) => s.encode_utf16().count() + 1,
+            Exp::Utf32StringLiteral(s) => s.chars().count() + 1,
             Exp::StringLiteral(s) => s.chars().count() + 1,
             Exp::ArrayInit(elems) if elem.to_ctype().is_char() => match elems.as_slice() {
                 [Exp::StringLiteral(s)] => c_string_byte_len(s) + 1,
@@ -630,6 +632,8 @@ impl Parser {
             },
             Exp::ArrayInit(elems) => match elems.as_slice() {
                 [Exp::WideStringLiteral(s)] => s.chars().count() + 1,
+                [Exp::Utf16StringLiteral(s)] => s.encode_utf16().count() + 1,
+                [Exp::Utf32StringLiteral(s)] => s.chars().count() + 1,
                 [Exp::StringLiteral(s)] => s.chars().count() + 1,
                 _ => self.infer_array_init_len(elems)?,
             },
@@ -1593,6 +1597,14 @@ impl Parser {
             }),
             Exp::WideStringLiteral(value) => Ok(FullType::Array {
                 elem: Box::new(FullType::Scalar(CType::Int)),
+                size: value.chars().count() + 1,
+            }),
+            Exp::Utf16StringLiteral(value) => Ok(FullType::Array {
+                elem: Box::new(FullType::Scalar(CType::UShort)),
+                size: value.encode_utf16().count() + 1,
+            }),
+            Exp::Utf32StringLiteral(value) => Ok(FullType::Array {
+                elem: Box::new(FullType::Scalar(CType::UInt)),
                 size: value.chars().count() + 1,
             }),
             Exp::Var(name) => self.lookup_value_type(name).ok_or_else(|| {
@@ -5743,14 +5755,24 @@ impl Parser {
                 self.advance()?;
                 Ok(Exp::Constant(val)) // char constants have type int
             }
-            Some(Token::StringLiteral(_) | Token::WideStringLiteral(_)) => {
-                // Concatenate adjacent string literals. If any literal is wide,
-                // the concatenated literal is wide.
+            Some(
+                Token::StringLiteral(_)
+                | Token::WideStringLiteral(_)
+                | Token::Utf16StringLiteral(_)
+                | Token::Utf32StringLiteral(_),
+            ) => {
+                // Concatenate adjacent string literals. Narrow pieces can join
+                // any prefixed literal; distinct non-narrow prefixes cannot.
                 let mut s = String::new();
-                let mut wide = false;
+                let mut kind: Option<&'static str> = None;
                 while matches!(
                     self.peek(),
-                    Some(Token::StringLiteral(_) | Token::WideStringLiteral(_))
+                    Some(
+                        Token::StringLiteral(_)
+                            | Token::WideStringLiteral(_)
+                            | Token::Utf16StringLiteral(_)
+                            | Token::Utf32StringLiteral(_)
+                    )
                 ) {
                     match self.peek().cloned() {
                         Some(Token::StringLiteral(part)) => {
@@ -5759,7 +5781,38 @@ impl Parser {
                         }
                         Some(Token::WideStringLiteral(part)) => {
                             self.advance()?;
-                            wide = true;
+                            if let Some(existing) = kind {
+                                if existing != "wide" {
+                                    return Err(self.format_error(
+                                        "cannot concatenate differently-prefixed string literals",
+                                    ));
+                                }
+                            }
+                            kind = Some("wide");
+                            s.push_str(&part);
+                        }
+                        Some(Token::Utf16StringLiteral(part)) => {
+                            self.advance()?;
+                            if let Some(existing) = kind {
+                                if existing != "utf16" {
+                                    return Err(self.format_error(
+                                        "cannot concatenate differently-prefixed string literals",
+                                    ));
+                                }
+                            }
+                            kind = Some("utf16");
+                            s.push_str(&part);
+                        }
+                        Some(Token::Utf32StringLiteral(part)) => {
+                            self.advance()?;
+                            if let Some(existing) = kind {
+                                if existing != "utf32" {
+                                    return Err(self.format_error(
+                                        "cannot concatenate differently-prefixed string literals",
+                                    ));
+                                }
+                            }
+                            kind = Some("utf32");
                             s.push_str(&part);
                         }
                         _ => {
@@ -5767,10 +5820,12 @@ impl Parser {
                         }
                     }
                 }
-                if wide {
-                    Ok(Exp::WideStringLiteral(s))
-                } else {
-                    Ok(Exp::StringLiteral(s))
+                match kind {
+                    Some("wide") => Ok(Exp::WideStringLiteral(s)),
+                    Some("utf16") => Ok(Exp::Utf16StringLiteral(s)),
+                    Some("utf32") => Ok(Exp::Utf32StringLiteral(s)),
+                    Some(_) => Err(self.format_error("unexpected string literal prefix state")),
+                    None => Ok(Exp::StringLiteral(s)),
                 }
             }
             Some(Token::Identifier(name)) => {

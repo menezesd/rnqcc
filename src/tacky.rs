@@ -449,9 +449,9 @@ impl TackyGen {
 
     fn string_array_initializer(init: &Exp) -> Option<&String> {
         match init {
-            Exp::StringLiteral(s) | Exp::WideStringLiteral(s) => Some(s),
+            Exp::StringLiteral(s) => Some(s),
             Exp::ArrayInit(elems) => match elems.as_slice() {
-                [Exp::StringLiteral(s)] | [Exp::WideStringLiteral(s)] => Some(s),
+                [Exp::StringLiteral(s)] => Some(s),
                 _ => None,
             },
             _ => None,
@@ -623,6 +623,39 @@ impl TackyGen {
             }
             Exp::StringLiteral(s) => Some(StaticAddressConstant {
                 base: Some(self.make_string_constant(s)),
+                offset: 0,
+            }),
+            Exp::WideStringLiteral(s) => Some(StaticAddressConstant {
+                base: Some(self.make_raw_string_constant(
+                    wide_string_bytes_with_null(s),
+                    FullType::Array {
+                        elem: Box::new(FullType::Scalar(CType::Int)),
+                        size: s.chars().count() + 1,
+                    },
+                    FullType::Scalar(CType::Int).alignment(),
+                )),
+                offset: 0,
+            }),
+            Exp::Utf16StringLiteral(s) => Some(StaticAddressConstant {
+                base: Some(self.make_raw_string_constant(
+                    utf16_string_bytes_with_null(s),
+                    FullType::Array {
+                        elem: Box::new(FullType::Scalar(CType::UShort)),
+                        size: s.encode_utf16().count() + 1,
+                    },
+                    FullType::Scalar(CType::UShort).alignment(),
+                )),
+                offset: 0,
+            }),
+            Exp::Utf32StringLiteral(s) => Some(StaticAddressConstant {
+                base: Some(self.make_raw_string_constant(
+                    utf32_string_bytes_with_null(s),
+                    FullType::Array {
+                        elem: Box::new(FullType::Scalar(CType::UInt)),
+                        size: s.chars().count() + 1,
+                    },
+                    FullType::Scalar(CType::UInt).alignment(),
+                )),
                 offset: 0,
             }),
             Exp::Constant(value) | Exp::LongConstant(value) => Some(StaticAddressConstant {
@@ -815,7 +848,10 @@ impl TackyGen {
 
     fn static_aggregate_initializer(init: &Exp) -> Option<&Exp> {
         match init {
-            Exp::ArrayInit(_) | Exp::WideStringLiteral(_) => Some(init),
+            Exp::ArrayInit(_)
+            | Exp::WideStringLiteral(_)
+            | Exp::Utf16StringLiteral(_)
+            | Exp::Utf32StringLiteral(_) => Some(init),
             Exp::Cast(_, _, inner) if matches!(inner.as_ref(), Exp::ArrayInit(_)) => Some(inner),
             _ => None,
         }
@@ -1863,6 +1899,14 @@ impl TackyGen {
                 elem: Box::new(FullType::Scalar(CType::Int)),
                 size: s.chars().count() + 1,
             },
+            Exp::Utf16StringLiteral(s) => FullType::Array {
+                elem: Box::new(FullType::Scalar(CType::UShort)),
+                size: s.encode_utf16().count() + 1,
+            },
+            Exp::Utf32StringLiteral(s) => FullType::Array {
+                elem: Box::new(FullType::Scalar(CType::UInt)),
+                size: s.chars().count() + 1,
+            },
             Exp::Var(name) => self.get_full_type(name),
             Exp::LabelAddress(_) => FullType::Pointer(Box::new(FullType::Scalar(CType::Void))),
             Exp::Cast(ct, ft, _) => {
@@ -2094,6 +2138,23 @@ impl TackyGen {
             name: label.clone(),
             alignment: 1,
             init: StaticInit::StringInit(s.to_string(), true),
+        });
+        label
+    }
+
+    fn make_raw_string_constant(
+        &mut self,
+        bytes: String,
+        ft: FullType,
+        alignment: usize,
+    ) -> String {
+        let label = format!("__string_const_{}", self.string_counter);
+        self.string_counter += 1;
+        self.register_var(&label, ft);
+        self.static_constants.push(TackyStaticConstant {
+            name: label.clone(),
+            alignment,
+            init: StaticInit::StringInit(bytes, false),
         });
         label
     }
@@ -2746,8 +2807,49 @@ impl TackyGen {
                 Ok((ptr, CType::Pointer))
             }
             Exp::WideStringLiteral(s) => {
-                let label = self.make_string_constant(&wide_string_bytes(&s));
+                let label = self.make_raw_string_constant(
+                    wide_string_bytes_with_null(&s),
+                    FullType::Array {
+                        elem: Box::new(FullType::Scalar(CType::Int)),
+                        size: s.chars().count() + 1,
+                    },
+                    FullType::Scalar(CType::Int).alignment(),
+                );
                 let decayed_ft = FullType::Pointer(Box::new(FullType::Scalar(CType::Int)));
+                let ptr = self.fresh_tmp_full(&decayed_ft);
+                self.emit(TackyInstr::GetAddress {
+                    src: TackyVal::Var(label),
+                    dst: ptr.clone(),
+                });
+                Ok((ptr, CType::Pointer))
+            }
+            Exp::Utf16StringLiteral(s) => {
+                let label = self.make_raw_string_constant(
+                    utf16_string_bytes_with_null(&s),
+                    FullType::Array {
+                        elem: Box::new(FullType::Scalar(CType::UShort)),
+                        size: s.encode_utf16().count() + 1,
+                    },
+                    FullType::Scalar(CType::UShort).alignment(),
+                );
+                let decayed_ft = FullType::Pointer(Box::new(FullType::Scalar(CType::UShort)));
+                let ptr = self.fresh_tmp_full(&decayed_ft);
+                self.emit(TackyInstr::GetAddress {
+                    src: TackyVal::Var(label),
+                    dst: ptr.clone(),
+                });
+                Ok((ptr, CType::Pointer))
+            }
+            Exp::Utf32StringLiteral(s) => {
+                let label = self.make_raw_string_constant(
+                    utf32_string_bytes_with_null(&s),
+                    FullType::Array {
+                        elem: Box::new(FullType::Scalar(CType::UInt)),
+                        size: s.chars().count() + 1,
+                    },
+                    FullType::Scalar(CType::UInt).alignment(),
+                );
+                let decayed_ft = FullType::Pointer(Box::new(FullType::Scalar(CType::UInt)));
                 let ptr = self.fresh_tmp_full(&decayed_ft);
                 self.emit(TackyInstr::GetAddress {
                     src: TackyVal::Var(label),
@@ -4564,6 +4666,8 @@ impl TackyGen {
             | Exp::ImaginaryDoubleConstant(_)
             | Exp::StringLiteral(_)
             | Exp::WideStringLiteral(_)
+            | Exp::Utf16StringLiteral(_)
+            | Exp::Utf32StringLiteral(_)
             | Exp::Var(_)
             | Exp::LabelAddress(_)
             | Exp::SizeOfType(_, _)
@@ -11075,6 +11179,32 @@ impl TackyGen {
                     )?;
                 }
             }
+            (FullType::Array { elem, size }, Exp::Utf16StringLiteral(s))
+                if !elem.to_ctype().is_char() =>
+            {
+                let elem_size = elem.byte_size_with(&self.struct_defs);
+                for (index, unit) in s.encode_utf16().take(*size).enumerate() {
+                    self.put_static_initializer(
+                        builder,
+                        elem,
+                        &Exp::Constant(i64::from(unit)),
+                        base_offset + index * elem_size,
+                    )?;
+                }
+            }
+            (FullType::Array { elem, size }, Exp::Utf32StringLiteral(s))
+                if !elem.to_ctype().is_char() =>
+            {
+                let elem_size = elem.byte_size_with(&self.struct_defs);
+                for (index, ch) in s.chars().take(*size).enumerate() {
+                    self.put_static_initializer(
+                        builder,
+                        elem,
+                        &Exp::Constant(ch as i64),
+                        base_offset + index * elem_size,
+                    )?;
+                }
+            }
             (FullType::Array { elem, size }, Exp::StringLiteral(s)) => {
                 let total_bytes = elem.byte_size_with(&self.struct_defs) * size;
                 let string_bytes = c_string_byte_len(s);
@@ -11179,6 +11309,39 @@ impl TackyGen {
             }
             (FullType::Pointer(_), Exp::StringLiteral(s)) => {
                 let label = self.make_string_constant(s);
+                builder.put(base_offset, StaticInit::PointerInit(label))?;
+            }
+            (FullType::Pointer(_), Exp::WideStringLiteral(s)) => {
+                let label = self.make_raw_string_constant(
+                    wide_string_bytes_with_null(s),
+                    FullType::Array {
+                        elem: Box::new(FullType::Scalar(CType::Int)),
+                        size: s.chars().count() + 1,
+                    },
+                    FullType::Scalar(CType::Int).alignment(),
+                );
+                builder.put(base_offset, StaticInit::PointerInit(label))?;
+            }
+            (FullType::Pointer(_), Exp::Utf16StringLiteral(s)) => {
+                let label = self.make_raw_string_constant(
+                    utf16_string_bytes_with_null(s),
+                    FullType::Array {
+                        elem: Box::new(FullType::Scalar(CType::UShort)),
+                        size: s.encode_utf16().count() + 1,
+                    },
+                    FullType::Scalar(CType::UShort).alignment(),
+                );
+                builder.put(base_offset, StaticInit::PointerInit(label))?;
+            }
+            (FullType::Pointer(_), Exp::Utf32StringLiteral(s)) => {
+                let label = self.make_raw_string_constant(
+                    utf32_string_bytes_with_null(s),
+                    FullType::Array {
+                        elem: Box::new(FullType::Scalar(CType::UInt)),
+                        size: s.chars().count() + 1,
+                    },
+                    FullType::Scalar(CType::UInt).alignment(),
+                );
                 builder.put(base_offset, StaticInit::PointerInit(label))?;
             }
             (FullType::Vector { elem, lanes, .. }, Exp::ArrayInit(elems)) => {
@@ -13355,6 +13518,8 @@ impl TackyGen {
             | Exp::ImaginaryDoubleConstant(_)
             | Exp::StringLiteral(_)
             | Exp::WideStringLiteral(_)
+            | Exp::Utf16StringLiteral(_)
+            | Exp::Utf32StringLiteral(_)
             | Exp::LabelAddress(_)
             | Exp::SizeOfType(_, _)
             | Exp::AlignOfType(_)
@@ -13879,6 +14044,14 @@ fn eval_static_expr_full_type(
             elem: Box::new(FullType::Scalar(CType::Int)),
             size: s.chars().count() + 1,
         }),
+        Exp::Utf16StringLiteral(s) => Some(FullType::Array {
+            elem: Box::new(FullType::Scalar(CType::UShort)),
+            size: s.encode_utf16().count() + 1,
+        }),
+        Exp::Utf32StringLiteral(s) => Some(FullType::Array {
+            elem: Box::new(FullType::Scalar(CType::UInt)),
+            size: s.chars().count() + 1,
+        }),
         Exp::Cast(_, Some(ft), _) => Some(ft.clone()),
         Exp::Cast(ctype, None, _) => Some(FullType::Scalar(*ctype)),
         Exp::Unary(UnaryOp::Deref, inner) => match eval_static_expr_full_type(inner, full_types)? {
@@ -14303,12 +14476,45 @@ fn eval_static_integer_constant_exp(exp: &Exp) -> Option<StaticIntegerConstant> 
     eval_static_integer_constant_exp_with_context(exp, &HashMap::new(), &HashMap::new())
 }
 
-fn wide_string_bytes(s: &str) -> String {
+fn push_raw_byte(out: &mut String, byte: u8) {
+    out.push(char::from(byte));
+}
+
+fn wide_string_bytes_with_null(s: &str) -> String {
     let mut out = String::new();
     for ch in s.chars() {
         for byte in (ch as u32).to_le_bytes() {
-            out.push(char::from(byte));
+            push_raw_byte(&mut out, byte);
         }
+    }
+    for byte in 0u32.to_le_bytes() {
+        push_raw_byte(&mut out, byte);
+    }
+    out
+}
+
+fn utf16_string_bytes_with_null(s: &str) -> String {
+    let mut out = String::new();
+    for unit in s.encode_utf16() {
+        for byte in unit.to_le_bytes() {
+            push_raw_byte(&mut out, byte);
+        }
+    }
+    for byte in 0u16.to_le_bytes() {
+        push_raw_byte(&mut out, byte);
+    }
+    out
+}
+
+fn utf32_string_bytes_with_null(s: &str) -> String {
+    let mut out = String::new();
+    for ch in s.chars() {
+        for byte in (ch as u32).to_le_bytes() {
+            push_raw_byte(&mut out, byte);
+        }
+    }
+    for byte in 0u32.to_le_bytes() {
+        push_raw_byte(&mut out, byte);
     }
     out
 }
@@ -14522,7 +14728,12 @@ pub fn generate_with_target_options_and_warnings(
                 {
                     None // Aggregate init handled separately
                 }
-                Some(Exp::StringLiteral(_) | Exp::WideStringLiteral(_)) => None, // String init handled separately
+                Some(
+                    Exp::StringLiteral(_)
+                    | Exp::WideStringLiteral(_)
+                    | Exp::Utf16StringLiteral(_)
+                    | Exp::Utf32StringLiteral(_),
+                ) => None, // String init handled separately
                 Some(exp)
                     if vd.var_type == CType::Pointer
                         && gen.static_pointer_initializer(exp).is_some() =>

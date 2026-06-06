@@ -1267,6 +1267,8 @@ pub enum Token {
     CharLiteral(i64),
     StringLiteral(String),
     WideStringLiteral(String),
+    Utf16StringLiteral(String),
+    Utf32StringLiteral(String),
     // Keywords
     KWChar,
     KWSizeOf,
@@ -1444,6 +1446,8 @@ pub enum Exp {
     ImaginaryDoubleConstant(f64),
     StringLiteral(String),
     WideStringLiteral(String),
+    Utf16StringLiteral(String),
+    Utf32StringLiteral(String),
     Var(String),
     LabelAddress(String),
     Cast(CType, Option<FullType>, Box<Exp>),

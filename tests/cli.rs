@@ -25114,6 +25114,30 @@ fn internal_cpp_uses_filesystem_header_before_fallback_virtual_header() {
 }
 
 #[test]
+fn compiles_unicode_local_identifiers() {
+    let src = TempPath::new("unicode-identifiers", "c");
+    let exe = TempPath::new("unicode-identifiers", "bin");
+    std::fs::write(
+        src.path(),
+        "int main(void) { int α = 40; int β = 2; return α + β; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg(src.path())
+        .arg("-o")
+        .arg(exe.path())
+        .output()
+        .expect("failed to run rnqcc");
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let run = Command::new(exe.path())
+        .status()
+        .expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+}
+
+#[test]
 fn x86_linux_allows_zero_sized_variadic_memory_arg_block() {
     let src = temp_file("x86-linux-zero-vararg-struct", "c");
     let asm = temp_file("x86-linux-zero-vararg-struct", "s");

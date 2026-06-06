@@ -308,12 +308,12 @@ impl Lexer {
     }
 }
 
-fn is_ident_start(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphabetic()
+pub(crate) fn is_ident_start(ch: char) -> bool {
+    ch == '_' || ch.is_alphabetic()
 }
 
-fn is_ident_continue(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphanumeric()
+pub(crate) fn is_ident_continue(ch: char) -> bool {
+    ch == '_' || ch.is_alphanumeric()
 }
 
 fn starts_string_or_char_literal(ch: char, next: Option<char>, after_next: Option<char>) -> bool {
@@ -357,6 +357,22 @@ mod tests {
                 PpTokenKind::Punct("<%".to_string()),
                 PpTokenKind::Whitespace(" ".to_string()),
                 PpTokenKind::Punct("%>".to_string()),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lexes_unicode_identifier_letters() -> Result<(), String> {
+        let got = kinds("α β2 _γ")?;
+        assert_eq!(
+            got,
+            vec![
+                PpTokenKind::Ident("α".to_string()),
+                PpTokenKind::Whitespace(" ".to_string()),
+                PpTokenKind::Ident("β2".to_string()),
+                PpTokenKind::Whitespace(" ".to_string()),
+                PpTokenKind::Ident("_γ".to_string()),
             ]
         );
         Ok(())

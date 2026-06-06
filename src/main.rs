@@ -5220,7 +5220,7 @@ fn internal_preprocess_source(
     }
     let source_bytes =
         std::fs::read(src).map_err(|err| format!("could not read {}: {}", src.display(), err))?;
-    let source: String = source_bytes.into_iter().map(char::from).collect();
+    let source = compile::decode_c_source_bytes(&source_bytes);
     let source = strip_comments(&splice_continued_lines(
         &preprocess::lexer::replace_trigraphs(&source),
     ))?;

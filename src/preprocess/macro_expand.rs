@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::lexer::lex;
+use super::lexer::{is_ident_continue, is_ident_start, lex};
 use super::token::{PpToken, PpTokenKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -315,11 +315,7 @@ fn paste_tokens(tokens: &[PpToken]) -> Result<Vec<PpToken>, String> {
                 break;
             };
             let pasted = format!("{}{}", left.text(), right.text());
-            let mut pasted_tokens = lex(&pasted)?;
-            if pasted_tokens.len() != 1 || pasted_tokens[0].text() != pasted {
-                return Err(format!("invalid token paste: {}", pasted));
-            }
-            out.append(&mut pasted_tokens);
+            out.push(lex_pasted_token(&left, &pasted)?);
             index = right_index + 1;
         } else {
             out.push(tokens[index].clone());
@@ -327,6 +323,37 @@ fn paste_tokens(tokens: &[PpToken]) -> Result<Vec<PpToken>, String> {
         }
     }
     Ok(out)
+}
+
+fn lex_pasted_token(anchor: &PpToken, pasted: &str) -> Result<PpToken, String> {
+    if pasted.starts_with(is_ident_start) && pasted.chars().all(is_ident_continue) {
+        return Ok(anchor.clone_with_text(PpTokenKind::Ident(pasted.to_string())));
+    }
+    if is_pp_number(pasted) {
+        return Ok(anchor.clone_with_text(PpTokenKind::Number(pasted.to_string())));
+    }
+
+    let pasted_tokens = lex(pasted)?;
+    if pasted_tokens.len() != 1 || pasted_tokens[0].text() != pasted {
+        return Err(format!("invalid token paste: {}", pasted));
+    }
+    Ok(pasted_tokens[0].clone())
+}
+
+fn is_pp_number(text: &str) -> bool {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if first == '.' {
+        matches!(chars.next(), Some(ch) if ch.is_ascii_digit()) && chars.all(is_pp_number_continue)
+    } else {
+        first.is_ascii_digit() && chars.all(is_pp_number_continue)
+    }
+}
+
+fn is_pp_number_continue(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.')
 }
 
 fn comma_va_args_paste(
@@ -678,6 +705,21 @@ mod tests {
             },
         );
         assert_eq!(text(&expand_macros(&lex("CAT(x, y)")?, &macros)?), "42");
+        Ok(())
+    }
+
+    #[test]
+    fn token_paste_accepts_unicode_identifiers() -> Result<(), String> {
+        let mut macros = MacroTable::new();
+        macros.insert(
+            "CAT".to_string(),
+            MacroDef::Function {
+                params: vec!["a".to_string(), "b".to_string()],
+                variadic: false,
+                body: lex("a ## b")?,
+            },
+        );
+        assert_eq!(text(&expand_macros(&lex("CAT(α, β)")?, &macros)?), "αβ");
         Ok(())
     }
 

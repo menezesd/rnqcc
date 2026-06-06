@@ -1,8 +1,7 @@
-use super::lexer::lex;
 use super::token::{PpToken, PpTokenKind};
 
 pub fn emit_tokens(tokens: &[PpToken]) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(tokens.iter().map(|token| token.text().len()).sum());
     let mut previous: Option<&PpToken> = None;
     for token in tokens {
         if should_insert_space(previous, token, &out) {
@@ -34,11 +33,80 @@ fn should_insert_space(previous: Option<&PpToken>, current: &PpToken, out: &str)
 }
 
 fn tokens_would_merge(previous: &PpToken, current: &PpToken) -> bool {
-    let joined = format!("{}{}", previous.text(), current.text());
-    match lex(&joined) {
-        Ok(tokens) => tokens.len() == 1 && tokens[0].text() == joined,
-        Err(_) => true,
+    match (&previous.kind, &current.kind) {
+        (PpTokenKind::Ident(left), PpTokenKind::Ident(_) | PpTokenKind::Number(_)) => {
+            can_continue_identifier(left)
+        }
+        (PpTokenKind::Number(left), PpTokenKind::Ident(_) | PpTokenKind::Number(_)) => {
+            can_continue_pp_number(left)
+        }
+        (PpTokenKind::Number(left), PpTokenKind::Punct(right)) => {
+            right == "." || matches!(right.as_str(), "+" | "-") && ends_pp_exponent(left)
+        }
+        (PpTokenKind::Punct(left), PpTokenKind::Number(_)) => left == ".",
+        (PpTokenKind::Ident(left), PpTokenKind::StringLit(_) | PpTokenKind::CharLit(_)) => {
+            matches!(left.as_str(), "L" | "u" | "U" | "u8")
+        }
+        (PpTokenKind::Punct(left), PpTokenKind::Punct(right)) => {
+            punctuators_or_comments_would_merge(left, right)
+        }
+        _ => false,
     }
+}
+
+fn can_continue_identifier(left: &str) -> bool {
+    left.chars()
+        .last()
+        .is_some_and(super::lexer::is_ident_continue)
+}
+
+fn can_continue_pp_number(left: &str) -> bool {
+    left.chars()
+        .last()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.'))
+}
+
+fn ends_pp_exponent(text: &str) -> bool {
+    matches!(text.chars().last(), Some('e' | 'E' | 'p' | 'P'))
+}
+
+fn punctuators_or_comments_would_merge(left: &str, right: &str) -> bool {
+    matches!(
+        (left, right),
+        ("+", "+")
+            | ("+", "=")
+            | ("-", "-")
+            | ("-", ">")
+            | ("-", "=")
+            | ("<", "<")
+            | ("<", "=")
+            | ("<", ":")
+            | ("<", "%")
+            | ("<<", "=")
+            | (">", ">")
+            | (">", "=")
+            | (">>", "=")
+            | ("=", "=")
+            | ("!", "=")
+            | ("&", "&")
+            | ("&", "=")
+            | ("|", "|")
+            | ("|", "=")
+            | ("*", "=")
+            | ("/", "/")
+            | ("/", "*")
+            | ("/", "=")
+            | ("%", "=")
+            | ("%", ":")
+            | ("%:", "%:")
+            | ("%:", "%")
+            | ("%>", "=")
+            | ("^", "=")
+            | (":", ">")
+            | (".", ".")
+            | ("..", ".")
+            | ("#", "#")
+    )
 }
 
 #[cfg(test)]

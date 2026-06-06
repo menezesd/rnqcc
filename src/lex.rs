@@ -41,6 +41,14 @@ struct FloatSuffixes {
     long_double: bool,
 }
 
+fn is_ident_start(ch: char) -> bool {
+    ch == '_' || ch.is_alphabetic()
+}
+
+fn is_ident_continue(ch: char) -> bool {
+    ch == '_' || ch.is_alphanumeric()
+}
+
 impl Lexer {
     pub fn new(input: &str) -> Self {
         let chars: Vec<char> = input.chars().collect();
@@ -728,7 +736,7 @@ impl Lexer {
 
         // Check that the number is not immediately followed by an identifier char
         if let Some(c) = self.peek() {
-            if c.is_ascii_alphabetic() || c == '_' {
+            if is_ident_start(c) {
                 return Err(format!(
                     "invalid number literal at position {}: digit followed by '{}'",
                     start, c
@@ -915,7 +923,7 @@ impl Lexer {
     fn read_identifier_or_keyword(&mut self) -> Result<Token, String> {
         let start = self.pos;
         while let Some(c) = self.peek() {
-            if c.is_ascii_alphanumeric() || c == '_' {
+            if is_ident_continue(c) {
                 self.advance();
             } else {
                 break;
@@ -970,10 +978,7 @@ impl Lexer {
                 self.skip_whitespace_and_comments()?;
                 loop {
                     let save = self.pos;
-                    while self
-                        .peek()
-                        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-                    {
+                    while self.peek().is_some_and(is_ident_continue) {
                         self.advance();
                     }
                     let word: String = self.chars[save..self.pos].iter().collect();
@@ -1533,7 +1538,7 @@ impl Lexer {
                     self.pos -= 1; // unget
                     self.read_number()?
                 }
-                _ if c.is_ascii_alphabetic() || c == '_' => {
+                _ if is_ident_start(c) => {
                     self.pos -= 1; // unget
                     self.read_identifier_or_keyword()?
                 }
@@ -1612,8 +1617,19 @@ mod tests {
         let err = require_err(lex("int x = 123abc;"), "lexing should fail")?;
         assert!(err.contains("invalid number literal"));
 
+        let err = require_err(lex("int x = 123α;"), "lexing should fail")?;
+        assert!(err.contains("invalid number literal"));
+
         let err = require_err(lex("double x = .5Lfoo;"), "lexing should fail")?;
         assert!(err.contains("invalid float literal suffix"));
+        Ok(())
+    }
+
+    #[test]
+    fn lexes_unicode_identifier_letters() -> Result<(), String> {
+        let tokens = lex("int α = 1; int β2 = α;")?;
+        assert!(tokens.contains(&Token::Identifier("α".to_string())));
+        assert!(tokens.contains(&Token::Identifier("β2".to_string())));
         Ok(())
     }
 

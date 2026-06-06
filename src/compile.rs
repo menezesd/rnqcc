@@ -331,12 +331,9 @@ pub fn compile(stage: &Stage, src_file: &str, options: CompileOptions<'_>) -> Re
     let dumps = options.dumps;
     let warnings = options.warnings;
 
-    // C source is byte-oriented. External preprocessors can materialize string
-    // escapes such as \377 as raw non-UTF-8 bytes in .i output, so preserve
-    // each input byte as a single scalar value for the lexer.
     let source_bytes =
         std::fs::read(src_file).map_err(|err| format!("could not read {}: {}", src_file, err))?;
-    let source: String = source_bytes.into_iter().map(char::from).collect();
+    let source = decode_c_source_bytes(&source_bytes);
     let mapped_source = strip_preprocessor_line_markers_with_map(&source);
 
     // Lex
@@ -439,6 +436,34 @@ pub fn compile(stage: &Stage, src_file: &str, options: CompileOptions<'_>) -> Re
         prepend_source_comment(&asm_filename, src_file)?;
     }
     Ok(())
+}
+
+/// C source is byte-oriented. Valid UTF-8 spelling should survive for extended
+/// identifiers, while raw non-UTF-8 bytes from preprocessors still need stable
+/// single-byte code points for legacy escape handling.
+pub fn decode_c_source_bytes(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        match std::str::from_utf8(rest) {
+            Ok(text) => {
+                out.push_str(text);
+                break;
+            }
+            Err(err) => {
+                let valid_up_to = err.valid_up_to();
+                if valid_up_to > 0 {
+                    out.push_str(std::str::from_utf8(&rest[..valid_up_to]).unwrap_or(""));
+                }
+                let invalid_len = err.error_len().unwrap_or(1);
+                for byte in &rest[valid_up_to..valid_up_to + invalid_len] {
+                    out.push(char::from(*byte));
+                }
+                rest = &rest[valid_up_to + invalid_len..];
+            }
+        }
+    }
+    out
 }
 
 struct MappedSource {

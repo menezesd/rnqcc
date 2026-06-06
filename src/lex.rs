@@ -39,6 +39,15 @@ pub struct Lexer {
     pending_tokens: VecDeque<Token>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CharLiteralPrefix {
+    None,
+    Wide,
+    Utf8,
+    Utf16,
+    Utf32,
+}
+
 struct FloatSuffixes {
     imaginary: bool,
     long_double: bool,
@@ -941,7 +950,7 @@ impl Lexer {
         }
     }
 
-    fn read_char_constant(&mut self, wide: bool) -> Result<Token, String> {
+    fn read_char_constant(&mut self, prefix: CharLiteralPrefix) -> Result<Token, String> {
         // Opening ' already consumed
         let mut value = 0i64;
         let mut chars = Vec::new();
@@ -963,7 +972,31 @@ impl Lexer {
         if !saw_char {
             return Err("empty character constant".to_string());
         }
-        if wide && chars.len() > 1 {
+        match prefix {
+            CharLiteralPrefix::Utf8 => {
+                if chars.len() != 1 {
+                    return Err("UTF-8 character literal must contain one character".to_string());
+                }
+                if chars[0] > u8::MAX as u32 {
+                    return Err("UTF-8 character literal value exceeds one byte".to_string());
+                }
+            }
+            CharLiteralPrefix::Utf16 => {
+                if chars.len() != 1 {
+                    return Err("UTF-16 character literal must contain one character".to_string());
+                }
+                if chars[0] > 0xffff {
+                    return Err("UTF-16 character literal value exceeds 16 bits".to_string());
+                }
+            }
+            CharLiteralPrefix::Utf32 => {
+                if chars.len() != 1 {
+                    return Err("UTF-32 character literal must contain one character".to_string());
+                }
+            }
+            CharLiteralPrefix::Wide | CharLiteralPrefix::None => {}
+        }
+        if prefix == CharLiteralPrefix::Wide && chars.len() > 1 {
             if let Some(decoded) = Self::decode_utf8_byte_chars(&chars) {
                 let mut decoded_chars = decoded.chars();
                 if decoded_chars.clone().count() == 1 {
@@ -1564,10 +1597,12 @@ impl Lexer {
                     Token::Skip
                 }
 
-                '\'' => self.read_char_constant(false)?,
+                '\'' => self.read_char_constant(CharLiteralPrefix::None)?,
                 '"' => self.read_string_literal()?,
                 'u' if self.peek() == Some('8') && self.peek_ahead(1) == Some('\'') => {
-                    return Err("unsupported UTF-8 character literal prefix: u8".to_string());
+                    self.advance();
+                    self.advance();
+                    self.read_char_constant(CharLiteralPrefix::Utf8)?
                 }
                 'u' if self.peek() == Some('8') && self.peek_ahead(1) == Some('"') => {
                     self.advance();
@@ -1575,9 +1610,13 @@ impl Lexer {
                     self.read_string_literal()?
                 }
                 'u' | 'U' if self.peek() == Some('\'') => {
-                    return Err(format!(
-                        "unsupported UTF-16/UTF-32 character literal prefix: {c}"
-                    ));
+                    self.advance();
+                    let prefix = if c == 'u' {
+                        CharLiteralPrefix::Utf16
+                    } else {
+                        CharLiteralPrefix::Utf32
+                    };
+                    self.read_char_constant(prefix)?
                 }
                 'u' | 'U' if self.peek() == Some('"') => {
                     return Err(format!(
@@ -1586,7 +1625,7 @@ impl Lexer {
                 }
                 'L' if self.peek() == Some('\'') => {
                     self.advance();
-                    self.read_char_constant(true)?
+                    self.read_char_constant(CharLiteralPrefix::Wide)?
                 }
                 'L' if self.peek() == Some('"') => {
                     self.advance();
@@ -1778,20 +1817,24 @@ mod tests {
 
         let err = require_err(lex("char *s = U\"hi\";"), "lexing should fail")?;
         assert!(err.contains("unsupported UTF-16/UTF-32 string literal prefix: U"));
+        Ok(())
+    }
 
-        let err = require_err(lex("int c = u'a';"), "lexing should fail")?;
-        assert!(err.contains("unsupported UTF-16/UTF-32 character literal prefix: u"));
-
-        let err = require_err(lex("int c = U'a';"), "lexing should fail")?;
-        assert!(err.contains("unsupported UTF-16/UTF-32 character literal prefix: U"));
-
-        let err = require_err(lex("int c = u8'a';"), "lexing should fail")?;
-        assert!(err.contains("unsupported UTF-8 character literal prefix: u8"));
-
-        let tokens = lex("char *s = u8\"hi\"; int c = L'a'; int *w = L\"hi\";")?;
+    #[test]
+    fn lexes_prefixed_character_literals() -> Result<(), String> {
+        let tokens =
+            lex("char *s = u8\"hi\"; int a = u'a'; int b = U'π'; int c = u8'x'; int d = L'a'; int *w = L\"hi\";")?;
         assert!(tokens.contains(&Token::StringLiteral("hi".to_string())));
         assert!(tokens.contains(&Token::CharLiteral('a' as i64)));
+        assert!(tokens.contains(&Token::CharLiteral('π' as i64)));
+        assert!(tokens.contains(&Token::CharLiteral('x' as i64)));
         assert!(tokens.contains(&Token::WideStringLiteral("hi".to_string())));
+
+        let err = require_err(lex("int c = u'ab';"), "lexing should fail")?;
+        assert!(err.contains("UTF-16 character literal must contain one character"));
+
+        let err = require_err(lex("int c = u8'π';"), "lexing should fail")?;
+        assert!(err.contains("UTF-8 character literal value exceeds one byte"));
         Ok(())
     }
 

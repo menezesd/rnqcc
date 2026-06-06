@@ -4228,6 +4228,34 @@ fn preprocessed_line_markers_remap_lex_diagnostics() {
 }
 
 #[test]
+fn preprocessed_line_markers_remap_ucn_lex_diagnostics() {
+    let src = temp_file("bad-ucn-line-marker", "i");
+    std::fs::write(&src, "# 42 \"generated-ucn.c\"\nint \\u0041 = 0;\n")
+        .expect("failed to write bad input");
+
+    let output = Command::new(rnqcc())
+        .arg("--stage")
+        .arg("lex")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("lex failed at generated-ucn.c:42:5"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("basic character universal character"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("thread 'main' panicked"), "{stderr}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn rejects_extreme_alignment_without_panic() {
     for (name, source) in [
         (
@@ -25378,23 +25406,12 @@ fn rejects_invalid_unicode_ucns_with_both_preprocessors() {
 
 #[test]
 fn rejects_unsupported_utf_literal_prefixes_under_internal_cpp() {
-    for (prefix, kind) in [
-        ("u", "string"),
-        ("U", "string"),
-        ("u", "character"),
-        ("U", "character"),
-        ("u8", "character"),
-    ] {
-        let src = TempPath::new(&format!("unsupported-{prefix}-{kind}-literal"), "c");
-        let exe = TempPath::new(&format!("unsupported-{prefix}-{kind}-literal"), "bin");
-        let literal = if kind == "string" {
-            format!("{prefix}\"x\"")
-        } else {
-            format!("{prefix}'x'")
-        };
+    for prefix in ["u", "U"] {
+        let src = TempPath::new(&format!("unsupported-{prefix}-string-literal"), "c");
+        let exe = TempPath::new(&format!("unsupported-{prefix}-string-literal"), "bin");
         std::fs::write(
             src.path(),
-            format!("int main(void) {{ return {literal}[0]; }}\n"),
+            format!("int main(void) {{ return {prefix}\"x\"[0]; }}\n"),
         )
         .expect("failed to write input");
 
@@ -25407,11 +25424,48 @@ fn rejects_unsupported_utf_literal_prefixes_under_internal_cpp() {
             .expect("failed to run rnqcc");
         let status = output.status;
         let stderr = stderr(output);
-        assert!(!status.success(), "{prefix} {kind} unexpectedly succeeded");
+        assert!(!status.success(), "{prefix} string unexpectedly succeeded");
         assert!(
             stderr.contains("unsupported UTF"),
-            "{prefix} {kind}: {stderr}"
+            "{prefix} string: {stderr}"
         );
+    }
+}
+
+#[test]
+fn compiles_prefixed_character_literals_with_both_preprocessors() {
+    for internal_cpp in [false, true] {
+        let mode = if internal_cpp {
+            "internal-cpp"
+        } else {
+            "external-cpp"
+        };
+        let src = TempPath::new(&format!("prefixed-character-literals-{mode}"), "c");
+        let exe = TempPath::new(&format!("prefixed-character-literals-{mode}"), "bin");
+        std::fs::write(
+            src.path(),
+            "int main(void) {\n\
+                 return u'a' == 97 && U'\\U000003c0' == 0x03c0 && u8'x' == 120 ? 42 : 1;\n\
+             }\n",
+        )
+        .expect("failed to write input");
+
+        let mut command = Command::new(rnqcc());
+        if internal_cpp {
+            command.arg("--internal-cpp");
+        }
+        let output = command
+            .arg(src.path())
+            .arg("-o")
+            .arg(exe.path())
+            .output()
+            .expect("failed to run rnqcc");
+        assert!(output.status.success(), "{mode}: {}", stderr(output));
+
+        let run = Command::new(exe.path())
+            .status()
+            .expect("failed to run output");
+        assert_eq!(run.code(), Some(42), "{mode}");
     }
 }
 

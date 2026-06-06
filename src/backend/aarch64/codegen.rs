@@ -658,7 +658,11 @@ fn data_operand_with_offset(name: &str, offset: i32) -> AsmOperand {
     if offset == 0 {
         AsmOperand::Data(name.to_string())
     } else {
-        AsmOperand::Data(format!("{}+{}", name, offset))
+        AsmOperand::Data(format!(
+            "{}{}",
+            name,
+            assembly_offset_suffix(i64::from(offset))
+        ))
     }
 }
 

@@ -25180,6 +25180,49 @@ fn compiles_unicode_macro_identifiers_with_both_preprocessors() {
 }
 
 #[test]
+fn compiles_unicode_ucn_macro_identifiers_with_both_preprocessors() {
+    for internal_cpp in [false, true] {
+        let mode = if internal_cpp {
+            "internal-cpp"
+        } else {
+            "external-cpp"
+        };
+        let src = TempPath::new(&format!("unicode-ucn-macro-identifiers-{mode}"), "c");
+        let exe = TempPath::new(&format!("unicode-ucn-macro-identifiers-{mode}"), "bin");
+        std::fs::write(
+            src.path(),
+            "#define CAT(a, b) a ## b\n\
+             #define STR(x) #x\n\
+             int main(void) {\n\
+                 int CAT(\\u03b1, \\u03b2) = 40;\n\
+                 char *s = STR(\\u03b3);\n\
+                 return αβ + ((unsigned char)s[0] == 0xce\n\
+                     && (unsigned char)s[1] == 0xb3\n\
+                     && s[2] == 0 ? 2 : 0);\n\
+             }\n",
+        )
+        .expect("failed to write input");
+
+        let mut command = Command::new(rnqcc());
+        if internal_cpp {
+            command.arg("--internal-cpp");
+        }
+        let output = command
+            .arg(src.path())
+            .arg("-o")
+            .arg(exe.path())
+            .output()
+            .expect("failed to run rnqcc");
+        assert!(output.status.success(), "{mode}: {}", stderr(output));
+
+        let run = Command::new(exe.path())
+            .status()
+            .expect("failed to run output");
+        assert_eq!(run.code(), Some(42), "{mode}");
+    }
+}
+
+#[test]
 fn compiles_unicode_global_symbols_with_both_preprocessors() {
     for internal_cpp in [false, true] {
         let mode = if internal_cpp {
@@ -25256,6 +25299,37 @@ fn compiles_unicode_literal_escapes_with_both_preprocessors() {
             .status()
             .expect("failed to run output");
         assert_eq!(run.code(), Some(42), "{mode}");
+    }
+}
+
+#[test]
+fn rejects_invalid_unicode_ucns_with_both_preprocessors() {
+    for internal_cpp in [false, true] {
+        let mode = if internal_cpp {
+            "internal-cpp"
+        } else {
+            "external-cpp"
+        };
+        let src = TempPath::new(&format!("invalid-unicode-ucn-{mode}"), "c");
+        let exe = TempPath::new(&format!("invalid-unicode-ucn-{mode}"), "bin");
+        std::fs::write(
+            src.path(),
+            "int \\u0041 = 1;\n\
+             int main(void) { return \\u0041; }\n",
+        )
+        .expect("failed to write input");
+
+        let mut command = Command::new(rnqcc());
+        if internal_cpp {
+            command.arg("--internal-cpp");
+        }
+        let output = command
+            .arg(src.path())
+            .arg("-o")
+            .arg(exe.path())
+            .output()
+            .expect("failed to run rnqcc");
+        assert!(!output.status.success(), "{mode} unexpectedly succeeded");
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::types::Token;
+use crate::types::{is_valid_universal_character_value, Token};
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,12 +51,6 @@ fn is_ident_continue(ch: char) -> bool {
 
 fn hex_value(ch: char) -> Option<u32> {
     ch.to_digit(16)
-}
-
-fn is_valid_universal_character_value(value: u32) -> bool {
-    matches!(value, 0x24 | 0x40 | 0x60)
-        || (0xA0..=0xD7FF).contains(&value)
-        || (0xE000..=0x10FFFF).contains(&value)
 }
 
 impl Lexer {

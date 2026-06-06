@@ -73,9 +73,29 @@ impl Target {
     }
 
     pub fn show_label(&self, name: &str) -> String {
-        let (name, offset) = split_assembly_label_offset(name);
+        self.show_symbol(name)
+    }
+
+    pub fn show_symbol(&self, name: &str) -> String {
+        let name = mangle_assembly_label(name);
+        match self.os {
+            TargetOs::MacOs => format!("_{}", name),
+            TargetOs::Linux => name,
+        }
+    }
+
+    pub fn show_symbol_with_offset(&self, name: &str, offset: i64) -> String {
+        let mut name = self.show_symbol(name);
+        name.push_str(&assembly_offset_suffix(offset));
+        name
+    }
+
+    pub fn show_label_expr(&self, name: &str) -> String {
+        let Some((name, offset)) = split_assembly_label_offset(name) else {
+            return self.show_symbol(name);
+        };
         let mut name = mangle_assembly_label(name);
-        name.push_str(offset);
+        name.push_str(&assembly_offset_suffix(offset));
         match self.os {
             TargetOs::MacOs => format!("_{}", name),
             TargetOs::Linux => name,
@@ -131,18 +151,28 @@ fn is_assembly_label_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '.')
 }
 
-fn split_assembly_label_offset(name: &str) -> (&str, &str) {
-    match name.rfind('+') {
-        Some(pos) if pos > 0 && is_assembly_label_offset(&name[pos + 1..]) => {
-            (&name[..pos], &name[pos..])
-        }
-        _ => (name, ""),
+fn split_assembly_label_offset(name: &str) -> Option<(&str, i64)> {
+    let pos = name
+        .char_indices()
+        .rev()
+        .find(|(idx, ch)| *idx > 0 && matches!(ch, '+' | '-'))?
+        .0;
+    let offset = name[pos..].parse().ok()?;
+    Some((&name[..pos], offset))
+}
+
+pub fn assembly_offset_suffix(offset: i64) -> String {
+    if offset >= 0 {
+        format!("+{offset}")
+    } else {
+        offset.to_string()
     }
 }
 
-fn is_assembly_label_offset(offset: &str) -> bool {
-    let digits = offset.strip_prefix('-').unwrap_or(offset);
-    !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+pub fn is_valid_universal_character_value(value: u32) -> bool {
+    matches!(value, 0x24 | 0x40 | 0x60)
+        || (0xA0..=0xD7FF).contains(&value)
+        || (0xE000..=0x10FFFF).contains(&value)
 }
 
 fn mangle_assembly_label(name: &str) -> String {
@@ -2258,51 +2288,61 @@ mod tests {
     fn show_label_preserves_ascii_symbol_names() {
         assert_eq!(Target::x86_64_linux().show_label("main"), "main");
         assert_eq!(
-            Target::x86_64_linux().show_label("__double_const_0"),
+            Target::x86_64_linux().show_symbol("__double_const_0"),
             "__double_const_0"
         );
-        assert_eq!(Target::x86_64_macos().show_label("main"), "_main");
+        assert_eq!(Target::x86_64_macos().show_symbol("main"), "_main");
     }
 
     #[test]
     fn show_label_mangles_unicode_symbol_names() {
         assert_eq!(
-            Target::x86_64_linux().show_label("αβ_global"),
+            Target::x86_64_linux().show_symbol("αβ_global"),
             "__rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe"
         );
         assert_eq!(
-            Target::x86_64_macos().show_label("αβ_global"),
+            Target::x86_64_macos().show_symbol("αβ_global"),
             "___rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe"
         );
     }
 
     #[test]
-    fn show_label_preserves_data_offsets() {
-        assert_eq!(Target::x86_64_linux().show_label("origin+4"), "origin+4");
-        assert_eq!(Target::x86_64_linux().show_label("origin+-4"), "origin+-4");
+    fn show_label_expr_preserves_data_offsets() {
         assert_eq!(
-            Target::x86_64_linux().show_label("αβ_global+4"),
+            Target::x86_64_linux().show_label_expr("origin+4"),
+            "origin+4"
+        );
+        assert_eq!(
+            Target::x86_64_linux().show_label_expr("origin-4"),
+            "origin-4"
+        );
+        assert_eq!(
+            Target::x86_64_linux().show_label_expr("αβ_global+4"),
             "__rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe+4"
         );
         assert_eq!(
-            Target::x86_64_linux().show_label("αβ_global+-4"),
-            "__rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe+-4"
+            Target::x86_64_linux().show_label_expr("αβ_global-4"),
+            "__rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe-4"
         );
         assert_eq!(
-            Target::x86_64_macos().show_label("αβ_global+4"),
+            Target::x86_64_macos().show_label_expr("αβ_global+4"),
             "___rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe+4"
+        );
+        assert_eq!(
+            Target::x86_64_linux().show_symbol_with_offset("αβ_global", -4),
+            "__rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe-4"
         );
     }
 
     #[test]
     fn show_label_does_not_collide_with_ascii_lookalikes() {
         assert_eq!(
-            Target::x86_64_linux().show_label("__rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe"),
+            Target::x86_64_linux().show_symbol("__rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe"),
             "__rnqcc_u____rnqcc__u__x3b1____x3b2______global__h80d54a5cf5297ffe_h96ccdba34d0da6e9"
         );
         assert_ne!(
-            Target::x86_64_linux().show_label("αβ_global"),
-            Target::x86_64_linux().show_label("__rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe")
+            Target::x86_64_linux().show_symbol("αβ_global"),
+            Target::x86_64_linux().show_symbol("__rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe")
         );
     }
 

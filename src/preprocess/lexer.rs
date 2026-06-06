@@ -1,4 +1,5 @@
 use super::token::{PpLocation, PpSpan, PpToken, PpTokenKind};
+use crate::types::is_valid_universal_character_value;
 
 pub fn lex(input: &str) -> Result<Vec<PpToken>, String> {
     Lexer::new(&splice_continued_lines(&replace_trigraphs(input))).lex_all()
@@ -348,12 +349,6 @@ pub(crate) fn is_ident_start(ch: char) -> bool {
 
 pub(crate) fn is_ident_continue(ch: char) -> bool {
     ch == '_' || unicode_ident::is_xid_continue(ch)
-}
-
-fn is_valid_universal_character_value(value: u32) -> bool {
-    matches!(value, 0x24 | 0x40 | 0x60)
-        || (0xA0..=0xD7FF).contains(&value)
-        || (0xE000..=0x10FFFF).contains(&value)
 }
 
 fn starts_string_or_char_literal(ch: char, next: Option<char>, after_next: Option<char>) -> bool {

@@ -3447,8 +3447,11 @@ fn replace_pseudos(func: &mut AsmFunction, ctx: &ReplacePseudoContext<'_>) -> Re
                     *op = AsmOperand::TlsData(name, mem_off);
                 } else if ctx.statics.contains(&name) {
                     if mem_off != 0 {
-                        // Static var with offset: name+offset(%rip)
-                        *op = AsmOperand::Data(format!("{}+{}", name, mem_off));
+                        *op = AsmOperand::Data(format!(
+                            "{}{}",
+                            name,
+                            assembly_offset_suffix(i64::from(mem_off))
+                        ));
                     } else {
                         *op = AsmOperand::Data(name);
                     }

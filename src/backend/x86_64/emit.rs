@@ -9,7 +9,7 @@ fn static_label_name(platform: &Target, label: &str) -> String {
     if label.starts_with("label.") {
         format!(".L{}", label)
     } else {
-        platform.show_label(label)
+        platform.show_symbol(label)
     }
 }
 
@@ -122,7 +122,7 @@ fn show_operand(op: &AsmOperand, t: AsmType, target: &Target) -> io::Result<Stri
         }
         AsmOperand::Stack(offset) => Ok(format!("{}(%rbp)", offset)),
         AsmOperand::StackArg(offset) => Ok(format!("{}(%rsp)", offset)),
-        AsmOperand::Data(name) => Ok(format!("{}(%rip)", target.show_label(name))),
+        AsmOperand::Data(name) => Ok(format!("{}(%rip)", target.show_label_expr(name))),
         AsmOperand::TlsData(name, offset) => show_tls_operand(name, *offset, target),
         AsmOperand::Indexed(base, index, scale) => Ok(format!(
             "({}, {}, {})",
@@ -138,7 +138,7 @@ fn show_operand_byte(op: &AsmOperand, target: &Target) -> io::Result<String> {
         AsmOperand::Reg(reg) => Ok(reg_name(reg, AsmType::Byte)?.to_string()),
         AsmOperand::Stack(offset) => Ok(format!("{}(%rbp)", offset)),
         AsmOperand::StackArg(offset) => Ok(format!("{}(%rsp)", offset)),
-        AsmOperand::Data(name) => Ok(format!("{}(%rip)", target.show_label(name))),
+        AsmOperand::Data(name) => Ok(format!("{}(%rip)", target.show_label_expr(name))),
         AsmOperand::TlsData(name, offset) => show_tls_operand(name, *offset, target),
         other => invalid_input(format!("Cannot get byte-sized version of {:?}", other)),
     }
@@ -147,16 +147,18 @@ fn show_operand_byte(op: &AsmOperand, target: &Target) -> io::Result<String> {
 fn show_tls_operand(name: &str, offset: i32, target: &Target) -> io::Result<String> {
     match target.os {
         TargetOs::Linux => {
-            let label = target.show_label(name);
+            let label = target.show_symbol(name);
             if offset == 0 {
                 Ok(format!("%fs:{}@tpoff", label))
-            } else if offset > 0 {
-                Ok(format!("%fs:{}@tpoff+{}", label, offset))
             } else {
-                Ok(format!("%fs:{}@tpoff{}", label, offset))
+                Ok(format!(
+                    "%fs:{}@tpoff{}",
+                    label,
+                    assembly_offset_suffix(i64::from(offset))
+                ))
             }
         }
-        TargetOs::MacOs => Ok(format!("{}(%rip)", target.show_label(name))),
+        TargetOs::MacOs => Ok(format!("{}(%rip)", target.show_symbol(name))),
     }
 }
 
@@ -174,7 +176,7 @@ fn emit_macho_tls_address_to_rax(
     offset: i32,
     target: &Target,
 ) -> io::Result<()> {
-    writeln!(w, "\tmovq {}@TLVP(%rip), %rdi", target.show_label(name))?;
+    writeln!(w, "\tmovq {}@TLVP(%rip), %rdi", target.show_symbol(name))?;
     writeln!(w, "\tcallq *(%rdi)")?;
     if offset != 0 {
         writeln!(w, "\taddq ${}, %rax", offset)?;
@@ -268,14 +270,12 @@ fn emit_tls_address(
 ) -> std::io::Result<()> {
     match target.os {
         TargetOs::Linux => {
-            let label = target.show_label(name);
+            let label = target.show_symbol(name);
             writeln!(w, "\tmovq %fs:0, %r11")?;
             let off = if offset == 0 {
                 String::new()
-            } else if offset > 0 {
-                format!("+{}", offset)
             } else {
-                offset.to_string()
+                assembly_offset_suffix(i64::from(offset))
             };
             let addr = format!("{}@tpoff{}(%r11)", label, off);
             match dst {
@@ -1203,7 +1203,7 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                 // Indirect call through R10 (function pointer already loaded there)
                 writeln!(w, "\tcall *%r10")
             } else {
-                let label = platform.show_label(name);
+                let label = platform.show_symbol(name);
                 match platform.os {
                     TargetOs::MacOs => writeln!(w, "\tcall {}", label),
                     TargetOs::Linux if *local => writeln!(w, "\tcall {}", label),
@@ -1255,7 +1255,7 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
 }
 
 fn emit_function(w: &mut dyn Write, func: &AsmFunction, platform: &Target) -> std::io::Result<()> {
-    let label = platform.show_label(&func.name);
+    let label = platform.show_symbol(&func.name);
     writeln!(w, "\t.text")?;
     if func.global {
         writeln!(w, "\t.globl {}", label)?;
@@ -1303,7 +1303,7 @@ fn emit_macho_tls_static_var(
     platform: &Target,
     all_zero: bool,
 ) -> std::io::Result<()> {
-    let label = platform.show_label(&sv.name);
+    let label = platform.show_symbol(&sv.name);
     let init_label = format!("{}$tlv$init", label);
     let size: usize = sv.init_values.iter().map(static_init_size).sum();
 
@@ -1336,7 +1336,7 @@ fn emit_macho_tls_static_var(
 }
 
 fn emit_static_var(w: &mut dyn Write, sv: &AsmStaticVar, platform: &Target) -> std::io::Result<()> {
-    let label = platform.show_label(&sv.name);
+    let label = platform.show_symbol(&sv.name);
     let all_zero = sv
         .init_values
         .iter()
@@ -1483,13 +1483,11 @@ fn emit_static_init(
             writeln!(w, "\t.quad {}", static_label_name(platform, label))
         }
         StaticInit::PointerInitOffset(label, offset) => {
-            let sign = if *offset >= 0 { "+" } else { "" };
             writeln!(
                 w,
-                "\t.quad {}{}{}",
+                "\t.quad {}{}",
                 static_label_name(platform, label),
-                sign,
-                offset
+                assembly_offset_suffix(*offset)
             )
         }
         StaticInit::LabelDiffInit(left, right, 1) => writeln!(
@@ -1527,7 +1525,7 @@ fn emit_static_constant(
     sc: &AsmStaticConstant,
     platform: &Target,
 ) -> std::io::Result<()> {
-    let label = platform.show_label(&sc.name);
+    let label = platform.show_symbol(&sc.name);
     match platform.os {
         TargetOs::MacOs if matches!(&sc.init, StaticInit::StringInit(s, _) if !c_string_bytes(s).contains(&0)) => {
             writeln!(w, "\t.section __TEXT,__cstring")?
@@ -1552,8 +1550,8 @@ fn emit_alias(
     if alias_target.is_empty() {
         return Ok(());
     }
-    let name = platform.show_label(name);
-    let alias_target = platform.show_label(alias_target);
+    let name = platform.show_symbol(name);
+    let alias_target = platform.show_symbol(alias_target);
     writeln!(w, "\t.globl {}", name)?;
     writeln!(w, "\t.set {}, {}", name, alias_target)
 }

@@ -9,7 +9,7 @@ fn static_label_name(target: &Target, label: &str) -> String {
     if label.starts_with("label.") {
         format!(".L{}", label)
     } else {
-        target.show_label(label)
+        target.show_symbol(label)
     }
 }
 
@@ -368,7 +368,7 @@ fn emit_store_large_local_base(
 }
 
 fn data_label(target: &Target, name: &str) -> String {
-    target.show_label(name)
+    target.show_symbol(name)
 }
 
 struct DataOffset<'a> {
@@ -378,19 +378,19 @@ struct DataOffset<'a> {
 
 fn offset_data_name(name: &str, add: i32) -> String {
     if let Some(data_offset) = split_data_offset(name) {
-        format!("{}+{}", data_offset.base, data_offset.offset + add)
+        format!(
+            "{}{}",
+            data_offset.base,
+            assembly_offset_suffix(i64::from(data_offset.offset + add))
+        )
     } else {
-        format!("{}+{}", name, add)
+        format!("{}{}", name, assembly_offset_suffix(i64::from(add)))
     }
 }
 
 fn data_label_expr(target: &Target, name: &str) -> String {
     if let Some(data_offset) = split_data_offset(name) {
-        format!(
-            "{}+{}",
-            data_label(target, data_offset.base),
-            data_offset.offset
-        )
+        target.show_symbol_with_offset(data_offset.base, i64::from(data_offset.offset))
     } else {
         data_label(target, name)
     }
@@ -419,8 +419,13 @@ fn stack_offset_i32(offset: i64) -> std::io::Result<i32> {
 }
 
 fn split_data_offset(name: &str) -> Option<DataOffset<'_>> {
-    let (base, offset) = name.rsplit_once('+')?;
-    let offset = offset.parse().ok()?;
+    let pos = name
+        .char_indices()
+        .rev()
+        .find(|(idx, ch)| *idx > 0 && matches!(ch, '+' | '-'))?
+        .0;
+    let base = &name[..pos];
+    let offset = name[pos..].parse().ok()?;
     Some(DataOffset { base, offset })
 }
 
@@ -1744,7 +1749,7 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, target: &Target) -> std
             writeln!(w, "\tmov sp, x11")?;
             writeln!(w, "\tbr x12")
         }
-        AsmInstr::Call(name, _, _, false, _) => writeln!(w, "\tbl {}", target.show_label(name)),
+        AsmInstr::Call(name, _, _, false, _) => writeln!(w, "\tbl {}", target.show_symbol(name)),
         AsmInstr::Call(_, _, _, true, _) => writeln!(w, "\tblr x9"),
         AsmInstr::AArch64AddPtr(ptr, index, scale, dst) => {
             emit_add_ptr(w, target, ptr, index, *scale, dst)
@@ -1795,7 +1800,7 @@ fn emit_function(
     function: &AsmFunction,
     target: &Target,
 ) -> std::io::Result<()> {
-    let name = target.show_label(&function.name);
+    let name = target.show_symbol(&function.name);
     writeln!(w, "\t.text")?;
     if function.global {
         writeln!(w, "\t.globl {}", name)?;
@@ -1886,7 +1891,7 @@ fn emit_macho_tls_static_var(
     target: &Target,
     all_zero: bool,
 ) -> std::io::Result<()> {
-    let label = target.show_label(&sv.name);
+    let label = target.show_symbol(&sv.name);
     let init_label = format!("{}$tlv$init", label);
     let size: usize = sv.init_values.iter().map(static_init_size).sum();
 
@@ -2011,7 +2016,7 @@ fn emit_static_init(w: &mut dyn Write, init: &StaticInit, target: &Target) -> st
 }
 
 fn emit_static_var(w: &mut dyn Write, sv: &AsmStaticVar, target: &Target) -> std::io::Result<()> {
-    let label = target.show_label(&sv.name);
+    let label = target.show_symbol(&sv.name);
     let alignment = data_alignment(sv.alignment);
     let all_zero = !sv.init_values.is_empty()
         && sv
@@ -2072,7 +2077,7 @@ fn emit_static_constant(
     if sc.alignment > 1 {
         writeln!(w, "\t.balign {}", sc.alignment)?;
     }
-    writeln!(w, "{}:", target.show_label(&sc.name))?;
+    writeln!(w, "{}:", target.show_symbol(&sc.name))?;
     emit_static_init(w, &sc.init, target)
 }
 
@@ -2085,8 +2090,8 @@ fn emit_alias(
     if alias_target.is_empty() {
         return Ok(());
     }
-    let name = target.show_label(name);
-    let alias_target = target.show_label(alias_target);
+    let name = target.show_symbol(name);
+    let alias_target = target.show_symbol(alias_target);
     writeln!(w, "\t.globl {}", name)?;
     writeln!(w, "\t.set {}, {}", name, alias_target)
 }

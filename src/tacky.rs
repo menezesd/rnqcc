@@ -4,7 +4,6 @@ use crate::diagnostic::{Phase, Warning, WarningKind};
 use crate::types::*;
 use std::collections::{HashMap, HashSet};
 
-type StaticComplexValue = (StaticScalarValue, StaticScalarValue);
 type BuiltinFunctionInfo = (&'static str, CType, FullType, Vec<CType>, Option<PtrInfo>);
 pub type TackyResult<T> = Result<T, String>;
 
@@ -56,6 +55,11 @@ impl StaticScalarValue {
             source_is_unsigned: false,
         }
     }
+}
+
+struct StaticComplexValue {
+    real: StaticScalarValue,
+    imag: StaticScalarValue,
 }
 
 #[derive(Copy, Clone)]
@@ -10861,12 +10865,12 @@ impl TackyGen {
                     }
                 }
                 _ => {
-                    let (real, imag) = self
+                    let value = self
                         .eval_static_complex_constant_init(init)
                         .ok_or_else(|| "Static complex initializer must be constant".to_string())?;
-                    let cv = convert_init_value(real, elem_type);
+                    let cv = convert_init_value(value.real, elem_type);
                     builder.put(base_offset, make_static_init(cv, elem_type))?;
-                    let cv = convert_init_value(imag, elem_type);
+                    let cv = convert_init_value(value.imag, elem_type);
                     builder.put(base_offset + elem_size, make_static_init(cv, elem_type))?;
                 }
             }
@@ -11245,25 +11249,32 @@ impl TackyGen {
     fn eval_static_complex_constant_init(&self, init: &Exp) -> Option<StaticComplexValue> {
         let zero = StaticScalarValue::integer(0);
         match init {
-            Exp::ImaginaryIntConstant(value) => Some((zero, StaticScalarValue::integer(*value))),
-            Exp::ImaginaryDoubleConstant(value) => {
-                Some((zero, StaticScalarValue::double_bits(*value)))
-            }
+            Exp::ImaginaryIntConstant(value) => Some(StaticComplexValue {
+                real: zero,
+                imag: StaticScalarValue::integer(*value),
+            }),
+            Exp::ImaginaryDoubleConstant(value) => Some(StaticComplexValue {
+                real: zero,
+                imag: StaticScalarValue::double_bits(*value),
+            }),
             Exp::Unary(UnaryOp::Negate, inner) => {
-                let (real, imag) = self.eval_static_complex_constant_init(inner)?;
-                Some((neg_static_init_value(real), neg_static_init_value(imag)))
+                let value = self.eval_static_complex_constant_init(inner)?;
+                Some(StaticComplexValue {
+                    real: neg_static_init_value(value.real),
+                    imag: neg_static_init_value(value.imag),
+                })
             }
             Exp::Binary(
                 op @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div),
                 left,
                 right,
             ) => {
-                let (left_real, left_imag) = self.eval_static_complex_constant_init(left)?;
-                let (right_real, right_imag) = self.eval_static_complex_constant_init(right)?;
-                let left_real = static_init_value_to_f64(left_real);
-                let left_imag = static_init_value_to_f64(left_imag);
-                let right_real = static_init_value_to_f64(right_real);
-                let right_imag = static_init_value_to_f64(right_imag);
+                let left_value = self.eval_static_complex_constant_init(left)?;
+                let right_value = self.eval_static_complex_constant_init(right)?;
+                let left_real = static_init_value_to_f64(left_value.real);
+                let left_imag = static_init_value_to_f64(left_value.imag);
+                let right_real = static_init_value_to_f64(right_value.real);
+                let right_imag = static_init_value_to_f64(right_value.imag);
                 let (real, imag) = match op {
                     BinaryOp::Add => (left_real + right_real, left_imag + right_imag),
                     BinaryOp::Sub => (left_real - right_real, left_imag - right_imag),
@@ -11280,14 +11291,17 @@ impl TackyGen {
                     }
                     _ => unreachable!(),
                 };
-                Some((
-                    StaticScalarValue::double_bits(real),
-                    StaticScalarValue::double_bits(imag),
-                ))
+                Some(StaticComplexValue {
+                    real: StaticScalarValue::double_bits(real),
+                    imag: StaticScalarValue::double_bits(imag),
+                })
             }
             _ => {
                 let value = self.eval_static_constant_init(&Some(init.clone())).ok()?;
-                Some((value, zero))
+                Some(StaticComplexValue {
+                    real: value,
+                    imag: zero,
+                })
             }
         }
     }

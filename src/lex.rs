@@ -36,6 +36,11 @@ pub struct Lexer {
     pending_tokens: VecDeque<Token>,
 }
 
+struct FloatSuffixes {
+    imaginary: bool,
+    long_double: bool,
+}
+
 impl Lexer {
     pub fn new(input: &str) -> Self {
         let chars: Vec<char> = input.chars().collect();
@@ -418,7 +423,7 @@ impl Lexer {
         false
     }
 
-    fn consume_float_suffixes(&mut self) -> (bool, bool) {
+    fn consume_float_suffixes(&mut self) -> FloatSuffixes {
         let mut saw_float_suffix = false;
         let mut saw_long_double_suffix = false;
         let mut saw_imaginary_suffix = false;
@@ -441,7 +446,10 @@ impl Lexer {
                 _ => break,
             }
         }
-        (saw_imaginary_suffix, saw_long_double_suffix)
+        FloatSuffixes {
+            imaginary: saw_imaginary_suffix,
+            long_double: saw_long_double_suffix,
+        }
     }
 
     fn read_number(&mut self) -> Result<Token, String> {
@@ -475,7 +483,7 @@ impl Lexer {
             let value = num_str
                 .parse::<f64>()
                 .map_err(|_| format!("invalid float literal: {}", num_str))?;
-            let (imaginary, long_double) = self.consume_float_suffixes();
+            let suffixes = self.consume_float_suffixes();
             if let Some(c) = self.peek() {
                 if c.is_ascii_alphabetic() || c == '_' {
                     return Err(format!(
@@ -484,9 +492,9 @@ impl Lexer {
                     ));
                 }
             }
-            return Ok(if imaginary {
+            return Ok(if suffixes.imaginary {
                 Token::ImaginaryDoubleLiteral(value)
-            } else if long_double {
+            } else if suffixes.long_double {
                 Token::LongDoubleLiteral(value)
             } else {
                 Token::DoubleLiteral(value)
@@ -565,7 +573,7 @@ impl Lexer {
                 ));
             }
             if is_hex_float {
-                let (imaginary, long_double) = self.consume_float_suffixes();
+                let suffixes = self.consume_float_suffixes();
                 if let Some(c) = self.peek() {
                     if c.is_ascii_alphabetic() || c == '_' {
                         return Err(format!(
@@ -574,9 +582,9 @@ impl Lexer {
                         ));
                     }
                 }
-                return Ok(if imaginary {
+                return Ok(if suffixes.imaginary {
                     Token::ImaginaryDoubleLiteral(value)
-                } else if long_double {
+                } else if suffixes.long_double {
                     Token::LongDoubleLiteral(value)
                 } else {
                     Token::DoubleLiteral(value)
@@ -665,7 +673,7 @@ impl Lexer {
                 .parse::<f64>()
                 .map_err(|_| format!("invalid float literal: {}", num_str))?;
             // Consume optional floating and GNU imaginary suffixes (all treated as double).
-            let (imaginary, long_double) = self.consume_float_suffixes();
+            let suffixes = self.consume_float_suffixes();
             if let Some(c) = self.peek() {
                 if c.is_ascii_alphabetic() || c == '_' {
                     return Err(format!(
@@ -674,9 +682,9 @@ impl Lexer {
                     ));
                 }
             }
-            return Ok(if imaginary {
+            return Ok(if suffixes.imaginary {
                 Token::ImaginaryDoubleLiteral(value)
-            } else if long_double {
+            } else if suffixes.long_double {
                 Token::LongDoubleLiteral(value)
             } else {
                 Token::DoubleLiteral(value)

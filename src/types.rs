@@ -133,11 +133,16 @@ fn is_assembly_label_char(ch: char) -> bool {
 
 fn split_assembly_label_offset(name: &str) -> (&str, &str) {
     match name.rfind('+') {
-        Some(pos) if pos > 0 && name[pos + 1..].chars().all(|ch| ch.is_ascii_digit()) => {
+        Some(pos) if pos > 0 && is_assembly_label_offset(&name[pos + 1..]) => {
             (&name[..pos], &name[pos..])
         }
         _ => (name, ""),
     }
+}
+
+fn is_assembly_label_offset(offset: &str) -> bool {
+    let digits = offset.strip_prefix('-').unwrap_or(offset);
+    !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
 }
 
 fn mangle_assembly_label(name: &str) -> String {
@@ -2274,9 +2279,14 @@ mod tests {
     #[test]
     fn show_label_preserves_data_offsets() {
         assert_eq!(Target::x86_64_linux().show_label("origin+4"), "origin+4");
+        assert_eq!(Target::x86_64_linux().show_label("origin+-4"), "origin+-4");
         assert_eq!(
             Target::x86_64_linux().show_label("αβ_global+4"),
             "__rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe+4"
+        );
+        assert_eq!(
+            Target::x86_64_linux().show_label("αβ_global+-4"),
+            "__rnqcc_u_x3b1__x3b2___global_h80d54a5cf5297ffe+-4"
         );
         assert_eq!(
             Target::x86_64_macos().show_label("αβ_global+4"),

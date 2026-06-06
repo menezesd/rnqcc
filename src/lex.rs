@@ -53,6 +53,12 @@ fn hex_value(ch: char) -> Option<u32> {
     ch.to_digit(16)
 }
 
+fn is_valid_universal_character_value(value: u32) -> bool {
+    matches!(value, 0x24 | 0x40 | 0x60)
+        || (0xA0..=0xD7FF).contains(&value)
+        || (0xE000..=0x10FFFF).contains(&value)
+}
+
 impl Lexer {
     pub fn new(input: &str) -> Self {
         let chars: Vec<char> = input.chars().collect();
@@ -108,6 +114,9 @@ impl Lexer {
         let mut value = 0u32;
         for offset in 0..digits {
             value = (value << 4) | hex_value(*self.chars.get(pos + 2 + offset)?)?;
+        }
+        if !is_valid_universal_character_value(value) {
+            return None;
         }
         char::from_u32(value).map(|ch| (ch, len))
     }
@@ -861,6 +870,8 @@ impl Lexer {
                     char::from_u32(value)
                         .ok_or_else(|| "invalid hexadecimal escape value".to_string())
                 }
+                Some('u') => self.read_universal_character_escape(4),
+                Some('U') => self.read_universal_character_escape(8),
                 Some(c @ '0'..='7') => {
                     let mut value = c.to_digit(8).unwrap_or(0);
                     for _ in 0..2 {
@@ -891,6 +902,23 @@ impl Lexer {
             Some(c) => Ok(c),
             None => Err("unexpected end of input in character/string literal".to_string()),
         }
+    }
+
+    fn read_universal_character_escape(&mut self, digits: usize) -> Result<char, String> {
+        let mut value = 0u32;
+        for _ in 0..digits {
+            let c = self
+                .advance()
+                .ok_or_else(|| "incomplete universal character escape".to_string())?;
+            let digit = c
+                .to_digit(16)
+                .ok_or_else(|| "invalid universal character escape".to_string())?;
+            value = (value << 4) | digit;
+        }
+        if !is_valid_universal_character_value(value) {
+            return Err("invalid universal character escape".to_string());
+        }
+        char::from_u32(value).ok_or_else(|| "invalid universal character escape".to_string())
     }
 
     fn decode_utf8_byte_chars(chars: &[u32]) -> Option<String> {
@@ -1686,6 +1714,9 @@ mod tests {
 
         let err = require_err(lex("int \\u0030 = 0;"), "lexing should fail")?;
         assert!(err.contains("invalid universal character name"));
+
+        let err = require_err(lex("int \\u0041 = 0;"), "lexing should fail")?;
+        assert!(err.contains("invalid universal character name"));
         Ok(())
     }
 
@@ -1695,6 +1726,20 @@ mod tests {
         assert!(tokens.contains(&Token::Identifier("α".to_string())));
         assert!(tokens.contains(&Token::Identifier("β2".to_string())));
         assert!(tokens.contains(&Token::Identifier("γ".to_string())));
+        Ok(())
+    }
+
+    #[test]
+    fn lexes_universal_character_escapes_in_literals() -> Result<(), String> {
+        let tokens = lex("char *s = \"\\u03b1\\U000003b2\"; int c = '\\u03b3';")?;
+        assert!(tokens.contains(&Token::StringLiteral("αβ".to_string())));
+        assert!(tokens.contains(&Token::CharLiteral('γ' as i64)));
+
+        let err = require_err(lex("char *s = \"\\u12xz\";"), "lexing should fail")?;
+        assert!(err.contains("invalid universal character escape"));
+
+        let err = require_err(lex("char *s = \"\\u0041\";"), "lexing should fail")?;
+        assert!(err.contains("invalid universal character escape"));
         Ok(())
     }
 

@@ -169,6 +169,9 @@ impl Lexer {
         for offset in 0..digits {
             value = (value << 4) | self.peek_ahead(2 + offset)?.to_digit(16)?;
         }
+        if !is_valid_universal_character_value(value) {
+            return None;
+        }
         char::from_u32(value).map(|ch| (ch, len))
     }
 
@@ -347,6 +350,12 @@ pub(crate) fn is_ident_continue(ch: char) -> bool {
     ch == '_' || unicode_ident::is_xid_continue(ch)
 }
 
+fn is_valid_universal_character_value(value: u32) -> bool {
+    matches!(value, 0x24 | 0x40 | 0x60)
+        || (0xA0..=0xD7FF).contains(&value)
+        || (0xE000..=0x10FFFF).contains(&value)
+}
+
 fn starts_string_or_char_literal(ch: char, next: Option<char>, after_next: Option<char>) -> bool {
     matches!(ch, '"' | '\'')
         || (matches!(ch, 'u' | 'U' | 'L') && matches!(next, Some('"' | '\'')))
@@ -422,6 +431,9 @@ mod tests {
         assert!(err.contains("invalid universal character name"));
 
         let err = lex("\\u0030").expect_err("lexing should fail");
+        assert!(err.contains("invalid universal character name"));
+
+        let err = lex("\\u0041").expect_err("lexing should fail");
         assert!(err.contains("invalid universal character name"));
         Ok(())
     }

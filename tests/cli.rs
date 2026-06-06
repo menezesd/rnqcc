@@ -25217,6 +25217,49 @@ fn compiles_unicode_global_symbols_with_both_preprocessors() {
 }
 
 #[test]
+fn compiles_unicode_literal_escapes_with_both_preprocessors() {
+    for internal_cpp in [false, true] {
+        let mode = if internal_cpp {
+            "internal-cpp"
+        } else {
+            "external-cpp"
+        };
+        let src = TempPath::new(&format!("unicode-literal-escapes-{mode}"), "c");
+        let exe = TempPath::new(&format!("unicode-literal-escapes-{mode}"), "bin");
+        std::fs::write(
+            src.path(),
+            "int main(void) {\n\
+                 char *s = \"\\u03b1\\U000003b2\";\n\
+                 return (unsigned char)s[0] == 0xce\n\
+                     && (unsigned char)s[1] == 0xb1\n\
+                     && (unsigned char)s[2] == 0xce\n\
+                     && (unsigned char)s[3] == 0xb2\n\
+                     && s[4] == 0\n\
+                     && L'\\u03b3' == 0x03b3 ? 42 : 1;\n\
+             }\n",
+        )
+        .expect("failed to write input");
+
+        let mut command = Command::new(rnqcc());
+        if internal_cpp {
+            command.arg("--internal-cpp");
+        }
+        let output = command
+            .arg(src.path())
+            .arg("-o")
+            .arg(exe.path())
+            .output()
+            .expect("failed to run rnqcc");
+        assert!(output.status.success(), "{mode}: {}", stderr(output));
+
+        let run = Command::new(exe.path())
+            .status()
+            .expect("failed to run output");
+        assert_eq!(run.code(), Some(42), "{mode}");
+    }
+}
+
+#[test]
 fn x86_linux_allows_zero_sized_variadic_memory_arg_block() {
     let src = temp_file("x86-linux-zero-vararg-struct", "c");
     let asm = temp_file("x86-linux-zero-vararg-struct", "s");

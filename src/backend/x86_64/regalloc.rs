@@ -400,9 +400,13 @@ fn find_used_and_updated(instr: &AsmInstr) -> (Vec<RegId>, Vec<RegId>) {
     }
 }
 
+struct MovOperands {
+    src: RegId,
+    dst: RegId,
+}
+
 /// Check if instruction is a plain Mov between register-allocatable operands.
-/// Returns (src_id, dst_id) if so.
-fn mov_operands(instr: &AsmInstr) -> Option<(RegId, RegId)> {
+fn mov_operands(instr: &AsmInstr) -> Option<MovOperands> {
     if let AsmInstr::Mov(_, src, dst) = instr {
         let s = match src {
             AsmOperand::Reg(r) => Some(RegId::Gp(*r)),
@@ -418,7 +422,7 @@ fn mov_operands(instr: &AsmInstr) -> Option<(RegId, RegId)> {
         };
         if let (Some(s), Some(d)) = (s, d) {
             if s != d {
-                return Some((s, d));
+                return Some(MovOperands { src: s, dst: d });
             }
         }
     }
@@ -599,7 +603,7 @@ fn build_interference_graph(
     for (i, instr) in instrs.iter().enumerate() {
         let (_, updated) = find_used_and_updated(instr);
         let is_mov = mov_operands(instr);
-        let mov_src = is_mov.as_ref().map(|(s, _)| s);
+        let mov_src = is_mov.as_ref().map(|mov| &mov.src);
 
         for u in &updated {
             if !graph.has_node(u) {
@@ -829,9 +833,9 @@ fn coalesce_pass(
 
     // Collect Mov instructions that are coalescing candidates
     for instr in instrs {
-        if let Some((src, dst)) = mov_operands(instr) {
-            let src_r = uf.find(&src);
-            let dst_r = uf.find(&dst);
+        if let Some(mov) = mov_operands(instr) {
+            let src_r = uf.find(&mov.src);
+            let dst_r = uf.find(&mov.dst);
             if src_r == dst_r {
                 continue;
             }

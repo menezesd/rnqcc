@@ -62,6 +62,12 @@ struct StaticComplexValue {
     imag: StaticScalarValue,
 }
 
+#[derive(Clone)]
+struct NestedCaptureSlot {
+    capture: String,
+    slot: String,
+}
+
 #[derive(Copy, Clone)]
 struct StaticIntegerConstant {
     value: i64,
@@ -320,7 +326,7 @@ struct TackyGen {
     permissive: bool,
     no_instrument_functions: std::collections::HashSet<String>,
     inline_va_arg_pack_functions: HashMap<String, FunctionDeclaration>,
-    nested_capture_slots: HashMap<String, Vec<(String, String)>>,
+    nested_capture_slots: HashMap<String, Vec<NestedCaptureSlot>>,
     current_nonlocal_label_envs: HashMap<String, String>,
     current_parent_label_env_slots: HashMap<String, String>,
     deprecated_vars: HashMap<String, Option<String>>,
@@ -12276,32 +12282,30 @@ impl TackyGen {
         let Some(captures) = self.nested_capture_slots.get(function_name).cloned() else {
             return;
         };
-        for (capture, slot) in captures {
-            self.ensure_current_capture_slot(&capture);
+        for capture_slot in captures {
+            self.ensure_current_capture_slot(&capture_slot.capture);
             let src = self
                 .nested_capture_slots
                 .get(&self.current_function)
                 .and_then(|current_captures| {
-                    current_captures
-                        .iter()
-                        .find_map(|(current_capture, current_slot)| {
-                            (current_capture == &capture)
-                                .then(|| TackyVal::Var(current_slot.clone()))
-                        })
+                    current_captures.iter().find_map(|current_capture_slot| {
+                        (current_capture_slot.capture == capture_slot.capture)
+                            .then(|| TackyVal::Var(current_capture_slot.slot.clone()))
+                    })
                 });
             let src = if let Some(src) = src {
                 src
             } else {
                 let addr = self.fresh_tmp(CType::Pointer);
                 self.emit(TackyInstr::GetAddress {
-                    src: TackyVal::Var(capture),
+                    src: TackyVal::Var(capture_slot.capture),
                     dst: addr.clone(),
                 });
                 addr
             };
             self.emit(TackyInstr::Copy {
                 src,
-                dst: TackyVal::Var(slot),
+                dst: TackyVal::Var(capture_slot.slot),
             });
         }
     }
@@ -12316,7 +12320,11 @@ impl TackyGen {
         if self
             .nested_capture_slots
             .get(&self.current_function)
-            .is_some_and(|captures| captures.iter().any(|(name, _)| name == capture))
+            .is_some_and(|captures| {
+                captures
+                    .iter()
+                    .any(|capture_slot| capture_slot.capture == capture)
+            })
         {
             return;
         }
@@ -12340,7 +12348,10 @@ impl TackyGen {
         self.nested_capture_slots
             .entry(self.current_function.clone())
             .or_default()
-            .push((capture.to_string(), slot));
+            .push(NestedCaptureSlot {
+                capture: capture.to_string(),
+                slot,
+            });
     }
 
     fn emit_nested_function(&mut self, mut fd: FunctionDeclaration) -> TackyResult<()> {
@@ -12395,7 +12406,10 @@ impl TackyGen {
                 alignment: 8,
                 init_values: vec![StaticInit::ZeroInit(8)],
             });
-            capture_slots.push((capture.clone(), slot.clone()));
+            capture_slots.push(NestedCaptureSlot {
+                capture: capture.clone(),
+                slot: slot.clone(),
+            });
             capture_map.insert(capture, slot);
         }
         for (label, env) in parent_label_envs {
@@ -12602,12 +12616,14 @@ impl TackyGen {
             .collect();
         for name in used {
             if let Some(nested_captures) = self.nested_capture_slots.get(&name) {
-                for (capture, _) in nested_captures {
-                    if !local_names.contains(capture)
-                        && self.full_types.contains_key(capture)
-                        && !captures.iter().any(|existing| existing == capture)
+                for capture_slot in nested_captures {
+                    if !local_names.contains(&capture_slot.capture)
+                        && self.full_types.contains_key(&capture_slot.capture)
+                        && !captures
+                            .iter()
+                            .any(|existing| existing == &capture_slot.capture)
                     {
-                        captures.push(capture.clone());
+                        captures.push(capture_slot.capture.clone());
                     }
                 }
             }

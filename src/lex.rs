@@ -61,6 +61,11 @@ fn is_ident_continue(ch: char) -> bool {
     ch == '_' || unicode_ident::is_xid_continue(ch)
 }
 
+fn is_identifier_text(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars.next().is_some_and(is_ident_start) && chars.all(is_ident_continue)
+}
+
 fn hex_value(ch: char) -> Option<u32> {
     ch.to_digit(16)
 }
@@ -1305,12 +1310,7 @@ impl Lexer {
         if let Ok(value) = integer {
             return Some(Token::IntLiteral(value));
         }
-        let mut chars = value.chars();
-        let first = chars.next()?;
-        if !(first.is_ascii_alphabetic() || first == '_') {
-            return None;
-        }
-        if chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        if is_identifier_text(value) {
             Some(Token::Identifier(value.to_string()))
         } else {
             None
@@ -1327,12 +1327,7 @@ impl Lexer {
         let output = Self::last_parenthesized_text(outputs)?.trim();
         let call = output.strip_prefix('*').unwrap_or(output).trim();
         let name = call.strip_suffix("()")?.trim();
-        let mut chars = name.chars();
-        let first = chars.next()?;
-        if !(first.is_ascii_alphabetic() || first == '_') {
-            return None;
-        }
-        if !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        if !is_identifier_text(name) {
             return None;
         }
         Some(vec![
@@ -1344,12 +1339,7 @@ impl Lexer {
 
     fn first_parenthesized_identifier(text: &str) -> Option<String> {
         let inner = Self::first_parenthesized_text(text)?.trim().to_string();
-        let mut chars = inner.chars();
-        let first = chars.next()?;
-        if !(first.is_ascii_alphabetic() || first == '_') {
-            return None;
-        }
-        if chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        if is_identifier_text(&inner) {
             Some(inner)
         } else {
             None
@@ -1385,14 +1375,7 @@ impl Lexer {
             let inner_start = start + 1;
             let end = text[inner_start..].find(')')? + inner_start;
             let inner = text[inner_start..end].trim();
-            let mut chars = inner.chars();
-            let first = chars.next()?;
-            if !(first.is_ascii_alphabetic() || first == '_') {
-                return None;
-            }
-            chars
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-                .then_some(inner)
+            is_identifier_text(inner).then_some(inner)
         })
     }
 
@@ -1928,6 +1911,15 @@ mod tests {
                 .count(),
             1
         );
+        Ok(())
+    }
+
+    #[test]
+    fn inline_asm_compat_helpers_accept_unicode_identifiers() -> Result<(), String> {
+        let tokens = lex("void α(void);\n\
+             void f(void) { int β = 0; asm(\"\" : \"=r\"(β)); asm(\"\" : \"=r\"(*α())); }\n")?;
+        assert!(tokens.contains(&Token::Identifier("α".to_string())));
+        assert!(tokens.contains(&Token::Identifier("β".to_string())));
         Ok(())
     }
 

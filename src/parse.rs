@@ -2526,10 +2526,15 @@ impl Parser {
             return Err(self.format_error("_BitInt cannot be combined with another type specifier"));
         }
 
+        let bitint_spec = bitint_width
+            .map(|width| Self::bitint_spec(width, has_unsigned))
+            .transpose()
+            .map_err(|msg| self.format_error(&msg))?;
+
         let mut ctype = if has_void {
             CType::Void
-        } else if let Some(width) = bitint_width {
-            Self::bitint_ctype(width, has_unsigned).map_err(|msg| self.format_error(&msg))?
+        } else if let Some(spec) = bitint_spec {
+            spec.storage
         } else if has_int128 && has_unsigned {
             CType::UInt128
         } else if has_int128 {
@@ -2871,8 +2876,13 @@ impl Parser {
         {
             return Err(self.format_error("_BitInt cannot be combined with another type specifier"));
         }
-        let ctype = if let Some(width) = bitint_width {
-            Self::bitint_ctype(width, has_unsigned).map_err(|msg| self.format_error(&msg))?
+        let bitint_spec = bitint_width
+            .map(|width| Self::bitint_spec(width, has_unsigned))
+            .transpose()
+            .map_err(|msg| self.format_error(&msg))?;
+
+        let ctype = if let Some(spec) = bitint_spec {
+            spec.storage
         } else if has_char && has_unsigned {
             CType::UChar
         } else if has_int128 && has_unsigned {

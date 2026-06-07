@@ -3992,6 +3992,14 @@ fn pp_location(file: &str, line: usize, message: impl AsRef<str>) -> String {
     format!("{}:{}: {}", file, line, message.as_ref())
 }
 
+fn pp_current_location(
+    logical_file: &str,
+    current_line_number: usize,
+    message: impl AsRef<str>,
+) -> String {
+    pp_location(logical_file, current_line_number, message)
+}
+
 fn push_line_marker(out: &mut String, line: usize, file: &str) {
     out.push_str(&format!("# {} \"{}\"\n", line, escape_c_string(file)));
 }
@@ -5490,18 +5498,28 @@ fn internal_preprocess_source(
                     }
                     Directive::Elifdef { name, negated } => {
                         let Some(frame) = conditionals.last_mut() else {
-                            return Err(if negated {
+                            let message = if negated {
                                 "#elifndef without #if".to_string()
                             } else {
                                 "#elifdef without #if".to_string()
-                            });
+                            };
+                            return Err(pp_current_location(
+                                &logical_file,
+                                current_line_number,
+                                message,
+                            ));
                         };
                         if frame.saw_else {
-                            return Err(if negated {
+                            let message = if negated {
                                 "#elifndef after #else".to_string()
                             } else {
                                 "#elifdef after #else".to_string()
-                            });
+                            };
+                            return Err(pp_current_location(
+                                &logical_file,
+                                current_line_number,
+                                message,
+                            ));
                         }
                         if !frame.parent_active || frame.branch_taken {
                             frame.condition_active = false;
@@ -5514,10 +5532,18 @@ fn internal_preprocess_source(
                     }
                     Directive::Elif { expr } => {
                         let Some(frame) = conditionals.last_mut() else {
-                            return Err("#elif without #if".to_string());
+                            return Err(pp_current_location(
+                                &logical_file,
+                                current_line_number,
+                                "#elif without #if",
+                            ));
                         };
                         if frame.saw_else {
-                            return Err("#elif after #else".to_string());
+                            return Err(pp_current_location(
+                                &logical_file,
+                                current_line_number,
+                                "#elif after #else",
+                            ));
                         }
                         if !frame.parent_active || frame.branch_taken {
                             frame.condition_active = false;
@@ -5540,10 +5566,18 @@ fn internal_preprocess_source(
                     }
                     Directive::Else => {
                         let Some(frame) = conditionals.last_mut() else {
-                            return Err("#else without #if".to_string());
+                            return Err(pp_current_location(
+                                &logical_file,
+                                current_line_number,
+                                "#else without #if",
+                            ));
                         };
                         if frame.saw_else {
-                            return Err("duplicate #else".to_string());
+                            return Err(pp_current_location(
+                                &logical_file,
+                                current_line_number,
+                                "duplicate #else",
+                            ));
                         }
                         frame.condition_active = frame.parent_active && !frame.branch_taken;
                         frame.branch_taken = true;
@@ -5552,7 +5586,11 @@ fn internal_preprocess_source(
                     }
                     Directive::Endif => {
                         if conditionals.pop().is_none() {
-                            return Err("#endif without #if".to_string());
+                            return Err(pp_current_location(
+                                &logical_file,
+                                current_line_number,
+                                "#endif without #if",
+                            ));
                         }
                         continue;
                     }
@@ -5648,7 +5686,11 @@ fn internal_preprocess_source(
                         let new_def = token_macro_def_to_string(def);
                         if let Some(existing) = macros.get(&name) {
                             if !macro_defs_equivalent(existing, &new_def)? {
-                                return Err(format!("macro {} redefined", name));
+                                return Err(pp_current_location(
+                                    &logical_file,
+                                    current_line_number,
+                                    format!("macro {} redefined", name),
+                                ));
                             }
                         } else {
                             macros.insert(name, new_def);

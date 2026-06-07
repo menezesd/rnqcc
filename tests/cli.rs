@@ -21027,6 +21027,69 @@ fn internal_cpp_unterminated_conditionals_include_source_location() {
 }
 
 #[test]
+fn internal_cpp_unmatched_conditional_directives_include_source_location() {
+    for (name, source, message, line) in [
+        ("elif", "int first;\n#elif 1\n", "#elif without #if", 2usize),
+        ("else", "int first;\n#else\n", "#else without #if", 2usize),
+        (
+            "endif",
+            "int first;\n#endif\n",
+            "#endif without #if",
+            2usize,
+        ),
+        (
+            "duplicate-else",
+            "#if 1\n#else\n#else\n#endif\n",
+            "duplicate #else",
+            3usize,
+        ),
+    ] {
+        let src = temp_file(&format!("internal-cpp-located-{name}"), "c");
+        std::fs::write(&src, source).expect("failed to write source");
+
+        let output = Command::new(rnqcc())
+            .arg("--internal-cpp")
+            .arg("-E")
+            .arg(&src)
+            .output()
+            .expect("failed to run rnqcc");
+
+        assert!(!output.status.success(), "{name}");
+        let stderr = stderr(output);
+        assert!(
+            stderr.contains(&format!("{}:{line}:", src.display())),
+            "{name}: {stderr}"
+        );
+        assert!(stderr.contains(message), "{name}: {stderr}");
+
+        let _ = std::fs::remove_file(src);
+    }
+}
+
+#[test]
+fn internal_cpp_macro_redefinitions_include_source_location() {
+    let src = temp_file("internal-cpp-located-redefinition", "c");
+    std::fs::write(&src, "#define VALUE 1\n#define VALUE 2\n").expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains(&format!("{}:2:", src.display())),
+        "{stderr}"
+    );
+    assert!(stderr.contains("macro VALUE redefined"), "{stderr}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn internal_cpp_if_handles_large_integer_constants() {
     let src = temp_file("internal-cpp-large-if", "c");
     std::fs::write(

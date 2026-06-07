@@ -4005,6 +4005,48 @@ struct IfExprParser<'a> {
     macros: &'a HashMap<String, MacroDef>,
 }
 
+#[derive(Clone, Copy)]
+struct IfValue {
+    value: u128,
+    unsigned: bool,
+}
+
+impl IfValue {
+    fn signed(value: i128) -> Self {
+        Self {
+            value: value as u64 as u128,
+            unsigned: false,
+        }
+    }
+
+    fn unsigned(value: u128) -> Self {
+        Self {
+            value: value as u64 as u128,
+            unsigned: true,
+        }
+    }
+
+    fn zero() -> Self {
+        Self::signed(0)
+    }
+
+    fn truth(self) -> bool {
+        self.value != 0
+    }
+
+    fn signed_value(self) -> i128 {
+        (self.value as u64 as i64) as i128
+    }
+
+    fn truth_value(value: bool) -> Self {
+        Self::signed(value as i128)
+    }
+
+    fn common_unsigned(left: Self, right: Self) -> bool {
+        left.unsigned || right.unsigned
+    }
+}
+
 struct IfEvalContext<'a> {
     file: &'a str,
     line_number: usize,
@@ -4022,7 +4064,7 @@ impl<'a> IfExprParser<'a> {
         }
     }
 
-    fn parse(mut self) -> Result<i128, String> {
+    fn parse(mut self) -> Result<IfValue, String> {
         let value = self.parse_conditional(true)?;
         self.skip_ws();
         if self.pos != self.chars.len() {
@@ -4067,7 +4109,7 @@ impl<'a> IfExprParser<'a> {
         Some(self.chars[start..self.pos].iter().collect())
     }
 
-    fn number(&mut self) -> Result<Option<i128>, String> {
+    fn number(&mut self) -> Result<Option<IfValue>, String> {
         self.skip_ws();
         let start = self.pos;
         if self.pos >= self.chars.len() || !self.chars[self.pos].is_ascii_digit() {
@@ -4119,6 +4161,7 @@ impl<'a> IfExprParser<'a> {
         }
 
         let digits_end = self.pos;
+        let suffix_start = self.pos;
         while self.pos < self.chars.len() && self.chars[self.pos].is_ascii_alphabetic() {
             if !matches!(
                 self.chars[self.pos],
@@ -4131,6 +4174,9 @@ impl<'a> IfExprParser<'a> {
             }
             self.pos += 1;
         }
+        let suffix = self.chars[suffix_start..self.pos]
+            .iter()
+            .collect::<String>();
 
         if self.pos < self.chars.len()
             && (self.chars[self.pos].is_ascii_digit() || self.chars[self.pos] == '_')
@@ -4146,11 +4192,15 @@ impl<'a> IfExprParser<'a> {
             .collect::<String>();
         let value = u128::from_str_radix(&digits, base)
             .map_err(|_| format!("invalid integer literal in #if expression: {}", digits))?;
-        let value = value.min(i128::MAX as u128) as i128;
-        Ok(Some(value))
+        let unsigned = suffix.chars().any(|ch| matches!(ch, 'u' | 'U')) || value > i64::MAX as u128;
+        Ok(Some(if unsigned {
+            IfValue::unsigned(value)
+        } else {
+            IfValue::signed(value as i128)
+        }))
     }
 
-    fn char_constant(&mut self) -> Result<Option<i128>, String> {
+    fn char_constant(&mut self) -> Result<Option<IfValue>, String> {
         self.skip_ws();
         if self.pos >= self.chars.len() {
             return Ok(None);
@@ -4183,7 +4233,7 @@ impl<'a> IfExprParser<'a> {
                 if !saw_char {
                     return Err("empty character constant in #if expression".to_string());
                 }
-                return Ok(Some(value));
+                return Ok(Some(IfValue::signed(value)));
             }
             let unit = if ch == '\\' {
                 if self.pos >= self.chars.len() {
@@ -4213,7 +4263,7 @@ impl<'a> IfExprParser<'a> {
         }
     }
 
-    fn parse_primary(&mut self, eval: bool) -> Result<i128, String> {
+    fn parse_primary(&mut self, eval: bool) -> Result<IfValue, String> {
         if self.eat("(") {
             let value = self.parse_conditional(eval)?;
             if !self.eat(")") {
@@ -4239,7 +4289,7 @@ impl<'a> IfExprParser<'a> {
                     return Err("missing ')' in #if assertion predicate".to_string());
                 }
             }
-            return Ok(0);
+            return Ok(IfValue::zero());
         }
         if let Some(number) = self.number()? {
             return Ok(number);
@@ -4256,28 +4306,46 @@ impl<'a> IfExprParser<'a> {
                     if !self.eat(")") {
                         return Err("missing ')' after defined macro name".to_string());
                     }
-                    return Ok((eval && self.macros.contains_key(&name)) as i128);
+                    return Ok(IfValue::truth_value(
+                        eval && self.macros.contains_key(&name),
+                    ));
                 }
                 let Some(name) = self.ident() else {
                     return Err("expected macro name after defined".to_string());
                 };
-                return Ok((eval && self.macros.contains_key(&name)) as i128);
+                return Ok(IfValue::truth_value(
+                    eval && self.macros.contains_key(&name),
+                ));
             }
-            return Ok(0);
+            return Ok(IfValue::zero());
         }
         Err("expected value in #if expression".to_string())
     }
 
-    fn parse_unary(&mut self, eval: bool) -> Result<i128, String> {
+    fn parse_unary(&mut self, eval: bool) -> Result<IfValue, String> {
         if self.eat("!") {
             let value = self.parse_unary(eval)?;
-            Ok((eval && value == 0) as i128)
+            Ok(IfValue::truth_value(eval && !value.truth()))
         } else if self.eat("~") {
             let value = self.parse_unary(eval)?;
-            Ok(if eval { !value } else { 0 })
+            Ok(if eval {
+                IfValue {
+                    value: (!value.value) as u64 as u128,
+                    unsigned: value.unsigned,
+                }
+            } else {
+                IfValue::zero()
+            })
         } else if self.eat("-") {
             let value = self.parse_unary(eval)?;
-            Ok(if eval { value.wrapping_neg() } else { 0 })
+            Ok(if eval {
+                IfValue {
+                    value: value.value.wrapping_neg() as u64 as u128,
+                    unsigned: value.unsigned,
+                }
+            } else {
+                IfValue::zero()
+            })
         } else if self.eat("+") {
             self.parse_unary(eval)
         } else {
@@ -4285,33 +4353,50 @@ impl<'a> IfExprParser<'a> {
         }
     }
 
-    fn parse_mul(&mut self, eval: bool) -> Result<i128, String> {
+    fn parse_mul(&mut self, eval: bool) -> Result<IfValue, String> {
         let mut left = self.parse_unary(eval)?;
         loop {
             if self.eat("*") {
                 let right = self.parse_unary(eval)?;
                 if eval {
-                    left = left.wrapping_mul(right);
+                    left = IfValue {
+                        value: left.value.wrapping_mul(right.value) as u64 as u128,
+                        unsigned: IfValue::common_unsigned(left, right),
+                    };
                 }
             } else if self.eat("/") {
                 let right = self.parse_unary(eval)?;
-                if eval && right == 0 {
+                if eval && !right.truth() {
                     return Err("division by zero in #if expression".to_string());
                 }
                 if eval {
-                    left = left
-                        .checked_div(right)
-                        .ok_or_else(|| "overflow in #if division".to_string())?;
+                    let unsigned = IfValue::common_unsigned(left, right);
+                    left = if unsigned {
+                        IfValue::unsigned(left.value / right.value)
+                    } else {
+                        IfValue::signed(
+                            left.signed_value()
+                                .checked_div(right.signed_value())
+                                .ok_or_else(|| "overflow in #if division".to_string())?,
+                        )
+                    };
                 }
             } else if self.eat("%") {
                 let right = self.parse_unary(eval)?;
-                if eval && right == 0 {
+                if eval && !right.truth() {
                     return Err("division by zero in #if expression".to_string());
                 }
                 if eval {
-                    left = left
-                        .checked_rem(right)
-                        .ok_or_else(|| "overflow in #if remainder".to_string())?;
+                    let unsigned = IfValue::common_unsigned(left, right);
+                    left = if unsigned {
+                        IfValue::unsigned(left.value % right.value)
+                    } else {
+                        IfValue::signed(
+                            left.signed_value()
+                                .checked_rem(right.signed_value())
+                                .ok_or_else(|| "overflow in #if remainder".to_string())?,
+                        )
+                    };
                 }
             } else {
                 return Ok(left);
@@ -4319,18 +4404,24 @@ impl<'a> IfExprParser<'a> {
         }
     }
 
-    fn parse_add(&mut self, eval: bool) -> Result<i128, String> {
+    fn parse_add(&mut self, eval: bool) -> Result<IfValue, String> {
         let mut left = self.parse_mul(eval)?;
         loop {
             if self.eat("+") {
                 let right = self.parse_mul(eval)?;
                 if eval {
-                    left = left.wrapping_add(right);
+                    left = IfValue {
+                        value: left.value.wrapping_add(right.value) as u64 as u128,
+                        unsigned: IfValue::common_unsigned(left, right),
+                    };
                 }
             } else if self.eat("-") {
                 let right = self.parse_mul(eval)?;
                 if eval {
-                    left = left.wrapping_sub(right);
+                    left = IfValue {
+                        value: left.value.wrapping_sub(right.value) as u64 as u128,
+                        unsigned: IfValue::common_unsigned(left, right),
+                    };
                 }
             } else {
                 return Ok(left);
@@ -4338,24 +4429,28 @@ impl<'a> IfExprParser<'a> {
         }
     }
 
-    fn parse_shift(&mut self, eval: bool) -> Result<i128, String> {
+    fn parse_shift(&mut self, eval: bool) -> Result<IfValue, String> {
         let mut left = self.parse_add(eval)?;
         loop {
             if self.eat("<<") {
                 let right = self.parse_add(eval)?;
-                if eval && right < 0 {
+                if eval && !right.unsigned && right.signed_value() < 0 {
                     return Err("negative shift count in #if expression".to_string());
                 }
                 if eval {
-                    left = left.wrapping_shl(right as u32);
+                    left.value = left.value.wrapping_shl(right.value as u32) as u64 as u128;
                 }
             } else if self.eat(">>") {
                 let right = self.parse_add(eval)?;
-                if eval && right < 0 {
+                if eval && !right.unsigned && right.signed_value() < 0 {
                     return Err("negative shift count in #if expression".to_string());
                 }
                 if eval {
-                    left = left.wrapping_shr(right as u32);
+                    left.value = if left.unsigned {
+                        left.value.wrapping_shr(right.value as u32) as u64 as u128
+                    } else {
+                        left.signed_value().wrapping_shr(right.value as u32) as u64 as u128
+                    };
                 }
             } else {
                 return Ok(left);
@@ -4363,104 +4458,113 @@ impl<'a> IfExprParser<'a> {
         }
     }
 
-    fn parse_relational(&mut self, eval: bool) -> Result<i128, String> {
+    fn parse_relational(&mut self, eval: bool) -> Result<IfValue, String> {
         let mut left = self.parse_shift(eval)?;
         loop {
             if self.eat("<=") {
                 let right = self.parse_shift(eval)?;
-                left = (eval && left <= right) as i128;
+                left = IfValue::truth_value(eval && Self::compare_le(left, right));
             } else if self.eat(">=") {
                 let right = self.parse_shift(eval)?;
-                left = (eval && left >= right) as i128;
+                left = IfValue::truth_value(eval && Self::compare_ge(left, right));
             } else if self.eat("<") {
                 let right = self.parse_shift(eval)?;
-                left = (eval && left < right) as i128;
+                left = IfValue::truth_value(eval && Self::compare_lt(left, right));
             } else if self.eat(">") {
                 let right = self.parse_shift(eval)?;
-                left = (eval && left > right) as i128;
+                left = IfValue::truth_value(eval && Self::compare_gt(left, right));
             } else {
                 return Ok(left);
             }
         }
     }
 
-    fn parse_equality(&mut self, eval: bool) -> Result<i128, String> {
+    fn parse_equality(&mut self, eval: bool) -> Result<IfValue, String> {
         let mut left = self.parse_relational(eval)?;
         loop {
             if self.eat("==") {
                 let right = self.parse_relational(eval)?;
-                left = (eval && left == right) as i128;
+                left = IfValue::truth_value(eval && left.value == right.value);
             } else if self.eat("!=") {
                 let right = self.parse_relational(eval)?;
-                left = (eval && left != right) as i128;
+                left = IfValue::truth_value(eval && left.value != right.value);
             } else {
                 return Ok(left);
             }
         }
     }
 
-    fn parse_bit_and(&mut self, eval: bool) -> Result<i128, String> {
+    fn parse_bit_and(&mut self, eval: bool) -> Result<IfValue, String> {
         let mut left = self.parse_equality(eval)?;
         while !self.starts_with("&&") && self.eat("&") {
             let right = self.parse_equality(eval)?;
             if eval {
-                left &= right;
+                left = IfValue {
+                    value: left.value & right.value,
+                    unsigned: IfValue::common_unsigned(left, right),
+                };
             }
         }
         Ok(left)
     }
 
-    fn parse_bit_xor(&mut self, eval: bool) -> Result<i128, String> {
+    fn parse_bit_xor(&mut self, eval: bool) -> Result<IfValue, String> {
         let mut left = self.parse_bit_and(eval)?;
         while self.eat("^") {
             let right = self.parse_bit_and(eval)?;
             if eval {
-                left ^= right;
+                left = IfValue {
+                    value: left.value ^ right.value,
+                    unsigned: IfValue::common_unsigned(left, right),
+                };
             }
         }
         Ok(left)
     }
 
-    fn parse_bit_or(&mut self, eval: bool) -> Result<i128, String> {
+    fn parse_bit_or(&mut self, eval: bool) -> Result<IfValue, String> {
         let mut left = self.parse_bit_xor(eval)?;
         while !self.starts_with("||") && self.eat("|") {
             let right = self.parse_bit_xor(eval)?;
             if eval {
-                left |= right;
+                left = IfValue {
+                    value: left.value | right.value,
+                    unsigned: IfValue::common_unsigned(left, right),
+                };
             }
         }
         Ok(left)
     }
 
-    fn parse_logical_and(&mut self, eval: bool) -> Result<i128, String> {
+    fn parse_logical_and(&mut self, eval: bool) -> Result<IfValue, String> {
         let mut left = self.parse_bit_or(eval)?;
         while self.eat("&&") {
-            let right_eval = eval && left != 0;
+            let right_eval = eval && left.truth();
             let right = self.parse_bit_or(right_eval)?;
-            left = (right_eval && right != 0) as i128;
+            left = IfValue::truth_value(right_eval && right.truth());
         }
         Ok(left)
     }
 
-    fn parse_logical_or(&mut self, eval: bool) -> Result<i128, String> {
+    fn parse_logical_or(&mut self, eval: bool) -> Result<IfValue, String> {
         let mut left = self.parse_logical_and(eval)?;
         while self.eat("||") {
-            let right_eval = eval && left == 0;
+            let right_eval = eval && !left.truth();
             let right = self.parse_logical_and(right_eval)?;
-            left = (eval && (left != 0 || right != 0)) as i128;
+            left = IfValue::truth_value(eval && (left.truth() || right.truth()));
         }
         Ok(left)
     }
 
-    fn parse_conditional(&mut self, eval: bool) -> Result<i128, String> {
+    fn parse_conditional(&mut self, eval: bool) -> Result<IfValue, String> {
         let condition = self.parse_logical_or(eval)?;
         if self.eat("?") {
-            let true_eval = eval && condition != 0;
+            let true_eval = eval && condition.truth();
             let when_true = self.parse_conditional(true_eval)?;
             if !self.eat(":") {
                 return Err("missing ':' in #if conditional expression".to_string());
             }
-            let false_eval = eval && condition == 0;
+            let false_eval = eval && !condition.truth();
             let when_false = self.parse_conditional(false_eval)?;
             if true_eval {
                 Ok(when_true)
@@ -4470,6 +4574,26 @@ impl<'a> IfExprParser<'a> {
         } else {
             Ok(condition)
         }
+    }
+
+    fn compare_lt(left: IfValue, right: IfValue) -> bool {
+        if IfValue::common_unsigned(left, right) {
+            left.value < right.value
+        } else {
+            left.signed_value() < right.signed_value()
+        }
+    }
+
+    fn compare_le(left: IfValue, right: IfValue) -> bool {
+        Self::compare_lt(left, right) || left.value == right.value
+    }
+
+    fn compare_gt(left: IfValue, right: IfValue) -> bool {
+        !Self::compare_le(left, right)
+    }
+
+    fn compare_ge(left: IfValue, right: IfValue) -> bool {
+        !Self::compare_lt(left, right)
     }
 }
 
@@ -4490,7 +4614,7 @@ fn eval_internal_if(
     )?;
     IfExprParser::new(&expanded, macros)
         .parse()
-        .map(|value| value != 0)
+        .map(IfValue::truth)
         .map_err(|err| format!("unsupported #if expression '{}': {}", expr, err))
 }
 

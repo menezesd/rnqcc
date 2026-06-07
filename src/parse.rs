@@ -2202,18 +2202,7 @@ impl Parser {
                     self.advance()?;
                     has_int128 = true;
                 }
-                Some(Token::Identifier(name))
-                    if name == "_BitInt"
-                        && bitint_width.is_none()
-                        && !has_int
-                        && !has_long
-                        && !has_short
-                        && !has_char
-                        && !has_void
-                        && !has_float
-                        && !has_double
-                        && !has_int128 =>
-                {
+                Some(Token::Identifier(name)) if name == "_BitInt" && bitint_width.is_none() => {
                     bitint_width = Some(self.parse_bitint_width()?);
                 }
                 Some(Token::KWNoreturn) | Some(Token::AttributeNoreturn) => {
@@ -2490,6 +2479,19 @@ impl Parser {
             return Err(self.format_error("expected type specifier"));
         }
         self.last_typedef_full_type = None;
+
+        if bitint_width.is_some()
+            && (has_int
+                || has_long
+                || has_short
+                || has_char
+                || has_void
+                || has_float
+                || has_double
+                || has_int128)
+        {
+            return Err(self.format_error("_BitInt cannot be combined with another type specifier"));
+        }
 
         let mut ctype = if has_void {
             CType::Void
@@ -2780,16 +2782,7 @@ impl Parser {
                     self.advance()?;
                     has_int128 = true;
                 }
-                Some(Token::Identifier(name))
-                    if name == "_BitInt"
-                        && bitint_width.is_none()
-                        && !has_int
-                        && !has_long
-                        && !has_short
-                        && !has_char
-                        && !has_double
-                        && !has_int128 =>
-                {
+                Some(Token::Identifier(name)) if name == "_BitInt" && bitint_width.is_none() => {
                     bitint_width = Some(self.parse_bitint_width()?);
                 }
                 Some(Token::KWAlignAs) => {
@@ -2836,6 +2829,11 @@ impl Parser {
                 }
                 _ => break,
             }
+        }
+        if bitint_width.is_some()
+            && (has_int || has_long || has_short || has_char || has_double || has_int128)
+        {
+            return Err(self.format_error("_BitInt cannot be combined with another type specifier"));
         }
         let ctype = if let Some(width) = bitint_width {
             Self::bitint_ctype(width, has_unsigned).map_err(|msg| self.format_error(&msg))?
@@ -7391,6 +7389,25 @@ mod tests {
             err.contains("expected integer constant _BitInt width"),
             "{err}"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_bitint_with_other_type_specifiers() -> Result<(), String> {
+        for src in [
+            "_BitInt(32) int x;\n",
+            "long _BitInt(64) x;\n",
+            "char _BitInt(32) x;\n",
+            "float _BitInt(32) x;\n",
+            "int x = sizeof(_BitInt(32) int);\n",
+        ] {
+            let err = require_err(parse_source_err(src), "parse should fail")?;
+            assert!(
+                err.contains("_BitInt cannot be combined with another type specifier"),
+                "{src}: {err}"
+            );
+        }
 
         Ok(())
     }

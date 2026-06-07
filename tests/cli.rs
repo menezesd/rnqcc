@@ -20901,7 +20901,19 @@ fn internal_cpp_if_handles_large_integer_constants() {
     let src = temp_file("internal-cpp-large-if", "c");
     std::fs::write(
         &src,
-        "#if 18446744073709551615UL < 9223372036854775807L\n#error bad comparison\n#endif\nint ok = 1;\n",
+        "#if 18446744073709551615UL < 9223372036854775807L\n\
+         #error bad comparison\n\
+         #endif\n\
+         #if 18446744073709551615UL != 0xffffffffffffffffUL\n\
+         #error bad equality\n\
+         #endif\n\
+         #if -1 != 18446744073709551615UL\n\
+         #error bad unsigned conversion\n\
+         #endif\n\
+         #if 18446744073709551614UL == 18446744073709551615UL\n\
+         #error bad distinct large constants\n\
+         #endif\n\
+         int ok = 1;\n",
     )
     .expect("failed to write source");
 

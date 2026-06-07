@@ -10312,8 +10312,11 @@ fn ignores_common_gnu_and_msvc_attribute_annotations() {
 __attribute__((visibility("hidden"))) int hidden_value(void) { return 40; }
 int noinline_value(void) __attribute__((noinline));
 int noinline_value(void) { return 2; }
+__attribute__((weak, cold)) int weak_value(void) { return 0; }
+static int section_value __attribute__((used, section(".rnqcc_test"))) = 0;
+static inline __attribute__((always_inline, gnu_inline, hot)) int inline_value(void) { return section_value; }
 __declspec(dllexport) int exported_value(void) { return 0; }
-int main(void) { return hidden_value() + noinline_value() + exported_value(); }
+int main(void) { return hidden_value() + noinline_value() + weak_value() + inline_value() + exported_value(); }
 "#,
     )
     .expect("failed to write test input");

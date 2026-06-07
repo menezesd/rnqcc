@@ -1114,7 +1114,13 @@ impl Lexer {
                     let word: String = self.chars[save..self.pos].iter().collect();
                     if !matches!(
                         word.as_str(),
-                        "volatile" | "__volatile__" | "goto" | "inline"
+                        "volatile"
+                            | "__volatile"
+                            | "__volatile__"
+                            | "goto"
+                            | "inline"
+                            | "__inline"
+                            | "__inline__"
                     ) {
                         self.pos = save;
                         break;
@@ -1918,6 +1924,22 @@ mod tests {
                 .filter(|tok| matches!(tok, Token::KWVolatile))
                 .count(),
             2
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn skips_gnu_asm_modifier_aliases() -> Result<(), String> {
+        let tokens = lex(
+            "int f(void) { __asm __volatile (\"\"); __asm__ __inline__ (\"\"); asm __inline (\"\"); return 42; }",
+        )?;
+        assert!(!tokens.iter().any(|tok| matches!(tok, Token::Identifier(name) if name == "__asm" || name == "__asm__" || name == "asm")));
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|tok| matches!(tok, Token::KWReturn))
+                .count(),
+            1
         );
         Ok(())
     }

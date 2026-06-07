@@ -473,6 +473,7 @@ impl TackyGen {
             | Exp::LongConstant(_)
             | Exp::UIntConstant(_)
             | Exp::ULongConstant(_) => true,
+            Exp::Cast(_, Some(_), inner) if matches!(inner.as_ref(), Exp::ArrayInit(_)) => true,
             Exp::Cast(_, _, inner)
             | Exp::Unary(UnaryOp::AddrOf, inner)
             | Exp::Unary(UnaryOp::Deref, inner) => Self::static_address_constant_candidate(inner),
@@ -496,7 +497,7 @@ impl TackyGen {
         target: &FullType,
         init: &Exp,
     ) -> TackyResult<()> {
-        if let Some(src) = eval_static_expr_full_type(init, &self.full_types) {
+        if let Some(src) = self.static_exp_full_type(init) {
             self.assert_assignable_exp_full_type(target, &src, init, "initializer")?;
         }
         Ok(())
@@ -722,6 +723,9 @@ impl TackyGen {
 
     fn static_exp_full_type(&self, exp: &Exp) -> Option<FullType> {
         match exp {
+            Exp::Var(name) if self.function_symbols.contains(name) => {
+                self.function_designator_full_type(name)
+            }
             Exp::Dot(inner, member) => self.static_struct_member_full_type(inner, member),
             Exp::Arrow(inner, member) => {
                 let tag = match self.static_exp_full_type(inner)? {
@@ -763,6 +767,25 @@ impl TackyGen {
             },
             _ => eval_static_expr_full_type(exp, &self.full_types),
         }
+    }
+
+    fn function_designator_full_type(&self, name: &str) -> Option<FullType> {
+        let (return_type, params, _return_ptr_info, variadic) = self.func_types.get(name)?;
+        let return_type = self
+            .func_full_types
+            .get(name)
+            .cloned()
+            .unwrap_or(FullType::Scalar(*return_type));
+        let params = self
+            .func_param_full_types
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| params.iter().copied().map(FullType::Scalar).collect());
+        Some(FullType::Function {
+            return_type: Box::new(return_type),
+            params,
+            variadic: *variadic,
+        })
     }
 
     fn static_struct_member_full_type(&self, inner: &Exp, member: &str) -> Option<FullType> {
@@ -1818,7 +1841,10 @@ impl TackyGen {
     fn is_pointer_like_full_type(ft: &FullType) -> bool {
         matches!(
             ft,
-            FullType::Pointer(_) | FullType::Function { .. } | FullType::Scalar(CType::Pointer)
+            FullType::Pointer(_)
+                | FullType::Array { .. }
+                | FullType::Function { .. }
+                | FullType::Scalar(CType::Pointer)
         )
     }
 
@@ -1925,6 +1951,9 @@ impl TackyGen {
                 elem: Box::new(FullType::Scalar(CType::UInt)),
                 size: s.chars().count() + 1,
             },
+            Exp::Var(name) if self.function_symbols.contains(name) => self
+                .function_designator_full_type(name)
+                .unwrap_or(FullType::Scalar(CType::Int)),
             Exp::Var(name) => self.get_full_type(name),
             Exp::LabelAddress(_) => FullType::Pointer(Box::new(FullType::Scalar(CType::Void))),
             Exp::Cast(ct, ft, _) => {
@@ -11842,14 +11871,14 @@ impl TackyGen {
                 }
                 // Null terminator if there's room (already zero-filled above)
             } else if let Some(init) = vd.init {
-                if let Exp::ArrayInit(elems) = &init {
-                    let mut index = 0usize;
-                    self.emit_initializer_list_at(&vd.name, &full_type, elems, &mut index, 0)?;
-                    return Ok(());
-                }
                 if let Some(elem) = Self::direct_array_struct_elem(&full_type) {
                     let tag = elem.tag.to_string();
                     self.emit_struct_array_init_flat(&vd.name, &init, &tag, elem.array_len, 0)?;
+                    return Ok(());
+                }
+                if let Exp::ArrayInit(elems) = &init {
+                    let mut index = 0usize;
+                    self.emit_initializer_list_at(&vd.name, &full_type, elems, &mut index, 0)?;
                     return Ok(());
                 }
                 let elem_sizes = Self::compute_elem_sizes(&full_type, &self.struct_defs);
@@ -14735,9 +14764,6 @@ pub fn generate_with_target_options_and_warnings(
                     gen.inline_va_arg_pack_functions
                         .insert(fd.name.clone(), fd.clone());
                 }
-                if fd.body.is_some() {
-                    continue;
-                }
                 let param_types: Vec<CType> = fd.params.iter().map(|(_, t, _)| *t).collect();
                 gen.func_types.insert(
                     fd.name.clone(),
@@ -14753,6 +14779,9 @@ pub fn generate_with_target_options_and_warnings(
                     .insert(fd.name.clone(), fd.param_full_types.clone());
                 if let Some(ref rft) = fd.return_full_type {
                     gen.func_full_types.insert(fd.name.clone(), rft.clone());
+                }
+                if fd.body.is_some() {
+                    continue;
                 }
             }
             Declaration::VarDecl(vd) => {

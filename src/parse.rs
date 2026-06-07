@@ -635,6 +635,9 @@ impl Parser {
                 [Exp::Utf16StringLiteral(s)] => s.encode_utf16().count() + 1,
                 [Exp::Utf32StringLiteral(s)] => s.chars().count() + 1,
                 [Exp::StringLiteral(s)] => s.chars().count() + 1,
+                _ if matches!(elem.as_ref(), FullType::Struct(_)) => {
+                    self.infer_struct_array_init_len(elem.as_ref(), elems)?
+                }
                 _ => self.infer_array_init_len(elems)?,
             },
             _ => 0,
@@ -680,6 +683,70 @@ impl Parser {
             };
             max_len = max_len.max(index + 1);
             next = index + 1;
+        }
+        Ok(max_len)
+    }
+
+    fn infer_struct_array_init_len(&self, elem: &FullType, elems: &[Exp]) -> ParseResult<usize> {
+        let FullType::Struct(tag) = elem else {
+            return self.infer_array_init_len(elems);
+        };
+        let Some(def) = self.struct_defs.get(tag) else {
+            return self.infer_array_init_len(elems);
+        };
+        let max_members = if def.is_union {
+            1
+        } else {
+            def.members.len().max(1)
+        };
+        let mut next = 0usize;
+        let mut max_len = 0usize;
+        let mut member_index = 0usize;
+        for elem in elems {
+            let index = if let Exp::DesignatedInit(designators, _) = elem {
+                match designators.first() {
+                    Some(Designator::Index(index_exp)) => {
+                        let value = self
+                            .eval_integer_constant_exp_with_layout(index_exp)
+                            .ok_or_else(|| {
+                                self.format_error("array designator must be constant")
+                            })?;
+                        if value < 0 {
+                            return Err(self.format_error("array designator must be non-negative"));
+                        }
+                        member_index = 0;
+                        value as usize
+                    }
+                    Some(Designator::IndexRange(_, end_exp)) => {
+                        let value = self
+                            .eval_integer_constant_exp_with_layout(end_exp)
+                            .ok_or_else(|| {
+                                self.format_error("array designator must be constant")
+                            })?;
+                        if value < 0 {
+                            return Err(self.format_error("array designator must be non-negative"));
+                        }
+                        member_index = 0;
+                        value as usize
+                    }
+                    _ => next,
+                }
+            } else {
+                next
+            };
+            max_len = max_len.max(index + 1);
+            if matches!(elem, Exp::ArrayInit(_)) {
+                next = index + 1;
+                member_index = 0;
+            } else {
+                member_index += 1;
+                if member_index >= max_members {
+                    next = index + 1;
+                    member_index = 0;
+                } else {
+                    next = index;
+                }
+            }
         }
         Ok(max_len)
     }
@@ -7052,8 +7119,10 @@ mod tests {
 
     #[test]
     fn infers_unsized_array_bounds_from_initializers() -> Result<(), String> {
-        let program =
-            parse_source("char s[] = \"abc\"; int a[] = { 1, 2, 3 }; int b[] = { [4] = 1 };\n")?;
+        let program = parse_source(
+            "char s[] = \"abc\"; int a[] = { 1, 2, 3 }; int b[] = { [4] = 1 };
+             struct P { char *s; int *p; }; struct P p[] = { \"\", 0, \"\", 0 };\n",
+        )?;
         let Declaration::VarDecl(s) = &program.declarations[0] else {
             return Err("expected string array declaration".to_string());
         };
@@ -7063,9 +7132,13 @@ mod tests {
         let Declaration::VarDecl(b) = &program.declarations[2] else {
             return Err("expected designated array declaration".to_string());
         };
+        let Declaration::VarDecl(p) = &program.declarations[4] else {
+            return Err("expected struct array declaration".to_string());
+        };
         assert_eq!(s.array_dims, Some(vec![4]));
         assert_eq!(a.array_dims, Some(vec![3]));
         assert_eq!(b.array_dims, Some(vec![5]));
+        assert_eq!(p.array_dims, Some(vec![2]));
         Ok(())
     }
 

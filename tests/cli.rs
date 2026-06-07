@@ -20408,6 +20408,69 @@ int main(void) {
 }
 
 #[test]
+fn global_pointer_initializer_accepts_compound_literal_address() {
+    let src = temp_file("global-compound-literal-ptr-init", "c");
+    std::fs::write(
+        &src,
+        r#"
+struct A { int value; };
+struct A *const b = &(struct A) { 42 };
+struct B { char *s; struct A *t; };
+void bar(struct B *);
+
+void foo(void) {
+    struct B a[] = { "", b, "", b };
+    bar(a);
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn global_function_pointer_array_accepts_defined_function_address() {
+    let src = temp_file("global-function-pointer-array-defined-function", "c");
+    let exe = temp_file("global-function-pointer-array-defined-function", "bin");
+    std::fs::write(
+        &src,
+        r#"
+double f(double a) { return a + 1.0; }
+double (* const a[])(double) = { &f };
+
+int main(void) {
+    double (*p)() = &f;
+    return p == a[0] && a[0](41.0) == 42.0 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn static_pointer_initializer_emits_normalized_negative_label_offsets() {
     for target in ["x86_64-linux", "aarch64-linux"] {
         let src = temp_file(&format!("static-negative-label-offset-{target}"), "c");
@@ -24156,6 +24219,7 @@ void (*foo(void))(float) {
 
 void test(float *fp, const double *dp) {
     long long *lp = a;
+    char *s = L"a" "b";
     func(fp);
     callee(dp, lp);
 }

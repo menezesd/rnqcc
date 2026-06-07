@@ -14678,8 +14678,9 @@ fn internal_cpp_provides_basic_virtual_compatibility_headers() {
              assert(ok);\n\
              size_t offset = offsetof(struct Item, value);\n\
              ptrdiff_t diff = (char *)&ok - (char *)&ok;\n\
+             nullptr_t nil = nullptr;\n\
              va_list ap;\n\
-             return ok && !false && NULL == (void *)0 && offset == 4 &&\n\
+             return ok && !false && NULL == (void *)0 && nil == nullptr && offset == 4 &&\n\
                     diff == 0 && sizeof(ap) == sizeof(char *) && (ok and not false) &&\n\
                     (1 bitand 3) == 1 && (1 bitor 2) == 3 && (1 xor 3) == 2 &&\n\
                     CHAR_BIT == 8 &&\n\

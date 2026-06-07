@@ -97,12 +97,6 @@ fn static_integer_constant(
     }
 }
 
-struct StaticStringAddress<'a> {
-    value: &'a str,
-    offset: i64,
-    elem_size: i64,
-}
-
 struct StaticAddressConstant {
     base: Option<String>,
     offset: i64,
@@ -589,9 +583,6 @@ impl TackyGen {
                     .value;
                     return Some(diff.wrapping_sub(value));
                 }
-                if let Some(diff) = Self::static_same_string_lvalue_diff(left, right) {
-                    return Some(diff);
-                }
                 let left_address = self.static_address_constant(left)?;
                 let right_address = self.static_address_constant(right)?;
                 if left_address.base != right_address.base {
@@ -611,42 +602,6 @@ impl TackyGen {
                 }
                 let byte_diff = left_address.offset - right_address.offset;
                 (byte_diff % elem_size == 0).then_some(byte_diff / elem_size)
-            }
-            _ => None,
-        }
-    }
-
-    fn static_same_string_lvalue_diff(left: &Exp, right: &Exp) -> Option<i64> {
-        let left_addr = Self::static_string_lvalue_address(left)?;
-        let right_addr = Self::static_string_lvalue_address(right)?;
-        if left_addr.value != right_addr.value
-            || left_addr.elem_size != right_addr.elem_size
-            || left_addr.elem_size == 0
-        {
-            return None;
-        }
-        let byte_diff = left_addr.offset - right_addr.offset;
-        (byte_diff % left_addr.elem_size == 0).then_some(byte_diff / left_addr.elem_size)
-    }
-
-    fn static_string_lvalue_address(exp: &Exp) -> Option<StaticStringAddress<'_>> {
-        match exp {
-            Exp::Unary(UnaryOp::AddrOf, inner) => Self::static_string_lvalue_address(inner),
-            Exp::Cast(_, _, inner) => Self::static_string_lvalue_address(inner),
-            Exp::Subscript(arr, idx) => {
-                let (value, elem_size) = match arr.as_ref() {
-                    Exp::StringLiteral(s) => (s.as_str(), 1),
-                    Exp::WideStringLiteral(s) => (s.as_str(), CType::Int.size() as i64),
-                    Exp::Utf16StringLiteral(s) => (s.as_str(), CType::UShort.size() as i64),
-                    Exp::Utf32StringLiteral(s) => (s.as_str(), CType::UInt.size() as i64),
-                    _ => return None,
-                };
-                let index = eval_static_integer_constant_exp(idx)?.value;
-                Some(StaticStringAddress {
-                    value,
-                    offset: index * elem_size,
-                    elem_size,
-                })
             }
             _ => None,
         }

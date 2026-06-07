@@ -7686,9 +7686,9 @@ fn compiles_static_pointer_difference_initializers() {
         &src,
         "int x[60];\n\
          char *y = ((char *)&(x[2 * 8 + 2]) - 8);\n\
-         int z = (&\"Foobar\"[1] - &\"Foobar\"[0]);\n\
+         int z = &x[18] - &x[16];\n\
          int main(void) {\n\
-             return z == 1 && y == (char *)&x[16] ? 42 : 1;\n\
+             return z == 2 && y == (char *)&x[16] ? 42 : 1;\n\
          }\n",
     )
     .expect("failed to write input");
@@ -8545,9 +8545,6 @@ fn emits_linux_utf_static_string_data_for_x86_and_aarch64() {
              int *pw_off = L\"abcd\" + 2;\n\
              unsigned short *p16_off = u\"abcd\" + 2;\n\
              unsigned int *p32_addr = &U\"abcd\"[1];\n\
-             int dw = &L\"abcd\"[3] - &L\"abcd\"[1];\n\
-             int d16 = &u\"abcd\"[3] - &u\"abcd\"[1];\n\
-             int d32 = &U\"abcd\"[3] - &U\"abcd\"[1];\n\
              int main(void) { return 0; }\n",
         )
         .expect("failed to write input");
@@ -8589,9 +8586,6 @@ fn emits_linux_utf_static_string_data_for_x86_and_aarch64() {
             asm.contains("p32_addr:\n\t.quad __string_const_4+4"),
             "{target}:\n{asm}"
         );
-        assert!(asm.contains("dw:\n\t.long 2"), "{target}:\n{asm}");
-        assert!(asm.contains("d16:\n\t.long 2"), "{target}:\n{asm}");
-        assert!(asm.contains("d32:\n\t.long 2"), "{target}:\n{asm}");
         assert!(
             asm.contains("__string_const_0:\n\t.byte 122, 0, 0, 0"),
             "{target}:\n{asm}"
@@ -25692,6 +25686,36 @@ fn rejects_incompatible_utf_string_pointer_assignments() {
         let stderr = stderr(output);
         assert!(!status.success(), "{name} unexpectedly succeeded");
         assert!(stderr.contains("incompatible types"), "{name}: {stderr}");
+    }
+}
+
+#[test]
+fn rejects_file_scope_string_literal_pointer_differences() {
+    for (name, source) in [
+        ("narrow", "int d = &\"abcd\"[3] - &\"abcd\"[1];\n"),
+        ("wide", "int d = &L\"abcd\"[3] - &L\"abcd\"[1];\n"),
+        ("utf16", "int d = &u\"abcd\"[3] - &u\"abcd\"[1];\n"),
+        ("utf32", "int d = &U\"abcd\"[3] - &U\"abcd\"[1];\n"),
+    ] {
+        let src = TempPath::new(&format!("bad-string-literal-pointer-diff-{name}"), "c");
+        let out = TempPath::new(&format!("bad-string-literal-pointer-diff-{name}"), "s");
+        std::fs::write(src.path(), source).expect("failed to write input");
+
+        let output = Command::new(rnqcc())
+            .arg("--internal-cpp")
+            .arg("-S")
+            .arg("-o")
+            .arg(out.path())
+            .arg(src.path())
+            .output()
+            .expect("failed to run rnqcc");
+        let status = output.status;
+        let stderr = stderr(output);
+        assert!(!status.success(), "{name} unexpectedly succeeded");
+        assert!(
+            stderr.contains("Global initializer must be constant"),
+            "{name}: {stderr}"
+        );
     }
 }
 

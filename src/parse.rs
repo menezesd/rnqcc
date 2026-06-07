@@ -6234,6 +6234,10 @@ impl Parser {
                 } else if let Some(val) = self.lookup_enum_constant(&name) {
                     // Enum constant — resolve to integer literal
                     Ok(Exp::Constant(val))
+                } else if name == "true" && self.lookup_value_type(&name).is_none() {
+                    Ok(Exp::Constant(1))
+                } else if name == "false" && self.lookup_value_type(&name).is_none() {
+                    Ok(Exp::Constant(0))
                 } else {
                     Ok(Exp::Var(name))
                 }
@@ -7315,6 +7319,34 @@ mod tests {
             "parse should fail",
         )?;
         assert!(err.contains("flexible array member must be last"), "{err}");
+        Ok(())
+    }
+
+    #[test]
+    fn parses_unshadowed_true_false_as_c23_constants() -> Result<(), String> {
+        let program = parse_source("int a = true;\nint b = false;\n")?;
+        let Declaration::VarDecl(a) = &program.declarations[0] else {
+            return Err("expected a declaration".to_string());
+        };
+        let Declaration::VarDecl(b) = &program.declarations[1] else {
+            return Err("expected b declaration".to_string());
+        };
+        assert!(matches!(a.init, Some(Exp::Constant(1))));
+        assert!(matches!(b.init, Some(Exp::Constant(0))));
+        Ok(())
+    }
+
+    #[test]
+    fn true_false_constants_do_not_hide_visible_objects() -> Result<(), String> {
+        let program = parse_source("int true;\nint false;\nint a = true;\nint b = false;\n")?;
+        let Declaration::VarDecl(a) = &program.declarations[2] else {
+            return Err("expected a declaration".to_string());
+        };
+        let Declaration::VarDecl(b) = &program.declarations[3] else {
+            return Err("expected b declaration".to_string());
+        };
+        assert!(matches!(a.init, Some(Exp::Var(ref name)) if name == "true"));
+        assert!(matches!(b.init, Some(Exp::Var(ref name)) if name == "false"));
         Ok(())
     }
 

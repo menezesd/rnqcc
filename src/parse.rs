@@ -2134,6 +2134,19 @@ impl Parser {
                     self.advance()?;
                     continue;
                 }
+                Some(Token::Identifier(name))
+                    if Self::is_builtin_float_type_name(&name)
+                        && !has_int
+                        && !has_long
+                        && !has_int128
+                        && !has_void
+                        && !has_unsigned
+                        && !has_signed
+                        && !has_char =>
+                {
+                    self.advance()?;
+                    has_double = true;
+                }
                 Some(Token::Identifier(name)) if Self::is_builtin_int128_type_name(&name) => {
                     self.advance()?;
                     has_int128 = true;
@@ -2585,6 +2598,14 @@ impl Parser {
                 self.last_typedef_full_type = Some(Self::complex_full_type(CType::Double));
                 return Ok(CType::Double);
             }
+            if self
+                .peek()
+                .is_some_and(|tok| matches!(tok, Token::Identifier(name) if Self::is_builtin_float_type_name(name)))
+            {
+                self.advance()?;
+                self.last_typedef_full_type = Some(Self::complex_full_type(CType::Double));
+                return Ok(CType::Double);
+            }
             if !matches!(
                 self.peek(),
                 Some(Token::KWInt)
@@ -2626,7 +2647,15 @@ impl Parser {
         if let Some(Token::Identifier(name)) = self.peek() {
             if Self::is_builtin_float_type_name(name) {
                 self.advance()?;
-                self.last_typedef_full_type = None;
+                let has_complex = self.peek().is_some_and(
+                    |tok| matches!(tok, Token::Identifier(name) if Self::is_complex_type_name(name)),
+                );
+                if has_complex {
+                    self.advance()?;
+                    self.last_typedef_full_type = Some(Self::complex_full_type(CType::Double));
+                } else {
+                    self.last_typedef_full_type = None;
+                }
                 return Ok(CType::Double);
             }
             if Self::is_builtin_int128_type_name(name) {
@@ -6981,6 +7010,28 @@ mod tests {
         };
         assert_eq!(func.return_type, CType::Double);
         assert_eq!(func.params[0].1, CType::Double);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_builtin_float_complex_type_names() -> Result<(), String> {
+        let program = parse_source(
+            "extern _Float16 _Complex f(_Complex _Float16 x, _Float32 _Complex y);\n",
+        )?;
+        let Declaration::FunDecl(func) = &program.declarations[0] else {
+            return Err("expected function declaration".to_string());
+        };
+        let complex_double = FullType::Vector {
+            elem: Box::new(FullType::Scalar(CType::Double)),
+            lanes: 2,
+            complex: true,
+        };
+        assert_eq!(func.return_type, CType::Double);
+        assert_eq!(func.return_full_type, Some(complex_double.clone()));
+        assert_eq!(func.params[0].1, CType::Double);
+        assert_eq!(func.params[1].1, CType::Double);
+        assert_eq!(func.param_full_types[0], complex_double);
+        assert_eq!(func.param_full_types[1], complex_double);
         Ok(())
     }
 

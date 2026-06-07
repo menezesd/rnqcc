@@ -7010,6 +7010,22 @@ mod tests {
     }
 
     #[test]
+    fn parses_gnu_signed_aliases_as_signed_specifiers() -> Result<(), String> {
+        let program = parse_source("__signed char a;\n__signed__ int b;\n")?;
+        let Declaration::VarDecl(a) = &program.declarations[0] else {
+            return Err("expected a declaration".to_string());
+        };
+        assert_eq!(a.var_type, CType::SChar);
+        assert_eq!(a.decl_full_type, Some(FullType::Scalar(CType::SChar)));
+        let Declaration::VarDecl(b) = &program.declarations[1] else {
+            return Err("expected b declaration".to_string());
+        };
+        assert_eq!(b.var_type, CType::Int);
+        assert_eq!(b.decl_full_type, Some(FullType::Scalar(CType::Int)));
+        Ok(())
+    }
+
+    #[test]
     fn parses_builtin_float_type_names_as_double() -> Result<(), String> {
         let program = parse_source("extern _Float16 f(_Float64 x, __float128 y, __fp16 z);\n")?;
         let Declaration::FunDecl(func) = &program.declarations[0] else {

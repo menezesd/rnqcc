@@ -1065,7 +1065,7 @@ impl Lexer {
             "int" => Token::KWInt,
             "long" => Token::KWLong,
             "unsigned" => Token::KWUnsigned,
-            "signed" => Token::KWSigned,
+            "signed" | "__signed" | "__signed__" => Token::KWSigned,
             "double" => Token::KWDouble,
             "float" => Token::KWFloat,
             "void" => Token::KWVoid,
@@ -1103,8 +1103,7 @@ impl Lexer {
             "_Noreturn" => Token::KWNoreturn,
             "_Generic" => Token::KWGeneric,
             "__auto_type" => Token::KWAutoType,
-            "__extension__" | "_Nullable" | "_Nonnull" | "_Null_unspecified" | "__signed"
-            | "__signed__" => Token::Skip, // gcc/clang extensions — skip
+            "__extension__" | "_Nullable" | "_Nonnull" | "_Null_unspecified" => Token::Skip, // gcc/clang extensions — skip
             "__asm__" | "__asm" | "asm" => {
                 self.skip_whitespace_and_comments()?;
                 loop {
@@ -1884,6 +1883,19 @@ mod tests {
             tokens
                 .iter()
                 .filter(|tok| matches!(tok, Token::ULongLiteral(42)))
+                .count(),
+            2
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lexes_gnu_signed_aliases_as_signed_keyword() -> Result<(), String> {
+        let tokens = lex("__signed char a; __signed__ int b;")?;
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|tok| matches!(tok, Token::KWSigned))
                 .count(),
             2
         );

@@ -25670,6 +25670,26 @@ fn rejects_incompatible_utf_string_pointer_assignments() {
             "utf16-from-wide",
             "unsigned short *p = L\"x\";\nint main(void) { return p != 0; }\n",
         ),
+        (
+            "global-pointer-array-char-from-utf16",
+            "char *p[] = { u\"x\" };\nint main(void) { return p[0] != 0; }\n",
+        ),
+        (
+            "global-pointer-struct-char-from-utf16",
+            "struct S { char *p; } s = { u\"x\" };\nint main(void) { return s.p != 0; }\n",
+        ),
+        (
+            "global-designated-pointer-struct-char-from-utf16",
+            "struct S { char *p; } s = { .p = u\"x\" };\nint main(void) { return s.p != 0; }\n",
+        ),
+        (
+            "local-pointer-array-char-from-utf16",
+            "int main(void) { char *p[] = { u\"x\" }; return p[0] != 0; }\n",
+        ),
+        (
+            "local-pointer-struct-char-from-utf16",
+            "int main(void) { struct S { char *p; } s = { u\"x\" }; return s.p != 0; }\n",
+        ),
     ] {
         let src = TempPath::new(&format!("bad-utf-string-pointer-{name}"), "c");
         let exe = TempPath::new(&format!("bad-utf-string-pointer-{name}"), "bin");

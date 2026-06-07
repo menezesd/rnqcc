@@ -502,6 +502,18 @@ impl TackyGen {
         Ok(())
     }
 
+    fn assert_pointer_initializer_assignable(
+        &self,
+        target: &FullType,
+        init: &Exp,
+    ) -> TackyResult<()> {
+        if matches!(target, FullType::Pointer(_)) {
+            let src = self.typeof_exp(init);
+            self.assert_assignable_exp_full_type(target, &src, init, "initializer")?;
+        }
+        Ok(())
+    }
+
     fn declaration_is_pointer(vd: &VarDeclaration) -> bool {
         matches!(vd.decl_full_type, Some(FullType::Pointer(_))) || vd.var_type == CType::Pointer
     }
@@ -1718,7 +1730,11 @@ impl TackyGen {
                 },
             ) => {
                 self.compatible_full_types(dst_ret, src_ret)
-                    && (Self::has_unspecified_function_params(dst_params, *dst_variadic)
+                    && (*dst_variadic == *src_variadic
+                        && (dst_params == src_params
+                            || self.canonical_param_full_types(dst_params)
+                                == self.canonical_param_full_types(src_params))
+                        || Self::has_unspecified_function_params(dst_params, *dst_variadic)
                         || Self::has_unspecified_function_params(src_params, *src_variadic))
             }
             (FullType::Pointer(dst_inner), FullType::Pointer(src_inner)) => {
@@ -10942,6 +10958,7 @@ impl TackyGen {
                 self.emit_struct_copy_ptr_to_ptr(src_addr, target_addr, struct_size);
             }
             _ => {
+                self.assert_pointer_initializer_assignable(target_ft, value)?;
                 let target_type = target_ft.to_ctype();
                 let (val, val_type) = self.emit_exp(value.clone())?;
                 let val_conv = self.convert_to(val, val_type, target_type);
@@ -11398,10 +11415,12 @@ impl TackyGen {
                 }
             }
             (FullType::Pointer(_), Exp::StringLiteral(s)) => {
+                self.assert_pointer_initializer_assignable(base_ft, init)?;
                 let label = self.make_string_constant(s);
                 builder.put(base_offset, StaticInit::PointerInit(label))?;
             }
             (FullType::Pointer(_), Exp::WideStringLiteral(s)) => {
+                self.assert_pointer_initializer_assignable(base_ft, init)?;
                 let label = self.make_raw_string_constant(
                     wide_string_bytes_with_null(s),
                     FullType::Array {
@@ -11413,6 +11432,7 @@ impl TackyGen {
                 builder.put(base_offset, StaticInit::PointerInit(label))?;
             }
             (FullType::Pointer(_), Exp::Utf16StringLiteral(s)) => {
+                self.assert_pointer_initializer_assignable(base_ft, init)?;
                 let label = self.make_raw_string_constant(
                     utf16_string_bytes_with_null(s),
                     FullType::Array {
@@ -11424,6 +11444,7 @@ impl TackyGen {
                 builder.put(base_offset, StaticInit::PointerInit(label))?;
             }
             (FullType::Pointer(_), Exp::Utf32StringLiteral(s)) => {
+                self.assert_pointer_initializer_assignable(base_ft, init)?;
                 let label = self.make_raw_string_constant(
                     utf32_string_bytes_with_null(s),
                     FullType::Array {
@@ -11446,6 +11467,7 @@ impl TackyGen {
                 }
             }
             (FullType::Pointer(_), _) => {
+                self.assert_pointer_initializer_assignable(base_ft, init)?;
                 if let Some(ptr_init) = self.static_pointer_initializer(init) {
                     builder.put(base_offset, ptr_init)?;
                 } else {
@@ -11990,6 +12012,10 @@ impl TackyGen {
                         }
                     } else {
                         // Scalar first member — use first element
+                        self.assert_pointer_initializer_assignable(
+                            &mem.member_full_type,
+                            &elems[0],
+                        )?;
                         let (val, val_type) = self.emit_exp(elems[0].clone())?;
                         let val_conv = self.convert_to(val, val_type, mem.member_type);
                         if mem.bit_width.is_some() {
@@ -12175,6 +12201,10 @@ impl TackyGen {
                                                     (member.offset + inner_mem.offset) as i64,
                                                 )?;
                                             } else {
+                                                self.assert_pointer_initializer_assignable(
+                                                    &inner_mem.member_full_type,
+                                                    sub_elem,
+                                                )?;
                                                 let (val, val_type) =
                                                     self.emit_exp(sub_elem.clone())?;
                                                 let target_type = inner_mem.member_type;
@@ -12188,6 +12218,10 @@ impl TackyGen {
                                                 });
                                             }
                                         } else {
+                                            self.assert_pointer_initializer_assignable(
+                                                &inner_mem.member_full_type,
+                                                sub_elem,
+                                            )?;
                                             let (val, val_type) =
                                                 self.emit_exp(sub_elem.clone())?;
                                             let target_type = inner_mem.member_type;
@@ -12203,6 +12237,10 @@ impl TackyGen {
                                 }
                             }
                         } else {
+                            self.assert_pointer_initializer_assignable(
+                                &member.member_full_type,
+                                elem,
+                            )?;
                             let (val, val_type) = self.emit_exp(elem.clone())?;
                             let target_type = member.member_type;
                             let val_conv = self.convert_to(val, val_type, target_type);

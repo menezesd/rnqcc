@@ -3992,14 +3992,6 @@ fn pp_location(file: &str, line: usize, message: impl AsRef<str>) -> String {
     format!("{}:{}: {}", file, line, message.as_ref())
 }
 
-fn pp_current_location(
-    logical_file: &str,
-    current_line_number: usize,
-    message: impl AsRef<str>,
-) -> String {
-    pp_location(logical_file, current_line_number, message)
-}
-
 fn push_line_marker(out: &mut String, line: usize, file: &str) {
     out.push_str(&format!("# {} \"{}\"\n", line, escape_c_string(file)));
 }
@@ -5449,12 +5441,16 @@ fn internal_preprocess_source(
             {
                 continue;
             }
-            let tokens = preprocess::lexer::lex(line)?;
-            if let Some(directive) = preprocess::directive::parse_directive_tokens(&tokens)? {
+            let tokens = preprocess::lexer::lex(line)
+                .map_err(|err| pp_location(&logical_file, current_line_number, err))?;
+            if let Some(directive) = preprocess::directive::parse_directive_tokens(&tokens)
+                .map_err(|err| pp_location(&logical_file, current_line_number, err))?
+            {
                 use preprocess::directive::Directive;
 
                 if !matches!(directive, Directive::Pragma { .. }) {
-                    check_poisoned_tokens(&tokens, context)?;
+                    check_poisoned_tokens(&tokens, context)
+                        .map_err(|err| pp_location(&logical_file, current_line_number, err))?;
                 }
 
                 match directive {
@@ -5484,7 +5480,8 @@ fn internal_preprocess_source(
                                     include_paths: context.include_paths,
                                     include_level,
                                 },
-                            )?
+                            )
+                            .map_err(|err| pp_location(&logical_file, current_line_number, err))?
                         } else {
                             false
                         };
@@ -5503,11 +5500,7 @@ fn internal_preprocess_source(
                             } else {
                                 "#elifdef without #if".to_string()
                             };
-                            return Err(pp_current_location(
-                                &logical_file,
-                                current_line_number,
-                                message,
-                            ));
+                            return Err(pp_location(&logical_file, current_line_number, message));
                         };
                         if frame.saw_else {
                             let message = if negated {
@@ -5515,11 +5508,7 @@ fn internal_preprocess_source(
                             } else {
                                 "#elifdef after #else".to_string()
                             };
-                            return Err(pp_current_location(
-                                &logical_file,
-                                current_line_number,
-                                message,
-                            ));
+                            return Err(pp_location(&logical_file, current_line_number, message));
                         }
                         if !frame.parent_active || frame.branch_taken {
                             frame.condition_active = false;
@@ -5532,14 +5521,14 @@ fn internal_preprocess_source(
                     }
                     Directive::Elif { expr } => {
                         let Some(frame) = conditionals.last_mut() else {
-                            return Err(pp_current_location(
+                            return Err(pp_location(
                                 &logical_file,
                                 current_line_number,
                                 "#elif without #if",
                             ));
                         };
                         if frame.saw_else {
-                            return Err(pp_current_location(
+                            return Err(pp_location(
                                 &logical_file,
                                 current_line_number,
                                 "#elif after #else",
@@ -5559,21 +5548,22 @@ fn internal_preprocess_source(
                                     include_paths: context.include_paths,
                                     include_level,
                                 },
-                            )?;
+                            )
+                            .map_err(|err| pp_location(&logical_file, current_line_number, err))?;
                             frame.branch_taken = frame.condition_active;
                         }
                         continue;
                     }
                     Directive::Else => {
                         let Some(frame) = conditionals.last_mut() else {
-                            return Err(pp_current_location(
+                            return Err(pp_location(
                                 &logical_file,
                                 current_line_number,
                                 "#else without #if",
                             ));
                         };
                         if frame.saw_else {
-                            return Err(pp_current_location(
+                            return Err(pp_location(
                                 &logical_file,
                                 current_line_number,
                                 "duplicate #else",
@@ -5586,7 +5576,7 @@ fn internal_preprocess_source(
                     }
                     Directive::Endif => {
                         if conditionals.pop().is_none() {
-                            return Err(pp_current_location(
+                            return Err(pp_location(
                                 &logical_file,
                                 current_line_number,
                                 "#endif without #if",
@@ -5595,7 +5585,9 @@ fn internal_preprocess_source(
                         continue;
                     }
                     Directive::Empty => {
-                        if let Some((line_number, filename)) = parse_line_marker_tokens(&tokens)? {
+                        if let Some((line_number, filename)) = parse_line_marker_tokens(&tokens)
+                            .map_err(|err| pp_location(&logical_file, current_line_number, err))?
+                        {
                             next_logical_line = line_number;
                             if let Some(filename) = filename {
                                 logical_file = filename;
@@ -5618,7 +5610,8 @@ fn internal_preprocess_source(
                             current_line_number,
                             include_level,
                             state,
-                        )?;
+                        )
+                        .map_err(|err| pp_location(&logical_file, current_line_number, err))?;
                         if let Some(name) = forced_virtual_header_name(&spec, include_next) {
                             emit_virtual_include(
                                 &mut out,
@@ -5685,8 +5678,10 @@ fn internal_preprocess_source(
                         }
                         let new_def = token_macro_def_to_string(def);
                         if let Some(existing) = macros.get(&name) {
-                            if !macro_defs_equivalent(existing, &new_def)? {
-                                return Err(pp_current_location(
+                            if !macro_defs_equivalent(existing, &new_def).map_err(|err| {
+                                pp_location(&logical_file, current_line_number, err)
+                            })? {
+                                return Err(pp_location(
                                     &logical_file,
                                     current_line_number,
                                     format!("macro {} redefined", name),
@@ -5734,7 +5729,8 @@ fn internal_preprocess_source(
                             current_line_number,
                             include_level,
                             state,
-                        )?;
+                        )
+                        .map_err(|err| pp_location(&logical_file, current_line_number, err))?;
                         next_logical_line = line_number;
                         if let Some(filename) = filename {
                             logical_file = filename;
@@ -5749,10 +5745,12 @@ fn internal_preprocess_source(
                             current_line_number,
                             include_level,
                             state,
-                        )?;
+                        )
+                        .map_err(|err| pp_location(&logical_file, current_line_number, err))?;
                         let pragma = preprocess::emit::emit_tokens(&expanded);
                         let pragma = pragma.trim();
-                        handle_internal_pragma(pragma, &canonical, macros, context)?;
+                        handle_internal_pragma(pragma, &canonical, macros, context)
+                            .map_err(|err| pp_location(&logical_file, current_line_number, err))?;
                         continue;
                     }
                     Directive::Ident => continue,

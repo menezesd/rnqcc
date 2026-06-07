@@ -21090,6 +21090,78 @@ fn internal_cpp_macro_redefinitions_include_source_location() {
 }
 
 #[test]
+fn internal_cpp_if_expression_errors_include_source_location() {
+    let src = temp_file("internal-cpp-located-if-expression", "c");
+    std::fs::write(&src, "\n#if 1 / 0\n#endif\n").expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains(&format!("{}:2:", src.display())),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("division by zero in #if expression"),
+        "{stderr}"
+    );
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn internal_cpp_include_operand_errors_include_source_location() {
+    let src = temp_file("internal-cpp-located-include-operand", "c");
+    std::fs::write(&src, "\n#include <>\n").expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains(&format!("{}:2:", src.display())),
+        "{stderr}"
+    );
+    assert!(stderr.contains("malformed include operand"), "{stderr}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn internal_cpp_line_marker_errors_include_source_location() {
+    let src = temp_file("internal-cpp-located-line-marker", "c");
+    std::fs::write(&src, "\n# 12 badflag\n").expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains(&format!("{}:2:", src.display())),
+        "{stderr}"
+    );
+    assert!(stderr.contains("malformed line marker"), "{stderr}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn internal_cpp_if_handles_large_integer_constants() {
     let src = temp_file("internal-cpp-large-if", "c");
     std::fs::write(

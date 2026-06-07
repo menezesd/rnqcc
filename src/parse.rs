@@ -7026,6 +7026,23 @@ mod tests {
     }
 
     #[test]
+    fn parses_gnu_qualifier_aliases_as_type_qualifiers() -> Result<(), String> {
+        let program =
+            parse_source("__const int * __volatile p;\n__const__ int * __volatile__ q;\n")?;
+        for declaration in &program.declarations {
+            let Declaration::VarDecl(var) = declaration else {
+                return Err("expected a variable declaration".to_string());
+            };
+            assert_eq!(var.var_type, CType::Pointer);
+            assert_eq!(
+                var.decl_full_type,
+                Some(FullType::Pointer(Box::new(FullType::Scalar(CType::Int))))
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn parses_builtin_float_type_names_as_double() -> Result<(), String> {
         let program = parse_source("extern _Float16 f(_Float64 x, __float128 y, __fp16 z);\n")?;
         let Declaration::FunDecl(func) = &program.declarations[0] else {

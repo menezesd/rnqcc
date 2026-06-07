@@ -1085,8 +1085,8 @@ impl Lexer {
             "extern" => Token::KWExtern,
             "typedef" => Token::KWTypedef,
             "enum" => Token::KWEnum,
-            "const" => Token::KWConst,
-            "volatile" => Token::KWVolatile,
+            "const" | "__const" | "__const__" => Token::KWConst,
+            "volatile" | "__volatile" | "__volatile__" => Token::KWVolatile,
             "inline" => Token::KWInline,
             "__inline" => Token::KWInline,
             "__inline__" => Token::KWInline,
@@ -1896,6 +1896,26 @@ mod tests {
             tokens
                 .iter()
                 .filter(|tok| matches!(tok, Token::KWSigned))
+                .count(),
+            2
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lexes_gnu_qualifier_aliases_as_keywords() -> Result<(), String> {
+        let tokens = lex("__const int * __volatile p; __const__ int * __volatile__ q;")?;
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|tok| matches!(tok, Token::KWConst))
+                .count(),
+            2
+        );
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|tok| matches!(tok, Token::KWVolatile))
                 .count(),
             2
         );

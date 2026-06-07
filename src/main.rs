@@ -4109,6 +4109,56 @@ impl<'a> IfExprParser<'a> {
         Some(self.chars[start..self.pos].iter().collect())
     }
 
+    fn integer_suffix_unsigned(suffix: &str, literal: &str) -> Result<bool, String> {
+        if suffix.is_empty() {
+            return Ok(false);
+        }
+        let suffix = suffix.to_ascii_lowercase();
+        if suffix.ends_with("wb") {
+            return match suffix.strip_suffix("wb").unwrap_or_default() {
+                "" => Ok(false),
+                "u" => Ok(true),
+                _ => Err(format!(
+                    "invalid integer literal suffix in #if expression near '{}'",
+                    literal
+                )),
+            };
+        }
+        if suffix.contains('w') || suffix.contains('b') {
+            return Err(format!(
+                "invalid integer literal suffix in #if expression near '{}'",
+                literal
+            ));
+        }
+        if suffix.contains('z') {
+            return match suffix.as_str() {
+                "z" => Ok(false),
+                "uz" | "zu" => Ok(true),
+                _ => Err(format!(
+                    "invalid integer literal suffix in #if expression near '{}'",
+                    literal
+                )),
+            };
+        }
+
+        let unsigned_count = suffix.chars().filter(|ch| *ch == 'u').count();
+        if unsigned_count > 1 {
+            return Err(format!(
+                "invalid integer literal suffix in #if expression near '{}'",
+                literal
+            ));
+        }
+        let without_u = suffix.replace('u', "");
+        if matches!(without_u.as_str(), "" | "l" | "ll") {
+            Ok(unsigned_count == 1)
+        } else {
+            Err(format!(
+                "invalid integer literal suffix in #if expression near '{}'",
+                literal
+            ))
+        }
+    }
+
     fn number(&mut self) -> Result<Option<IfValue>, String> {
         self.skip_ws();
         let start = self.pos;
@@ -4163,15 +4213,6 @@ impl<'a> IfExprParser<'a> {
         let digits_end = self.pos;
         let suffix_start = self.pos;
         while self.pos < self.chars.len() && self.chars[self.pos].is_ascii_alphabetic() {
-            if !matches!(
-                self.chars[self.pos],
-                'u' | 'U' | 'l' | 'L' | 'z' | 'Z' | 'w' | 'W' | 'b' | 'B'
-            ) {
-                return Err(format!(
-                    "invalid integer literal suffix in #if expression near '{}'",
-                    self.chars[start..=self.pos].iter().collect::<String>()
-                ));
-            }
             self.pos += 1;
         }
         let suffix = self.chars[suffix_start..self.pos]
@@ -4192,7 +4233,9 @@ impl<'a> IfExprParser<'a> {
             .collect::<String>();
         let value = u128::from_str_radix(&digits, base)
             .map_err(|_| format!("invalid integer literal in #if expression: {}", digits))?;
-        let unsigned = suffix.chars().any(|ch| matches!(ch, 'u' | 'U')) || value > i64::MAX as u128;
+        let literal = self.chars[start..self.pos].iter().collect::<String>();
+        let unsigned =
+            Self::integer_suffix_unsigned(&suffix, &literal)? || value > i64::MAX as u128;
         Ok(Some(if unsigned {
             IfValue::unsigned(value)
         } else {

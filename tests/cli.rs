@@ -13576,7 +13576,7 @@ fn internal_cpp_accepts_c23_integer_suffixes_in_if_expressions() {
     let src = temp_file("internal-cpp-c23-if-suffixes", "c");
     std::fs::write(
         &src,
-        "#if 1z + 2Z == 3\n\
+        "#if 1z + 2Z + 3uz + 4zu == 10\n\
          int size_suffix_value = 11;\n\
          #endif\n\
          #if 7wb == 7 && 8uwb == 8 && 9UWB == 9\n\
@@ -13599,6 +13599,39 @@ fn internal_cpp_accepts_c23_integer_suffixes_in_if_expressions() {
     assert!(stdout.contains("int bitint_suffix_value = 13;"), "{stdout}");
 
     let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn internal_cpp_rejects_malformed_integer_suffixes_in_if_expressions() {
+    for (name, expr) in [
+        ("internal-cpp-bad-if-suffix-repeat-z", "1zz"),
+        ("internal-cpp-bad-if-suffix-mixed-z-wb", "1zzwb"),
+        ("internal-cpp-bad-if-suffix-long-z", "1llz"),
+        ("internal-cpp-bad-if-suffix-duplicate-u", "1uuwb"),
+        ("internal-cpp-bad-if-suffix-trailing-b", "1b"),
+    ] {
+        let src = temp_file(name, "c");
+        std::fs::write(&src, format!("#if {expr}\nint value = 1;\n#endif\n"))
+            .expect("failed to write source");
+
+        let output = Command::new(rnqcc())
+            .arg("--internal-cpp")
+            .arg("-nostdinc")
+            .arg("-E")
+            .arg(&src)
+            .output()
+            .expect("failed to run rnqcc");
+        let status = output.status;
+        let stderr = stderr(output);
+
+        let _ = std::fs::remove_file(src);
+
+        assert!(!status.success(), "{expr}: {stderr}");
+        assert!(
+            stderr.contains("invalid integer literal suffix in #if expression"),
+            "{expr}: {stderr}"
+        );
+    }
 }
 
 #[test]
@@ -20805,6 +20838,8 @@ fn internal_cpp_exposes_common_predefined_limit_macros() {
          #if __SIZEOF_LONG_LONG__ != 8 || __SIZEOF_BOOL__ != 1\n#error bad sizeof macro\n#endif\n\
          #if __INT8_MAX__ != 127 || __UINT8_MAX__ != 255 || __INT16_MAX__ != 32767 || __UINT16_MAX__ != 65535\n#error bad fixed-width max\n#endif\n\
          #if __INT32_MAX__ != 2147483647 || __UINT32_MAX__ != 4294967295U || __INT64_MAX__ != 9223372036854775807L\n#error bad 32/64 max\n#endif\n\
+         #if __INTMAX_MAX__ != 9223372036854775807L || __UINTMAX_MAX__ != 18446744073709551615UL\n#error bad intmax max\n#endif\n\
+         #if __UINTMAX_MAX__ != -1\n#error bad uintmax conversion\n#endif\n\
          __INT8_TYPE__ signed_byte;\n\
          __UINTPTR_TYPE__ uintptr_value;\n\
          char *version = __VERSION__;\n\

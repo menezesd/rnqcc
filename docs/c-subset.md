@@ -96,6 +96,11 @@ assembly/linking.
   `__typeof_unqual__` are accepted for type-name and expression operands; rnqcc
   does not model C qualifiers, so the unqualified form shares the same internal
   representation as `typeof`.
+- C23 `_BitInt(N)` is accepted only for widths that map exactly to existing
+  storage and lowering paths: signed/unsigned 32, 64, and 128 bits. Other
+  widths, duplicate `_BitInt` specifiers, and combinations with another
+  arithmetic type specifier are rejected instead of being approximated with a
+  wider standard integer type.
 - Common `__atomic_*_fetch`, `__atomic_fetch_*`, `__sync_*_and_fetch`,
   `__sync_fetch_and_*`, `__atomic_load_n`, `__atomic_store_n`,
   `__atomic_exchange_n`,
@@ -153,6 +158,11 @@ assembly/linking.
 - The internal preprocessor intentionally does not exactly mirror every hosted
   compiler predefined macro, compiler-specific header directive, or macro
   expansion corner case yet.
+- Full arbitrary-width `_BitInt(N)` needs a real bit-precise integer type in the
+  rich type representation, usual arithmetic conversions that preserve precision
+  and signedness, constant folding with unsigned modulo behavior at result
+  widths, cast/assignment truncation and sign extension, TACKY value metadata,
+  static initializer handling, and backend lowering for non-native widths.
 - AArch64 code generation favors correctness over register allocation quality and
   currently emits stack-heavy assembly.
 

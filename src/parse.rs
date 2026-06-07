@@ -2205,6 +2205,9 @@ impl Parser {
                 Some(Token::Identifier(name)) if name == "_BitInt" && bitint_width.is_none() => {
                     bitint_width = Some(self.parse_bitint_width()?);
                 }
+                Some(Token::Identifier(name)) if name == "_BitInt" => {
+                    return Err(self.format_error("duplicate _BitInt type specifier"));
+                }
                 Some(Token::KWNoreturn) | Some(Token::AttributeNoreturn) => {
                     self.pending_noreturn = true;
                     self.advance()?;
@@ -2784,6 +2787,9 @@ impl Parser {
                 }
                 Some(Token::Identifier(name)) if name == "_BitInt" && bitint_width.is_none() => {
                     bitint_width = Some(self.parse_bitint_width()?);
+                }
+                Some(Token::Identifier(name)) if name == "_BitInt" => {
+                    return Err(self.format_error("duplicate _BitInt type specifier"));
                 }
                 Some(Token::KWAlignAs) => {
                     let alignment = self.parse_alignment_specifier()?;
@@ -7405,6 +7411,22 @@ mod tests {
             let err = require_err(parse_source_err(src), "parse should fail")?;
             assert!(
                 err.contains("_BitInt cannot be combined with another type specifier"),
+                "{src}: {err}"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_duplicate_bitint_specifiers() -> Result<(), String> {
+        for src in [
+            "_BitInt(32) _BitInt(64) x;\n",
+            "int x = sizeof(_BitInt(32) _BitInt(64));\n",
+        ] {
+            let err = require_err(parse_source_err(src), "parse should fail")?;
+            assert!(
+                err.contains("duplicate _BitInt type specifier"),
                 "{src}: {err}"
             );
         }

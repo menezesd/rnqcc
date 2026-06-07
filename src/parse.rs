@@ -413,6 +413,7 @@ impl Parser {
                 | "_Decimal32"
                 | "_Decimal64"
                 | "_Decimal128"
+                | "__bf16"
         )
     }
 
@@ -2136,13 +2137,16 @@ impl Parser {
                 }
                 Some(Token::Identifier(name))
                     if Self::is_builtin_float_type_name(&name)
+                        && self.lookup_visible_typedef(&name).is_none()
                         && !has_int
                         && !has_long
                         && !has_int128
                         && !has_void
                         && !has_unsigned
                         && !has_signed
-                        && !has_char =>
+                        && !has_char
+                        && !has_float
+                        && !has_double =>
                 {
                     self.advance()?;
                     has_double = true;
@@ -2379,11 +2383,6 @@ impl Parser {
                     self.last_typedef_full_type = None;
                     return Ok((sc, CType::Bool));
                 }
-                if Self::is_builtin_float_type_name(name) {
-                    self.advance()?;
-                    self.last_typedef_full_type = None;
-                    return Ok((sc, CType::Double));
-                }
                 if Self::is_builtin_int128_type_name(name) {
                     self.advance()?;
                     self.last_typedef_full_type = None;
@@ -2408,6 +2407,11 @@ impl Parser {
                             Self::merge_alignment(self.pending_alignment, alignment);
                     }
                     return Ok((sc, ct));
+                }
+                if Self::is_builtin_float_type_name(name) {
+                    self.advance()?;
+                    self.last_typedef_full_type = None;
+                    return Ok((sc, CType::Double));
                 }
             }
             if saw_complex {
@@ -2645,19 +2649,6 @@ impl Parser {
         }
         // Check for typedef name before parsing int/long/etc.
         if let Some(Token::Identifier(name)) = self.peek() {
-            if Self::is_builtin_float_type_name(name) {
-                self.advance()?;
-                let has_complex = self.peek().is_some_and(
-                    |tok| matches!(tok, Token::Identifier(name) if Self::is_complex_type_name(name)),
-                );
-                if has_complex {
-                    self.advance()?;
-                    self.last_typedef_full_type = Some(Self::complex_full_type(CType::Double));
-                } else {
-                    self.last_typedef_full_type = None;
-                }
-                return Ok(CType::Double);
-            }
             if Self::is_builtin_int128_type_name(name) {
                 self.advance()?;
                 self.last_typedef_full_type = None;
@@ -2677,6 +2668,19 @@ impl Parser {
                 self.last_typedef_vla_size = vla_size;
                 self.last_type_was_enum = is_enum;
                 return Ok(ct);
+            }
+            if Self::is_builtin_float_type_name(name) {
+                self.advance()?;
+                let has_complex = self.peek().is_some_and(
+                    |tok| matches!(tok, Token::Identifier(name) if Self::is_complex_type_name(name)),
+                );
+                if has_complex {
+                    self.advance()?;
+                    self.last_typedef_full_type = Some(Self::complex_full_type(CType::Double));
+                } else {
+                    self.last_typedef_full_type = None;
+                }
+                return Ok(CType::Double);
             }
         }
         self.last_typedef_full_type = None;
@@ -7010,6 +7014,37 @@ mod tests {
         };
         assert_eq!(func.return_type, CType::Double);
         assert_eq!(func.params[0].1, CType::Double);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_builtin_float_names_as_typedef_declarators_after_float() -> Result<(), String> {
+        let program = parse_source("typedef float _Float32;\n_Float32 x;\n")?;
+        assert_eq!(program.declarations.len(), 2);
+        let Declaration::VarDecl(var) = &program.declarations[1] else {
+            return Err("expected variable declaration".to_string());
+        };
+        assert_eq!(var.var_type, CType::Float);
+        assert_eq!(var.decl_full_type, Some(FullType::Scalar(CType::Float)));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_bfloat16_vector_typedefs() -> Result<(), String> {
+        let program =
+            parse_source("typedef __bf16 __v16bf __attribute__((vector_size(32)));\n__v16bf x;\n")?;
+        let Declaration::VarDecl(var) = &program.declarations[1] else {
+            return Err("expected variable declaration".to_string());
+        };
+        assert_eq!(var.var_type, CType::Double);
+        assert_eq!(
+            var.decl_full_type,
+            Some(FullType::Vector {
+                elem: Box::new(FullType::Scalar(CType::Double)),
+                lanes: 4,
+                complex: false,
+            })
+        );
         Ok(())
     }
 

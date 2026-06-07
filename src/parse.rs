@@ -414,6 +414,9 @@ impl Parser {
                 | "_Decimal64"
                 | "_Decimal128"
                 | "__bf16"
+                | "__float128"
+                | "__float80"
+                | "__fp16"
         )
     }
 
@@ -7008,24 +7011,33 @@ mod tests {
 
     #[test]
     fn parses_builtin_float_type_names_as_double() -> Result<(), String> {
-        let program = parse_source("extern _Float16 f(_Float64 x);\n")?;
+        let program = parse_source("extern _Float16 f(_Float64 x, __float128 y, __fp16 z);\n")?;
         let Declaration::FunDecl(func) = &program.declarations[0] else {
             return Err("expected function declaration".to_string());
         };
         assert_eq!(func.return_type, CType::Double);
         assert_eq!(func.params[0].1, CType::Double);
+        assert_eq!(func.params[1].1, CType::Double);
+        assert_eq!(func.params[2].1, CType::Double);
         Ok(())
     }
 
     #[test]
     fn parses_builtin_float_names_as_typedef_declarators_after_float() -> Result<(), String> {
-        let program = parse_source("typedef float _Float32;\n_Float32 x;\n")?;
-        assert_eq!(program.declarations.len(), 2);
-        let Declaration::VarDecl(var) = &program.declarations[1] else {
+        let program = parse_source(
+            "typedef float _Float32;\ntypedef float __fp16;\n_Float32 x;\n__fp16 y;\n",
+        )?;
+        assert_eq!(program.declarations.len(), 4);
+        let Declaration::VarDecl(x) = &program.declarations[2] else {
             return Err("expected variable declaration".to_string());
         };
-        assert_eq!(var.var_type, CType::Float);
-        assert_eq!(var.decl_full_type, Some(FullType::Scalar(CType::Float)));
+        assert_eq!(x.var_type, CType::Float);
+        assert_eq!(x.decl_full_type, Some(FullType::Scalar(CType::Float)));
+        let Declaration::VarDecl(y) = &program.declarations[3] else {
+            return Err("expected variable declaration".to_string());
+        };
+        assert_eq!(y.var_type, CType::Float);
+        assert_eq!(y.decl_full_type, Some(FullType::Scalar(CType::Float)));
         Ok(())
     }
 

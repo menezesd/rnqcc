@@ -1314,6 +1314,7 @@ pub enum Token {
     KWShort,
     KWNoreturn,
     KWTypeOf,
+    KWTypeOfUnqual,
     AttributeAligned(String),
     AttributeAlignedNoreturn(String),
     AttributePacked,

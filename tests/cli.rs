@@ -10548,7 +10548,12 @@ int main(void) {
     typeof(*ptr) from_pointer = add_with_typeof_param(copy);
     __typeof_unqual__(const int) unqualified_type_name = 3;
     typeof_unqual(base) unqualified_expression = 4;
-    return base + from_pointer + diff + function_result + unqualified_type_name + unqualified_expression - 13;
+    int typeof_keeps_pointer_qualifier = !__builtin_types_compatible_p(typeof(const int *), int *);
+    int typeof_unqual_strips_pointer_qualifier = __builtin_types_compatible_p(typeof_unqual(const int *), int *);
+    int underscored_unqual_strips_pointer_qualifier = __builtin_types_compatible_p(__typeof_unqual__(const int *), int *);
+    return base + from_pointer + diff + function_result + unqualified_type_name + unqualified_expression
+        + typeof_keeps_pointer_qualifier + typeof_unqual_strips_pointer_qualifier
+        + underscored_unqual_strips_pointer_qualifier - 16;
 }
 "#,
     )
@@ -10790,6 +10795,9 @@ int main(void) {
     if (d != (float _Complex){5.0f, -10.0f}) return 2;
     if ((float _Complex){0.0f, 0.0f}) return 3;
     if (!((float _Complex){1.0f, 0.0f})) return 4;
+    if (((float _Complex){0.0f, 0.0f}) || ((float _Complex){0.0f, 0.0f})) return 5;
+    if (!(((float _Complex){0.0f, 1.0f}) && ((float _Complex){1.0f, 0.0f}))) return 6;
+    if (((float _Complex){0.0f, 0.0f}) && ((float _Complex){1.0f, 0.0f})) return 7;
     return 42;
 }
 "#,
@@ -13561,6 +13569,36 @@ fn internal_cpp_handles_defined_elif_undef_and_expressions() {
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_accepts_c23_integer_suffixes_in_if_expressions() {
+    let src = temp_file("internal-cpp-c23-if-suffixes", "c");
+    std::fs::write(
+        &src,
+        "#if 1z + 2Z == 3\n\
+         int size_suffix_value = 11;\n\
+         #endif\n\
+         #if 7wb == 7 && 8uwb == 8 && 9UWB == 9\n\
+         int bitint_suffix_value = 13;\n\
+         #endif\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-nostdinc")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("int size_suffix_value = 11;"), "{stdout}");
+    assert!(stdout.contains("int bitint_suffix_value = 13;"), "{stdout}");
+
+    let _ = std::fs::remove_file(src);
 }
 
 #[test]

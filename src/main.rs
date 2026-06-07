@@ -4120,7 +4120,10 @@ impl<'a> IfExprParser<'a> {
 
         let digits_end = self.pos;
         while self.pos < self.chars.len() && self.chars[self.pos].is_ascii_alphabetic() {
-            if !matches!(self.chars[self.pos], 'u' | 'U' | 'l' | 'L') {
+            if !matches!(
+                self.chars[self.pos],
+                'u' | 'U' | 'l' | 'L' | 'z' | 'Z' | 'w' | 'W' | 'b' | 'B'
+            ) {
                 return Err(format!(
                     "invalid integer literal suffix in #if expression near '{}'",
                     self.chars[start..=self.pos].iter().collect::<String>()

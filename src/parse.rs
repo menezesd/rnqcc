@@ -1333,12 +1333,16 @@ impl Parser {
                 .lookup_visible_typedef(name)
                 .filter(|info| info.is_enum)
                 .map(|_| name.clone()),
-            [Token::KWTypeOf, Token::OpenParen, Token::Identifier(name), Token::CloseParen] => self
-                .lookup_visible_typedef(name)
-                .filter(|info| info.is_enum)
-                .map(|_| name.clone()),
+            [Token::KWTypeOf | Token::KWTypeOfUnqual, Token::OpenParen, Token::Identifier(name), Token::CloseParen] => {
+                self.lookup_visible_typedef(name)
+                    .filter(|info| info.is_enum)
+                    .map(|_| name.clone())
+            }
             _ => None,
         };
+
+        let pointee_qualified =
+            pointee_qualified && !matches!(tokens.first(), Some(Token::KWTypeOfUnqual));
 
         CompatTypeMeta {
             pointee_qualified,
@@ -1480,6 +1484,9 @@ impl Parser {
             _ => return Err(self.format_error("expected _BitInt")),
         }
         self.expect_token(Token::OpenParen)?;
+        if self.at(&Token::CloseParen) {
+            return Err(self.format_error("expected integer constant _BitInt width"));
+        }
         let width_exp = self.parse_expression()?;
         self.expect_token(Token::CloseParen)?;
         self.eval_integer_constant_exp_with_layout(&width_exp)
@@ -1671,7 +1678,10 @@ impl Parser {
     }
 
     fn parse_typeof_full_type(&mut self) -> ParseResult<FullType> {
-        self.expect_token(Token::KWTypeOf)?;
+        if !matches!(self.peek(), Some(Token::KWTypeOf | Token::KWTypeOfUnqual)) {
+            return Err(self.format_error("expected typeof"));
+        }
+        self.advance()?;
         self.expect_token(Token::OpenParen)?;
         let full_type = if self.is_type_keyword_at_pos() {
             self.parse_type_name_full()?
@@ -2273,7 +2283,7 @@ impl Parser {
                     }
                     continue;
                 }
-                Some(Token::KWTypeOf)
+                Some(Token::KWTypeOf | Token::KWTypeOfUnqual)
                     if !has_int
                         && !has_long
                         && !has_int128
@@ -2593,7 +2603,7 @@ impl Parser {
             self.advance()?;
             return Ok(CType::Void);
         }
-        if self.at(&Token::KWTypeOf) {
+        if matches!(self.peek(), Some(Token::KWTypeOf | Token::KWTypeOfUnqual)) {
             let full_type = self.parse_typeof_full_type()?;
             let ctype = full_type.to_ctype();
             self.last_typedef_full_type = Some(full_type);
@@ -2900,6 +2910,7 @@ impl Parser {
             | Token::KWBool
             | Token::KWShort
             | Token::KWTypeOf
+            | Token::KWTypeOfUnqual
             | Token::KWAutoType
             | Token::AttributePacked
             | Token::AttributePackedAligned(_)
@@ -4775,6 +4786,7 @@ impl Parser {
             | Some(Token::KWBool)
             | Some(Token::KWShort)
             | Some(Token::KWTypeOf)
+            | Some(Token::KWTypeOfUnqual)
             | Some(Token::KWAutoType)
             | Some(Token::AttributeAligned(_))
             | Some(Token::AttributeAlignedNoreturn(_))
@@ -7348,6 +7360,35 @@ mod tests {
         let err = require_err(parse_source_err("_BitInt(1) x;\n"), "parse should fail")?;
         assert!(
             err.contains("signed _BitInt width must be greater than 1"),
+            "{err}"
+        );
+
+        let err = require_err(
+            parse_source_err("unsigned _BitInt(1) x;\n"),
+            "parse should fail",
+        )?;
+        assert!(
+            err.contains("_BitInt width is not supported by an exact storage type"),
+            "{err}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_malformed_bitint_specifiers() -> Result<(), String> {
+        let err = require_err(parse_source_err("_BitInt() x;\n"), "parse should fail")?;
+        assert!(
+            err.contains("expected integer constant _BitInt width"),
+            "{err}"
+        );
+
+        let err = require_err(parse_source_err("_BitInt(-1) x;\n"), "parse should fail")?;
+        assert!(err.contains("_BitInt width must be positive"), "{err}");
+
+        let err = require_err(parse_source_err("_BitInt(foo) x;\n"), "parse should fail")?;
+        assert!(
+            err.contains("expected integer constant _BitInt width"),
             "{err}"
         );
 

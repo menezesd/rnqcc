@@ -211,14 +211,7 @@ impl Lexer {
         let chars: Vec<char> = text.chars().collect();
         let mut pos = 0;
         while pos < chars.len() {
-            if chars[pos].is_ascii_alphabetic() || chars[pos] == '_' {
-                let start = pos;
-                pos += 1;
-                while pos < chars.len() && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_')
-                {
-                    pos += 1;
-                }
-                let name: String = chars[start..pos].iter().collect();
+            if let Some(name) = Self::read_attribute_identifier(&chars, &mut pos) {
                 if !matches!(
                     name.as_str(),
                     "aligned" | "__aligned__" | "align" | "__align__"
@@ -266,14 +259,7 @@ impl Lexer {
         let chars: Vec<char> = text.chars().collect();
         let mut pos = 0;
         while pos < chars.len() {
-            if chars[pos].is_ascii_alphabetic() || chars[pos] == '_' {
-                let start = pos;
-                pos += 1;
-                while pos < chars.len() && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_')
-                {
-                    pos += 1;
-                }
-                let name: String = chars[start..pos].iter().collect();
+            if let Some(name) = Self::read_attribute_identifier(&chars, &mut pos) {
                 if !matches!(name.as_str(), "alias" | "__alias__") {
                     continue;
                 }
@@ -309,14 +295,7 @@ impl Lexer {
         let chars: Vec<char> = text.chars().collect();
         let mut pos = 0;
         while pos < chars.len() {
-            if chars[pos].is_ascii_alphabetic() || chars[pos] == '_' {
-                let start = pos;
-                pos += 1;
-                while pos < chars.len() && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_')
-                {
-                    pos += 1;
-                }
-                let name: String = chars[start..pos].iter().collect();
+            if let Some(name) = Self::read_attribute_identifier(&chars, &mut pos) {
                 if !matches!(name.as_str(), "mode" | "__mode__") {
                     continue;
                 }
@@ -353,14 +332,7 @@ impl Lexer {
         let chars: Vec<char> = text.chars().collect();
         let mut pos = 0;
         while pos < chars.len() {
-            if chars[pos].is_ascii_alphabetic() || chars[pos] == '_' {
-                let start = pos;
-                pos += 1;
-                while pos < chars.len() && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_')
-                {
-                    pos += 1;
-                }
-                let name: String = chars[start..pos].iter().collect();
+            if let Some(name) = Self::read_attribute_identifier(&chars, &mut pos) {
                 if !matches!(name.as_str(), "vector_size" | "__vector_size__") {
                     continue;
                 }
@@ -398,14 +370,7 @@ impl Lexer {
         let chars: Vec<char> = text.chars().collect();
         let mut pos = 0;
         while pos < chars.len() {
-            if chars[pos].is_ascii_alphabetic() || chars[pos] == '_' {
-                let start = pos;
-                pos += 1;
-                while pos < chars.len() && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_')
-                {
-                    pos += 1;
-                }
-                let name: String = chars[start..pos].iter().collect();
+            if let Some(name) = Self::read_attribute_identifier(&chars, &mut pos) {
                 if !matches!(name.as_str(), "deprecated" | "__deprecated__") {
                     continue;
                 }
@@ -477,14 +442,7 @@ impl Lexer {
         let chars: Vec<char> = text.chars().collect();
         let mut pos = 0;
         while pos < chars.len() {
-            if chars[pos].is_ascii_alphabetic() || chars[pos] == '_' {
-                let start = pos;
-                pos += 1;
-                while pos < chars.len() && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_')
-                {
-                    pos += 1;
-                }
-                let name: String = chars[start..pos].iter().collect();
+            if let Some(name) = Self::read_attribute_identifier(&chars, &mut pos) {
                 if names.contains(&name.as_str()) {
                     return true;
                 }
@@ -493,6 +451,19 @@ impl Lexer {
             }
         }
         false
+    }
+
+    fn read_attribute_identifier(chars: &[char], pos: &mut usize) -> Option<String> {
+        let start = *pos;
+        let first = *chars.get(*pos)?;
+        if !is_ident_start(first) {
+            return None;
+        }
+        *pos += 1;
+        while *pos < chars.len() && is_ident_continue(chars[*pos]) {
+            *pos += 1;
+        }
+        Some(chars[start..*pos].iter().collect())
     }
 
     fn consume_ascii_suffix_ignore_case(&mut self, suffix: &str) -> bool {
@@ -1827,6 +1798,22 @@ mod tests {
         assert!(tokens.contains(&Token::Identifier("α".to_string())));
         assert!(tokens.contains(&Token::Identifier("β2".to_string())));
         assert!(tokens.contains(&Token::Identifier("γ".to_string())));
+        Ok(())
+    }
+
+    #[test]
+    fn unicode_identifiers_do_not_confuse_attribute_scanners() -> Result<(), String> {
+        let tokens = lex("int α __attribute__((aligned(8))) = 0;\n\
+             int β __attribute__((γaligned(16), deprecated(\"old\"))) = 1;\n\
+             void γ(void) __attribute__((δnoreturn, noreturn));\n")?;
+
+        assert!(tokens.contains(&Token::Identifier("α".to_string())));
+        assert!(tokens.contains(&Token::AttributeAligned("8".to_string())));
+        assert!(tokens.contains(&Token::Identifier("β".to_string())));
+        assert!(tokens.contains(&Token::AttributeDeprecated(Some("old".to_string()))));
+        assert!(tokens.contains(&Token::Identifier("γ".to_string())));
+        assert!(tokens.contains(&Token::AttributeNoreturn));
+        assert!(!tokens.contains(&Token::AttributeAligned("16".to_string())));
         Ok(())
     }
 

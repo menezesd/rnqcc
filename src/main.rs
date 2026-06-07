@@ -627,11 +627,11 @@ enum MacroDef {
 }
 
 fn is_ident_start(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphabetic()
+    ch == '_' || unicode_ident::is_xid_start(ch)
 }
 
 fn is_ident_continue(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphanumeric()
+    ch == '_' || unicode_ident::is_xid_continue(ch)
 }
 
 fn splice_continued_lines(source: &str) -> String {
@@ -3969,6 +3969,9 @@ fn check_poisoned_tokens(
     tokens: &[preprocess::token::PpToken],
     context: &InternalPreprocessContext<'_>,
 ) -> Result<(), String> {
+    if context.poisoned_identifiers.is_empty() {
+        return Ok(());
+    }
     for token in tokens {
         if let preprocess::token::PpTokenKind::Ident(name) = &token.kind {
             if context.poisoned_identifiers.contains(name) {
@@ -3980,6 +3983,9 @@ fn check_poisoned_tokens(
 }
 
 fn check_poisoned_line(line: &str, context: &InternalPreprocessContext<'_>) -> Result<(), String> {
+    if context.poisoned_identifiers.is_empty() {
+        return Ok(());
+    }
     let tokens = preprocess::lexer::lex(line)?;
     check_poisoned_tokens(&tokens, context)
 }
@@ -4693,10 +4699,14 @@ fn flush_pending_source(
         pending_source.start_line,
         include_level,
         state,
-    )?;
-    let (expanded, pragmas) = process_pragma_operators(&expanded)?;
+    )
+    .map_err(|err| pp_location(&pending_source.logical_file, pending_source.start_line, err))?;
+    let (expanded, pragmas) = process_pragma_operators(&expanded)
+        .map_err(|err| pp_location(&pending_source.logical_file, pending_source.start_line, err))?;
     for pragma in pragmas {
-        handle_internal_pragma(pragma.trim(), canonical, macros, context)?;
+        handle_internal_pragma(pragma.trim(), canonical, macros, context).map_err(|err| {
+            pp_location(&pending_source.logical_file, pending_source.start_line, err)
+        })?;
     }
     let expanded = context
         .pragma_pack_alignment
@@ -5720,6 +5730,9 @@ fn internal_preprocess_source(
             continue;
         }
         if pending_source.is_none() {
+            if line.trim().is_empty() {
+                continue;
+            }
             pending_source = Some(PendingSource {
                 text: String::new(),
                 logical_file: logical_file.clone(),

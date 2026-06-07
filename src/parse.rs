@@ -7306,7 +7306,7 @@ mod tests {
     #[test]
     fn parses_exact_width_bitint_specifiers() -> Result<(), String> {
         let program = parse_source(
-            "_BitInt(32) a;\nunsigned _BitInt(32) b;\n_BitInt(64) c;\nunsigned _BitInt(64) d;\n_BitInt(128) e;\n",
+            "_BitInt(32) a;\nunsigned _BitInt(32) b;\n_BitInt(64) c;\nunsigned _BitInt(64) d;\n_BitInt(128) e;\nunsigned _BitInt(128) f;\n",
         )?;
         let Declaration::VarDecl(a) = &program.declarations[0] else {
             return Err("expected a declaration".to_string());
@@ -7323,12 +7323,22 @@ mod tests {
         let Declaration::VarDecl(e) = &program.declarations[4] else {
             return Err("expected e declaration".to_string());
         };
+        let Declaration::VarDecl(f) = &program.declarations[5] else {
+            return Err("expected f declaration".to_string());
+        };
 
         assert_eq!(a.var_type, CType::Int);
+        assert_eq!(a.decl_full_type, Some(FullType::Scalar(CType::Int)));
         assert_eq!(b.var_type, CType::UInt);
+        assert_eq!(b.decl_full_type, Some(FullType::Scalar(CType::UInt)));
         assert_eq!(c.var_type, CType::Long);
+        assert_eq!(c.decl_full_type, Some(FullType::Scalar(CType::Long)));
         assert_eq!(d.var_type, CType::ULong);
+        assert_eq!(d.decl_full_type, Some(FullType::Scalar(CType::ULong)));
         assert_eq!(e.var_type, CType::Int128);
+        assert_eq!(e.decl_full_type, Some(FullType::Scalar(CType::Int128)));
+        assert_eq!(f.var_type, CType::UInt128);
+        assert_eq!(f.decl_full_type, Some(FullType::Scalar(CType::UInt128)));
         Ok(())
     }
 

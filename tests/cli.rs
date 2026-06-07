@@ -20766,6 +20766,23 @@ fn internal_cpp_supports_gcc_poison_pragma() {
 }
 
 #[test]
+fn internal_cpp_supports_unicode_gcc_poison_pragma() {
+    let src = temp_file("internal-cpp-unicode-poison", "c");
+    std::fs::write(&src, "#pragma GCC poison αβ\nint value = αβ;\n")
+        .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    assert!(stderr(output).contains("poisoned identifier αβ"));
+}
+
+#[test]
 fn internal_cpp_system_header_suppresses_warning_and_user_dependencies() {
     let include_dir = temp_file("internal-cpp-system-header", "dir");
     std::fs::create_dir(&include_dir).expect("failed to create include dir");
@@ -20929,6 +20946,27 @@ fn internal_cpp_diagnostics_include_source_location() {
     let stderr = stderr(output);
     assert!(stderr.contains(&format!("{}:2:", src.display())));
     assert!(stderr.contains("#error located"));
+}
+
+#[test]
+fn internal_cpp_pending_source_errors_include_source_location() {
+    let src = temp_file("internal-cpp-located-pending-error", "c");
+    std::fs::write(&src, "\nint x = _Pragma(42);\n").expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains(&format!("{}:2:", src.display())),
+        "{stderr}"
+    );
+    assert!(stderr.contains("malformed _Pragma operator"), "{stderr}");
 }
 
 #[test]
@@ -26432,6 +26470,45 @@ fn compiles_unicode_macro_identifiers_with_both_preprocessors() {
                  MAKE_LOCAL(β, 19);\n\
                  MAKE_LOCAL(CAT(α, β), 3);\n\
                  return α + β + αβ;\n\
+             }\n",
+        )
+        .expect("failed to write input");
+
+        let mut command = Command::new(rnqcc());
+        if internal_cpp {
+            command.arg("--internal-cpp");
+        }
+        let output = command
+            .arg(src.path())
+            .arg("-o")
+            .arg(exe.path())
+            .output()
+            .expect("failed to run rnqcc");
+        assert!(output.status.success(), "{mode}: {}", stderr(output));
+
+        let run = Command::new(exe.path())
+            .status()
+            .expect("failed to run output");
+        assert_eq!(run.code(), Some(42), "{mode}");
+    }
+}
+
+#[test]
+fn compiles_unicode_identifiers_near_attributes_with_both_preprocessors() {
+    for internal_cpp in [false, true] {
+        let mode = if internal_cpp {
+            "internal-cpp"
+        } else {
+            "external-cpp"
+        };
+        let src = TempPath::new(&format!("unicode-attributes-{mode}"), "c");
+        let exe = TempPath::new(&format!("unicode-attributes-{mode}"), "bin");
+        std::fs::write(
+            src.path(),
+            "__attribute__((noinline)) int αβ(int γ) { return γ + 2; }\n\
+             int main(void) {\n\
+                 int δ __attribute__((aligned(8))) = 40;\n\
+                 return αβ(δ);\n\
              }\n",
         )
         .expect("failed to write input");

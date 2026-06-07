@@ -52,43 +52,213 @@ fn optimize_function(
         return;
     }
 
-    let static_vars = static_var_names.clone();
+    let static_vars = referenced_static_vars(&func.body, static_var_names);
 
-    loop {
-        let before = func.body.clone();
+    if flags.fold_constants || flags.eliminate_unreachable_code {
+        loop {
+            let before = func.body.clone();
 
+            if flags.fold_constants {
+                func.body = constant_folding(std::mem::take(&mut func.body), types);
+            }
+
+            if flags.eliminate_unreachable_code {
+                func.body = unreachable_code_elimination(std::mem::take(&mut func.body));
+            }
+
+            if func.body == before || func.body.is_empty() {
+                break;
+            }
+        }
+    }
+
+    if flags.propagate_copies && !func.body.is_empty() {
         let aliased_vars = crate::cfg::find_aliased_vars(&func.body, &static_vars);
+        let mut cfg = crate::cfg::Cfg::build(std::mem::take(&mut func.body));
+        crate::cfg::copy_propagation(&mut cfg, &aliased_vars, types);
+        func.body = cfg.to_instructions();
+        func.body = cse_copy_from_offset(std::mem::take(&mut func.body));
 
-        if flags.fold_constants {
+        if flags.fold_constants && !func.body.is_empty() {
             func.body = constant_folding(std::mem::take(&mut func.body), types);
         }
-
-        if flags.eliminate_unreachable_code {
+        if flags.eliminate_unreachable_code && !func.body.is_empty() {
             func.body = unreachable_code_elimination(std::mem::take(&mut func.body));
         }
+    }
 
-        if flags.propagate_copies || flags.eliminate_dead_stores {
+    if flags.eliminate_dead_stores && !func.body.is_empty() {
+        let aliased_vars = crate::cfg::find_aliased_vars(&func.body, &static_vars);
+        let mut before_len = func.body.len();
+        loop {
             let mut cfg = crate::cfg::Cfg::build(std::mem::take(&mut func.body));
-
-            if flags.propagate_copies {
-                crate::cfg::copy_propagation(&mut cfg, &aliased_vars, types);
-            }
-
-            if flags.eliminate_dead_stores {
-                crate::cfg::dead_store_elimination(&mut cfg, &aliased_vars, &static_vars);
-            }
-
+            crate::cfg::dead_store_elimination(&mut cfg, &aliased_vars, &static_vars);
             func.body = cfg.to_instructions();
+            let after_len = func.body.len();
+            if after_len == before_len || func.body.is_empty() {
+                break;
+            }
+            before_len = after_len;
         }
+    }
+}
 
-        // Simple CSE for CopyFromOffset: replace duplicate reads with Copy
-        if flags.propagate_copies {
-            func.body = cse_copy_from_offset(std::mem::take(&mut func.body));
-        }
+fn referenced_static_vars(
+    instructions: &[TackyInstr],
+    static_var_names: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    let mut referenced = std::collections::HashSet::new();
+    for instr in instructions {
+        collect_static_refs(instr, static_var_names, &mut referenced);
+    }
+    referenced
+}
 
-        if func.body == before || func.body.is_empty() {
-            break;
+fn collect_static_val_ref(
+    val: &TackyVal,
+    static_var_names: &std::collections::HashSet<String>,
+    referenced: &mut std::collections::HashSet<String>,
+) {
+    if let TackyVal::Var(name) = val {
+        if static_var_names.contains(name) {
+            referenced.insert(name.clone());
         }
+    }
+}
+
+fn collect_static_name_ref(
+    name: &str,
+    static_var_names: &std::collections::HashSet<String>,
+    referenced: &mut std::collections::HashSet<String>,
+) {
+    if static_var_names.contains(name) {
+        referenced.insert(name.to_string());
+    }
+}
+
+fn collect_static_refs(
+    instr: &TackyInstr,
+    static_var_names: &std::collections::HashSet<String>,
+    referenced: &mut std::collections::HashSet<String>,
+) {
+    match instr {
+        TackyInstr::Copy { src, dst }
+        | TackyInstr::Store { src, dst_ptr: dst }
+        | TackyInstr::BuiltinLongjmp {
+            buf: src,
+            value: dst,
+        } => {
+            collect_static_val_ref(src, static_var_names, referenced);
+            collect_static_val_ref(dst, static_var_names, referenced);
+        }
+        TackyInstr::Unary { src, dst, .. }
+        | TackyInstr::Truncate { src, dst }
+        | TackyInstr::SignExtend { src, dst }
+        | TackyInstr::ZeroExtend { src, dst }
+        | TackyInstr::DoubleToInt { src, dst }
+        | TackyInstr::FloatToInt { src, dst }
+        | TackyInstr::DoubleToUInt { src, dst }
+        | TackyInstr::FloatToUInt { src, dst }
+        | TackyInstr::IntToDouble { src, dst }
+        | TackyInstr::IntToFloat { src, dst }
+        | TackyInstr::UIntToDouble { src, dst }
+        | TackyInstr::UIntToFloat { src, dst }
+        | TackyInstr::FloatToDouble { src, dst }
+        | TackyInstr::DoubleToFloat { src, dst }
+        | TackyInstr::Load { src_ptr: src, dst }
+        | TackyInstr::GetAddress { src, dst } => {
+            collect_static_val_ref(src, static_var_names, referenced);
+            collect_static_val_ref(dst, static_var_names, referenced);
+        }
+        TackyInstr::Binary {
+            left, right, dst, ..
+        }
+        | TackyInstr::AddPtr {
+            ptr: left,
+            index: right,
+            dst,
+            ..
+        } => {
+            collect_static_val_ref(left, static_var_names, referenced);
+            collect_static_val_ref(right, static_var_names, referenced);
+            collect_static_val_ref(dst, static_var_names, referenced);
+        }
+        TackyInstr::Return(val)
+        | TackyInstr::JumpIndirect(val)
+        | TackyInstr::JumpIfZero(val, _)
+        | TackyInstr::JumpIfNotZero(val, _)
+        | TackyInstr::VaStart { dst: val }
+        | TackyInstr::FrameAddress { dst: val } => {
+            collect_static_val_ref(val, static_var_names, referenced);
+        }
+        TackyInstr::BuiltinSetjmp { buf, dst, .. } => {
+            collect_static_val_ref(buf, static_var_names, referenced);
+            collect_static_val_ref(dst, static_var_names, referenced);
+        }
+        TackyInstr::FunCall {
+            name,
+            args,
+            dst,
+            indirect,
+            ..
+        } => {
+            if *indirect {
+                collect_static_name_ref(name, static_var_names, referenced);
+            }
+            for arg in args {
+                collect_static_val_ref(arg, static_var_names, referenced);
+            }
+            collect_static_val_ref(dst, static_var_names, referenced);
+        }
+        TackyInstr::AtomicFetch { ptr, arg, dst, .. } => {
+            collect_static_val_ref(ptr, static_var_names, referenced);
+            collect_static_val_ref(arg, static_var_names, referenced);
+            collect_static_val_ref(dst, static_var_names, referenced);
+        }
+        TackyInstr::AtomicExchange { ptr, value, dst } => {
+            collect_static_val_ref(ptr, static_var_names, referenced);
+            collect_static_val_ref(value, static_var_names, referenced);
+            collect_static_val_ref(dst, static_var_names, referenced);
+        }
+        TackyInstr::AtomicCompareExchange {
+            ptr,
+            expected,
+            desired,
+            dst,
+        }
+        | TackyInstr::AtomicCompareSwap {
+            ptr,
+            expected,
+            desired,
+            dst,
+            ..
+        } => {
+            collect_static_val_ref(ptr, static_var_names, referenced);
+            collect_static_val_ref(expected, static_var_names, referenced);
+            collect_static_val_ref(desired, static_var_names, referenced);
+            collect_static_val_ref(dst, static_var_names, referenced);
+        }
+        TackyInstr::CopyToOffset { src, dst_name, .. } => {
+            collect_static_val_ref(src, static_var_names, referenced);
+            collect_static_name_ref(dst_name, static_var_names, referenced);
+        }
+        TackyInstr::CopyFromOffset { src_name, dst, .. } => {
+            collect_static_name_ref(src_name, static_var_names, referenced);
+            collect_static_val_ref(dst, static_var_names, referenced);
+        }
+        TackyInstr::CopyStruct { src_name, dst_name } => {
+            collect_static_name_ref(src_name, static_var_names, referenced);
+            collect_static_name_ref(dst_name, static_var_names, referenced);
+        }
+        TackyInstr::LoadLabelAddress(_, dst) => {
+            collect_static_val_ref(dst, static_var_names, referenced);
+        }
+        TackyInstr::AtomicFence
+        | TackyInstr::Jump(_)
+        | TackyInstr::NonlocalJump(_)
+        | TackyInstr::Label(_)
+        | TackyInstr::Unreachable
+        | TackyInstr::Nop => {}
     }
 }
 
@@ -176,12 +346,28 @@ fn constant_folding(
                     let rt = resolve_val_type(right, &const_map, types);
                     Some(CType::common(lt, rt))
                 }
+                TackyInstr::Truncate { src, .. }
+                | TackyInstr::SignExtend { src, .. }
+                | TackyInstr::ZeroExtend { src, .. }
+                | TackyInstr::DoubleToInt { src, .. }
+                | TackyInstr::FloatToInt { src, .. }
+                | TackyInstr::DoubleToUInt { src, .. }
+                | TackyInstr::FloatToUInt { src, .. }
+                | TackyInstr::IntToDouble { src, .. }
+                | TackyInstr::IntToFloat { src, .. }
+                | TackyInstr::UIntToDouble { src, .. }
+                | TackyInstr::UIntToFloat { src, .. }
+                | TackyInstr::FloatToDouble { src, .. }
+                | TackyInstr::DoubleToFloat { src, .. } => {
+                    Some(resolve_val_type(src, &const_map, types))
+                }
                 _ => None,
             };
 
             // Resolve operands using known constants — but NOT for Copy/Store/CopyToOffset sources
             // (Copy sources: handled by CFG-based copy propagation)
             // (Store/CopyToOffset sources: constant replacement may lose type info)
+            let original_instr = instr.clone();
             let instr = if matches!(
                 &instr,
                 TackyInstr::Copy { .. }
@@ -193,7 +379,18 @@ fn constant_folding(
                 resolve_constants(&instr, &const_map)
             };
 
-            let folded = fold_instruction(instr, types, src_type_hint);
+            let mut folded = fold_instruction(instr, types, src_type_hint);
+            if let (
+                TackyInstr::Binary {
+                    op: original_op, ..
+                },
+                TackyInstr::Binary { .. },
+            ) = (&original_instr, &folded)
+            {
+                if is_typed_sensitive_binary(original_op) {
+                    folded = original_instr;
+                }
+            }
 
             // Track constants: Copy(Constant, Var) and Copy(Var, Var) where Var is known
             match &folded {
@@ -633,17 +830,8 @@ fn fold_instruction(
                 } else {
                     CType::Int
                 };
-                let truncated = match dst_type {
-                    CType::Char | CType::SChar => v as i8 as i64,
-                    CType::UChar => v as u8 as i64,
-                    CType::Short => v as i16 as i64,
-                    CType::UShort => v as u16 as i64,
-                    CType::Int => v as i32 as i64,
-                    CType::UInt => v as u32 as i64,
-                    _ => v as i32 as i64,
-                };
                 return TackyInstr::Copy {
-                    src: TackyVal::Constant(truncated),
+                    src: TackyVal::Constant(cast_integer_constant(v, dst_type)),
                     dst,
                 };
             }
@@ -651,8 +839,17 @@ fn fold_instruction(
         }
         TackyInstr::SignExtend { src, dst } => {
             if let Some(v) = const_val(&src) {
+                let dst_type = if let TackyVal::Var(ref n) = dst {
+                    types.get(n).copied().unwrap_or(CType::Int)
+                } else {
+                    CType::Int
+                };
+                let src_type = src_type_hint.unwrap_or(dst_type);
                 return TackyInstr::Copy {
-                    src: TackyVal::Constant(v as i32 as i64),
+                    src: TackyVal::Constant(cast_integer_constant(
+                        sign_extend_integer_constant(v, src_type),
+                        dst_type,
+                    )),
                     dst,
                 };
             }
@@ -660,8 +857,17 @@ fn fold_instruction(
         }
         TackyInstr::ZeroExtend { src, dst } => {
             if let Some(v) = const_val(&src) {
+                let dst_type = if let TackyVal::Var(ref n) = dst {
+                    types.get(n).copied().unwrap_or(CType::UInt)
+                } else {
+                    CType::UInt
+                };
+                let src_type = src_type_hint.unwrap_or(dst_type);
                 return TackyInstr::Copy {
-                    src: TackyVal::Constant(v as u32 as i64),
+                    src: TackyVal::Constant(cast_integer_constant(
+                        zero_extend_integer_constant(v, src_type),
+                        dst_type,
+                    )),
                     dst,
                 };
             }
@@ -747,8 +953,11 @@ fn fold_instruction(
         }
         TackyInstr::UIntToDouble { src, dst } => {
             if let Some(v) = const_val(&src) {
+                let src_type = src_type_hint.unwrap_or(CType::ULong);
                 return TackyInstr::Copy {
-                    src: TackyVal::DoubleConstant(v as u64 as f64),
+                    src: TackyVal::DoubleConstant(
+                        unsigned_integer_constant_as_u64(v, src_type) as f64
+                    ),
                     dst,
                 };
             }
@@ -756,8 +965,11 @@ fn fold_instruction(
         }
         TackyInstr::UIntToFloat { src, dst } => {
             if let Some(v) = const_val(&src) {
+                let src_type = src_type_hint.unwrap_or(CType::ULong);
                 return TackyInstr::Copy {
-                    src: TackyVal::DoubleConstant(v as u64 as f32 as f64),
+                    src: TackyVal::DoubleConstant(
+                        unsigned_integer_constant_as_u64(v, src_type) as f32 as f64
+                    ),
                     dst,
                 };
             }
@@ -794,6 +1006,46 @@ fn const_val(val: &TackyVal) -> Option<i64> {
     }
 }
 
+fn cast_integer_constant(value: i64, dst_type: CType) -> i64 {
+    match dst_type {
+        CType::Bool => (value != 0) as i64,
+        CType::Char | CType::SChar => value as i8 as i64,
+        CType::UChar => value as u8 as i64,
+        CType::Short => value as i16 as i64,
+        CType::UShort => value as u16 as i64,
+        CType::Int => value as i32 as i64,
+        CType::UInt => value as u32 as i64,
+        CType::Long => value,
+        CType::ULong => value as u64 as i64,
+        _ => value,
+    }
+}
+
+fn sign_extend_integer_constant(value: i64, src_type: CType) -> i64 {
+    match src_type {
+        CType::Bool => (value != 0) as i64,
+        CType::Char | CType::SChar => value as i8 as i64,
+        CType::UChar => value as u8 as i64,
+        CType::Short => value as i16 as i64,
+        CType::UShort => value as u16 as i64,
+        CType::Int => value as i32 as i64,
+        CType::UInt => value as u32 as i64,
+        CType::Long | CType::ULong => value,
+        _ => value,
+    }
+}
+
+fn zero_extend_integer_constant(value: i64, src_type: CType) -> i64 {
+    match src_type {
+        CType::Bool => (value != 0) as i64,
+        CType::Char | CType::SChar | CType::UChar => value as u8 as i64,
+        CType::Short | CType::UShort => value as u16 as i64,
+        CType::Int | CType::UInt => value as u32 as i64,
+        CType::Long | CType::ULong => value as u64 as i64,
+        _ => value,
+    }
+}
+
 fn is_comparison(op: &TackyBinaryOp) -> bool {
     matches!(
         op,
@@ -804,6 +1056,10 @@ fn is_comparison(op: &TackyBinaryOp) -> bool {
             | TackyBinaryOp::LessEqual
             | TackyBinaryOp::GreaterEqual
     )
+}
+
+fn is_typed_sensitive_binary(op: &TackyBinaryOp) -> bool {
+    is_comparison(op) || matches!(op, TackyBinaryOp::ShiftLeft | TackyBinaryOp::ShiftRight)
 }
 
 fn eval_binary_typed(
@@ -829,6 +1085,7 @@ fn eval_binary_typed(
         }
         CType::Long => eval_binary(op, l, r),
         CType::ULong => eval_binary_u64(op, l as u64, r as u64).map(|v| v as i64),
+        CType::Int128 | CType::UInt128 => None,
         _ => eval_binary(op, l, r),
     }
 }
@@ -923,6 +1180,17 @@ fn eval_binary_u64(op: &TackyBinaryOp, l: u64, r: u64) -> Option<u64> {
     }
 }
 
+fn unsigned_integer_constant_as_u64(value: i64, src_type: CType) -> u64 {
+    match src_type {
+        CType::Bool => (value != 0) as u64,
+        CType::Char | CType::SChar | CType::UChar => value as u8 as u64,
+        CType::Short | CType::UShort => value as u16 as u64,
+        CType::Int | CType::UInt => value as u32 as u64,
+        CType::Long | CType::ULong => value as u64,
+        _ => value as u64,
+    }
+}
+
 fn eval_binary(op: &TackyBinaryOp, l: i64, r: i64) -> Option<i64> {
     match op {
         TackyBinaryOp::Add => Some(l.wrapping_add(r)),
@@ -1006,90 +1274,47 @@ fn unreachable_code_elimination(instructions: Vec<TackyInstr>) -> Vec<TackyInstr
 }
 
 fn unreachable_code_pass(instructions: Vec<TackyInstr>) -> Vec<TackyInstr> {
-    // Pass 1: linear scan to mark reachable instructions
-    // Only consider labels reachable if jumped to from REACHABLE code
-    let mut reachable_labels = std::collections::HashSet::new();
-    let mut reachable = true;
-
-    for instr in &instructions {
-        match instr {
-            TackyInstr::Label(label) if reachable_labels.contains(label) => {
-                reachable = true;
-                // Labels referenced by earlier reachable jumps make this reachable
-            }
-            TackyInstr::Jump(target) if reachable => {
-                reachable_labels.insert(target.clone());
-                reachable = false;
-            }
-            TackyInstr::JumpIfZero(_, target) if reachable => {
-                reachable_labels.insert(target.clone());
-                // Conditional jump: next instruction is also reachable
-            }
-            TackyInstr::JumpIfNotZero(_, target) if reachable => {
-                reachable_labels.insert(target.clone());
-            }
-            TackyInstr::Return(_) if reachable => {
-                reachable = false;
-            }
-            TackyInstr::Unreachable if reachable => {
-                reachable = false;
-            }
-            TackyInstr::Jump(_) | TackyInstr::Return(_) | TackyInstr::Unreachable => {
-                // Already unreachable
-            }
-            _ => {}
-        }
+    let cfg = crate::cfg::Cfg::build(instructions);
+    let mut reachable_blocks = std::collections::HashSet::new();
+    let mut worklist = std::collections::VecDeque::new();
+    if !cfg.blocks.is_empty() {
+        reachable_blocks.insert(0usize);
+        worklist.push_back(0usize);
     }
-
-    // Pass 2: keep only reachable instructions
-    let mut result = Vec::new();
-    reachable = true;
-    for instr in instructions {
-        match &instr {
-            TackyInstr::Label(label) => {
-                if reachable_labels.contains(label) {
-                    reachable = true;
-                } else if !reachable {
-                    continue; // Skip unreachable label
+    while let Some(block_id) = worklist.pop_front() {
+        if cfg.blocks[block_id]
+            .instructions
+            .iter()
+            .any(|instr| matches!(instr, TackyInstr::JumpIndirect(_)))
+        {
+            for indirect_target_id in 0..cfg.blocks.len() {
+                if reachable_blocks.insert(indirect_target_id) {
+                    worklist.push_back(indirect_target_id);
                 }
-                result.push(instr);
             }
-            TackyInstr::Jump(_) | TackyInstr::Return(_) | TackyInstr::Unreachable => {
-                if reachable {
-                    result.push(instr);
-                }
-                reachable = false;
-            }
-            TackyInstr::Nop => { /* skip */ }
-            _ => {
-                if reachable {
-                    result.push(instr);
-                }
+        }
+        for successor in &cfg.blocks[block_id].successors {
+            let crate::cfg::NodeId::Block(successor_id) = successor else {
+                continue;
+            };
+            if reachable_blocks.insert(*successor_id) {
+                worklist.push_back(*successor_id);
             }
         }
     }
 
-    // Pass 3: remove labels that are no longer jumped to
-    let mut final_targets = std::collections::HashSet::new();
-    for instr in &result {
-        match instr {
-            TackyInstr::Jump(t)
-            | TackyInstr::JumpIfZero(_, t)
-            | TackyInstr::JumpIfNotZero(_, t) => {
-                final_targets.insert(t.clone());
-            }
-            _ => {}
-        }
-    }
-    result.retain(|instr| {
-        if let TackyInstr::Label(label) = instr {
-            final_targets.contains(label)
-        } else {
-            true
-        }
-    });
+    let result = cfg
+        .blocks
+        .into_iter()
+        .filter(|block| reachable_blocks.contains(&block.id))
+        .flat_map(|block| block.instructions)
+        .filter(|instr| !matches!(instr, TackyInstr::Nop))
+        .collect::<Vec<_>>();
 
-    // Pass 4: remove jumps to immediately following label
+    // Remove jumps to immediately following label.  Keep surviving
+    // labels even when this pass cannot prove they are branch targets: labels
+    // also partition later CFG passes, and removing them can invalidate jumps
+    // that become visible after branch simplification.
     let mut cleaned = Vec::new();
     for i in 0..result.len() {
         let target_opt = match &result[i] {

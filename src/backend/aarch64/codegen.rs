@@ -1871,9 +1871,14 @@ fn convert_function(
                     emit_i128_copy(&mut instructions, src, dst, &stack_slots, global_vars)?;
                     continue;
                 }
+                let src_operand = if matches!(ty, AsmType::Float | AsmType::Double) {
+                    floating_return_operand(ty, src, &stack_slots, global_vars)?
+                } else {
+                    val_operand(src, &stack_slots, global_vars)?
+                };
                 instructions.push(AsmInstr::Mov(
                     ty,
-                    val_operand(src, &stack_slots, global_vars)?,
+                    src_operand,
                     val_operand(dst, &stack_slots, global_vars)?,
                 ));
             }
@@ -3166,11 +3171,17 @@ fn convert_function(
                         (AsmType::Word, _) | (_, AsmType::Word) => AsmType::Word,
                         _ => AsmType::Byte,
                     };
-                    instructions.push(AsmInstr::Cmp(
-                        cmp_ty,
-                        val_operand(right, &stack_slots, global_vars)?,
-                        val_operand(left, &stack_slots, global_vars)?,
-                    ));
+                    let right_op = if matches!(cmp_ty, AsmType::Float | AsmType::Double) {
+                        floating_return_operand(cmp_ty, right, &stack_slots, global_vars)?
+                    } else {
+                        val_operand(right, &stack_slots, global_vars)?
+                    };
+                    let left_op = if matches!(cmp_ty, AsmType::Float | AsmType::Double) {
+                        floating_return_operand(cmp_ty, left, &stack_slots, global_vars)?
+                    } else {
+                        val_operand(left, &stack_slots, global_vars)?
+                    };
+                    instructions.push(AsmInstr::Cmp(cmp_ty, right_op, left_op));
                     instructions.push(AsmInstr::SetCC(cc, dst_op));
                     continue;
                 }
@@ -3204,17 +3215,18 @@ fn convert_function(
                     }
                     _ => convert_binary_op(op)?,
                 };
-                instructions.push(AsmInstr::Mov(
-                    ty,
-                    val_operand(left, &stack_slots, global_vars)?,
-                    dst_op.clone(),
-                ));
-                instructions.push(AsmInstr::Binary(
-                    ty,
-                    asm_op,
-                    val_operand(right, &stack_slots, global_vars)?,
-                    dst_op,
-                ));
+                let left_op = if matches!(ty, AsmType::Float | AsmType::Double) {
+                    floating_return_operand(ty, left, &stack_slots, global_vars)?
+                } else {
+                    val_operand(left, &stack_slots, global_vars)?
+                };
+                let right_op = if matches!(ty, AsmType::Float | AsmType::Double) {
+                    floating_return_operand(ty, right, &stack_slots, global_vars)?
+                } else {
+                    val_operand(right, &stack_slots, global_vars)?
+                };
+                instructions.push(AsmInstr::Mov(ty, left_op, dst_op.clone()));
+                instructions.push(AsmInstr::Binary(ty, asm_op, right_op, dst_op));
             }
         }
     }

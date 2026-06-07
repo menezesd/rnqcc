@@ -1208,6 +1208,64 @@ EOF\n\
 }
 
 #[test]
+fn gcc_torture_smoke_passes_extra_rnqcc_args() -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let suite = TempPath::new("gcc-smoke-extra-rnqcc-args-suite", "dir");
+    let compile_dir = suite.path().join("compile");
+    std::fs::create_dir_all(&compile_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(compile_dir.join("raw.c"), "int x;\n")
+        .map_err(|err| format!("failed to write fake GCC torture source: {err}"))?;
+
+    let fake_rnqcc = TempPath::new("gcc-smoke-extra-rnqcc-args-rnqcc", "sh");
+    std::fs::write(
+        fake_rnqcc.path(),
+        "#!/bin/sh\n\
+         saw_optimize=0\n\
+         out=\n\
+         while [ \"$#\" -gt 0 ]; do\n\
+           case \"$1\" in\n\
+             --optimize) saw_optimize=1 ;;\n\
+             -o) shift; out=$1 ;;\n\
+           esac\n\
+           shift\n\
+         done\n\
+         [ \"$saw_optimize\" -eq 1 ] || exit 9\n\
+         [ -n \"$out\" ] || exit 10\n\
+         : > \"$out\"\n",
+    )
+    .map_err(|err| format!("failed to write fake rnqcc: {err}"))?;
+    let mut perms = std::fs::metadata(fake_rnqcc.path())
+        .map_err(|err| format!("missing fake rnqcc: {err}"))?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(fake_rnqcc.path(), perms)
+        .map_err(|err| format!("failed to chmod fake rnqcc: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/gcc_torture_smoke.py")
+        .arg("--rnqcc")
+        .arg(fake_rnqcc.path())
+        .arg("--suite")
+        .arg(suite.path())
+        .arg("--mode")
+        .arg("compile")
+        .arg("--limit")
+        .arg("1")
+        .arg("--rnqcc-arg=--optimize")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run gcc torture smoke: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    Ok(())
+}
+
+#[test]
 fn gcc_torture_smoke_emits_canonical_skip_paths() -> Result<(), String> {
     let suite = TempPath::new("gcc-smoke-skip-path-suite", "dir");
     let compile_dir = suite.path().join("compile");
@@ -9604,6 +9662,510 @@ int main(void) {
 }
 
 #[test]
+fn constant_folding_preserves_unsigned_int_comparison_width() {
+    let src = temp_file("folded-uint-comparison-width", "c");
+    let exe = temp_file("folded-uint-comparison-width", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef unsigned int u32 __attribute__((mode(SI)));
+extern void abort(void);
+
+u32 shift(u32 n) {
+    return n << 0;
+}
+
+int main(void) {
+    if (shift((u32)0xffffffff) != (u32)((u32)0xffffffff << 0)) abort();
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--fold-constants")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn copy_propagation_preserves_unsigned_right_shift_operand_type() {
+    let src = temp_file("copy-prop-uint-shift-width", "c");
+    let exe = temp_file("copy-prop-uint-shift-width", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef unsigned int u32 __attribute__((mode(SI)));
+extern void abort(void);
+
+u32 shift(u32 n) {
+    return n >> 1;
+}
+
+int main(void) {
+    if (shift((u32)0xffffffff) != (u32)((u32)0xffffffff >> 1)) abort();
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--propagate-copies")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn copy_propagation_preserves_unsigned_comparison_operand_type() {
+    let src = temp_file("copy-prop-uint-comparison-type", "c");
+    let exe = temp_file("copy-prop-uint-comparison-type", "bin");
+    std::fs::write(
+        &src,
+        r#"
+unsigned int a = 1387579096U;
+extern void abort(void);
+
+void sinkandcheck(unsigned b) {
+    if (a != b) abort();
+}
+
+int main(void) {
+    a = 1 < (~a) ? 1 : (~a);
+    sinkandcheck(1);
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--propagate-copies")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn copy_propagation_preserves_ulong_comparison_operand_type() {
+    let src = temp_file("copy-prop-ulong-comparison-type", "c");
+    let exe = temp_file("copy-prop-ulong-comparison-type", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int minus_1 = -1;
+extern void abort(void);
+
+int main(void) {
+    if ((0, 0xffffffffull) >= minus_1) abort();
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--propagate-copies")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn copy_propagation_treats_va_start_as_va_list_write() {
+    let src = temp_file("copy-prop-va-start-kills-va-list", "c");
+    let exe = temp_file("copy-prop-va-start-kills-va-list", "bin");
+    std::fs::write(
+        &src,
+        r#"
+#include <stdarg.h>
+extern void abort(void);
+
+va_list global;
+
+void vat(va_list param, ...) {
+    va_list local;
+    va_start(local, param);
+    va_copy(global, local);
+    va_copy(param, local);
+    if (va_arg(local, int) != 1) abort();
+    if (va_arg(global, int) != 1) abort();
+    if (va_arg(param, int) != 1) abort();
+
+    va_start(param, param);
+    va_start(global, param);
+    va_copy(local, param);
+    if (va_arg(local, int) != 1) abort();
+    va_copy(local, global);
+    if (va_arg(local, int) != 1) abort();
+    if (va_arg(global, int) != 1) abort();
+    if (va_arg(param, int) != 1) abort();
+}
+
+int main(void) {
+    va_list t;
+    vat(t, 1);
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--propagate-copies")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn optimized_packed_complex_float_store_keeps_float_width() {
+    let src = temp_file("optimized-packed-complex-float", "c");
+    let exe = temp_file("optimized-packed-complex-float", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef __complex__ float cf;
+struct x { char c; cf f; } __attribute__((__packed__));
+extern void abort(void);
+
+void check(struct x *y) {
+    if (y->f != 1 || y->c != 42) abort();
+}
+
+int main(void) {
+    struct x s;
+    s.f = 1;
+    s.c = 42;
+    check(&s);
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--fold-constants")
+        .arg("--propagate-copies")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn folded_complex_float_extracts_use_float_constants() {
+    let src = temp_file("folded-complex-float-extract", "c");
+    let exe = temp_file("folded-complex-float-extract", "bin");
+    std::fs::write(
+        &src,
+        r#"
+extern void abort(void);
+
+__attribute__((pure)) _Complex float make(int x) {
+    _Complex float r;
+    __real r = x + 1;
+    __imag r = x - 1;
+    return r;
+}
+
+void real_part(float *x) {
+    *x = __real make(5);
+}
+
+void imag_part(float *x) {
+    *x = __imag make(5);
+}
+
+int main(void) {
+    float var = 0;
+    real_part(&var);
+    if (var != 6) abort();
+    var = 0;
+    imag_part(&var);
+    if (var != 4) abort();
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--fold-constants")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn folded_signed_char_to_unsigned_short_cast_keeps_short_width() {
+    let src = temp_file("folded-schar-to-ushort", "c");
+    let exe = temp_file("folded-schar-to-ushort", "bin");
+    std::fs::write(
+        &src,
+        r#"
+extern void abort(void);
+
+void check(int got) {
+    if (got != 0xffff) abort();
+}
+
+int main(void) {
+    signed char c = -1;
+    unsigned u = (unsigned short)c;
+    check(u);
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--fold-constants")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn folded_copy_propagated_uint_zero_extend_preserves_wraparound() {
+    let src = temp_file("folded-uint-zero-extend-wrap", "c");
+    let exe = temp_file("folded-uint-zero-extend-wrap", "bin");
+    std::fs::write(
+        &src,
+        r#"
+unsigned p;
+
+long test(unsigned a) {
+    return (long)(p + a) - (long)p;
+}
+
+int main(void) {
+    p = (unsigned)-2;
+    if (test(0) != 0) return 1;
+    if (test(1) != 1) return 2;
+    if (test(2) != -(long)(unsigned)-2) return 3;
+    p = (unsigned)-1;
+    if (test(0) != 0) return 4;
+    if (test(1) != -(long)(unsigned)-1) return 5;
+    if (test(2) != -(long)(unsigned)-2) return 6;
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--fold-constants")
+        .arg("--propagate-copies")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn folded_unsigned_int_to_float_uses_source_width() {
+    let src = temp_file("folded-uint-to-float-source-width", "c");
+    let exe = temp_file("folded-uint-to-float-source-width", "bin");
+    std::fs::write(
+        &src,
+        r#"
+extern void abort(void);
+
+float u2f(unsigned int u) {
+    return u;
+}
+
+int main(void) {
+    float got = (float)~0U;
+    if (got != u2f(~0U)) abort();
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--fold-constants")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn constant_folding_preserves_unsigned_long_dynamic_shift_type() {
+    let src = temp_file("folded-ulong-dynamic-shift-type", "c");
+    let exe = temp_file("folded-ulong-dynamic-shift-type", "bin");
+    std::fs::write(
+        &src,
+        r#"
+extern void abort(void);
+
+int sign_bit(unsigned long val, int width) {
+    unsigned long mask = (unsigned long)-1 >> (64 - width);
+    unsigned long lo = (unsigned long)1 << (width - 1);
+    return (val & mask) == lo;
+}
+
+int main(void) {
+    if (!sign_bit((unsigned long)-1, 1)) abort();
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--fold-constants")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn constant_folding_does_not_narrow_int128_shift() {
+    let src = temp_file("folded-int128-shift-width", "c");
+    let exe = temp_file("folded-int128-shift-width", "bin");
+    std::fs::write(
+        &src,
+        r#"
+extern void abort(void);
+
+unsigned char check(__int128 val) {
+    switch (val) {
+    case 0: return 1;
+    case 1: return 2;
+    case 2: return 3;
+    default: return 0;
+    }
+}
+
+int main(void) {
+    if (check(((__int128)1) << 64) != 0) abort();
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--fold-constants")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn compiles_alignof_type_expression() {
     let src = temp_file("alignof-src", "i");
     let exe = temp_file("alignof-exe", "bin");
@@ -13524,6 +14086,38 @@ fn global_initializer_accepts_wrapping_unsigned_sizeof_expression() {
 }
 
 #[test]
+fn global_initializer_accepts_string_literal_element_pointer_difference() {
+    let src = temp_file("global-string-element-pointer-diff", "c");
+    let exe = temp_file("global-string-element-pointer-diff", "bin");
+    std::fs::write(
+        &src,
+        "int x[60];\n\
+         char *y = ((char*)&(x[2*8 + 2]) - 8);\n\
+         int z = (&\"Foobar\"[1] - &\"Foobar\"[0]);\n\
+         int main(void) {\n\
+           return z == 1 && y == ((char *)&x[18] - 8) ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn address_of_struct_compound_literal() {
     let src = temp_file("address-of-struct-compound-literal", "c");
     let exe = temp_file("address-of-struct-compound-literal", "bin");
@@ -13592,6 +14186,314 @@ fn implicit_function_call_passes_arguments_in_registers() {
         .expect("failed to write source");
 
     let output = Command::new(rnqcc())
+        .arg("--Wno-missing-return")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn implicit_function_call_keeps_no_prototype_call_site() {
+    let src = temp_file("implicit-function-no-prototype-call-site", "c");
+    let out = temp_file("implicit-function-no-prototype-call-site", "s");
+    std::fs::write(
+        &src,
+        "void caller(void) { fn(0); }\n\
+         int fn(const int x, int y __attribute__((unused))) { return x; }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-fpermissive")
+        .arg("-S")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn optimized_unreachable_elimination_keeps_goto_continue_label_targets() {
+    let src = temp_file("optimized-goto-continue-label-targets", "c");
+    let out = temp_file("optimized-goto-continue-label-targets", "s");
+    std::fs::write(
+        &src,
+        "typedef unsigned char byte;\n\
+         typedef unsigned int uint;\n\
+         typedef unsigned long ulong;\n\
+         typedef ulong gs_char;\n\
+         typedef struct gs_show_enum_s gs_show_enum;\n\
+         typedef struct gs_font_s gs_font;\n\
+         typedef struct gx_font_stack_item_s { gs_font *font; } gx_font_stack_item;\n\
+         typedef struct gx_font_stack_s { gx_font_stack_item items[6]; } gx_font_stack;\n\
+         struct gs_show_enum_s { gx_font_stack fstack; };\n\
+         typedef enum { ft_composite = 0 } font_type;\n\
+         struct gs_font_s { font_type FontType; };\n\
+         typedef enum { fmap_escape = 3, fmap_shift = 8 } fmap_type;\n\
+         typedef struct gs_type0_data_s { fmap_type FMapType; } gs_type0_data;\n\
+         gs_type0_next_char(register gs_show_enum *penum) {\n\
+           const byte *p;\n\
+           int fdepth;\n\
+           gs_font *pfont;\n\
+           gs_type0_data *pdata;\n\
+           uint fidx;\n\
+           gs_char chr;\n\
+           for (; pfont->FontType == ft_composite; ) {\n\
+             fmap_type fmt;\n\
+             switch (fmt) {\n\
+               do {} while (0);\n\
+             rdown:\n\
+               continue;\n\
+             case fmap_shift:\n\
+               p++;\n\
+               do {} while (0);\n\
+               goto rdown;\n\
+             }\n\
+             break;\n\
+           }\n\
+         up:\n\
+           while (fdepth > 0) {\n\
+             switch (pdata->FMapType) {\n\
+             default:\n\
+               continue;\n\
+             case fmap_escape:\n\
+               fidx = *++p;\n\
+               do {} while (0);\n\
+               if (fidx == chr && fdepth > 1)\n\
+                 goto up;\n\
+             down:\n\
+               fdepth--;\n\
+               do {} while (0);\n\
+             }\n\
+             break;\n\
+           }\n\
+           while ((pfont = penum->fstack.items[fdepth].font)->FontType == ft_composite)\n\
+             ;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--optimize")
+        .arg("--Wno-missing-return")
+        .arg("-S")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn optimized_computed_goto_keeps_indirect_label_targets() {
+    let src = temp_file("optimized-computed-goto-label-targets", "c");
+    let exe = temp_file("optimized-computed-goto-label-targets", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int dispatch(int n) {
+    static const void *targets[] = { &&zero, &&one, &&two };
+    goto *targets[n];
+zero:
+    return 1;
+one:
+    return 2;
+two:
+    return 42;
+}
+
+int main(void) {
+    return dispatch(2);
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--optimize")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn dead_store_elimination_keeps_indirect_call_callee_live() {
+    let src = temp_file("dse-indirect-callee-live", "c");
+    let exe = temp_file("dse-indirect-callee-live", "bin");
+    std::fs::write(
+        &src,
+        "int f(void) { return 42; }\n\
+         int (*funcs[1])(void) = { f };\n\
+         int call(int i) { return funcs[i](); }\n\
+         int main(void) { return call(0); }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--eliminate-dead-stores")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn dead_store_elimination_keeps_nonlocal_label_setjmp_buffer_live() {
+    let src = temp_file("dse-nonlocal-label-setjmp-buffer", "c");
+    let exe = temp_file("dse-nonlocal-label-setjmp-buffer", "bin");
+    std::fs::write(
+        &src,
+        "int s(int i) {\n\
+             if (i > 0) {\n\
+               __label__ l1;\n\
+               int f(int j) { if (j == 2) goto l1; return 0; }\n\
+               return f(i);\n\
+             l1: ;\n\
+             }\n\
+             return 1;\n\
+         }\n\
+         int main(void) { return s(0) == 1 && s(1) == 0 && s(2) == 1 ? 42 : 1; }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--eliminate-dead-stores")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn dead_store_elimination_keeps_atomic_fetch_operands_live() {
+    let src = temp_file("dse-atomic-fetch-operands-live", "c");
+    let exe = temp_file("dse-atomic-fetch-operands-live", "bin");
+    std::fs::write(
+        &src,
+        r#"
+char c = 1;
+__attribute__((aligned(sizeof(unsigned long long)))) unsigned long long ll;
+extern void abort(void);
+
+int main(void) {
+    unsigned long long x =
+        __sync_add_and_fetch(&ll, c + 0xfedcba9876543210ULL);
+    if (x != 0xfedcba9876543211ULL) abort();
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--eliminate-dead-stores")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn dead_store_elimination_preserves_setjmp_modified_locals() {
+    let src = temp_file("dse-setjmp-modified-local", "c");
+    let exe = temp_file("dse-setjmp-modified-local", "bin");
+    std::fs::write(
+        &src,
+        r#"
+extern void abort(void);
+unsigned long long jmp_buf[5];
+
+__attribute__((noinline)) void baz(void) {
+    __builtin_longjmp(&jmp_buf, 1);
+}
+
+void bar(void) {
+    baz();
+}
+
+__attribute__((noinline)) int foo(int x) {
+    int a = 0;
+    if (__builtin_setjmp(&jmp_buf) == 0) {
+        while (1) {
+            a = 1;
+            bar();
+        }
+    } else {
+        return a == 0 ? 0 : x;
+    }
+}
+
+int main(void) {
+    if (foo(1) == 0) abort();
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--eliminate-dead-stores")
         .arg("--Wno-missing-return")
         .arg("-o")
         .arg(&exe)
@@ -25774,12 +26676,38 @@ fn rejects_incompatible_utf_string_pointer_assignments() {
 }
 
 #[test]
-fn rejects_file_scope_string_literal_pointer_differences() {
+fn accepts_file_scope_same_string_literal_pointer_differences() {
     for (name, source) in [
         ("narrow", "int d = &\"abcd\"[3] - &\"abcd\"[1];\n"),
         ("wide", "int d = &L\"abcd\"[3] - &L\"abcd\"[1];\n"),
         ("utf16", "int d = &u\"abcd\"[3] - &u\"abcd\"[1];\n"),
         ("utf32", "int d = &U\"abcd\"[3] - &U\"abcd\"[1];\n"),
+    ] {
+        let src = TempPath::new(&format!("same-string-literal-pointer-diff-{name}"), "c");
+        let out = TempPath::new(&format!("same-string-literal-pointer-diff-{name}"), "s");
+        std::fs::write(src.path(), source).expect("failed to write input");
+
+        let output = Command::new(rnqcc())
+            .arg("--internal-cpp")
+            .arg("-S")
+            .arg("-o")
+            .arg(out.path())
+            .arg(src.path())
+            .output()
+            .expect("failed to run rnqcc");
+        let status = output.status;
+        let stderr = stderr(output);
+        assert!(status.success(), "{name}: {stderr}");
+    }
+}
+
+#[test]
+fn rejects_file_scope_distinct_string_literal_pointer_differences() {
+    for (name, source) in [
+        ("narrow", "int d = &\"abcd\"[3] - &\"abce\"[1];\n"),
+        ("wide", "int d = &L\"abcd\"[3] - &L\"abce\"[1];\n"),
+        ("utf16", "int d = &u\"abcd\"[3] - &u\"abce\"[1];\n"),
+        ("utf32", "int d = &U\"abcd\"[3] - &U\"abce\"[1];\n"),
     ] {
         let src = TempPath::new(&format!("bad-string-literal-pointer-diff-{name}"), "c");
         let out = TempPath::new(&format!("bad-string-literal-pointer-diff-{name}"), "s");

@@ -1784,6 +1784,7 @@ impl Parser {
                 Some(full_type) => Ok(full_type),
                 None => Ok(FullType::Scalar(CType::Int)),
             },
+            Exp::ImplicitFunctionCall(_, _) => Ok(FullType::Scalar(CType::Int)),
             Exp::IndirectCall(callee, _) => match self.typeof_expression(callee)?.decay() {
                 FullType::Function { return_type, .. } => Ok(*return_type),
                 FullType::Pointer(inner) => match *inner {
@@ -6189,7 +6190,11 @@ impl Parser {
                     if matches!(name.as_str(), "__builtin_unreachable" | "__builtin_trap") {
                         return Ok(Exp::Unreachable);
                     }
-                    Ok(Exp::FunctionCall(name, args))
+                    if self.lookup_value_type(&name).is_some() || name.starts_with("__builtin_") {
+                        Ok(Exp::FunctionCall(name, args))
+                    } else {
+                        Ok(Exp::ImplicitFunctionCall(name, args))
+                    }
                 } else if let Some(val) = self.lookup_enum_constant(&name) {
                     // Enum constant — resolve to integer literal
                     Ok(Exp::Constant(val))

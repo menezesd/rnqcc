@@ -581,12 +581,22 @@ impl Resolver {
                                 Exp::FunctionCall(name, resolved_args)
                             } else {
                                 self.declare_implicit_function(&name);
-                                Exp::FunctionCall(name, resolved_args)
+                                Exp::ImplicitFunctionCall(name, resolved_args)
                             }
                         }
                         Err(err) => return Err(err),
                     }
                 }
+            }
+            Exp::ImplicitFunctionCall(name, args) => {
+                let resolved_args = args
+                    .into_iter()
+                    .map(|a| self.resolve_exp(a))
+                    .collect::<ResolveResult<Vec<_>>>()?;
+                if !self.functions.contains_key(&name) {
+                    self.declare_implicit_function(&name);
+                }
+                Exp::ImplicitFunctionCall(name, resolved_args)
             }
             Exp::SizeOf(inner) => Exp::SizeOf(Box::new(self.resolve_exp(*inner)?)),
             Exp::SizeOfType(ct, ft) => Exp::SizeOfType(ct, self.resolve_struct_tags_in_ft(ft)),
@@ -925,9 +935,9 @@ impl Resolver {
                 BlockItem::Statement(Statement::Expression(Exp::Unreachable)) => {
                     Some(BlockTerminator::Unreachable)
                 }
-                BlockItem::Statement(Statement::Expression(Exp::FunctionCall(name, _)))
-                    if self.functions.get(name).is_some_and(|sig| sig.noreturn) =>
-                {
+                BlockItem::Statement(Statement::Expression(
+                    Exp::FunctionCall(name, _) | Exp::ImplicitFunctionCall(name, _),
+                )) if self.functions.get(name).is_some_and(|sig| sig.noreturn) => {
                     Some(BlockTerminator::NoreturnCall)
                 }
                 BlockItem::Statement(Statement::Label(_, _))
@@ -1109,7 +1119,7 @@ fn statement_guarantees_return(
     match stmt {
         Statement::Return(_) => true,
         Statement::Expression(Exp::Unreachable) => true,
-        Statement::Expression(Exp::FunctionCall(name, _)) => {
+        Statement::Expression(Exp::FunctionCall(name, _) | Exp::ImplicitFunctionCall(name, _)) => {
             functions.get(name).is_some_and(|sig| sig.noreturn)
         }
         Statement::Block(block) => block_guarantees_return(block, functions),

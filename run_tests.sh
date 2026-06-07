@@ -78,7 +78,7 @@ run_single_test() {
         [ -f "$h" ] && add_helper "$h"
     done
     case "$name" in
-        pass_args_on_page_boundary|return_struct_on_page_boundary)
+        pass_args_on_page_boundary|push_arg_on_page_boundary|return_struct_on_page_boundary)
             [ -f "$src_dir/data_on_page_boundary_$HELPER_PLATFORM.s" ] \
                 && add_helper "$src_dir/data_on_page_boundary_$HELPER_PLATFORM.s"
             ;;

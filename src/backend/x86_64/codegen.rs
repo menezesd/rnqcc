@@ -213,6 +213,19 @@ fn convert_double_return_val(
     }
 }
 
+fn convert_floating_val(
+    ty: AsmType,
+    val: &TackyVal,
+    static_doubles: &mut Vec<(String, f64)>,
+    static_floats: &mut Vec<(String, f32)>,
+) -> AsmOperand {
+    if ty == AsmType::Float {
+        convert_float_return_val(val, static_floats)
+    } else {
+        convert_double_val(val, static_doubles)
+    }
+}
+
 fn is_positive_float_zero_return(t: AsmType, val: &TackyVal) -> bool {
     match (t, val) {
         (_, TackyVal::Constant(0))
@@ -1174,8 +1187,8 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
             dst,
         } if matches!(val_type(dst, types), AsmType::Float | AsmType::Double) => {
             let t = val_type(dst, types);
-            let left_op = convert_double_val(left, static_doubles);
-            let right_op = convert_double_val(right, static_doubles);
+            let left_op = convert_floating_val(t, left, static_doubles, static_floats);
+            let right_op = convert_floating_val(t, right, static_doubles, static_floats);
             let dst_op = convert_val(dst);
             out.push(AsmInstr::Mov(t, left_op, dst_op.clone()));
             out.push(AsmInstr::Binary(
@@ -1342,6 +1355,7 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                     types,
                     out,
                     static_doubles,
+                    static_floats,
                     label_counter,
                     function_name,
                 };
@@ -1386,6 +1400,7 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                 types,
                 out,
                 static_doubles,
+                static_floats,
                 label_counter,
                 function_name,
             };
@@ -1408,9 +1423,9 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                 emit_i128_copy(out, src, dst)?;
                 return Ok(());
             }
-            let src_op = if matches!(t, AsmType::Float | AsmType::Double)
-                || matches!(src, TackyVal::DoubleConstant(_))
-            {
+            let src_op = if t == AsmType::Float {
+                convert_float_return_val(src, static_floats)
+            } else if t == AsmType::Double || matches!(src, TackyVal::DoubleConstant(_)) {
                 convert_double_val(src, static_doubles)
             } else {
                 convert_val(src)
@@ -1723,9 +1738,9 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                     convert_val(dst_ptr),
                     AsmOperand::Reg(Reg::R11),
                 ));
-                let src_op = if matches!(src_t, AsmType::Float | AsmType::Double)
-                    || matches!(src, TackyVal::DoubleConstant(_))
-                {
+                let src_op = if src_t == AsmType::Float {
+                    convert_float_return_val(src, static_floats)
+                } else if src_t == AsmType::Double || matches!(src, TackyVal::DoubleConstant(_)) {
                     convert_double_val(src, static_doubles)
                 } else {
                     convert_val(src)
@@ -1758,7 +1773,11 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                     *offset as i32,
                 )));
             } else if matches!(src_t, AsmType::Float | AsmType::Double) {
-                let src_op = convert_double_val(src, static_doubles);
+                let src_op = if src_t == AsmType::Float {
+                    convert_float_return_val(src, static_floats)
+                } else {
+                    convert_double_val(src, static_doubles)
+                };
                 out.push(AsmInstr::Mov(
                     src_t,
                     src_op,
@@ -2532,6 +2551,7 @@ struct BinaryContext<'a> {
     types: &'a HashMap<String, CType>,
     out: &'a mut Vec<AsmInstr>,
     static_doubles: &'a mut Vec<(String, f64)>,
+    static_floats: &'a mut Vec<(String, f32)>,
     label_counter: &'a mut usize,
     function_name: &'a str,
 }
@@ -2546,6 +2566,7 @@ fn convert_binary(
     let types = ctx.types;
     let out = &mut *ctx.out;
     let static_doubles = &mut *ctx.static_doubles;
+    let static_floats = &mut *ctx.static_floats;
     let left_ctype = match left {
         TackyVal::Var(n) => types.get(n).copied().unwrap_or(CType::Int),
         TackyVal::Constant(_) => CType::Int,
@@ -2678,8 +2699,8 @@ fn convert_binary(
         }
         if cmp_type == AsmType::LongDouble {
         } else if matches!(cmp_type, AsmType::Float | AsmType::Double) {
-            let l = convert_double_val(left, static_doubles);
-            let r = convert_double_val(right, static_doubles);
+            let l = convert_floating_val(cmp_type, left, static_doubles, static_floats);
+            let r = convert_floating_val(cmp_type, right, static_doubles, static_floats);
             out.push(AsmInstr::Cmp(cmp_type, r, l));
         } else {
             let r = promoted_cmp_operand(out, right, cmp_type, Reg::R10, types);
@@ -2721,8 +2742,8 @@ fn convert_binary(
                 TackyBinaryOp::Mul => AsmBinaryOp::Mul,
                 _ => return Err(format!("Unsupported floating binary op: {:?}", op)),
             };
-            let l = convert_double_val(left, static_doubles);
-            let r = convert_double_val(right, static_doubles);
+            let l = convert_floating_val(t, left, static_doubles, static_floats);
+            let r = convert_floating_val(t, right, static_doubles, static_floats);
             out.push(AsmInstr::Mov(t, l, convert_val(dst)));
             out.push(AsmInstr::Binary(t, asm_op, r, convert_val(dst)));
         } else if t == AsmType::Octword {

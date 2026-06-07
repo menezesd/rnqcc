@@ -626,6 +626,13 @@ def main() -> int:
         action="store_true",
         help="use rnqcc's internal preprocessor instead of the host preprocessor",
     )
+    parser.add_argument(
+        "--rnqcc-arg",
+        action="append",
+        dest="rnqcc_args",
+        default=[],
+        help="extra argument to pass to rnqcc for every compile invocation; repeatable",
+    )
     args = parser.parse_args()
 
     rnqcc = Path(args.rnqcc)
@@ -680,7 +687,7 @@ def main() -> int:
                     )
                 continue
             stem = f"{idx:04d}-{src.stem}"
-            common = [str(rnqcc), "--Wno-missing-return"]
+            common = [str(rnqcc), *args.rnqcc_args, "--Wno-missing-return"]
             common.extend(rnqcc_options_for_test(src))
             if target := rnqcc_target_for_test(src):
                 common.extend(["--target", target])

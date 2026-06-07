@@ -1,7 +1,6 @@
 use crate::types::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-type InstrCopies = HashMap<InstrPosition, HashSet<CopyInstr>>;
 type InstrLiveAfter = HashMap<InstrPosition, HashSet<String>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -92,6 +91,12 @@ impl Cfg {
                         blocks[target_id].predecessors.push(NodeId::Block(i));
                     }
                 }
+                Some(TackyInstr::JumpIndirect(_)) => {
+                    for target_id in 0..num_blocks {
+                        blocks[i].successors.push(NodeId::Block(target_id));
+                        blocks[target_id].predecessors.push(NodeId::Block(i));
+                    }
+                }
                 Some(TackyInstr::JumpIfZero(_, ref target))
                 | Some(TackyInstr::JumpIfNotZero(_, ref target)) => {
                     if let Some(&target_id) = label_to_block.get(target) {
@@ -145,6 +150,7 @@ fn partition_into_basic_blocks(instructions: Vec<TackyInstr>) -> Vec<Vec<TackyIn
                 current.push(instr);
             }
             TackyInstr::Jump(_)
+            | TackyInstr::JumpIndirect(_)
             | TackyInstr::JumpIfZero(_, _)
             | TackyInstr::JumpIfNotZero(_, _)
             | TackyInstr::Return(_)
@@ -204,7 +210,7 @@ pub enum CopySrc {
 }
 
 fn can_propagate_double_constant_to(ty: CType) -> bool {
-    matches!(ty, CType::Float | CType::Double)
+    matches!(ty, CType::Double)
 }
 
 pub fn copy_propagation(
@@ -212,28 +218,22 @@ pub fn copy_propagation(
     aliased_vars: &HashSet<String>,
     types: &HashMap<String, CType>,
 ) {
-    // Collect all copy instructions in the function
-    let all_copies: HashSet<CopyInstr> = collect_all_copies(cfg, types);
-
-    // Initialize block annotations with all_copies
+    // Initialize block facts conservatively. Growing from empty may miss some
+    // available copies in exotic unreachable cycles, but never invents copies.
     let mut block_out: HashMap<usize, HashSet<CopyInstr>> = HashMap::new();
     for block in &cfg.blocks {
-        block_out.insert(block.id, all_copies.clone());
+        block_out.insert(block.id, HashSet::new());
     }
-
-    // Per-instruction annotations
-    let mut instr_reaching: InstrCopies = HashMap::new();
 
     // Worklist algorithm
     let mut worklist: VecDeque<usize> = (0..cfg.blocks.len()).collect();
 
     while let Some(block_id) = worklist.pop_front() {
         // Meet: intersection of all predecessors' out-copies
-        let incoming = meet_copies(&cfg.blocks[block_id], &block_out, &all_copies);
+        let incoming = meet_copies(&cfg.blocks[block_id], &block_out);
 
         // Transfer function
-        let (new_out, new_instr_reaching) =
-            transfer_copies(&cfg.blocks[block_id], &incoming, aliased_vars, types);
+        let new_out = transfer_copies_out(&cfg.blocks[block_id], &incoming, aliased_vars, types);
 
         let old_out = block_out.get(&block_id).cloned().unwrap_or_default();
         if new_out != old_out {
@@ -247,272 +247,174 @@ pub fn copy_propagation(
                 }
             }
         }
-        // Update instruction annotations
-        for (position, copies) in new_instr_reaching {
-            instr_reaching.insert(position, copies);
-        }
     }
 
     // Rewrite instructions using reaching copies
-    for block in &mut cfg.blocks {
+    for block_id in 0..cfg.blocks.len() {
+        let mut reaching = meet_copies(&cfg.blocks[block_id], &block_out);
         let mut new_instrs = Vec::new();
-        for (i, instr) in block.instructions.iter().enumerate() {
-            let reaching = instr_reaching
-                .get(&InstrPosition::new(block.id, i))
-                .cloned()
-                .unwrap_or_default();
+        for instr in &cfg.blocks[block_id].instructions {
             if let Some(rewritten) = rewrite_instruction(instr, &reaching, types) {
                 new_instrs.push(rewritten);
             }
             // else: instruction was eliminated (redundant copy)
+            transfer_copy_instr(instr, &mut reaching, aliased_vars, types);
         }
-        block.instructions = new_instrs;
+        cfg.blocks[block_id].instructions = new_instrs;
     }
-}
-
-fn collect_all_copies(cfg: &Cfg, types: &HashMap<String, CType>) -> HashSet<CopyInstr> {
-    let mut copies = HashSet::new();
-    for block in &cfg.blocks {
-        for instr in &block.instructions {
-            match instr {
-                TackyInstr::Copy {
-                    src: TackyVal::Var(s),
-                    dst: TackyVal::Var(d),
-                } => {
-                    let st = types.get(s).copied().unwrap_or(CType::Int);
-                    let dt = types.get(d).copied().unwrap_or(CType::Int);
-                    if st == dt || (st.is_signed() == dt.is_signed() && st.size() == dt.size()) {
-                        copies.insert(CopyInstr {
-                            src: CopySrc::Var(s.clone()),
-                            dst: d.clone(),
-                        });
-                    }
-                }
-                TackyInstr::Copy {
-                    src: TackyVal::Constant(c),
-                    dst: TackyVal::Var(d),
-                } => {
-                    copies.insert(CopyInstr {
-                        src: CopySrc::Constant(*c),
-                        dst: d.clone(),
-                    });
-                }
-                TackyInstr::Copy {
-                    src: TackyVal::DoubleConstant(c),
-                    dst: TackyVal::Var(d),
-                } => {
-                    let dt = types.get(d).copied().unwrap_or(CType::Int);
-                    if can_propagate_double_constant_to(dt) {
-                        copies.insert(CopyInstr {
-                            src: CopySrc::DoubleConstant(c.to_bits()),
-                            dst: d.clone(),
-                        });
-                    }
-                }
-                TackyInstr::CopyStruct { src_name, dst_name } => {
-                    copies.insert(CopyInstr {
-                        src: CopySrc::Var(src_name.clone()),
-                        dst: dst_name.clone(),
-                    });
-                }
-                _ => {}
-            }
-        }
-    }
-    copies
 }
 
 fn meet_copies(
     block: &BasicBlock,
     block_out: &HashMap<usize, HashSet<CopyInstr>>,
-    all_copies: &HashSet<CopyInstr>,
 ) -> HashSet<CopyInstr> {
-    let mut incoming = all_copies.clone();
+    let mut incoming: Option<HashSet<CopyInstr>> = None;
     for pred in &block.predecessors {
         match pred {
             NodeId::Entry => return HashSet::new(), // No copies reach from entry
             NodeId::Block(pid) => {
                 if let Some(pred_out) = block_out.get(pid) {
-                    incoming = incoming.intersection(pred_out).cloned().collect();
+                    incoming = Some(match incoming {
+                        Some(current) => current.intersection(pred_out).cloned().collect(),
+                        None => pred_out.clone(),
+                    });
                 }
             }
             _ => {}
         }
     }
-    if block.predecessors.is_empty() {
-        return all_copies.clone(); // Unreachable block
-    }
-    incoming
+    incoming.unwrap_or_default()
 }
 
-fn transfer_copies(
+fn transfer_copies_out(
     block: &BasicBlock,
     initial: &HashSet<CopyInstr>,
     aliased: &HashSet<String>,
     types: &HashMap<String, CType>,
-) -> (HashSet<CopyInstr>, InstrCopies) {
+) -> HashSet<CopyInstr> {
     let mut current = initial.clone();
-    let mut annotations = HashMap::new();
 
-    for (i, instr) in block.instructions.iter().enumerate() {
-        annotations.insert(InstrPosition::new(block.id, i), current.clone());
+    for instr in &block.instructions {
+        transfer_copy_instr(instr, &mut current, aliased, types);
+    }
 
-        match instr {
-            TackyInstr::Copy {
-                src: TackyVal::Var(s),
-                dst: TackyVal::Var(d),
-            } => {
-                let st = types.get(s).copied().unwrap_or(CType::Int);
-                let dt = types.get(d).copied().unwrap_or(CType::Int);
-                let same_type =
-                    st == dt || (st.is_signed() == dt.is_signed() && st.size() == dt.size());
-                if same_type {
-                    let copy = CopyInstr {
-                        src: CopySrc::Var(s.clone()),
-                        dst: d.clone(),
-                    };
-                    let reverse_redundant = current.contains(&CopyInstr {
-                        src: CopySrc::Var(d.clone()),
-                        dst: s.clone(),
-                    });
-                    if current.contains(&copy) || reverse_redundant {
-                        // Redundant — don't modify reaching copies
-                    } else {
-                        // Kill copies to/from dst
-                        current.retain(|c| {
-                            let src_match = match &c.src {
-                                CopySrc::Var(v) => v == d,
-                                _ => false,
-                            };
-                            c.dst != *d && !src_match
-                        });
-                        current.insert(copy);
-                    }
-                } else {
-                    // Type conversion copy — kill copies to/from dst
-                    current.retain(|c| {
-                        let src_match = match &c.src {
-                            CopySrc::Var(v) => v == d,
-                            _ => false,
-                        };
-                        c.dst != *d && !src_match
-                    });
-                }
-            }
-            TackyInstr::Copy {
-                src: TackyVal::Constant(c),
-                dst: TackyVal::Var(d),
-            } => {
+    current
+}
+
+fn kill_copies_involving_var(current: &mut HashSet<CopyInstr>, name: &str) {
+    current.retain(|copy| {
+        let src_match = match &copy.src {
+            CopySrc::Var(src) => src == name,
+            _ => false,
+        };
+        copy.dst != name && !src_match
+    });
+}
+
+fn transfer_copy_instr(
+    instr: &TackyInstr,
+    current: &mut HashSet<CopyInstr>,
+    aliased: &HashSet<String>,
+    types: &HashMap<String, CType>,
+) {
+    match instr {
+        TackyInstr::Copy {
+            src: TackyVal::Var(s),
+            dst: TackyVal::Var(d),
+        } => {
+            let st = types.get(s).copied().unwrap_or(CType::Int);
+            let dt = types.get(d).copied().unwrap_or(CType::Int);
+            let same_type =
+                st == dt || (st.is_signed() == dt.is_signed() && st.size() == dt.size());
+            if same_type {
                 let copy = CopyInstr {
-                    src: CopySrc::Constant(*c),
+                    src: CopySrc::Var(s.clone()),
+                    dst: d.clone(),
+                };
+                let reverse_redundant = current.contains(&CopyInstr {
+                    src: CopySrc::Var(d.clone()),
+                    dst: s.clone(),
+                });
+                if !current.contains(&copy) && !reverse_redundant {
+                    kill_copies_involving_var(current, d);
+                    current.insert(copy);
+                }
+            } else {
+                kill_copies_involving_var(current, d);
+            }
+        }
+        TackyInstr::Copy {
+            src: TackyVal::Constant(c),
+            dst: TackyVal::Var(d),
+        } => {
+            let copy = CopyInstr {
+                src: CopySrc::Constant(*c),
+                dst: d.clone(),
+            };
+            if !current.contains(&copy) {
+                kill_copies_involving_var(current, d);
+                current.insert(copy);
+            }
+        }
+        TackyInstr::Copy {
+            src: TackyVal::DoubleConstant(c),
+            dst: TackyVal::Var(d),
+        } => {
+            let dt = types.get(d).copied().unwrap_or(CType::Int);
+            if can_propagate_double_constant_to(dt) {
+                let copy = CopyInstr {
+                    src: CopySrc::DoubleConstant(c.to_bits()),
                     dst: d.clone(),
                 };
                 if !current.contains(&copy) {
-                    current.retain(|c| {
-                        let src_match = match &c.src {
-                            CopySrc::Var(v) => v == d,
-                            _ => false,
-                        };
-                        c.dst != *d && !src_match
-                    });
+                    kill_copies_involving_var(current, d);
                     current.insert(copy);
                 }
+            } else {
+                kill_copies_involving_var(current, d);
             }
-            TackyInstr::Copy {
-                src: TackyVal::DoubleConstant(c),
-                dst: TackyVal::Var(d),
-            } => {
-                let dt = types.get(d).copied().unwrap_or(CType::Int);
-                if can_propagate_double_constant_to(dt) {
-                    let copy = CopyInstr {
-                        src: CopySrc::DoubleConstant(c.to_bits()),
-                        dst: d.clone(),
-                    };
-                    if !current.contains(&copy) {
-                        current.retain(|c_instr| {
-                            let src_match = match &c_instr.src {
-                                CopySrc::Var(v) => v == d,
-                                _ => false,
-                            };
-                            c_instr.dst != *d && !src_match
-                        });
-                        current.insert(copy);
-                    }
-                } else {
-                    current.retain(|c_instr| {
-                        let src_match = match &c_instr.src {
-                            CopySrc::Var(v) => v == d,
-                            _ => false,
-                        };
-                        c_instr.dst != *d && !src_match
-                    });
-                }
-            }
-            TackyInstr::FunCall { dst, .. } => {
-                // Kill copies involving aliased vars or dst
-                current.retain(|c| {
-                    let src_aliased = match &c.src {
-                        CopySrc::Var(v) => aliased.contains(v),
-                        _ => false,
-                    };
-                    !src_aliased && !aliased.contains(&c.dst)
-                });
-                if let TackyVal::Var(d) = dst {
-                    current.retain(|c| {
-                        let src_match = match &c.src {
-                            CopySrc::Var(v) => v == d,
-                            _ => false,
-                        };
-                        c.dst != *d && !src_match
-                    });
-                }
-            }
-            TackyInstr::Store { .. } => {
-                // Kill copies involving aliased vars
-                current.retain(|c| {
-                    let src_aliased = match &c.src {
-                        CopySrc::Var(v) => aliased.contains(v),
-                        _ => false,
-                    };
-                    !src_aliased && !aliased.contains(&c.dst)
-                });
-            }
-            TackyInstr::CopyStruct { src_name, dst_name } => {
-                let copy = CopyInstr {
-                    src: CopySrc::Var(src_name.clone()),
-                    dst: dst_name.clone(),
+        }
+        TackyInstr::FunCall { dst, .. } => {
+            current.retain(|copy| {
+                let src_aliased = match &copy.src {
+                    CopySrc::Var(src) => aliased.contains(src),
+                    _ => false,
                 };
-                let reverse_redundant = current.contains(&CopyInstr {
-                    src: CopySrc::Var(dst_name.clone()),
-                    dst: src_name.clone(),
-                });
-                if !current.contains(&copy) && !reverse_redundant {
-                    current.retain(|c| {
-                        let src_match = match &c.src {
-                            CopySrc::Var(v) => v == dst_name,
-                            _ => false,
-                        };
-                        c.dst != *dst_name && !src_match
-                    });
-                    current.insert(copy);
-                }
+                !src_aliased && !aliased.contains(&copy.dst)
+            });
+            if let TackyVal::Var(d) = dst {
+                kill_copies_involving_var(current, d);
             }
-            _ => {
-                // Kill copies to/from dst if instruction writes to a variable
-                if let Some(d) = get_instr_dst(instr) {
-                    current.retain(|c| {
-                        let src_match = match &c.src {
-                            CopySrc::Var(v) => v == &d,
-                            _ => false,
-                        };
-                        c.dst != d && !src_match
-                    });
-                }
+        }
+        TackyInstr::Store { .. } => {
+            current.retain(|copy| {
+                let src_aliased = match &copy.src {
+                    CopySrc::Var(src) => aliased.contains(src),
+                    _ => false,
+                };
+                !src_aliased && !aliased.contains(&copy.dst)
+            });
+        }
+        TackyInstr::CopyStruct { src_name, dst_name } => {
+            let copy = CopyInstr {
+                src: CopySrc::Var(src_name.clone()),
+                dst: dst_name.clone(),
+            };
+            let reverse_redundant = current.contains(&CopyInstr {
+                src: CopySrc::Var(dst_name.clone()),
+                dst: src_name.clone(),
+            });
+            if !current.contains(&copy) && !reverse_redundant {
+                kill_copies_involving_var(current, dst_name);
+                current.insert(copy);
+            }
+        }
+        _ => {
+            if let Some(dst) = get_instr_dst(instr) {
+                kill_copies_involving_var(current, &dst);
             }
         }
     }
-
-    (current, annotations)
 }
 
 fn get_instr_dst(instr: &TackyInstr) -> Option<String> {
@@ -600,6 +502,25 @@ fn get_instr_dst(instr: &TackyInstr) -> Option<String> {
         | TackyInstr::FunCall {
             dst: TackyVal::Var(n),
             ..
+        }
+        | TackyInstr::VaStart {
+            dst: TackyVal::Var(n),
+        }
+        | TackyInstr::AtomicFetch {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstr::AtomicExchange {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstr::AtomicCompareExchange {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstr::AtomicCompareSwap {
+            dst: TackyVal::Var(n),
+            ..
         } => Some(n.clone()),
         TackyInstr::CopyToOffset { dst_name, .. } | TackyInstr::CopyStruct { dst_name, .. } => {
             Some(dst_name.clone())
@@ -655,18 +576,7 @@ fn replace_operand_typed(
             if copy.dst == *name {
                 match (&best, &copy.src) {
                     (None, CopySrc::Var(_)) => best = Some(copy),
-                    (None, CopySrc::Constant(c)) => {
-                        // Only use constant if it produces same AsmType as the variable
-                        let const_size = if *c > i32::MAX as i64 || *c < i32::MIN as i64 {
-                            8
-                        } else {
-                            4
-                        };
-                        let var_size = orig_type.size();
-                        if const_size == var_size {
-                            best = Some(copy);
-                        }
-                    }
+                    (None, CopySrc::Constant(_)) => {}
                     (None, CopySrc::DoubleConstant(_))
                         if can_propagate_double_constant_to(orig_type) =>
                     {
@@ -744,7 +654,9 @@ fn rewrite_instruction(
             right,
             dst,
         } => {
-            // For comparisons, use typed replacement to preserve signedness
+            // Comparisons and right shifts depend on operand signedness.  Keep
+            // typed temporaries when replacing them with an untyped constant
+            // would make codegen choose a different width or signed shift.
             let is_cmp = matches!(
                 op,
                 TackyBinaryOp::Equal
@@ -754,12 +666,13 @@ fn rewrite_instruction(
                     | TackyBinaryOp::GreaterThan
                     | TackyBinaryOp::GreaterEqual
             );
-            let new_left = if is_cmp {
+            let needs_typed_replacement = is_cmp || matches!(op, TackyBinaryOp::ShiftRight);
+            let new_left = if needs_typed_replacement {
                 replace_operand_typed(left, reaching, types)
             } else {
                 replace_operand(left, reaching)
             };
-            let new_right = if is_cmp {
+            let new_right = if needs_typed_replacement {
                 replace_operand_typed(right, reaching, types)
             } else {
                 replace_operand(right, reaching)
@@ -949,6 +862,15 @@ pub fn dead_store_elimination(
     aliased_vars: &HashSet<String>,
     static_vars: &HashSet<String>,
 ) {
+    if cfg
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .any(|instr| matches!(instr, TackyInstr::BuiltinSetjmp { .. }))
+    {
+        return;
+    }
+
     // Liveness analysis (backward data-flow)
     let mut block_live_in: HashMap<usize, HashSet<String>> = HashMap::new();
     for block in &cfg.blocks {
@@ -995,6 +917,7 @@ pub fn dead_store_elimination(
                     .get(&InstrPosition::new(block.id, i))
                     .cloned()
                     .unwrap_or_default(),
+                static_vars,
             ) {
                 continue; // Remove dead store
             }
@@ -1042,9 +965,18 @@ fn transfer_liveness(
 
         // Kill destination, generate sources
         match instr {
-            TackyInstr::FunCall { dst, args, .. } => {
+            TackyInstr::FunCall {
+                name,
+                dst,
+                args,
+                indirect,
+                ..
+            } => {
                 if let TackyVal::Var(d) = dst {
                     current.remove(d);
+                }
+                if *indirect {
+                    current.insert(name.clone());
                 }
                 for arg in args {
                     if let TackyVal::Var(a) = arg {
@@ -1125,9 +1057,9 @@ fn get_instr_sources(instr: &TackyInstr) -> Vec<String> {
             add_var(right, &mut srcs);
         }
         TackyInstr::Return(val) => add_var(val, &mut srcs),
-        TackyInstr::JumpIfZero(val, _) | TackyInstr::JumpIfNotZero(val, _) => {
-            add_var(val, &mut srcs)
-        }
+        TackyInstr::JumpIfZero(val, _)
+        | TackyInstr::JumpIfNotZero(val, _)
+        | TackyInstr::JumpIndirect(val) => add_var(val, &mut srcs),
         TackyInstr::Truncate { src, .. }
         | TackyInstr::SignExtend { src, .. }
         | TackyInstr::ZeroExtend { src, .. }
@@ -1147,9 +1079,38 @@ fn get_instr_sources(instr: &TackyInstr) -> Vec<String> {
         }
         TackyInstr::Load { src_ptr, .. } => add_var(src_ptr, &mut srcs),
         TackyInstr::GetAddress { .. } => {} // GetAddress takes address, doesn't read value
+        TackyInstr::BuiltinSetjmp { buf, .. } => add_var(buf, &mut srcs),
+        TackyInstr::BuiltinLongjmp { buf, value } => {
+            add_var(buf, &mut srcs);
+            add_var(value, &mut srcs);
+        }
         TackyInstr::AddPtr { ptr, index, .. } => {
             add_var(ptr, &mut srcs);
             add_var(index, &mut srcs);
+        }
+        TackyInstr::AtomicFetch { ptr, arg, .. } => {
+            add_var(ptr, &mut srcs);
+            add_var(arg, &mut srcs);
+        }
+        TackyInstr::AtomicExchange { ptr, value, .. } => {
+            add_var(ptr, &mut srcs);
+            add_var(value, &mut srcs);
+        }
+        TackyInstr::AtomicCompareExchange {
+            ptr,
+            expected,
+            desired,
+            ..
+        }
+        | TackyInstr::AtomicCompareSwap {
+            ptr,
+            expected,
+            desired,
+            ..
+        } => {
+            add_var(ptr, &mut srcs);
+            add_var(expected, &mut srcs);
+            add_var(desired, &mut srcs);
         }
         TackyInstr::CopyToOffset { src, .. } => add_var(src, &mut srcs),
         TackyInstr::CopyFromOffset { dst: _, .. } => {} // src_name is just a name, not a TackyVal
@@ -1159,10 +1120,23 @@ fn get_instr_sources(instr: &TackyInstr) -> Vec<String> {
     srcs
 }
 
-fn is_dead_store(instr: &TackyInstr, live_after: &HashSet<String>) -> bool {
+fn is_dead_store(
+    instr: &TackyInstr,
+    live_after: &HashSet<String>,
+    static_vars: &HashSet<String>,
+) -> bool {
     // Never eliminate function calls (side effects), stores (write through pointer),
     // CopyToOffset (partial struct update), or GetAddress
-    if matches!(instr, TackyInstr::FunCall { .. } | TackyInstr::Store { .. }) {
+    if matches!(
+        instr,
+        TackyInstr::FunCall { .. }
+            | TackyInstr::Store { .. }
+            | TackyInstr::AtomicFence
+            | TackyInstr::AtomicFetch { .. }
+            | TackyInstr::AtomicExchange { .. }
+            | TackyInstr::AtomicCompareExchange { .. }
+            | TackyInstr::AtomicCompareSwap { .. }
+    ) {
         return false;
     }
     // Never eliminate jumps, labels, returns
@@ -1180,6 +1154,9 @@ fn is_dead_store(instr: &TackyInstr, live_after: &HashSet<String>) -> bool {
     }
     // If instruction has a destination and it's not live after, it's a dead store
     if let Some(dst) = get_instr_dst(instr) {
+        if static_vars.contains(&dst) {
+            return false;
+        }
         if !live_after.contains(&dst) {
             return true;
         }

@@ -1458,6 +1458,7 @@ pub enum Exp {
     Conditional(Box<Exp>, Box<Exp>, Box<Exp>),
     BuiltinExpect(Box<Exp>, Vec<Exp>),
     FunctionCall(String, Vec<Exp>),
+    ImplicitFunctionCall(String, Vec<Exp>),
     Subscript(Box<Exp>, Box<Exp>), // arr[index]
     ArrayInit(Vec<Exp>),           // {1, 2, 3} or {{1,2}, {3,4}}
     DesignatedInit(Vec<Designator>, Box<Exp>),

@@ -102,6 +102,12 @@ struct StaticAddressConstant {
     offset: i64,
 }
 
+struct StaticStringLiteralElementAddress {
+    literal_key: String,
+    offset: i64,
+    elem_size: i64,
+}
+
 struct IntegerRange {
     min: i128,
     max: i128,
@@ -596,6 +602,16 @@ impl TackyGen {
                     .value;
                     return Some(diff.wrapping_sub(value));
                 }
+                if let (Some(left), Some(right)) = (
+                    self.static_string_literal_element_address(left),
+                    self.static_string_literal_element_address(right),
+                ) {
+                    if left.literal_key == right.literal_key && left.elem_size == right.elem_size {
+                        let byte_diff = left.offset - right.offset;
+                        return (byte_diff % left.elem_size == 0)
+                            .then_some(byte_diff / left.elem_size);
+                    }
+                }
                 let left_address = self.static_address_constant(left)?;
                 let right_address = self.static_address_constant(right)?;
                 if left_address.base != right_address.base {
@@ -615,6 +631,59 @@ impl TackyGen {
                 }
                 let byte_diff = left_address.offset - right_address.offset;
                 (byte_diff % elem_size == 0).then_some(byte_diff / elem_size)
+            }
+            _ => None,
+        }
+    }
+
+    fn static_string_literal_element_address(
+        &self,
+        exp: &Exp,
+    ) -> Option<StaticStringLiteralElementAddress> {
+        let Exp::Unary(UnaryOp::AddrOf, inner) = exp else {
+            return None;
+        };
+        let Exp::Subscript(array, index) = inner.as_ref() else {
+            return None;
+        };
+        let index = eval_static_integer_constant_exp_with_context(
+            index,
+            &self.struct_defs,
+            &self.full_types,
+        )?
+        .value;
+        match array.as_ref() {
+            Exp::StringLiteral(s) => Some(StaticStringLiteralElementAddress {
+                literal_key: format!("c:{s}"),
+                offset: index,
+                elem_size: 1,
+            }),
+            Exp::WideStringLiteral(s) => {
+                let elem_size =
+                    FullType::Scalar(CType::Int).byte_size_with(&self.struct_defs) as i64;
+                Some(StaticStringLiteralElementAddress {
+                    literal_key: format!("w:{s}"),
+                    offset: index * elem_size,
+                    elem_size,
+                })
+            }
+            Exp::Utf16StringLiteral(s) => {
+                let elem_size =
+                    FullType::Scalar(CType::UShort).byte_size_with(&self.struct_defs) as i64;
+                Some(StaticStringLiteralElementAddress {
+                    literal_key: format!("u16:{s}"),
+                    offset: index * elem_size,
+                    elem_size,
+                })
+            }
+            Exp::Utf32StringLiteral(s) => {
+                let elem_size =
+                    FullType::Scalar(CType::UInt).byte_size_with(&self.struct_defs) as i64;
+                Some(StaticStringLiteralElementAddress {
+                    literal_key: format!("u32:{s}"),
+                    offset: index * elem_size,
+                    elem_size,
+                })
             }
             _ => None,
         }
@@ -2020,7 +2089,7 @@ impl TackyGen {
                 }
                 FullType::Scalar(CType::Int)
             }
-            Exp::FunctionCall(name, _) => {
+            Exp::FunctionCall(name, _) | Exp::ImplicitFunctionCall(name, _) => {
                 if let Some(ft) = self.func_full_types.get(name) {
                     ft.clone()
                 } else {
@@ -3903,7 +3972,8 @@ impl TackyGen {
             Exp::Conditional(cond, then_exp, else_exp) => {
                 self.emit_conditional(*cond, *then_exp, *else_exp)
             }
-            Exp::FunctionCall(name, args) => self.emit_function_call(name, args),
+            Exp::FunctionCall(name, args) => self.emit_function_call(name, args, false),
+            Exp::ImplicitFunctionCall(name, args) => self.emit_function_call(name, args, true),
             Exp::IndirectCall(callee, args) => self.emit_indirect_call(*callee, args),
             Exp::Binary(BinaryOp::LogicalAnd, left, right) => {
                 Ok((self.emit_logical_and(*left, *right)?, CType::Int))
@@ -4634,7 +4704,9 @@ impl TackyGen {
 
     fn builtin_apply_target_name(exp: &Exp) -> Option<String> {
         match exp {
-            Exp::Var(name) | Exp::FunctionCall(name, _) => Some(name.clone()),
+            Exp::Var(name) | Exp::FunctionCall(name, _) | Exp::ImplicitFunctionCall(name, _) => {
+                Some(name.clone())
+            }
             Exp::Cast(_, _, inner) => Self::builtin_apply_target_name(inner),
             Exp::Unary(UnaryOp::AddrOf, inner) => Self::builtin_apply_target_name(inner),
             _ => None,
@@ -4643,7 +4715,7 @@ impl TackyGen {
 
     fn exp_contains_va_arg_pack(exp: &Exp) -> bool {
         match exp {
-            Exp::FunctionCall(name, args) => {
+            Exp::FunctionCall(name, args) | Exp::ImplicitFunctionCall(name, args) => {
                 (name == "__builtin_va_arg_pack" && args.is_empty())
                     || args.iter().any(Self::exp_contains_va_arg_pack)
             }
@@ -4812,6 +4884,12 @@ impl TackyGen {
                     .map(|arg| Self::substitute_inline_locals_exp(arg, locals))
                     .collect(),
             ),
+            Exp::ImplicitFunctionCall(name, args) => Exp::ImplicitFunctionCall(
+                name,
+                args.into_iter()
+                    .map(|arg| Self::substitute_inline_locals_exp(arg, locals))
+                    .collect(),
+            ),
             Exp::Cast(ct, ft, inner) => Exp::Cast(
                 ct,
                 ft,
@@ -4888,13 +4966,13 @@ impl TackyGen {
     ) -> Option<Exp> {
         match exp {
             Exp::Var(name) => Some(params.get(name).cloned().unwrap_or_else(|| exp.clone())),
-            Exp::FunctionCall(name, args) => {
+            Exp::FunctionCall(name, args) | Exp::ImplicitFunctionCall(name, args) => {
                 if name == "__builtin_va_arg_pack" && args.is_empty() {
                     return None;
                 }
                 let mut substituted = Vec::new();
                 for arg in args {
-                    if matches!(arg, Exp::FunctionCall(inner, inner_args)
+                    if matches!(arg, Exp::FunctionCall(inner, inner_args) | Exp::ImplicitFunctionCall(inner, inner_args)
                         if inner == "__builtin_va_arg_pack" && inner_args.is_empty())
                     {
                         substituted.extend(tail_args.iter().cloned());
@@ -4902,7 +4980,13 @@ impl TackyGen {
                         substituted.push(Self::substitute_va_arg_pack_exp(arg, params, tail_args)?);
                     }
                 }
-                Some(Exp::FunctionCall(name.clone(), substituted))
+                Some(match exp {
+                    Exp::FunctionCall(_, _) => Exp::FunctionCall(name.clone(), substituted),
+                    Exp::ImplicitFunctionCall(_, _) => {
+                        Exp::ImplicitFunctionCall(name.clone(), substituted)
+                    }
+                    _ => unreachable!(),
+                })
             }
             Exp::Cast(ct, ft, inner) => Some(Exp::Cast(
                 *ct,
@@ -4963,6 +5047,7 @@ impl TackyGen {
         &mut self,
         name: String,
         args: Vec<Exp>,
+        no_visible_prototype: bool,
     ) -> TackyResult<(TackyVal, CType)> {
         if let Some(inlined) = self.expand_inline_va_arg_pack_call(&name, &args) {
             return self.emit_exp(inlined);
@@ -4977,7 +5062,7 @@ impl TackyGen {
             let Some(target) = Self::builtin_apply_target_name(&args[0]) else {
                 return Err("__builtin_apply requires a direct function target".to_string());
             };
-            if !matches!(&args[1], Exp::FunctionCall(inner, inner_args)
+            if !matches!(&args[1], Exp::FunctionCall(inner, inner_args) | Exp::ImplicitFunctionCall(inner, inner_args)
                 if inner == "__builtin_apply_args" && inner_args.is_empty())
             {
                 let dst = self.fresh_tmp_full(&Self::void_pointer_type());
@@ -4993,7 +5078,7 @@ impl TackyGen {
                 .cloned()
                 .map(Exp::Var)
                 .collect();
-            let _ = self.emit_function_call(target, forwarded_args)?;
+            let _ = self.emit_function_call(target, forwarded_args, false)?;
             let dst = self.fresh_tmp_full(&Self::void_pointer_type());
             self.emit(TackyInstr::Copy {
                 src: TackyVal::Constant(0),
@@ -5426,10 +5511,10 @@ impl TackyGen {
             lowered_args.push(args[0].clone());
             lowered_args.push(args[3].clone());
             lowered_args.extend(args.into_iter().skip(4));
-            return self.emit_function_call("sprintf".to_string(), lowered_args);
+            return self.emit_function_call("sprintf".to_string(), lowered_args, false);
         }
         if name == "mempcpy" && args.len() == 3 {
-            self.emit_function_call("memcpy".to_string(), args.clone())?;
+            self.emit_function_call("memcpy".to_string(), args.clone(), false)?;
             let (dst, dst_ty) = self.emit_exp(args[0].clone())?;
             let (count, count_ty) = self.emit_exp(args[2].clone())?;
             let count = self.convert_to(count, count_ty, CType::Long);
@@ -5936,7 +6021,9 @@ impl TackyGen {
             return Ok((dst, ret_type));
         }
         let (ret_type, param_types, ret_pi, variadic) =
-            if let Some((_, ret_type, _, param_types, ret_pi)) = builtin_info.as_ref() {
+            if no_visible_prototype && builtin_info.is_none() {
+                (CType::Int, Vec::new(), None, false)
+            } else if let Some((_, ret_type, _, param_types, ret_pi)) = builtin_info.as_ref() {
                 (
                     *ret_type,
                     param_types.clone(),
@@ -5966,17 +6053,19 @@ impl TackyGen {
                     })
                     .unwrap_or((CType::Int, Vec::new(), None, false))
             };
-        let direct_old_style_call = self.old_style_functions.contains(&name)
-            && builtin_info.is_none()
-            && pointer_sig.is_none();
+        let direct_old_style_call = no_visible_prototype
+            || (self.old_style_functions.contains(&name)
+                && builtin_info.is_none()
+                && pointer_sig.is_none());
         let param_types = if direct_old_style_call {
             Vec::new()
         } else {
             param_types
         };
-        let has_prototype = builtin_info.is_some()
-            || pointer_sig.is_some()
-            || (self.func_types.contains_key(&name) && !direct_old_style_call);
+        let has_prototype = !no_visible_prototype
+            && (builtin_info.is_some()
+                || pointer_sig.is_some()
+                || (self.func_types.contains_key(&name) && !direct_old_style_call));
         if has_prototype && !variadic && args.len() != param_types.len() {
             return Err(format!(
                 "function '{}' called with {} argument(s), but prototype expects {}",
@@ -5994,16 +6083,20 @@ impl TackyGen {
             ));
         }
 
-        let ret_ft = builtin_info
-            .as_ref()
-            .map(|(_, _, ret_ft, _, _)| ret_ft.clone())
-            .or_else(|| {
-                self.func_full_types.get(&name).cloned().or_else(|| {
-                    pointer_sig
-                        .as_ref()
-                        .map(|signature| signature.return_type.clone())
+        let ret_ft = if no_visible_prototype && builtin_info.is_none() {
+            None
+        } else {
+            builtin_info
+                .as_ref()
+                .map(|(_, _, ret_ft, _, _)| ret_ft.clone())
+                .or_else(|| {
+                    self.func_full_types.get(&name).cloned().or_else(|| {
+                        pointer_sig
+                            .as_ref()
+                            .map(|signature| signature.return_type.clone())
+                    })
                 })
-            });
+        };
         let param_full_types: Vec<FullType> = if direct_old_style_call {
             Vec::new()
         } else {
@@ -13048,7 +13141,7 @@ impl TackyGen {
                     Self::collect_used_vars_exp(hint, used);
                 }
             }
-            Exp::FunctionCall(name, args) => {
+            Exp::FunctionCall(name, args) | Exp::ImplicitFunctionCall(name, args) => {
                 Self::push_used_var(name, used);
                 for arg in args {
                     Self::collect_used_vars_exp(arg, used);
@@ -13231,6 +13324,12 @@ impl TackyGen {
                     .collect(),
             ),
             Exp::FunctionCall(name, args) => Exp::FunctionCall(
+                name,
+                args.into_iter()
+                    .map(|arg| Self::rewrite_capture_exp(arg, capture_map))
+                    .collect(),
+            ),
+            Exp::ImplicitFunctionCall(name, args) => Exp::ImplicitFunctionCall(
                 name,
                 args.into_iter()
                     .map(|arg| Self::rewrite_capture_exp(arg, capture_map))
@@ -13599,7 +13698,7 @@ impl TackyGen {
             Exp::Var(name) => {
                 refs.insert(name.clone());
             }
-            Exp::FunctionCall(_, args) => {
+            Exp::FunctionCall(_, args) | Exp::ImplicitFunctionCall(_, args) => {
                 for arg in args {
                     Self::collect_escaped_function_refs_exp(arg, refs);
                 }

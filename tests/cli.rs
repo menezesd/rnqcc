@@ -20110,8 +20110,13 @@ fn internal_cpp_rejects_unguarded_recursive_include() {
         .expect("failed to run rnqcc");
 
     assert!(!output.status.success());
+    let stderr = stderr(output);
     assert!(
-        stderr(output).contains("recursive include"),
+        stderr.contains(&format!("{}:1:", header.display())),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("recursive include"),
         "expected recursive include diagnostic"
     );
 
@@ -21159,6 +21164,52 @@ fn internal_cpp_line_marker_errors_include_source_location() {
     assert!(stderr.contains("malformed line marker"), "{stderr}");
 
     let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn internal_cpp_directive_syntax_errors_include_source_location() {
+    for (name, source, message) in [
+        (
+            "duplicate-macro-param",
+            "\n#define F(a, a) a\n",
+            "duplicate macro parameter name a",
+        ),
+        (
+            "ifdef-trailing",
+            "\n#ifdef FEATURE extra\n#endif\n",
+            "unexpected tokens after #ifdef identifier",
+        ),
+        (
+            "bad-pragma-pack",
+            "\n#pragma pack(push, bad)\n",
+            "malformed #pragma pack",
+        ),
+        (
+            "bad-pragma-push-macro",
+            "\n#pragma push_macro(VALUE)\n",
+            "malformed #pragma push_macro",
+        ),
+    ] {
+        let src = temp_file(&format!("internal-cpp-located-directive-{name}"), "c");
+        std::fs::write(&src, source).expect("failed to write source");
+
+        let output = Command::new(rnqcc())
+            .arg("--internal-cpp")
+            .arg("-E")
+            .arg(&src)
+            .output()
+            .expect("failed to run rnqcc");
+
+        assert!(!output.status.success(), "{name}");
+        let stderr = stderr(output);
+        assert!(
+            stderr.contains(&format!("{}:2:", src.display())),
+            "{name}: {stderr}"
+        );
+        assert!(stderr.contains(message), "{name}: {stderr}");
+
+        let _ = std::fs::remove_file(src);
+    }
 }
 
 #[test]

@@ -19165,6 +19165,39 @@ fn internal_cpp_honors_pragma_pack_push_one_and_pop() {
 }
 
 #[test]
+fn internal_cpp_pragma_pack_respects_unicode_identifier_boundaries() {
+    let src = temp_file("internal-cpp-pragma-pack-unicode-boundary", "c");
+    std::fs::write(
+        &src,
+        "#pragma pack(push, 1)\n\
+         int structα;\n\
+         struct Packed { char c; int i; };\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("int structα;"), "{stdout}");
+    assert!(
+        stdout.contains("struct __attribute__((packed)) Packed"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("struct __attribute__((packed))α"),
+        "{stdout}"
+    );
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn internal_cpp_honors_pragma_pack_push_four_and_pop() {
     let src = temp_file("internal-cpp-pragma-pack-four", "c");
     let exe = temp_file("internal-cpp-pragma-pack-four", "bin");
@@ -20967,6 +21000,30 @@ fn internal_cpp_pending_source_errors_include_source_location() {
         "{stderr}"
     );
     assert!(stderr.contains("malformed _Pragma operator"), "{stderr}");
+}
+
+#[test]
+fn internal_cpp_unterminated_conditionals_include_source_location() {
+    let src = temp_file("internal-cpp-located-unterminated-conditional", "c");
+    std::fs::write(&src, "#if 1\nint value = 1;\n").expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains(&format!("{}:2:", src.display())),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("unterminated conditional directive"),
+        "{stderr}"
+    );
 }
 
 #[test]

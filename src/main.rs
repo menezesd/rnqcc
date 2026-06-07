@@ -3940,12 +3940,10 @@ fn inject_pack_attributes(text: &str, alignment: usize) -> String {
             index += 1;
             continue;
         }
-        if ch.is_ascii_alphabetic() || ch == '_' {
+        if is_ident_start(ch) {
             let start = index;
             index += 1;
-            while index < chars.len()
-                && (chars[index].is_ascii_alphanumeric() || chars[index] == '_')
-            {
+            while index < chars.len() && is_ident_continue(chars[index]) {
                 index += 1;
             }
             let ident: String = chars[start..index].iter().collect();
@@ -5755,7 +5753,11 @@ fn internal_preprocess_source(
     )?;
 
     if !conditionals.is_empty() {
-        return Err("unterminated conditional directive".to_string());
+        return Err(pp_location(
+            &logical_file,
+            next_logical_line.saturating_sub(1).max(1),
+            "unterminated conditional directive",
+        ));
     }
 
     context.include_stack.pop();

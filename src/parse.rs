@@ -29,6 +29,13 @@ struct DeclarationAttributes {
     vector_size: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BitIntSpec {
+    width: i64,
+    unsigned: bool,
+    storage: CType,
+}
+
 #[derive(Debug)]
 enum AbstractDecl {
     Base,
@@ -1457,23 +1464,46 @@ impl Parser {
         }
     }
 
-    fn bitint_ctype(width: i64, unsigned: bool) -> ParseResult<CType> {
+    fn bitint_spec(width: i64, unsigned: bool) -> ParseResult<BitIntSpec> {
         if width <= 0 {
             return Err("_BitInt width must be positive".to_string());
         }
         if !unsigned && width == 1 {
             return Err("signed _BitInt width must be greater than 1".to_string());
         }
-        match width {
-            32 => Ok(if unsigned { CType::UInt } else { CType::Int }),
-            64 => Ok(if unsigned { CType::ULong } else { CType::Long }),
-            128 => Ok(if unsigned {
-                CType::UInt128
-            } else {
-                CType::Int128
-            }),
-            _ => Err("_BitInt width is not supported by an exact storage type".to_string()),
-        }
+        let storage = match width {
+            32 => {
+                if unsigned {
+                    CType::UInt
+                } else {
+                    CType::Int
+                }
+            }
+            64 => {
+                if unsigned {
+                    CType::ULong
+                } else {
+                    CType::Long
+                }
+            }
+            128 => {
+                if unsigned {
+                    CType::UInt128
+                } else {
+                    CType::Int128
+                }
+            }
+            _ => return Err("_BitInt width is not supported by an exact storage type".to_string()),
+        };
+        Ok(BitIntSpec {
+            width,
+            unsigned,
+            storage,
+        })
+    }
+
+    fn bitint_ctype(width: i64, unsigned: bool) -> ParseResult<CType> {
+        Self::bitint_spec(width, unsigned).map(|spec| spec.storage)
     }
 
     fn parse_bitint_width(&mut self) -> ParseResult<i64> {
@@ -7339,6 +7369,27 @@ mod tests {
         assert_eq!(e.decl_full_type, Some(FullType::Scalar(CType::Int128)));
         assert_eq!(f.var_type, CType::UInt128);
         assert_eq!(f.decl_full_type, Some(FullType::Scalar(CType::UInt128)));
+        Ok(())
+    }
+
+    #[test]
+    fn bitint_spec_tracks_width_signedness_and_storage() -> Result<(), String> {
+        assert_eq!(
+            Parser::bitint_spec(32, false)?,
+            BitIntSpec {
+                width: 32,
+                unsigned: false,
+                storage: CType::Int,
+            }
+        );
+        assert_eq!(
+            Parser::bitint_spec(128, true)?,
+            BitIntSpec {
+                width: 128,
+                unsigned: true,
+                storage: CType::UInt128,
+            }
+        );
         Ok(())
     }
 

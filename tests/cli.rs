@@ -24405,6 +24405,39 @@ int main(void) {
 }
 
 #[test]
+fn runs_supported_c23_bitint_operations() {
+    let src = temp_file("c23-bitint-operations", "c");
+    let exe = temp_file("c23-bitint-operations", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    unsigned _BitInt(32) x = 4294967295U;
+    _BitInt(64) y = 40;
+    _BitInt(128) z = 2;
+    x = x + 1U;
+    return x == 0U && y + z == 42 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn supports_nested_function_local_label_addresses() {
     let src = temp_file("nested-local-label-address", "c");
     let exe = temp_file("nested-local-label-address", "bin");

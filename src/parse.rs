@@ -1453,6 +1453,39 @@ impl Parser {
         }
     }
 
+    fn bitint_ctype(width: i64, unsigned: bool) -> ParseResult<CType> {
+        if width <= 0 {
+            return Err("_BitInt width must be positive".to_string());
+        }
+        if !unsigned && width == 1 {
+            return Err("signed _BitInt width must be greater than 1".to_string());
+        }
+        match width {
+            32 => Ok(if unsigned { CType::UInt } else { CType::Int }),
+            64 => Ok(if unsigned { CType::ULong } else { CType::Long }),
+            128 => Ok(if unsigned {
+                CType::UInt128
+            } else {
+                CType::Int128
+            }),
+            _ => Err("_BitInt width is not supported by an exact storage type".to_string()),
+        }
+    }
+
+    fn parse_bitint_width(&mut self) -> ParseResult<i64> {
+        match self.peek() {
+            Some(Token::Identifier(name)) if name == "_BitInt" => {
+                self.advance()?;
+            }
+            _ => return Err(self.format_error("expected _BitInt")),
+        }
+        self.expect_token(Token::OpenParen)?;
+        let width_exp = self.parse_expression()?;
+        self.expect_token(Token::CloseParen)?;
+        self.eval_integer_constant_exp_with_layout(&width_exp)
+            .ok_or_else(|| self.format_error("expected integer constant _BitInt width"))
+    }
+
     fn consume_member_attributes(&mut self) -> ParseResult<MemberAttributes> {
         let mut attrs = MemberAttributes::default();
         loop {
@@ -2114,6 +2147,7 @@ impl Parser {
         let mut has_float = false;
         let mut has_double = false;
         let mut has_int128 = false;
+        let mut bitint_width: Option<i64> = None;
         let mut saw_complex = false;
         let mut mode_attr: Option<String> = None;
         let mut vector_size_attr: Option<usize> = None;
@@ -2157,6 +2191,20 @@ impl Parser {
                 Some(Token::Identifier(name)) if Self::is_builtin_int128_type_name(&name) => {
                     self.advance()?;
                     has_int128 = true;
+                }
+                Some(Token::Identifier(name))
+                    if name == "_BitInt"
+                        && bitint_width.is_none()
+                        && !has_int
+                        && !has_long
+                        && !has_short
+                        && !has_char
+                        && !has_void
+                        && !has_float
+                        && !has_double
+                        && !has_int128 =>
+                {
+                    bitint_width = Some(self.parse_bitint_width()?);
                 }
                 Some(Token::KWNoreturn) | Some(Token::AttributeNoreturn) => {
                     self.pending_noreturn = true;
@@ -2358,6 +2406,7 @@ impl Parser {
             && !has_char
             && !has_float
             && !has_double
+            && bitint_width.is_none()
         {
             // Check for struct or union
             if self.at(&Token::KWStruct) || self.at(&Token::KWUnion) {
@@ -2434,6 +2483,8 @@ impl Parser {
 
         let mut ctype = if has_void {
             CType::Void
+        } else if let Some(width) = bitint_width {
+            Self::bitint_ctype(width, has_unsigned).map_err(|msg| self.format_error(&msg))?
         } else if has_int128 && has_unsigned {
             CType::UInt128
         } else if has_int128 {
@@ -2695,6 +2746,7 @@ impl Parser {
         let mut has_signed = false;
         let mut has_double = false;
         let mut has_int128 = false;
+        let mut bitint_width: Option<i64> = None;
         loop {
             match self.peek() {
                 Some(Token::KWConst)
@@ -2717,6 +2769,18 @@ impl Parser {
                 Some(Token::Identifier(name)) if Self::is_builtin_int128_type_name(name) => {
                     self.advance()?;
                     has_int128 = true;
+                }
+                Some(Token::Identifier(name))
+                    if name == "_BitInt"
+                        && bitint_width.is_none()
+                        && !has_int
+                        && !has_long
+                        && !has_short
+                        && !has_char
+                        && !has_double
+                        && !has_int128 =>
+                {
+                    bitint_width = Some(self.parse_bitint_width()?);
                 }
                 Some(Token::KWAlignAs) => {
                     let alignment = self.parse_alignment_specifier()?;
@@ -2763,7 +2827,9 @@ impl Parser {
                 _ => break,
             }
         }
-        let ctype = if has_char && has_unsigned {
+        let ctype = if let Some(width) = bitint_width {
+            Self::bitint_ctype(width, has_unsigned).map_err(|msg| self.format_error(&msg))?
+        } else if has_char && has_unsigned {
             CType::UChar
         } else if has_int128 && has_unsigned {
             CType::UInt128
@@ -2848,7 +2914,8 @@ impl Parser {
             | Token::AttributeScalarStorageOrderReverse
             | Token::KWNoreturn => true,
             Token::Identifier(name) => {
-                self.is_typedef_name(name)
+                name == "_BitInt"
+                    || self.is_typedef_name(name)
                     || Self::is_builtin_float_type_name(name)
                     || Self::is_builtin_int128_type_name(name)
                     || Self::is_complex_type_name(name)
@@ -4722,7 +4789,8 @@ impl Parser {
             | Some(Token::AttributeScalarStorageOrderReverse)
             | Some(Token::KWNoreturn) => true,
             Some(Token::Identifier(name)) => {
-                self.is_typedef_name(name)
+                name == "_BitInt"
+                    || self.is_typedef_name(name)
                     || Self::is_builtin_int128_type_name(name)
                     || Self::is_complex_type_name(name)
                     || Self::is_builtin_float_type_name(name)
@@ -7216,6 +7284,73 @@ mod tests {
         );
         assert_eq!(scalar.decl_full_type, Some(FullType::Scalar(CType::Int128)));
         assert_eq!(word.decl_full_type, Some(FullType::Scalar(CType::UInt128)));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_exact_width_bitint_specifiers() -> Result<(), String> {
+        let program = parse_source(
+            "_BitInt(32) a;\nunsigned _BitInt(32) b;\n_BitInt(64) c;\nunsigned _BitInt(64) d;\n_BitInt(128) e;\n",
+        )?;
+        let Declaration::VarDecl(a) = &program.declarations[0] else {
+            return Err("expected a declaration".to_string());
+        };
+        let Declaration::VarDecl(b) = &program.declarations[1] else {
+            return Err("expected b declaration".to_string());
+        };
+        let Declaration::VarDecl(c) = &program.declarations[2] else {
+            return Err("expected c declaration".to_string());
+        };
+        let Declaration::VarDecl(d) = &program.declarations[3] else {
+            return Err("expected d declaration".to_string());
+        };
+        let Declaration::VarDecl(e) = &program.declarations[4] else {
+            return Err("expected e declaration".to_string());
+        };
+
+        assert_eq!(a.var_type, CType::Int);
+        assert_eq!(b.var_type, CType::UInt);
+        assert_eq!(c.var_type, CType::Long);
+        assert_eq!(d.var_type, CType::ULong);
+        assert_eq!(e.var_type, CType::Int128);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_bitint_type_names_in_casts_and_sizeof() -> Result<(), String> {
+        let program = parse_source("int a = (_BitInt(32))1;\nint b[sizeof(_BitInt(64))];\n")?;
+        let Declaration::VarDecl(a) = &program.declarations[0] else {
+            return Err("expected a declaration".to_string());
+        };
+        let Declaration::VarDecl(b) = &program.declarations[1] else {
+            return Err("expected b declaration".to_string());
+        };
+
+        assert!(matches!(a.init, Some(Exp::Cast(CType::Int, _, _))));
+        assert_eq!(b.array_dims, Some(vec![8]));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_bitint_widths_without_exact_storage() -> Result<(), String> {
+        let err = require_err(parse_source_err("_BitInt(5) x;\n"), "parse should fail")?;
+        assert!(
+            err.contains("_BitInt width is not supported by an exact storage type"),
+            "{err}"
+        );
+
+        let err = require_err(parse_source_err("_BitInt(16) x;\n"), "parse should fail")?;
+        assert!(
+            err.contains("_BitInt width is not supported by an exact storage type"),
+            "{err}"
+        );
+
+        let err = require_err(parse_source_err("_BitInt(1) x;\n"), "parse should fail")?;
+        assert!(
+            err.contains("signed _BitInt width must be greater than 1"),
+            "{err}"
+        );
+
         Ok(())
     }
 

@@ -18868,6 +18868,33 @@ fn internal_cpp_rejects_invalid_line_directive_operands() {
 }
 
 #[test]
+fn internal_cpp_macro_expanded_line_errors_use_directive_source_location() {
+    let src = temp_file("internal-cpp-located-expanded-line", "c");
+    std::fs::write(
+        &src,
+        "#line 100 \"logical.c\"\n\
+         int before = __LINE__;\n\
+         #define BAD_LINE \"macro-file.c\"\n\
+         #line BAD_LINE\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("logical.c:102:"), "{stderr}");
+    assert!(stderr.contains("malformed #line directive"), "{stderr}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn internal_cpp_function_macro_params_do_not_replace_substrings() {
     let output = Command::new(rnqcc())
         .arg("--internal-cpp")
@@ -21005,6 +21032,57 @@ fn internal_cpp_pending_source_errors_include_source_location() {
         "{stderr}"
     );
     assert!(stderr.contains("malformed _Pragma operator"), "{stderr}");
+}
+
+#[test]
+fn internal_cpp_pragma_operator_errors_use_exact_source_line() {
+    let src = temp_file("internal-cpp-located-pragma-operator-line", "c");
+    std::fs::write(&src, "int first;\nint second;\n_Pragma(42)\nint after;\n")
+        .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains(&format!("{}:3:", src.display())),
+        "{stderr}"
+    );
+    assert!(stderr.contains("malformed _Pragma operator"), "{stderr}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn internal_cpp_pragma_handler_errors_use_exact_source_line() {
+    let src = temp_file("internal-cpp-located-pragma-handler-line", "c");
+    std::fs::write(
+        &src,
+        "int first;\n_Pragma(\"pack(push, bad)\")\nint after;\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains(&format!("{}:2:", src.display())),
+        "{stderr}"
+    );
+    assert!(stderr.contains("malformed #pragma pack"), "{stderr}");
+
+    let _ = std::fs::remove_file(src);
 }
 
 #[test]

@@ -1216,18 +1216,47 @@ fn decode_line_filename(value: String) -> String {
     decoded
 }
 
-fn process_pragma_operators(line: &str) -> Result<(String, Vec<String>), String> {
-    let tokens = preprocess::lexer::lex(line)?;
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocatedPragma {
+    text: String,
+    line_offset: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PragmaOperatorError {
+    message: String,
+    line_offset: usize,
+}
+
+fn process_pragma_operators_located(
+    line: &str,
+) -> Result<(String, Vec<LocatedPragma>), PragmaOperatorError> {
+    let tokens = preprocess::lexer::lex(line).map_err(|message| PragmaOperatorError {
+        message,
+        line_offset: 0,
+    })?;
     let mut out = Vec::new();
     let mut pragmas = Vec::new();
     let mut index = 0usize;
     while index < tokens.len() {
-        if let Some((pragma, next_index)) = parse_pragma_operator(&tokens, index)? {
-            pragmas.push(pragma);
-            index = next_index;
-        } else {
-            out.push(tokens[index].clone());
-            index += 1;
+        match parse_pragma_operator(&tokens, index) {
+            Ok(Some((pragma, next_index))) => {
+                pragmas.push(LocatedPragma {
+                    text: pragma,
+                    line_offset: tokens[index].span.start.line.saturating_sub(1),
+                });
+                index = next_index;
+            }
+            Ok(None) => {
+                out.push(tokens[index].clone());
+                index += 1;
+            }
+            Err(message) => {
+                return Err(PragmaOperatorError {
+                    message,
+                    line_offset: tokens[index].span.start.line.saturating_sub(1),
+                });
+            }
         }
     }
     Ok((preprocess::emit::emit_tokens(&out), pragmas))
@@ -4711,11 +4740,20 @@ fn flush_pending_source(
         state,
     )
     .map_err(|err| pp_location(&pending_source.logical_file, pending_source.start_line, err))?;
-    let (expanded, pragmas) = process_pragma_operators(&expanded)
-        .map_err(|err| pp_location(&pending_source.logical_file, pending_source.start_line, err))?;
+    let (expanded, pragmas) = process_pragma_operators_located(&expanded).map_err(|err| {
+        pp_location(
+            &pending_source.logical_file,
+            pending_source.start_line + err.line_offset,
+            err.message,
+        )
+    })?;
     for pragma in pragmas {
-        handle_internal_pragma(pragma.trim(), canonical, macros, context).map_err(|err| {
-            pp_location(&pending_source.logical_file, pending_source.start_line, err)
+        handle_internal_pragma(pragma.text.trim(), canonical, macros, context).map_err(|err| {
+            pp_location(
+                &pending_source.logical_file,
+                pending_source.start_line + pragma.line_offset,
+                err,
+            )
         })?;
     }
     let expanded = context
@@ -7381,9 +7419,17 @@ mod tests {
 
     #[test]
     fn processes_pragma_macro_push_and_pop() -> Result<(), String> {
-        let (expanded, pragmas) = process_pragma_operators(r#"_Pragma("push_macro(\"X\")") X"#)?;
+        let (expanded, pragmas) =
+            process_pragma_operators_located(r#"_Pragma("push_macro(\"X\")") X"#)
+                .map_err(|err| err.message)?;
         assert_eq!(expanded.trim(), "X");
-        assert_eq!(pragmas, vec![r#"push_macro("X")"#.to_string()]);
+        assert_eq!(
+            pragmas,
+            vec![LocatedPragma {
+                text: r#"push_macro("X")"#.to_string(),
+                line_offset: 0,
+            }]
+        );
 
         let mut include_stack = Vec::new();
         let mut once_files = HashSet::new();
@@ -7450,20 +7496,49 @@ mod tests {
 
     #[test]
     fn processes_multiple_pragma_operators_in_one_line() -> Result<(), String> {
-        let (expanded, pragmas) =
-            process_pragma_operators(r#"_Pragma("once") int x; _Pragma("GCC poison bad") bad"#)?;
+        let (expanded, pragmas) = process_pragma_operators_located(
+            r#"_Pragma("once") int x; _Pragma("GCC poison bad") bad"#,
+        )
+        .map_err(|err| err.message)?;
         assert!(expanded.contains("int x;"));
         assert_eq!(
             pragmas,
-            vec![r#"once"#.to_string(), r#"GCC poison bad"#.to_string()]
+            vec![
+                LocatedPragma {
+                    text: "once".to_string(),
+                    line_offset: 0,
+                },
+                LocatedPragma {
+                    text: "GCC poison bad".to_string(),
+                    line_offset: 0,
+                }
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn locates_multiline_pragma_operators() -> Result<(), String> {
+        let (_expanded, pragmas) =
+            process_pragma_operators_located("int x;\n_Pragma(\"once\")\nint y;")
+                .map_err(|err| err.message)?;
+        assert_eq!(
+            pragmas,
+            vec![LocatedPragma {
+                text: "once".to_string(),
+                line_offset: 1,
+            }]
         );
         Ok(())
     }
 
     #[test]
     fn rejects_malformed_pragma_operators() {
-        assert!(process_pragma_operators(r#"_Pragma(42)"#).is_err());
-        assert!(process_pragma_operators(r#"_Pragma("once""#).is_err());
+        assert!(process_pragma_operators_located(r#"_Pragma(42)"#).is_err());
+        assert!(process_pragma_operators_located(r#"_Pragma("once""#).is_err());
+        let err = process_pragma_operators_located("int x;\n_Pragma(42)")
+            .expect_err("malformed pragma should fail");
+        assert_eq!(err.line_offset, 1);
     }
 
     #[test]

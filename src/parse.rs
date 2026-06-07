@@ -6234,10 +6234,12 @@ impl Parser {
                 } else if let Some(val) = self.lookup_enum_constant(&name) {
                     // Enum constant — resolve to integer literal
                     Ok(Exp::Constant(val))
-                } else if name == "true" && self.lookup_value_type(&name).is_none() {
-                    Ok(Exp::Constant(1))
-                } else if name == "false" && self.lookup_value_type(&name).is_none() {
-                    Ok(Exp::Constant(0))
+                } else if self.lookup_value_type(&name).is_none() {
+                    match name.as_str() {
+                        "true" => Ok(Exp::Constant(1)),
+                        "false" | "nullptr" => Ok(Exp::Constant(0)),
+                        _ => Ok(Exp::Var(name)),
+                    }
                 } else {
                     Ok(Exp::Var(name))
                 }
@@ -7347,6 +7349,26 @@ mod tests {
         };
         assert!(matches!(a.init, Some(Exp::Var(ref name)) if name == "true"));
         assert!(matches!(b.init, Some(Exp::Var(ref name)) if name == "false"));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_unshadowed_nullptr_as_c23_null_pointer_constant() -> Result<(), String> {
+        let program = parse_source("int a = nullptr;\n")?;
+        let Declaration::VarDecl(a) = &program.declarations[0] else {
+            return Err("expected a declaration".to_string());
+        };
+        assert!(matches!(a.init, Some(Exp::Constant(0))));
+        Ok(())
+    }
+
+    #[test]
+    fn nullptr_constant_does_not_hide_visible_objects() -> Result<(), String> {
+        let program = parse_source("int nullptr;\nint a = nullptr;\n")?;
+        let Declaration::VarDecl(a) = &program.declarations[1] else {
+            return Err("expected a declaration".to_string());
+        };
+        assert!(matches!(a.init, Some(Exp::Var(ref name)) if name == "nullptr"));
         Ok(())
     }
 

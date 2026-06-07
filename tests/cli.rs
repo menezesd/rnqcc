@@ -24372,6 +24372,38 @@ fn driver_accepts_fsyntax_only_without_writing_output() {
 }
 
 #[test]
+fn runs_c23_nullptr_pointer_operations() {
+    let src = temp_file("c23-nullptr-pointer", "c");
+    let exe = temp_file("c23-nullptr-pointer", "bin");
+    std::fs::write(
+        &src,
+        r#"
+int main(void) {
+    int value = 7;
+    int *p = nullptr;
+    int *q = &value;
+    return p == nullptr && q != nullptr ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn supports_nested_function_local_label_addresses() {
     let src = temp_file("nested-local-label-address", "c");
     let exe = temp_file("nested-local-label-address", "bin");

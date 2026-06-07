@@ -19,6 +19,7 @@ compile | internal-cpp | compile/limits-fnargs.c | internal-cpp expensive stress
 compile | internal-cpp | compile/limits-fndefn.c | internal-cpp translation-limit stress timeout
 compile | internal-cpp | compile/limits-structmem.c | internal-cpp translation-limit stress timeout
 compile | internal-cpp | compile/limits-structnest.c | internal-cpp translation-limit stress timeout
+compile | internal-cpp | compile/pr110386-2.c | internal-cpp expensive stress test
 compile | internal-cpp | compile/pr115143-2.c | unsupported GCC GIMPLE source extension
 compile | internal-cpp | compile/pr115143-3.c | unsupported GCC GIMPLE source extension
 execute | internal-cpp | execute/memclr.c | internal-cpp expensive stress test

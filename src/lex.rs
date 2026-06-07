@@ -495,11 +495,36 @@ impl Lexer {
         false
     }
 
+    fn consume_ascii_suffix_ignore_case(&mut self, suffix: &str) -> bool {
+        let suffix_len = suffix.len();
+        if self.pos + suffix_len > self.chars.len() {
+            return false;
+        }
+        if self.chars[self.pos..self.pos + suffix_len]
+            .iter()
+            .zip(suffix.chars())
+            .all(|(actual, expected)| actual.eq_ignore_ascii_case(&expected))
+        {
+            self.pos += suffix_len;
+            true
+        } else {
+            false
+        }
+    }
+
     fn consume_float_suffixes(&mut self) -> FloatSuffixes {
         let mut saw_float_suffix = false;
         let mut saw_long_double_suffix = false;
         let mut saw_imaginary_suffix = false;
         loop {
+            if !saw_float_suffix
+                && ["f128", "bf16", "f64", "f32", "f16"]
+                    .iter()
+                    .any(|suffix| self.consume_ascii_suffix_ignore_case(suffix))
+            {
+                saw_float_suffix = true;
+                continue;
+            }
             match self.peek() {
                 Some('f' | 'F' | 'l' | 'L' | 'd' | 'D') if !saw_float_suffix => {
                     saw_float_suffix = true;
@@ -557,7 +582,7 @@ impl Lexer {
                 .map_err(|_| format!("invalid float literal: {}", num_str))?;
             let suffixes = self.consume_float_suffixes();
             if let Some(c) = self.peek() {
-                if c.is_ascii_alphabetic() || c == '_' {
+                if c.is_ascii_alphanumeric() || c == '_' {
                     return Err(format!(
                         "invalid float literal suffix at position {}",
                         self.pos
@@ -647,7 +672,7 @@ impl Lexer {
             if is_hex_float {
                 let suffixes = self.consume_float_suffixes();
                 if let Some(c) = self.peek() {
-                    if c.is_ascii_alphabetic() || c == '_' {
+                    if c.is_ascii_alphanumeric() || c == '_' {
                         return Err(format!(
                             "invalid float literal suffix at position {}",
                             self.pos
@@ -747,7 +772,7 @@ impl Lexer {
             // Consume optional floating and GNU imaginary suffixes (all treated as double).
             let suffixes = self.consume_float_suffixes();
             if let Some(c) = self.peek() {
-                if c.is_ascii_alphabetic() || c == '_' {
+                if c.is_ascii_alphanumeric() || c == '_' {
                     return Err(format!(
                         "invalid float literal suffix at position {}",
                         self.pos
@@ -1765,6 +1790,9 @@ mod tests {
 
         let err = require_err(lex("double x = .5Lfoo;"), "lexing should fail")?;
         assert!(err.contains("invalid float literal suffix"));
+
+        let err = require_err(lex("double x = 0.0f2;"), "lexing should fail")?;
+        assert!(err.contains("invalid float literal suffix"));
         Ok(())
     }
 
@@ -1884,6 +1912,15 @@ mod tests {
         assert!(tokens.contains(&Token::DoubleLiteral(4.0)));
         assert!(tokens.contains(&Token::DoubleLiteral(3.0)));
         assert!(tokens.contains(&Token::LongDoubleLiteral(0.25)));
+        Ok(())
+    }
+
+    #[test]
+    fn lexes_gcc_extended_float_suffixes() -> Result<(), String> {
+        let tokens = lex("double a = 0.0f16; double b = 1.0bf16; double c = 2.0F128i;")?;
+        assert!(tokens.contains(&Token::DoubleLiteral(0.0)));
+        assert!(tokens.contains(&Token::DoubleLiteral(1.0)));
+        assert!(tokens.contains(&Token::ImaginaryDoubleLiteral(2.0)));
         Ok(())
     }
 

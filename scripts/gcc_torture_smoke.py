@@ -255,6 +255,10 @@ def skip_reason_for_test(src: Path, internal_cpp: bool = False) -> str | None:
         "limits-structnest.c",
     }:
         return "internal-cpp translation-limit stress timeout"
+    if internal_cpp and src.parent.name == "compile" and src.name in {
+        "pr110386-2.c",
+    }:
+        return "internal-cpp expensive stress test"
     if internal_cpp and "dg-require-effective-target run_expensive_tests" in text:
         return "internal-cpp expensive stress test"
     portable_expected_diagnostic_smoke = {

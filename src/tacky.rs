@@ -14332,6 +14332,41 @@ fn eval_static_expr_full_type(
     }
 }
 
+fn eval_static_integer_expr_ctype(
+    exp: &Exp,
+    full_types: &HashMap<String, FullType>,
+) -> Option<CType> {
+    match exp {
+        Exp::Constant(_) => Some(CType::Int),
+        Exp::LongConstant(_) => Some(CType::Long),
+        Exp::UIntConstant(_) => Some(CType::UInt),
+        Exp::ULongConstant(_) => Some(CType::ULong),
+        Exp::Int128Constant(_) => Some(CType::Int128),
+        Exp::UInt128Constant(_) => Some(CType::UInt128),
+        Exp::Cast(ctype, None, _) => Some(*ctype),
+        Exp::Cast(_, Some(ft), _) => Some(ft.to_ctype()),
+        Exp::Unary(UnaryOp::Negate | UnaryOp::Complement, inner) => {
+            Some(eval_static_integer_expr_ctype(inner, full_types)?.promote())
+        }
+        Exp::Unary(UnaryOp::LogicalNot, _) => Some(CType::Int),
+        Exp::Binary(op, left, right) => {
+            let left_type = eval_static_integer_expr_ctype(left, full_types)?;
+            let right_type = eval_static_integer_expr_ctype(right, full_types)?;
+            if matches!(op, BinaryOp::ShiftLeft | BinaryOp::ShiftRight) {
+                Some(left_type.promote())
+            } else {
+                Some(CType::common(left_type, right_type))
+            }
+        }
+        Exp::Conditional(_, then_exp, else_exp) => {
+            let then_type = eval_static_integer_expr_ctype(then_exp, full_types)?;
+            let else_type = eval_static_integer_expr_ctype(else_exp, full_types)?;
+            Some(CType::common(then_type, else_type))
+        }
+        _ => Some(eval_static_expr_full_type(exp, full_types)?.to_ctype()),
+    }
+}
+
 fn eval_static_integer_constant_exp_with_context(
     exp: &Exp,
     struct_defs: &HashMap<String, StructDef>,
@@ -14494,15 +14529,16 @@ fn eval_static_integer_constant_exp_with_context_and_values(
                 _ => None,
             }
         }
-        Exp::Binary(op, left, right) => {
+        Exp::Binary(op, left_exp, right_exp) => {
+            let op_type = eval_static_integer_expr_ctype(exp, full_types);
             let left = eval_static_integer_constant_exp_with_context_and_values(
-                left,
+                left_exp,
                 struct_defs,
                 full_types,
                 static_const_values,
             )?;
             let right = eval_static_integer_constant_exp_with_context_and_values(
-                right,
+                right_exp,
                 struct_defs,
                 full_types,
                 static_const_values,
@@ -14616,52 +14652,66 @@ fn eval_static_integer_constant_exp_with_context_and_values(
                     _ => None,
                 };
             }
-            let is_unsigned = left.is_unsigned || right.is_unsigned;
+            let is_unsigned = op_type.is_some_and(|ctype| !ctype.is_signed())
+                || left.is_unsigned
+                || right.is_unsigned;
             if is_unsigned {
-                let left_u = left.value as u64;
-                let right_u = right.value as u64;
+                let op_type = op_type.unwrap_or(CType::ULong);
+                let narrow = op_type.size() <= CType::UInt.size();
+                let left_u = if narrow {
+                    left.value as u32 as u64
+                } else {
+                    left.value as u64
+                };
+                let right_u = if narrow {
+                    right.value as u32 as u64
+                } else {
+                    right.value as u64
+                };
                 let value = match op {
-                    BinaryOp::BitwiseAnd => (left_u & right_u) as i64,
-                    BinaryOp::BitwiseNand => (!(left_u & right_u)) as i64,
-                    BinaryOp::BitwiseOr => (left_u | right_u) as i64,
-                    BinaryOp::BitwiseXor => (left_u ^ right_u) as i64,
-                    BinaryOp::Equal => (left_u == right_u) as i64,
-                    BinaryOp::NotEqual => (left_u != right_u) as i64,
-                    BinaryOp::LessThan => (left_u < right_u) as i64,
-                    BinaryOp::GreaterThan => (left_u > right_u) as i64,
-                    BinaryOp::LessEqual => (left_u <= right_u) as i64,
-                    BinaryOp::GreaterEqual => (left_u >= right_u) as i64,
-                    _ => {
-                        let value = match op {
-                            BinaryOp::Add => left_u.wrapping_add(right_u),
-                            BinaryOp::Sub => left_u.wrapping_sub(right_u),
-                            BinaryOp::Mul => left_u.wrapping_mul(right_u),
-                            BinaryOp::Div => {
-                                if right_u == 0 {
-                                    return None;
-                                }
-                                left_u / right_u
+                    BinaryOp::BitwiseAnd => left_u & right_u,
+                    BinaryOp::BitwiseNand => !(left_u & right_u),
+                    BinaryOp::BitwiseOr => left_u | right_u,
+                    BinaryOp::BitwiseXor => left_u ^ right_u,
+                    BinaryOp::Equal => (left_u == right_u) as u64,
+                    BinaryOp::NotEqual => (left_u != right_u) as u64,
+                    BinaryOp::LessThan => (left_u < right_u) as u64,
+                    BinaryOp::GreaterThan => (left_u > right_u) as u64,
+                    BinaryOp::LessEqual => (left_u <= right_u) as u64,
+                    BinaryOp::GreaterEqual => (left_u >= right_u) as u64,
+                    _ => match op {
+                        BinaryOp::Add => left_u.wrapping_add(right_u),
+                        BinaryOp::Sub => left_u.wrapping_sub(right_u),
+                        BinaryOp::Mul => left_u.wrapping_mul(right_u),
+                        BinaryOp::Div => {
+                            if right_u == 0 {
+                                return None;
                             }
-                            BinaryOp::Mod => {
-                                if right_u == 0 {
-                                    return None;
-                                }
-                                left_u % right_u
+                            left_u / right_u
+                        }
+                        BinaryOp::Mod => {
+                            if right_u == 0 {
+                                return None;
                             }
-                            BinaryOp::ShiftLeft => {
-                                let amount = u32::try_from(right.value).ok()?;
-                                left_u.checked_shl(amount)?
-                            }
-                            BinaryOp::ShiftRight => {
-                                let amount = u32::try_from(right.value).ok()?;
-                                left_u.checked_shr(amount)?
-                            }
-                            BinaryOp::LogicalAnd => (left_u != 0 && right_u != 0) as u64,
-                            BinaryOp::LogicalOr => (left_u != 0 || right_u != 0) as u64,
-                            _ => return None,
-                        };
-                        value as i64
-                    }
+                            left_u % right_u
+                        }
+                        BinaryOp::ShiftLeft => {
+                            let amount = u32::try_from(right.value).ok()?;
+                            left_u.checked_shl(amount)?
+                        }
+                        BinaryOp::ShiftRight => {
+                            let amount = u32::try_from(right.value).ok()?;
+                            left_u.checked_shr(amount)?
+                        }
+                        BinaryOp::LogicalAnd => (left_u != 0 && right_u != 0) as u64,
+                        BinaryOp::LogicalOr => (left_u != 0 || right_u != 0) as u64,
+                        _ => return None,
+                    },
+                };
+                let value = if narrow {
+                    value as u32 as i64
+                } else {
+                    value as i64
                 };
                 return Some(static_integer_constant(value, false, true));
             }

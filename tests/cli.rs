@@ -13545,6 +13545,30 @@ fn internal_cpp_checks_conditional_structure_in_skipped_groups() {
             "#elif after #else",
             3usize,
         ),
+        (
+            "nested-duplicate-else",
+            "#if 0\n#if 1\n#else\n#else\n#endif\n#endif\nint kept = 1;\n",
+            "duplicate #else",
+            4usize,
+        ),
+        (
+            "elifdef-after-else",
+            "#if 0\n#else\n#elifdef FEATURE\n#endif\nint kept = 1;\n",
+            "#elifdef after #else",
+            3usize,
+        ),
+        (
+            "elifndef-after-else",
+            "#if 0\n#else\n#elifndef FEATURE\n#endif\nint kept = 1;\n",
+            "#elifndef after #else",
+            3usize,
+        ),
+        (
+            "missing-nested-endif",
+            "#if 0\n#if 1\n#endif\nint kept = 1;\n",
+            "unterminated conditional directive",
+            4usize,
+        ),
     ] {
         let src = temp_file(&format!("internal-cpp-skipped-conditional-{name}"), "c");
         std::fs::write(&src, source).expect("failed to write source");
@@ -24988,6 +25012,64 @@ int main(void) {
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn runs_c23_bitint_width_runtime_matrix() {
+    let src = TempPath::new("c23-bitint-runtime-matrix", "c");
+    let exe = TempPath::new("c23-bitint-runtime-matrix", "bin");
+    std::fs::write(
+        src.path(),
+        r#"
+int main(void) {
+    unsigned _BitInt(32) u32 = 4294967295U;
+    if (u32 + 1U != 0U) return 1;
+    if ((unsigned _BitInt(32))0U - 1U != 4294967295U) return 2;
+    if ((unsigned _BitInt(32))65536U * 65536U != 0U) return 3;
+
+    _BitInt(32) s32 = -100;
+    if (s32 + 58 != -42) return 4;
+    if ((_BitInt(32))2147483647 > (_BitInt(32))-1 != 1) return 5;
+
+    unsigned _BitInt(64) u64 = 18446744073709551615UL;
+    if (u64 + 1UL != 0UL) return 6;
+    if (((unsigned _BitInt(64))1U << 63) >> 62 != 2U) return 7;
+
+    _BitInt(64) s64 = (_BitInt(64))1 << 40;
+    if (s64 / ((_BitInt(64))1 << 20) != ((_BitInt(64))1 << 20)) return 8;
+    if (s64 - 1099511627734L != 42) return 9;
+
+    unsigned _BitInt(128) u128 = (unsigned _BitInt(128))1 << 100;
+    u128 += (unsigned _BitInt(128))1 << 65;
+    if (((u128 >> 100) & 1U) != 1U) return 10;
+    if (((u128 >> 65) & 1U) != 1U) return 11;
+    if ((unsigned long)u128 != 0UL) return 12;
+
+    _BitInt(128) s128 = (_BitInt(128))1 << 70;
+    if (s128 <= ((_BitInt(128))1 << 69)) return 13;
+    if ((s128 >> 68) != 4) return 14;
+
+    unsigned _BitInt(32) narrowed = (unsigned _BitInt(32))(unsigned _BitInt(64))0x10000002aUL;
+    if (narrowed != 42U) return 15;
+
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(exe.path())
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(exe.path())
+        .status()
+        .expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
 }
 
 #[test]

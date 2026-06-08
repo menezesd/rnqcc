@@ -1163,6 +1163,45 @@ fn fold_instruction(
         }
         TackyInstr::FloatToDouble { src, dst } => TackyInstr::FloatToDouble { src, dst },
         TackyInstr::DoubleToFloat { src, dst } => TackyInstr::DoubleToFloat { src, dst },
+        TackyInstr::FunCall {
+            name,
+            args,
+            dst,
+            stack_arg_indices,
+            memory_arg_blocks,
+            struct_arg_groups,
+            variadic,
+            fixed_flat_arg_count,
+            hidden_return,
+            indirect,
+        } => {
+            if args.len() == 1 && !variadic && !hidden_return && !indirect {
+                if let Some(d) = const_double(&args[0]) {
+                    let src = match name.as_str() {
+                        "__fixdfti" => Some(TackyVal::Int128Constant(d as i128)),
+                        "__fixunsdfti" => Some(TackyVal::UInt128Constant(d as u128)),
+                        "__fixsfti" => Some(TackyVal::Int128Constant(d as f32 as i128)),
+                        "__fixunssfti" => Some(TackyVal::UInt128Constant(d as f32 as u128)),
+                        _ => None,
+                    };
+                    if let Some(src) = src {
+                        return TackyInstr::Copy { src, dst };
+                    }
+                }
+            }
+            TackyInstr::FunCall {
+                name,
+                args,
+                dst,
+                stack_arg_indices,
+                memory_arg_blocks,
+                struct_arg_groups,
+                variadic,
+                fixed_flat_arg_count,
+                hidden_return,
+                indirect,
+            }
+        }
         TackyInstr::AddPtr {
             ptr,
             index,

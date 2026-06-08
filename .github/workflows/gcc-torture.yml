@@ -27,6 +27,10 @@ on:
         description: Number of sorted tests to try
         required: true
         default: "100000"
+      rnqcc_arg:
+        description: Optional extra rnqcc argument, e.g. --fold-constants
+        required: false
+        default: ""
   schedule:
     - cron: "23 8 * * *"
 
@@ -79,6 +83,10 @@ jobs:
           if [ "${{ matrix.preprocessor }}" = "internal-cpp" ]; then
             cpp_args+=(--internal-cpp)
           fi
+          extra_rnqcc_args=()
+          if [ -n "${{ inputs.rnqcc_arg || '' }}" ]; then
+            extra_rnqcc_args+=(--rnqcc-arg="${{ inputs.rnqcc_arg }}")
+          fi
           python3 scripts/gcc_torture_smoke.py \
             --suite "$GCC_TORTURE_SUITE" \
             --mode "${{ matrix.mode }}" \
@@ -89,6 +97,7 @@ jobs:
             --expected-skips tests/fixtures/gcc_torture_expected_skips.txt \
             --allow-stale-expected-failures \
             "${cpp_args[@]}" \
+            "${extra_rnqcc_args[@]}" \
             --failure-log "$CI_ARTIFACT_DIR/gcc-torture-failures.txt" \
             --skip-log "$CI_ARTIFACT_DIR/gcc-torture-skips.txt" \
             --print-skips \

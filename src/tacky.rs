@@ -2515,60 +2515,28 @@ impl TackyGen {
             }
             return dst;
         }
-        if from == CType::Double && matches!(to, CType::Int128 | CType::UInt128) {
-            let intermediate_type = if to.is_signed() {
-                CType::Long
-            } else {
-                CType::ULong
+        if matches!(from, CType::Double | CType::Float)
+            && matches!(to, CType::Int128 | CType::UInt128)
+        {
+            let helper = match (from, to.is_signed()) {
+                (CType::Double, true) => "__fixdfti",
+                (CType::Double, false) => "__fixunsdfti",
+                (CType::Float, true) => "__fixsfti",
+                (CType::Float, false) => "__fixunssfti",
+                _ => unreachable!(),
             };
-            let intermediate = self.fresh_tmp(intermediate_type);
-            if to.is_signed() {
-                self.emit(TackyInstr::DoubleToInt {
-                    src: val,
-                    dst: intermediate.clone(),
-                });
-                self.emit(TackyInstr::SignExtend {
-                    src: intermediate,
-                    dst: dst.clone(),
-                });
-            } else {
-                self.emit(TackyInstr::DoubleToUInt {
-                    src: val,
-                    dst: intermediate.clone(),
-                });
-                self.emit(TackyInstr::ZeroExtend {
-                    src: intermediate,
-                    dst: dst.clone(),
-                });
-            }
-            return dst;
-        }
-        if from == CType::Float && matches!(to, CType::Int128 | CType::UInt128) {
-            let intermediate_type = if to.is_signed() {
-                CType::Long
-            } else {
-                CType::ULong
-            };
-            let intermediate = self.fresh_tmp(intermediate_type);
-            if to.is_signed() {
-                self.emit(TackyInstr::FloatToInt {
-                    src: val,
-                    dst: intermediate.clone(),
-                });
-                self.emit(TackyInstr::SignExtend {
-                    src: intermediate,
-                    dst: dst.clone(),
-                });
-            } else {
-                self.emit(TackyInstr::FloatToUInt {
-                    src: val,
-                    dst: intermediate.clone(),
-                });
-                self.emit(TackyInstr::ZeroExtend {
-                    src: intermediate,
-                    dst: dst.clone(),
-                });
-            }
+            self.emit(TackyInstr::FunCall {
+                name: helper.to_string(),
+                args: vec![val],
+                dst: dst.clone(),
+                stack_arg_indices: HashSet::new(),
+                memory_arg_blocks: Vec::new(),
+                struct_arg_groups: Vec::new(),
+                variadic: false,
+                fixed_flat_arg_count: 1,
+                hidden_return: false,
+                indirect: false,
+            });
             return dst;
         }
         if from == CType::LongDouble && matches!(to, CType::Int128 | CType::UInt128) {

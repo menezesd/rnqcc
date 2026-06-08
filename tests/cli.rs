@@ -10255,6 +10255,10 @@ int main(void) {
     unsigned __int128 widened = (unsigned __int128)(unsigned int)0xffffffffU;
     __int128 from_double = (__int128)42.0;
     unsigned __int128 from_unsigned_double = (unsigned __int128)43.0;
+    __int128 from_large_double = (__int128)36893488147419103232.0;
+    unsigned __int128 from_large_unsigned_double = (unsigned __int128)36893488147419103232.0;
+    __int128 from_large_float = (__int128)36893488147419103232.0f;
+    unsigned __int128 from_large_unsigned_float = (unsigned __int128)36893488147419103232.0f;
     double signed_double = (double)(__int128)123456789;
     double unsigned_double = (double)(unsigned __int128)123456789U;
 
@@ -10262,6 +10266,10 @@ int main(void) {
     if (widened != 0xffffffffU) abort();
     if (from_double != 42) abort();
     if (from_unsigned_double != 43) abort();
+    if (from_large_double != ((__int128)1 << 65)) abort();
+    if (from_large_unsigned_double != ((unsigned __int128)1 << 65)) abort();
+    if (from_large_float != ((__int128)1 << 65)) abort();
+    if (from_large_unsigned_float != ((unsigned __int128)1 << 65)) abort();
     if (signed_double < 123456788.5 || signed_double > 123456789.5) abort();
     if (unsigned_double < 123456788.5 || unsigned_double > 123456789.5) abort();
     return 42;
@@ -10284,6 +10292,95 @@ int main(void) {
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn converts_large_floating_values_to_int128() {
+    let src = temp_file("large-float-to-int128", "c");
+    let exe = temp_file("large-float-to-int128", "bin");
+    std::fs::write(
+        &src,
+        r#"
+extern void abort(void);
+
+int main(void) {
+    __int128 sd = (__int128)36893488147419103232.0;
+    unsigned __int128 ud = (unsigned __int128)36893488147419103232.0;
+    __int128 sf = (__int128)36893488147419103232.0f;
+    unsigned __int128 uf = (unsigned __int128)36893488147419103232.0f;
+
+    if (sd != ((__int128)1 << 65)) abort();
+    if (ud != ((unsigned __int128)1 << 65)) abort();
+    if (sf != ((__int128)1 << 65)) abort();
+    if (uf != ((unsigned __int128)1 << 65)) abort();
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn emits_float_to_int128_conversion_helpers() {
+    let src = temp_file("float-to-int128-helper-calls", "i");
+    let x86_out = temp_file("float-to-int128-helper-calls-x86", "s");
+    let a64_out = temp_file("float-to-int128-helper-calls-a64", "s");
+    std::fs::write(
+        &src,
+        "void f(double d, float f) {\n\
+           volatile __int128 a = (__int128)d;\n\
+           volatile unsigned __int128 b = (unsigned __int128)d;\n\
+           volatile __int128 c = (__int128)f;\n\
+           volatile unsigned __int128 e = (unsigned __int128)f;\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&x86_out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let x86_asm = std::fs::read_to_string(&x86_out).expect("failed to read x86 assembly");
+    assert!(x86_asm.contains("call __fixdfti@PLT"), "{x86_asm}");
+    assert!(x86_asm.contains("call __fixunsdfti@PLT"), "{x86_asm}");
+    assert!(x86_asm.contains("call __fixsfti@PLT"), "{x86_asm}");
+    assert!(x86_asm.contains("call __fixunssfti@PLT"), "{x86_asm}");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "-S", "-o"])
+        .arg(&a64_out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let a64_asm = std::fs::read_to_string(&a64_out).expect("failed to read AArch64 assembly");
+    assert!(a64_asm.contains("bl __fixdfti"), "{a64_asm}");
+    assert!(a64_asm.contains("bl __fixunsdfti"), "{a64_asm}");
+    assert!(a64_asm.contains("bl __fixsfti"), "{a64_asm}");
+    assert!(a64_asm.contains("bl __fixunssfti"), "{a64_asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(x86_out);
+    let _ = std::fs::remove_file(a64_out);
 }
 
 #[test]

@@ -1551,9 +1551,15 @@ pub enum Statement {
 
 #[derive(Debug, Clone)]
 pub struct SwitchCase {
-    pub value: Option<i64>, // None = default
-    pub end_value: Option<i64>,
+    pub value: Option<SwitchCaseValue>, // None = default
+    pub end_value: Option<SwitchCaseValue>,
     pub label: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SwitchCaseValue {
+    pub value: i128,
+    pub ctype: CType,
 }
 
 pub type Block = Vec<BlockItem>;

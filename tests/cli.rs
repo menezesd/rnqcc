@@ -10277,6 +10277,46 @@ int main(void) {
 }
 
 #[test]
+fn static_initializers_reuse_int128_high_bit_constants() {
+    let src = temp_file("static-init-int128-reuse", "c");
+    let exe = temp_file("static-init-int128-reuse", "bin");
+    std::fs::write(
+        &src,
+        r#"
+extern void abort(void);
+
+static unsigned __int128 high = ((unsigned __int128)1) << 100;
+static unsigned __int128 plus_five = high + 5;
+static __int128 signed_high = (__int128)high;
+static __int128 signed_next = signed_high - 3;
+
+int main(void) {
+    if ((unsigned long)(plus_five >> 96) != 16UL) abort();
+    if ((unsigned long)plus_five != 5UL) abort();
+    if ((unsigned long)(signed_next >> 96) != 15UL) abort();
+    if ((unsigned long)signed_next != (unsigned long)-3) abort();
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn compiles_alignof_type_expression() {
     let src = temp_file("alignof-src", "i");
     let exe = temp_file("alignof-exe", "bin");
@@ -12164,6 +12204,72 @@ fn compiles_int128_case_range_constant_expressions() {
 int main(void) {
     switch ((__int128)1099511627777LL) {
     case ((__int128)1 << 40) ... (((__int128)1 << 40) + 2):
+        return 42;
+    default:
+        return 1;
+    }
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(exe.path())
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(exe.path())
+        .status()
+        .expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+}
+
+#[test]
+fn compiles_full_width_int128_case_constant_expressions() {
+    let src = TempPath::new("case-full-width-int128-constant-expression", "c");
+    let exe = TempPath::new("case-full-width-int128-constant-expression", "bin");
+    std::fs::write(
+        src.path(),
+        r#"
+int main(void) {
+    switch (((__int128)1) << 100) {
+    case ((__int128)1) << 100:
+        return 42;
+    default:
+        return 1;
+    }
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(exe.path())
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(exe.path())
+        .status()
+        .expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+}
+
+#[test]
+fn compiles_full_width_uint128_case_range_constant_expressions() {
+    let src = TempPath::new("case-range-full-width-uint128-constant-expression", "c");
+    let exe = TempPath::new("case-range-full-width-uint128-constant-expression", "bin");
+    std::fs::write(
+        src.path(),
+        r#"
+int main(void) {
+    switch (((unsigned __int128)1) << 100) {
+    case (((unsigned __int128)1) << 100) - 1 ... (((unsigned __int128)1) << 100) + 1:
         return 42;
     default:
         return 1;

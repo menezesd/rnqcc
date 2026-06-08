@@ -312,6 +312,7 @@ struct TackyGen {
     static_vars: Vec<TackyStaticVar>,
     static_constants: Vec<TackyStaticConstant>,
     static_const_values: HashMap<String, StaticScalarValue>,
+    static_wide_const_values: HashMap<String, StaticWideIntegerConstant>,
     extern_vars: Vec<String>,
     /// CType for each variable/temporary (for codegen output)
     symbol_types: HashMap<String, CType>,
@@ -377,6 +378,7 @@ impl TackyGen {
             static_vars: Vec::new(),
             static_constants: Vec::new(),
             static_const_values: HashMap::new(),
+            static_wide_const_values: HashMap::new(),
             extern_vars: Vec::new(),
             symbol_types: HashMap::new(),
             full_types: HashMap::new(),
@@ -2667,6 +2669,21 @@ impl TackyGen {
             });
         }
         dst
+    }
+
+    fn switch_case_constant(&mut self, value: SwitchCaseValue, target_type: CType) -> TackyVal {
+        let src_type = value.ctype;
+        let src = match src_type {
+            CType::Int128 => TackyVal::Int128Constant(value.value),
+            CType::UInt128 => TackyVal::UInt128Constant(value.value as u128),
+            CType::UInt | CType::ULong => TackyVal::Constant(value.value as u64 as i64),
+            _ => TackyVal::Constant(value.value as i64),
+        };
+        if matches!(src_type, CType::Int128 | CType::UInt128) {
+            self.convert_to(src, src_type, target_type)
+        } else {
+            self.convert_to(src, CType::Int, target_type)
+        }
     }
 
     // --------------------------------------------------------
@@ -9968,16 +9985,11 @@ impl TackyGen {
                 for case in &cases {
                     if let Some(val) = case.value {
                         let cmp_value = self.fresh_tmp(CType::Int);
-                        let low =
-                            self.convert_to(TackyVal::Constant(val), CType::Int, promoted_type);
+                        let low = self.switch_case_constant(val, promoted_type);
                         if let Some(end_val) = case.end_value {
                             let ge_low = self.fresh_tmp(CType::Int);
                             let le_high = self.fresh_tmp(CType::Int);
-                            let high = self.convert_to(
-                                TackyVal::Constant(end_val),
-                                CType::Int,
-                                promoted_type,
-                            );
+                            let high = self.switch_case_constant(end_val, promoted_type);
                             self.emit(TackyInstr::Binary {
                                 op: TackyBinaryOp::GreaterEqual,
                                 left: control_val.clone(),
@@ -11640,6 +11652,7 @@ impl TackyGen {
                         &self.struct_defs,
                         &self.full_types,
                         &self.static_const_values,
+                        &self.static_wide_const_values,
                     )
                     .ok_or_else(|| "Static variable initializer must be a constant".to_string())?;
                     builder.put(
@@ -12533,6 +12546,7 @@ impl TackyGen {
                         &self.struct_defs,
                         &self.full_types,
                         &self.static_const_values,
+                        &self.static_wide_const_values,
                     )
                     .ok_or_else(|| "Static variable initializer must be a constant".to_string())?
                 } else {
@@ -14935,6 +14949,7 @@ fn eval_static_wide_integer_constant_exp_with_context_and_values(
     struct_defs: &HashMap<String, StructDef>,
     full_types: &HashMap<String, FullType>,
     static_const_values: &HashMap<String, StaticScalarValue>,
+    static_wide_const_values: &HashMap<String, StaticWideIntegerConstant>,
 ) -> Option<StaticWideIntegerConstant> {
     match exp {
         Exp::Constant(c) | Exp::LongConstant(c) => {
@@ -14945,17 +14960,19 @@ fn eval_static_wide_integer_constant_exp_with_context_and_values(
         }
         Exp::Int128Constant(c) => Some(StaticWideIntegerConstant::new(*c, false)),
         Exp::UInt128Constant(c) => Some(StaticWideIntegerConstant::new(*c as i128, true)),
-        Exp::Var(name) => static_const_values.get(name).and_then(|value| {
-            if value.source_is_double {
-                None
-            } else if value.source_is_unsigned {
-                Some(StaticWideIntegerConstant::new(
-                    value.value as u64 as i128,
-                    true,
-                ))
-            } else {
-                Some(StaticWideIntegerConstant::new(value.value as i128, false))
-            }
+        Exp::Var(name) => static_wide_const_values.get(name).copied().or_else(|| {
+            static_const_values.get(name).and_then(|value| {
+                if value.source_is_double {
+                    None
+                } else if value.source_is_unsigned {
+                    Some(StaticWideIntegerConstant::new(
+                        value.value as u64 as i128,
+                        true,
+                    ))
+                } else {
+                    Some(StaticWideIntegerConstant::new(value.value as i128, false))
+                }
+            })
         }),
         Exp::SizeOf(inner) => {
             let ft = eval_static_expr_full_type(inner, full_types)?;
@@ -14982,6 +14999,7 @@ fn eval_static_wide_integer_constant_exp_with_context_and_values(
                     struct_defs,
                     full_types,
                     static_const_values,
+                    static_wide_const_values,
                 )?
             } else {
                 eval_static_wide_integer_constant_exp_with_context_and_values(
@@ -14989,6 +15007,7 @@ fn eval_static_wide_integer_constant_exp_with_context_and_values(
                     struct_defs,
                     full_types,
                     static_const_values,
+                    static_wide_const_values,
                 )?
             };
             if target.is_floating() {
@@ -15003,6 +15022,7 @@ fn eval_static_wide_integer_constant_exp_with_context_and_values(
                 struct_defs,
                 full_types,
                 static_const_values,
+                static_wide_const_values,
             )?;
             match op {
                 UnaryOp::Negate => {
@@ -15037,12 +15057,14 @@ fn eval_static_wide_integer_constant_exp_with_context_and_values(
                 struct_defs,
                 full_types,
                 static_const_values,
+                static_wide_const_values,
             )?;
             let right = eval_static_wide_integer_constant_exp_with_context_and_values(
                 right_exp,
                 struct_defs,
                 full_types,
                 static_const_values,
+                static_wide_const_values,
             )?;
             let unsigned = op_type.is_some_and(|ctype| !ctype.is_signed())
                 || left.is_unsigned
@@ -15135,6 +15157,7 @@ fn eval_static_wide_integer_constant_exp_with_context_and_values(
                 struct_defs,
                 full_types,
                 static_const_values,
+                static_wide_const_values,
             )?;
             if !cond.is_zero() {
                 eval_static_wide_integer_constant_exp_with_context_and_values(
@@ -15142,6 +15165,7 @@ fn eval_static_wide_integer_constant_exp_with_context_and_values(
                     struct_defs,
                     full_types,
                     static_const_values,
+                    static_wide_const_values,
                 )
             } else {
                 eval_static_wide_integer_constant_exp_with_context_and_values(
@@ -15149,6 +15173,7 @@ fn eval_static_wide_integer_constant_exp_with_context_and_values(
                     struct_defs,
                     full_types,
                     static_const_values,
+                    static_wide_const_values,
                 )
             }
         }
@@ -15452,14 +15477,14 @@ pub fn generate_with_target_options_and_warnings(
                         &gen.struct_defs,
                         &gen.full_types,
                         &gen.static_const_values,
+                        &gen.static_wide_const_values,
                     )
                     .ok_or_else(|| "Global initializer must be constant".to_string())?;
+                    let value = cast_static_wide_integer(value, vd.var_type);
+                    gen.static_wide_const_values.insert(vd.name.clone(), value);
                     file_scope_static_inits.insert(
                         vd.name.clone(),
-                        make_static_wide_integer_init(
-                            cast_static_wide_integer(value, vd.var_type),
-                            vd.var_type,
-                        ),
+                        make_static_wide_integer_init(value, vd.var_type),
                     );
                 }
             } else if init_val.is_some() {

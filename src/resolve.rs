@@ -6,12 +6,12 @@ type ResolveResult<T> = Result<T, Diagnostic>;
 
 #[derive(Debug, Clone, Copy)]
 struct IntegerConstantValue {
-    value: i64,
+    value: i128,
     ctype: CType,
 }
 
 impl IntegerConstantValue {
-    fn new(value: i64, ctype: CType) -> Self {
+    fn new(value: i128, ctype: CType) -> Self {
         Self { value, ctype }
     }
 
@@ -1101,16 +1101,21 @@ fn collect_cases(
             body,
             label,
         } => {
-            let val =
-                eval_integer_constant_exp_with_type_context(value, var_full_types, struct_members)
-                    .ok_or_else(|| Diagnostic::resolve(DiagnosticKind::NonConstantCaseValue))?;
+            let val = eval_integer_constant_value_with_type_context(
+                value,
+                var_full_types,
+                struct_members,
+            )
+            .map(switch_case_value_from_integer_constant)
+            .ok_or_else(|| Diagnostic::resolve(DiagnosticKind::NonConstantCaseValue))?;
             let end_val = if let Some(end_value) = end_value {
                 Some(
-                    eval_integer_constant_exp_with_type_context(
+                    eval_integer_constant_value_with_type_context(
                         end_value,
                         var_full_types,
                         struct_members,
                     )
+                    .map(switch_case_value_from_integer_constant)
                     .ok_or_else(|| Diagnostic::resolve(DiagnosticKind::NonConstantCaseValue))?,
                 )
             } else {
@@ -1191,16 +1196,14 @@ fn statement_guarantees_return(
 }
 
 fn eval_integer_constant_exp(exp: &Exp) -> Option<i64> {
-    eval_integer_constant_value(exp).map(|constant| constant.value)
+    eval_integer_constant_value(exp).and_then(|constant| i64::try_from(constant.value).ok())
 }
 
-fn eval_integer_constant_exp_with_type_context(
-    exp: &Exp,
-    var_full_types: &HashMap<String, FullType>,
-    struct_members: &HashMap<String, Vec<MemberDeclaration>>,
-) -> Option<i64> {
-    eval_integer_constant_value_with_type_context(exp, var_full_types, struct_members)
-        .map(|constant| constant.value)
+fn switch_case_value_from_integer_constant(value: IntegerConstantValue) -> SwitchCaseValue {
+    SwitchCaseValue {
+        value: value.value,
+        ctype: value.ctype,
+    }
 }
 
 fn integer_constant_target_unsigned(ctype: CType) -> bool {
@@ -1212,17 +1215,17 @@ fn integer_constant_target_unsigned(ctype: CType) -> bool {
 
 fn cast_integer_constant(value: IntegerConstantValue, target: CType) -> IntegerConstantValue {
     let converted = match target {
-        CType::Char | CType::SChar => value.value as i8 as i64,
-        CType::UChar => value.value as u8 as i64,
-        CType::Short => value.value as i16 as i64,
-        CType::UShort => value.value as u16 as i64,
-        CType::Bool => (value.value != 0) as i64,
-        CType::Int => value.value as i32 as i64,
-        CType::UInt => value.value as u32 as i64,
-        CType::Long => value.value,
-        CType::ULong => value.value as u64 as i64,
+        CType::Char | CType::SChar => value.value as i8 as i128,
+        CType::UChar => value.value as u8 as i128,
+        CType::Short => value.value as i16 as i128,
+        CType::UShort => value.value as u16 as i128,
+        CType::Bool => (value.value != 0) as i128,
+        CType::Int => value.value as i32 as i128,
+        CType::UInt => value.value as u32 as i128,
+        CType::Long => value.value as i64 as i128,
+        CType::ULong => value.value as u64 as i128,
         CType::Int128 => value.value,
-        CType::UInt128 => value.value as u64 as i64,
+        CType::UInt128 => value.value as u128 as i128,
         _ => value.value,
     };
     IntegerConstantValue::new(
@@ -1235,19 +1238,23 @@ fn cast_integer_constant(value: IntegerConstantValue, target: CType) -> IntegerC
     )
 }
 
-fn unsigned_integer_constant_value(value: IntegerConstantValue, ctype: CType) -> u64 {
+fn unsigned_integer_constant_value(value: IntegerConstantValue, ctype: CType) -> u128 {
     if ctype.size() <= CType::UInt.size() {
-        value.value as u32 as u64
+        value.value as u32 as u128
+    } else if ctype.size() <= CType::ULong.size() {
+        value.value as u64 as u128
     } else {
-        value.value as u64
+        value.value as u128
     }
 }
 
-fn integer_constant_from_unsigned(value: u64, ctype: CType) -> i64 {
+fn integer_constant_from_unsigned(value: u128, ctype: CType) -> i128 {
     if ctype.size() <= CType::UInt.size() {
-        value as u32 as i64
+        value as u32 as i128
+    } else if ctype.size() <= CType::ULong.size() {
+        value as u64 as i128
     } else {
-        value as i64
+        value as i128
     }
 }
 
@@ -1375,7 +1382,7 @@ fn eval_integer_constant_value_with_type_context(
             let full_type =
                 expression_full_type_with_context(inner, var_full_types, struct_members)?;
             Some(IntegerConstantValue::new(
-                constant_type_size(&full_type)? as i64,
+                constant_type_size(&full_type)? as i128,
                 CType::ULong,
             ))
         }
@@ -1445,37 +1452,33 @@ fn eval_integer_constant_value_with_type_context(
 
 fn integer_constant_exp_from_value(value: IntegerConstantValue) -> Option<Exp> {
     Some(match value.ctype {
-        CType::Int => Exp::Constant(value.value),
-        CType::Long => Exp::LongConstant(value.value),
-        CType::UInt => Exp::UIntConstant(value.value),
-        CType::ULong => Exp::ULongConstant(value.value),
-        CType::Int128 => Exp::Int128Constant(value.value as i128),
-        CType::UInt128 => Exp::UInt128Constant(value.value as u64 as u128),
-        _ => Exp::Constant(value.value),
+        CType::Int => Exp::Constant(i64::try_from(value.value).ok()?),
+        CType::Long => Exp::LongConstant(i64::try_from(value.value).ok()?),
+        CType::UInt => Exp::UIntConstant(i64::try_from(value.value).ok()?),
+        CType::ULong => Exp::ULongConstant(i64::try_from(value.value).ok()?),
+        CType::Int128 => Exp::Int128Constant(value.value),
+        CType::UInt128 => Exp::UInt128Constant(value.value as u128),
+        _ => Exp::Constant(i64::try_from(value.value).ok()?),
     })
 }
 
 fn eval_integer_constant_value(exp: &Exp) -> Option<IntegerConstantValue> {
     match exp {
-        Exp::Constant(c) => Some(IntegerConstantValue::new(*c, CType::Int)),
-        Exp::LongConstant(c) => Some(IntegerConstantValue::new(*c, CType::Long)),
-        Exp::UIntConstant(c) => Some(IntegerConstantValue::new(*c, CType::UInt)),
-        Exp::ULongConstant(c) => Some(IntegerConstantValue::new(*c, CType::ULong)),
-        Exp::Int128Constant(c) => i64::try_from(*c)
-            .ok()
-            .map(|value| IntegerConstantValue::new(value, CType::Int128)),
-        Exp::UInt128Constant(c) => i64::try_from(*c)
-            .ok()
-            .map(|value| IntegerConstantValue::new(value, CType::UInt128)),
+        Exp::Constant(c) => Some(IntegerConstantValue::new(*c as i128, CType::Int)),
+        Exp::LongConstant(c) => Some(IntegerConstantValue::new(*c as i128, CType::Long)),
+        Exp::UIntConstant(c) => Some(IntegerConstantValue::new(*c as u64 as i128, CType::UInt)),
+        Exp::ULongConstant(c) => Some(IntegerConstantValue::new(*c as u64 as i128, CType::ULong)),
+        Exp::Int128Constant(c) => Some(IntegerConstantValue::new(*c, CType::Int128)),
+        Exp::UInt128Constant(c) => Some(IntegerConstantValue::new(*c as i128, CType::UInt128)),
         Exp::DoubleConstant(d) | Exp::LongDoubleConstant(d) => {
-            Some(IntegerConstantValue::new(*d as i64, CType::Long))
+            Some(IntegerConstantValue::new(*d as i128, CType::Long))
         }
         Exp::SizeOfType(_, ft) => Some(IntegerConstantValue::new(
-            constant_type_size(ft)? as i64,
+            constant_type_size(ft)? as i128,
             CType::ULong,
         )),
         Exp::AlignOfType(ft) => Some(IntegerConstantValue::new(
-            constant_type_alignment(ft)? as i64,
+            constant_type_alignment(ft)? as i128,
             CType::ULong,
         )),
         Exp::Cast(target, _, inner) => {
@@ -1494,7 +1497,7 @@ fn eval_integer_constant_value(exp: &Exp) -> Option<IntegerConstantValue> {
                     value.ctype.promote(),
                 )),
                 UnaryOp::LogicalNot => Some(IntegerConstantValue::new(
-                    (value.value == 0) as i64,
+                    (value.value == 0) as i128,
                     CType::Int,
                 )),
                 _ => None,
@@ -1535,14 +1538,14 @@ fn eval_integer_constant_value(exp: &Exp) -> Option<IntegerConstantValue> {
                         let amount = u32::try_from(right.value).ok()?;
                         left_u.checked_shr(amount)?
                     }
-                    BinaryOp::LogicalAnd => (left_u != 0 && right_u != 0) as u64,
-                    BinaryOp::LogicalOr => (left_u != 0 || right_u != 0) as u64,
-                    BinaryOp::Equal => (left_u == right_u) as u64,
-                    BinaryOp::NotEqual => (left_u != right_u) as u64,
-                    BinaryOp::LessThan => (left_u < right_u) as u64,
-                    BinaryOp::GreaterThan => (left_u > right_u) as u64,
-                    BinaryOp::LessEqual => (left_u <= right_u) as u64,
-                    BinaryOp::GreaterEqual => (left_u >= right_u) as u64,
+                    BinaryOp::LogicalAnd => (left_u != 0 && right_u != 0) as u128,
+                    BinaryOp::LogicalOr => (left_u != 0 || right_u != 0) as u128,
+                    BinaryOp::Equal => (left_u == right_u) as u128,
+                    BinaryOp::NotEqual => (left_u != right_u) as u128,
+                    BinaryOp::LessThan => (left_u < right_u) as u128,
+                    BinaryOp::GreaterThan => (left_u > right_u) as u128,
+                    BinaryOp::LessEqual => (left_u <= right_u) as u128,
+                    BinaryOp::GreaterEqual => (left_u >= right_u) as u128,
                 };
                 let result_type = binary_constant_result_type(op, operand_type);
                 return Some(IntegerConstantValue::new(
@@ -1580,18 +1583,19 @@ fn eval_integer_constant_value(exp: &Exp) -> Option<IntegerConstantValue> {
                     let amount = u32::try_from(right).ok()?;
                     left.checked_shr(amount)?
                 }
-                BinaryOp::LogicalAnd => (left != 0 && right != 0) as i64,
-                BinaryOp::LogicalOr => (left != 0 || right != 0) as i64,
-                BinaryOp::Equal => (left == right) as i64,
-                BinaryOp::NotEqual => (left != right) as i64,
-                BinaryOp::LessThan => (left < right) as i64,
-                BinaryOp::GreaterThan => (left > right) as i64,
-                BinaryOp::LessEqual => (left <= right) as i64,
-                BinaryOp::GreaterEqual => (left >= right) as i64,
+                BinaryOp::LogicalAnd => (left != 0 && right != 0) as i128,
+                BinaryOp::LogicalOr => (left != 0 || right != 0) as i128,
+                BinaryOp::Equal => (left == right) as i128,
+                BinaryOp::NotEqual => (left != right) as i128,
+                BinaryOp::LessThan => (left < right) as i128,
+                BinaryOp::GreaterThan => (left > right) as i128,
+                BinaryOp::LessEqual => (left <= right) as i128,
+                BinaryOp::GreaterEqual => (left >= right) as i128,
             };
-            Some(IntegerConstantValue::new(
-                value,
-                binary_constant_result_type(op, operand_type),
+            let result_type = binary_constant_result_type(op, operand_type);
+            Some(cast_integer_constant(
+                IntegerConstantValue::new(value, operand_type),
+                result_type,
             ))
         }
         Exp::Conditional(cond, then_exp, else_exp) => {

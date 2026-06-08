@@ -11903,6 +11903,39 @@ fn compiles_case_labels_with_integer_constant_expressions() {
 }
 
 #[test]
+fn compiles_unsigned_bitint_case_constant_expressions() {
+    let src = TempPath::new("case-unsigned-bitint-constant-expression", "c");
+    let exe = TempPath::new("case-unsigned-bitint-constant-expression", "bin");
+    std::fs::write(
+        src.path(),
+        r#"
+int main(void) {
+    switch ((unsigned _BitInt(32))4294967295U) {
+    case ((unsigned _BitInt(32))0U - 1U):
+        return 42;
+    default:
+        return 1;
+    }
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(exe.path())
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(exe.path())
+        .status()
+        .expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+}
+
+#[test]
 fn drops_unreachable_code_before_case_label_in_constant_false_if() {
     let src = temp_file("case-in-constant-false-if", "c");
     let exe = temp_file("case-in-constant-false-if", "bin");

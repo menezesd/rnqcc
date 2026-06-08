@@ -4,6 +4,22 @@ use std::collections::HashMap;
 
 type ResolveResult<T> = Result<T, Diagnostic>;
 
+#[derive(Debug, Clone, Copy)]
+struct IntegerConstantValue {
+    value: i64,
+    ctype: CType,
+}
+
+impl IntegerConstantValue {
+    fn new(value: i64, ctype: CType) -> Self {
+        Self { value, ctype }
+    }
+
+    fn is_unsigned(self) -> bool {
+        !self.ctype.is_signed()
+    }
+}
+
 #[derive(Clone)]
 struct FunctionSignature {
     return_type: CType,
@@ -1135,55 +1151,215 @@ fn statement_guarantees_return(
 }
 
 fn eval_integer_constant_exp(exp: &Exp) -> Option<i64> {
+    eval_integer_constant_value(exp).map(|constant| constant.value)
+}
+
+fn integer_constant_target_unsigned(ctype: CType) -> bool {
+    matches!(
+        ctype,
+        CType::Bool | CType::UChar | CType::UShort | CType::UInt | CType::ULong | CType::UInt128
+    )
+}
+
+fn cast_integer_constant(value: IntegerConstantValue, target: CType) -> IntegerConstantValue {
+    let converted = match target {
+        CType::Char | CType::SChar => value.value as i8 as i64,
+        CType::UChar => value.value as u8 as i64,
+        CType::Short => value.value as i16 as i64,
+        CType::UShort => value.value as u16 as i64,
+        CType::Bool => (value.value != 0) as i64,
+        CType::Int => value.value as i32 as i64,
+        CType::UInt => value.value as u32 as i64,
+        CType::Long => value.value,
+        CType::ULong => value.value as u64 as i64,
+        CType::Int128 => value.value,
+        CType::UInt128 => value.value as u64 as i64,
+        _ => value.value,
+    };
+    IntegerConstantValue::new(
+        converted,
+        if integer_constant_target_unsigned(target) {
+            target
+        } else {
+            target.promote()
+        },
+    )
+}
+
+fn unsigned_integer_constant_value(value: IntegerConstantValue, ctype: CType) -> u64 {
+    if ctype.size() <= CType::UInt.size() {
+        value.value as u32 as u64
+    } else {
+        value.value as u64
+    }
+}
+
+fn integer_constant_from_unsigned(value: u64, ctype: CType) -> i64 {
+    if ctype.size() <= CType::UInt.size() {
+        value as u32 as i64
+    } else {
+        value as i64
+    }
+}
+
+fn binary_constant_operand_type(op: &BinaryOp, left: CType, right: CType) -> CType {
+    if matches!(op, BinaryOp::ShiftLeft | BinaryOp::ShiftRight) {
+        left.promote()
+    } else {
+        CType::common(left, right)
+    }
+}
+
+fn binary_constant_result_type(op: &BinaryOp, operand_type: CType) -> CType {
+    match op {
+        BinaryOp::LogicalAnd
+        | BinaryOp::LogicalOr
+        | BinaryOp::Equal
+        | BinaryOp::NotEqual
+        | BinaryOp::LessThan
+        | BinaryOp::GreaterThan
+        | BinaryOp::LessEqual
+        | BinaryOp::GreaterEqual => CType::Int,
+        _ => operand_type,
+    }
+}
+
+fn eval_integer_constant_value(exp: &Exp) -> Option<IntegerConstantValue> {
     match exp {
-        Exp::Constant(c) | Exp::LongConstant(c) | Exp::UIntConstant(c) | Exp::ULongConstant(c) => {
-            Some(*c)
+        Exp::Constant(c) => Some(IntegerConstantValue::new(*c, CType::Int)),
+        Exp::LongConstant(c) => Some(IntegerConstantValue::new(*c, CType::Long)),
+        Exp::UIntConstant(c) => Some(IntegerConstantValue::new(*c, CType::UInt)),
+        Exp::ULongConstant(c) => Some(IntegerConstantValue::new(*c, CType::ULong)),
+        Exp::Int128Constant(c) => i64::try_from(*c)
+            .ok()
+            .map(|value| IntegerConstantValue::new(value, CType::Int128)),
+        Exp::UInt128Constant(c) => i64::try_from(*c)
+            .ok()
+            .map(|value| IntegerConstantValue::new(value, CType::UInt128)),
+        Exp::DoubleConstant(d) | Exp::LongDoubleConstant(d) => {
+            Some(IntegerConstantValue::new(*d as i64, CType::Long))
         }
-        Exp::DoubleConstant(d) | Exp::LongDoubleConstant(d) => Some(*d as i64),
-        Exp::Cast(_, _, inner) => eval_integer_constant_exp(inner),
+        Exp::Cast(target, _, inner) => {
+            let value = eval_integer_constant_value(inner)?;
+            Some(cast_integer_constant(value, *target))
+        }
         Exp::Unary(op, inner) => {
-            let value = eval_integer_constant_exp(inner)?;
+            let value = eval_integer_constant_value(inner)?;
             match op {
-                UnaryOp::Negate => Some(-value),
-                UnaryOp::Complement => Some(!value),
-                UnaryOp::LogicalNot => Some((value == 0) as i64),
+                UnaryOp::Negate => Some(IntegerConstantValue::new(
+                    value.value.wrapping_neg(),
+                    value.ctype,
+                )),
+                UnaryOp::Complement => Some(cast_integer_constant(
+                    IntegerConstantValue::new(!value.value, value.ctype),
+                    value.ctype.promote(),
+                )),
+                UnaryOp::LogicalNot => Some(IntegerConstantValue::new(
+                    (value.value == 0) as i64,
+                    CType::Int,
+                )),
                 _ => None,
             }
         }
         Exp::Binary(op, left, right) => {
-            let left = eval_integer_constant_exp(left)?;
-            let right = eval_integer_constant_exp(right)?;
-            match op {
-                BinaryOp::Add => Some(left + right),
-                BinaryOp::Sub => Some(left - right),
-                BinaryOp::Mul => Some(left * right),
-                BinaryOp::Div => (right != 0).then_some(left / right),
-                BinaryOp::Mod => (right != 0).then_some(left % right),
-                BinaryOp::BitwiseAnd => Some(left & right),
-                BinaryOp::BitwiseNand => Some(!(left & right)),
-                BinaryOp::BitwiseOr => Some(left | right),
-                BinaryOp::BitwiseXor => Some(left ^ right),
-                BinaryOp::ShiftLeft => u32::try_from(right)
-                    .ok()
-                    .and_then(|amount| left.checked_shl(amount)),
-                BinaryOp::ShiftRight => u32::try_from(right)
-                    .ok()
-                    .and_then(|amount| left.checked_shr(amount)),
-                BinaryOp::LogicalAnd => Some((left != 0 && right != 0) as i64),
-                BinaryOp::LogicalOr => Some((left != 0 || right != 0) as i64),
-                BinaryOp::Equal => Some((left == right) as i64),
-                BinaryOp::NotEqual => Some((left != right) as i64),
-                BinaryOp::LessThan => Some((left < right) as i64),
-                BinaryOp::GreaterThan => Some((left > right) as i64),
-                BinaryOp::LessEqual => Some((left <= right) as i64),
-                BinaryOp::GreaterEqual => Some((left >= right) as i64),
+            let left = eval_integer_constant_value(left)?;
+            let right = eval_integer_constant_value(right)?;
+            let operand_type = binary_constant_operand_type(op, left.ctype, right.ctype);
+            if !operand_type.is_signed() || left.is_unsigned() || right.is_unsigned() {
+                let left_u = unsigned_integer_constant_value(left, operand_type);
+                let right_u = unsigned_integer_constant_value(right, operand_type);
+                let value = match op {
+                    BinaryOp::Add => left_u.wrapping_add(right_u),
+                    BinaryOp::Sub => left_u.wrapping_sub(right_u),
+                    BinaryOp::Mul => left_u.wrapping_mul(right_u),
+                    BinaryOp::Div => {
+                        if right_u == 0 {
+                            return None;
+                        }
+                        left_u / right_u
+                    }
+                    BinaryOp::Mod => {
+                        if right_u == 0 {
+                            return None;
+                        }
+                        left_u % right_u
+                    }
+                    BinaryOp::BitwiseAnd => left_u & right_u,
+                    BinaryOp::BitwiseNand => !(left_u & right_u),
+                    BinaryOp::BitwiseOr => left_u | right_u,
+                    BinaryOp::BitwiseXor => left_u ^ right_u,
+                    BinaryOp::ShiftLeft => {
+                        let amount = u32::try_from(right.value).ok()?;
+                        left_u.checked_shl(amount)?
+                    }
+                    BinaryOp::ShiftRight => {
+                        let amount = u32::try_from(right.value).ok()?;
+                        left_u.checked_shr(amount)?
+                    }
+                    BinaryOp::LogicalAnd => (left_u != 0 && right_u != 0) as u64,
+                    BinaryOp::LogicalOr => (left_u != 0 || right_u != 0) as u64,
+                    BinaryOp::Equal => (left_u == right_u) as u64,
+                    BinaryOp::NotEqual => (left_u != right_u) as u64,
+                    BinaryOp::LessThan => (left_u < right_u) as u64,
+                    BinaryOp::GreaterThan => (left_u > right_u) as u64,
+                    BinaryOp::LessEqual => (left_u <= right_u) as u64,
+                    BinaryOp::GreaterEqual => (left_u >= right_u) as u64,
+                };
+                let result_type = binary_constant_result_type(op, operand_type);
+                return Some(IntegerConstantValue::new(
+                    integer_constant_from_unsigned(value, operand_type),
+                    result_type,
+                ));
             }
+            let left = left.value;
+            let right = right.value;
+            let value = match op {
+                BinaryOp::Add => left.wrapping_add(right),
+                BinaryOp::Sub => left.wrapping_sub(right),
+                BinaryOp::Mul => left.wrapping_mul(right),
+                BinaryOp::Div => {
+                    if right == 0 {
+                        return None;
+                    }
+                    left.checked_div(right)?
+                }
+                BinaryOp::Mod => {
+                    if right == 0 {
+                        return None;
+                    }
+                    left.checked_rem(right)?
+                }
+                BinaryOp::BitwiseAnd => left & right,
+                BinaryOp::BitwiseNand => !(left & right),
+                BinaryOp::BitwiseOr => left | right,
+                BinaryOp::BitwiseXor => left ^ right,
+                BinaryOp::ShiftLeft => {
+                    let amount = u32::try_from(right).ok()?;
+                    left.checked_shl(amount)?
+                }
+                BinaryOp::ShiftRight => {
+                    let amount = u32::try_from(right).ok()?;
+                    left.checked_shr(amount)?
+                }
+                BinaryOp::LogicalAnd => (left != 0 && right != 0) as i64,
+                BinaryOp::LogicalOr => (left != 0 || right != 0) as i64,
+                BinaryOp::Equal => (left == right) as i64,
+                BinaryOp::NotEqual => (left != right) as i64,
+                BinaryOp::LessThan => (left < right) as i64,
+                BinaryOp::GreaterThan => (left > right) as i64,
+                BinaryOp::LessEqual => (left <= right) as i64,
+                BinaryOp::GreaterEqual => (left >= right) as i64,
+            };
+            Some(IntegerConstantValue::new(
+                value,
+                binary_constant_result_type(op, operand_type),
+            ))
         }
         Exp::Conditional(cond, then_exp, else_exp) => {
-            if eval_integer_constant_exp(cond)? != 0 {
-                eval_integer_constant_exp(then_exp)
+            if eval_integer_constant_value(cond)?.value != 0 {
+                eval_integer_constant_value(then_exp)
             } else {
-                eval_integer_constant_exp(else_exp)
+                eval_integer_constant_value(else_exp)
             }
         }
         _ => None,
@@ -1315,6 +1491,30 @@ mod tests {
             })),
             Err(err) => Ok(err),
         }
+    }
+
+    #[test]
+    fn integer_constant_eval_preserves_unsigned_cast_wrap() -> Result<(), String> {
+        let exp = Exp::Binary(
+            BinaryOp::Sub,
+            Box::new(Exp::Cast(CType::UInt, None, Box::new(Exp::UIntConstant(0)))),
+            Box::new(Exp::UIntConstant(1)),
+        );
+
+        assert_eq!(eval_integer_constant_exp(&exp), Some(4_294_967_295));
+        Ok(())
+    }
+
+    #[test]
+    fn integer_constant_eval_uses_wrapping_arithmetic_without_panicking() -> Result<(), String> {
+        let exp = Exp::Binary(
+            BinaryOp::Add,
+            Box::new(Exp::LongConstant(i64::MAX)),
+            Box::new(Exp::LongConstant(1)),
+        );
+
+        assert_eq!(eval_integer_constant_exp(&exp), Some(i64::MIN));
+        Ok(())
     }
 
     #[test]

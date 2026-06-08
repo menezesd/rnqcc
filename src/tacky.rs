@@ -9948,19 +9948,26 @@ impl TackyGen {
                 for case in &cases {
                     if let Some(val) = case.value {
                         let cmp_value = self.fresh_tmp(CType::Int);
+                        let low =
+                            self.convert_to(TackyVal::Constant(val), CType::Int, promoted_type);
                         if let Some(end_val) = case.end_value {
                             let ge_low = self.fresh_tmp(CType::Int);
                             let le_high = self.fresh_tmp(CType::Int);
+                            let high = self.convert_to(
+                                TackyVal::Constant(end_val),
+                                CType::Int,
+                                promoted_type,
+                            );
                             self.emit(TackyInstr::Binary {
                                 op: TackyBinaryOp::GreaterEqual,
                                 left: control_val.clone(),
-                                right: TackyVal::Constant(val),
+                                right: low,
                                 dst: ge_low.clone(),
                             });
                             self.emit(TackyInstr::Binary {
                                 op: TackyBinaryOp::LessEqual,
                                 left: control_val.clone(),
-                                right: TackyVal::Constant(end_val),
+                                right: high,
                                 dst: le_high.clone(),
                             });
                             self.emit(TackyInstr::Binary {
@@ -9973,7 +9980,7 @@ impl TackyGen {
                             self.emit(TackyInstr::Binary {
                                 op: TackyBinaryOp::Equal,
                                 left: control_val.clone(),
-                                right: TackyVal::Constant(val),
+                                right: low,
                                 dst: cmp_value.clone(),
                             });
                         }

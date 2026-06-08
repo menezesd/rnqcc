@@ -26808,6 +26808,18 @@ int main(void) {
 "#,
         ),
         (
+            "x86-linux-i128-mul-cross-term-immediate",
+            r#"
+static int foo(long long x) {
+    return __builtin_mul_overflow_p(x, ~0U, x);
+}
+
+int main(void) {
+    return foo(0);
+}
+"#,
+        ),
+        (
             "x86-linux-word-to-ulong-zero-extend",
             r#"
 unsigned long f(unsigned long a, unsigned short b, unsigned long c) {
@@ -27007,6 +27019,32 @@ int main(void) {
 }
 "#,
         ),
+        (
+            "x86-linux-folded-huge-dead-array-index",
+            r#"
+int a = 0, c = 0;
+static int d[][8] = {};
+
+int main(void) {
+    int e;
+    for (int b = 0; b < 4; b++) {
+        __builtin_printf("%d\n", b, e);
+        while (a && c++) {
+            e = d[300000000000000000][0];
+        }
+    }
+    return 0;
+}
+"#,
+        ),
+        (
+            "x86-linux-folded-float-to-double-constant",
+            r#"
+double f(void) {
+    return (double)((float)0);
+}
+"#,
+        ),
     ]
 }
 
@@ -27018,7 +27056,13 @@ fn assert_x86_64_linux_assembly_regression_case(name: &str, source: &str) {
 
     let mut command = Command::new(rnqcc());
     command.args(["--target", "x86_64-linux"]);
-    if name == "x86-linux-long-double-x87-does-not-coalesce-with-double" {
+    if matches!(
+        name,
+        "x86-linux-long-double-x87-does-not-coalesce-with-double"
+            | "x86-linux-i128-mul-cross-term-immediate"
+            | "x86-linux-folded-huge-dead-array-index"
+            | "x86-linux-folded-float-to-double-constant"
+    ) {
         command.arg("--optimize");
     }
     let output = command
@@ -27077,6 +27121,12 @@ fn assert_x86_64_linux_assembly_regression_case(name: &str, source: &str) {
     if name == "x86-linux-vector-u16-divmod" {
         assert!(!asm.contains("Nand"), "{name}: {asm}");
     }
+    if name == "x86-linux-i128-mul-cross-term-immediate" {
+        assert!(
+            !asm.contains("movq %r11, %r10\n\tmovq $4294967295, %r10"),
+            "{name}: i128 multiply clobbered high-half cross term: {asm}"
+        );
+    }
     if name == "x86-linux-vprintf-shadow-va-list-bridge" {
         assert!(asm.contains("subq $32, %rsp"), "{name}: {asm}");
         assert!(asm.contains("movl $48, 0(%rsp)"), "{name}: {asm}");
@@ -27130,6 +27180,9 @@ fn assert_x86_64_linux_assembly_regression_case(name: &str, source: &str) {
             "{name}: local __vprintf_chk call should not be bridged: {asm}"
         );
     }
+    if name == "x86-linux-folded-float-to-double-constant" {
+        assert!(!asm.contains("cvtss2sd $"), "{name}: {asm}");
+    }
     if name == "x86-linux-aligned-struct-shadow-va-arg" {
         assert!(asm.contains("subq $32, %rsp"), "{name}: {asm}");
         assert!(asm.contains("leaq 16(%rsp), %rdi"), "{name}: {asm}");
@@ -27178,6 +27231,7 @@ fn x86_64_linux_assembly_regression_buckets() -> &'static [(&'static str, &'stat
                 "x86-linux-i128-signed-unsigned-stress",
                 "x86-linux-i128-vector-lane-stress",
                 "x86-linux-vector-u16-divmod",
+                "x86-linux-i128-mul-cross-term-immediate",
             ],
         ),
         (
@@ -27190,6 +27244,8 @@ fn x86_64_linux_assembly_regression_buckets() -> &'static [(&'static str, &'stat
                 "x86-linux-label-address-table-walk",
                 "x86-linux-struct-return-copy-abi",
                 "x86-linux-complex-char-struct-arg-compare",
+                "x86-linux-folded-huge-dead-array-index",
+                "x86-linux-folded-float-to-double-constant",
             ],
         ),
         (

@@ -1832,7 +1832,7 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
             // ptr + index * scale → dst
             // If index is a constant, compute offset at compile time
             if let TackyVal::Constant(idx) = index {
-                let offset = *idx * *scale;
+                let offset = idx.wrapping_mul(*scale);
                 if offset == 0 {
                     out.push(AsmInstr::Mov(
                         AsmType::Quadword,
@@ -1973,7 +1973,10 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
             }
         }
         TackyInstr::FloatToDouble { src, dst } => {
-            out.push(AsmInstr::Cvtss2sd(convert_val(src), convert_val(dst)));
+            out.push(AsmInstr::Cvtss2sd(
+                convert_float_return_val(src, static_floats),
+                convert_val(dst),
+            ));
         }
         TackyInstr::DoubleToFloat { src, dst } => {
             out.push(AsmInstr::Cvtsd2ss(
@@ -3000,10 +3003,15 @@ fn convert_binary(
                             AsmOperand::Reg(Reg::DX),
                             left_high.clone(),
                         ));
+                        out.push(AsmInstr::Mov(
+                            AsmType::Quadword,
+                            right_high,
+                            AsmOperand::Reg(Reg::DX),
+                        ));
                         out.push(AsmInstr::Binary(
                             AsmType::Quadword,
                             AsmBinaryOp::Mul,
-                            right_high,
+                            AsmOperand::Reg(Reg::DX),
                             AsmOperand::Reg(Reg::R10),
                         ));
                         out.push(AsmInstr::Binary(
@@ -3017,10 +3025,15 @@ fn convert_binary(
                             AsmOperand::Reg(Reg::R11),
                             AsmOperand::Reg(Reg::R10),
                         ));
+                        out.push(AsmInstr::Mov(
+                            AsmType::Quadword,
+                            right_low,
+                            AsmOperand::Reg(Reg::DX),
+                        ));
                         out.push(AsmInstr::Binary(
                             AsmType::Quadword,
                             AsmBinaryOp::Mul,
-                            right_low,
+                            AsmOperand::Reg(Reg::DX),
                             AsmOperand::Reg(Reg::R10),
                         ));
                         out.push(AsmInstr::Binary(

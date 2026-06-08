@@ -1681,11 +1681,63 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                     convert_val(dst),
                 ));
             } else {
+                let base = *label_counter;
+                *label_counter += 1;
+                let ok_label = format!("uint_to_float_ok.{}.{}", function_name, base);
+                let end_label = format!("uint_to_float_end.{}.{}", function_name, base);
+                out.push(AsmInstr::Cmp(
+                    AsmType::Quadword,
+                    AsmOperand::Imm(0),
+                    convert_val(src),
+                ));
+                out.push(AsmInstr::JmpCC(CondCode::GE, ok_label.clone()));
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    convert_val(src),
+                    AsmOperand::Reg(Reg::R10),
+                ));
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    AsmOperand::Reg(Reg::R10),
+                    AsmOperand::Reg(Reg::R11),
+                ));
+                out.push(AsmInstr::Binary(
+                    AsmType::Quadword,
+                    AsmBinaryOp::And,
+                    AsmOperand::Imm(1),
+                    AsmOperand::Reg(Reg::R11),
+                ));
+                out.push(AsmInstr::Binary(
+                    AsmType::Quadword,
+                    AsmBinaryOp::Shr,
+                    AsmOperand::Imm(1),
+                    AsmOperand::Reg(Reg::R10),
+                ));
+                out.push(AsmInstr::Binary(
+                    AsmType::Quadword,
+                    AsmBinaryOp::Or,
+                    AsmOperand::Reg(Reg::R11),
+                    AsmOperand::Reg(Reg::R10),
+                ));
+                out.push(AsmInstr::Cvtsi2ss(
+                    AsmType::Quadword,
+                    AsmOperand::Reg(Reg::R10),
+                    convert_val(dst),
+                ));
+                out.push(AsmInstr::Binary(
+                    AsmType::Float,
+                    AsmBinaryOp::Add,
+                    convert_val(dst),
+                    convert_val(dst),
+                ));
+                out.push(AsmInstr::Jmp(end_label.clone()));
+                out.push(AsmInstr::Label(ok_label));
                 out.push(AsmInstr::Cvtsi2ss(
                     AsmType::Quadword,
                     convert_val(src),
                     convert_val(dst),
                 ));
+                out.push(AsmInstr::Label(end_label));
             }
         }
         TackyInstr::GetAddress { src, dst } => {

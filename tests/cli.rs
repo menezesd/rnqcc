@@ -27045,6 +27045,18 @@ double f(void) {
 }
 "#,
         ),
+        (
+            "x86-linux-uint64-to-float-uses-unsigned-path",
+            r#"
+float ull2f(unsigned long long u) {
+    return u;
+}
+
+int main(void) {
+    return ull2f(~0ULL) == (float)~0ULL ? 0 : 1;
+}
+"#,
+        ),
     ]
 }
 
@@ -27183,6 +27195,21 @@ fn assert_x86_64_linux_assembly_regression_case(name: &str, source: &str) {
     if name == "x86-linux-folded-float-to-double-constant" {
         assert!(!asm.contains("cvtss2sd $"), "{name}: {asm}");
     }
+    if name == "x86-linux-uint64-to-float-uses-unsigned-path" {
+        let body = asm
+            .split("ull2f:")
+            .nth(1)
+            .and_then(|tail| tail.split("\t.text\n\t.globl main").next())
+            .unwrap_or(&asm);
+        assert!(
+            body.contains("uint_to_float_ok"),
+            "{name}: unsigned 64-bit conversion did not handle high values: {asm}"
+        );
+        assert!(
+            body.contains("shrq $1") && body.contains("addss"),
+            "{name}: unsigned 64-bit conversion did not use the high-value unsigned path: {asm}"
+        );
+    }
     if name == "x86-linux-aligned-struct-shadow-va-arg" {
         assert!(asm.contains("subq $32, %rsp"), "{name}: {asm}");
         assert!(asm.contains("leaq 16(%rsp), %rdi"), "{name}: {asm}");
@@ -27266,6 +27293,7 @@ fn x86_64_linux_assembly_regression_buckets() -> &'static [(&'static str, &'stat
                 "x86-linux-word-to-ulong-zero-extend",
                 "x86-linux-byte-to-word-sign-extend",
                 "x86-linux-signed-long-mul-overflow",
+                "x86-linux-uint64-to-float-uses-unsigned-path",
             ],
         ),
     ]

@@ -10241,6 +10241,52 @@ int main(void) {
 }
 
 #[test]
+fn constant_folding_handles_int128_conversions() {
+    let src = temp_file("folded-int128-conversions", "c");
+    let exe = temp_file("folded-int128-conversions", "bin");
+    std::fs::write(
+        &src,
+        r#"
+extern void abort(void);
+
+int main(void) {
+    unsigned __int128 high = ((unsigned __int128)1) << 100;
+    unsigned long low = (unsigned long)(high + 17);
+    unsigned __int128 widened = (unsigned __int128)(unsigned int)0xffffffffU;
+    __int128 from_double = (__int128)42.0;
+    unsigned __int128 from_unsigned_double = (unsigned __int128)43.0;
+    double signed_double = (double)(__int128)123456789;
+    double unsigned_double = (double)(unsigned __int128)123456789U;
+
+    if (low != 17UL) abort();
+    if (widened != 0xffffffffU) abort();
+    if (from_double != 42) abort();
+    if (from_unsigned_double != 43) abort();
+    if (signed_double < 123456788.5 || signed_double > 123456789.5) abort();
+    if (unsigned_double < 123456788.5 || unsigned_double > 123456789.5) abort();
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--fold-constants")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn static_initializers_preserve_int128_high_bits() {
     let src = temp_file("static-init-int128-high-bits", "c");
     let exe = temp_file("static-init-int128-high-bits", "bin");
@@ -12109,6 +12155,48 @@ int main(void) {
     long values[3];
     struct S s;
     return pick(values, &s);
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(exe.path())
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(exe.path())
+        .status()
+        .expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+}
+
+#[test]
+fn compiles_sizeof_struct_case_constant_expressions() {
+    let src = TempPath::new("case-sizeof-struct-expression-constant-expression", "c");
+    let exe = TempPath::new("case-sizeof-struct-expression-constant-expression", "bin");
+    std::fs::write(
+        src.path(),
+        r#"
+struct Outer { char c; long value; };
+
+int pick(void) {
+    struct Local { int x; double y; };
+    struct Outer outer;
+    struct Local local;
+    switch (sizeof outer + sizeof local) {
+    case sizeof(struct Outer) + sizeof(struct Local):
+        return 42;
+    default:
+        return 1;
+    }
+}
+
+int main(void) {
+    return pick();
 }
 "#,
     )

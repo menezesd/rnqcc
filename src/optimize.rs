@@ -938,13 +938,18 @@ fn fold_instruction(
         }
         // Type conversions with constant source
         TackyInstr::Truncate { src, dst } => {
-            if let Some(v) = const_val(&src) {
-                // Truncate to the destination type
-                let dst_type = if let TackyVal::Var(ref n) = dst {
-                    types.get(n).copied().unwrap_or(CType::Int)
-                } else {
-                    CType::Int
+            let dst_type = if let TackyVal::Var(ref n) = dst {
+                types.get(n).copied().unwrap_or(CType::Int)
+            } else {
+                CType::Int
+            };
+            if let Some(v) = const_i128_val(&src) {
+                return TackyInstr::Copy {
+                    src: integer_tacky_constant(cast_integer_constant_wide(v, dst_type), dst_type),
+                    dst,
                 };
+            }
+            if let Some(v) = const_val(&src) {
                 return TackyInstr::Copy {
                     src: TackyVal::Constant(cast_integer_constant(v, dst_type)),
                     dst,
@@ -953,13 +958,25 @@ fn fold_instruction(
             TackyInstr::Truncate { src, dst }
         }
         TackyInstr::SignExtend { src, dst } => {
-            if let Some(v) = const_val(&src) {
-                let dst_type = if let TackyVal::Var(ref n) = dst {
-                    types.get(n).copied().unwrap_or(CType::Int)
-                } else {
-                    CType::Int
+            let dst_type = if let TackyVal::Var(ref n) = dst {
+                types.get(n).copied().unwrap_or(CType::Int)
+            } else {
+                CType::Int
+            };
+            let src_type = src_type_hint.unwrap_or(dst_type);
+            if let Some(v) = const_i128_val(&src) {
+                return TackyInstr::Copy {
+                    src: integer_tacky_constant(
+                        cast_integer_constant_wide(
+                            sign_extend_integer_constant_wide(v, src_type),
+                            dst_type,
+                        ),
+                        dst_type,
+                    ),
+                    dst,
                 };
-                let src_type = src_type_hint.unwrap_or(dst_type);
+            }
+            if let Some(v) = const_val(&src) {
                 return TackyInstr::Copy {
                     src: TackyVal::Constant(cast_integer_constant(
                         sign_extend_integer_constant(v, src_type),
@@ -971,13 +988,25 @@ fn fold_instruction(
             TackyInstr::SignExtend { src, dst }
         }
         TackyInstr::ZeroExtend { src, dst } => {
-            if let Some(v) = const_val(&src) {
-                let dst_type = if let TackyVal::Var(ref n) = dst {
-                    types.get(n).copied().unwrap_or(CType::UInt)
-                } else {
-                    CType::UInt
+            let dst_type = if let TackyVal::Var(ref n) = dst {
+                types.get(n).copied().unwrap_or(CType::UInt)
+            } else {
+                CType::UInt
+            };
+            let src_type = src_type_hint.unwrap_or(dst_type);
+            if let Some(v) = const_i128_val(&src) {
+                return TackyInstr::Copy {
+                    src: integer_tacky_constant(
+                        cast_integer_constant_wide(
+                            zero_extend_integer_constant_wide(v, src_type),
+                            dst_type,
+                        ),
+                        dst_type,
+                    ),
+                    dst,
                 };
-                let src_type = src_type_hint.unwrap_or(dst_type);
+            }
+            if let Some(v) = const_val(&src) {
                 return TackyInstr::Copy {
                     src: TackyVal::Constant(cast_integer_constant(
                         zero_extend_integer_constant(v, src_type),
@@ -996,14 +1025,14 @@ fn fold_instruction(
                     CType::Int
                 };
                 let v = match dst_type {
-                    CType::Int => d as i32 as i64,
-                    CType::Long => d as i64,
-                    CType::Char | CType::SChar => d as i8 as i64,
-                    CType::Short => d as i16 as i64,
-                    _ => d as i64,
+                    CType::Int => d as i32 as i128,
+                    CType::Long => d as i64 as i128,
+                    CType::Char | CType::SChar => d as i8 as i128,
+                    CType::Short => d as i16 as i128,
+                    _ => d as i64 as i128,
                 };
                 return TackyInstr::Copy {
-                    src: TackyVal::Constant(v),
+                    src: integer_tacky_constant(v, dst_type),
                     dst,
                 };
             }
@@ -1017,14 +1046,14 @@ fn fold_instruction(
                     CType::UInt
                 };
                 let v = match dst_type {
-                    CType::UInt => d as u32 as i64,
-                    CType::ULong => d as u64 as i64,
-                    CType::UChar => d as u8 as i64,
-                    CType::UShort => d as u16 as i64,
-                    _ => d as u64 as i64,
+                    CType::UInt => d as u32 as i128,
+                    CType::ULong => d as u64 as i128,
+                    CType::UChar => d as u8 as i128,
+                    CType::UShort => d as u16 as i128,
+                    _ => d as u64 as i128,
                 };
                 return TackyInstr::Copy {
-                    src: TackyVal::Constant(v),
+                    src: integer_tacky_constant(v, dst_type),
                     dst,
                 };
             }
@@ -1049,6 +1078,12 @@ fn fold_instruction(
             TackyInstr::FloatToUInt { src, dst }
         }
         TackyInstr::IntToDouble { src, dst } => {
+            if let Some(v) = const_i128_val(&src) {
+                return TackyInstr::Copy {
+                    src: TackyVal::DoubleConstant(v as f64),
+                    dst,
+                };
+            }
             if let Some(v) = const_val(&src) {
                 return TackyInstr::Copy {
                     src: TackyVal::DoubleConstant(v as f64),
@@ -1058,6 +1093,12 @@ fn fold_instruction(
             TackyInstr::IntToDouble { src, dst }
         }
         TackyInstr::IntToFloat { src, dst } => {
+            if let Some(v) = const_i128_val(&src) {
+                return TackyInstr::Copy {
+                    src: TackyVal::DoubleConstant(v as f32 as f64),
+                    dst,
+                };
+            }
             if let Some(v) = const_val(&src) {
                 return TackyInstr::Copy {
                     src: TackyVal::DoubleConstant(v as f32 as f64),
@@ -1067,6 +1108,21 @@ fn fold_instruction(
             TackyInstr::IntToFloat { src, dst }
         }
         TackyInstr::UIntToDouble { src, dst } => {
+            match src {
+                TackyVal::UInt128Constant(v) => {
+                    return TackyInstr::Copy {
+                        src: TackyVal::DoubleConstant(v as f64),
+                        dst,
+                    };
+                }
+                TackyVal::Int128Constant(v) => {
+                    return TackyInstr::Copy {
+                        src: TackyVal::DoubleConstant((v as u128) as f64),
+                        dst,
+                    };
+                }
+                _ => {}
+            }
             if let Some(v) = const_val(&src) {
                 let src_type = src_type_hint.unwrap_or(CType::ULong);
                 return TackyInstr::Copy {
@@ -1079,6 +1135,21 @@ fn fold_instruction(
             TackyInstr::UIntToDouble { src, dst }
         }
         TackyInstr::UIntToFloat { src, dst } => {
+            match src {
+                TackyVal::UInt128Constant(v) => {
+                    return TackyInstr::Copy {
+                        src: TackyVal::DoubleConstant(v as f32 as f64),
+                        dst,
+                    };
+                }
+                TackyVal::Int128Constant(v) => {
+                    return TackyInstr::Copy {
+                        src: TackyVal::DoubleConstant((v as u128) as f32 as f64),
+                        dst,
+                    };
+                }
+                _ => {}
+            }
             if let Some(v) = const_val(&src) {
                 let src_type = src_type_hint.unwrap_or(CType::ULong);
                 return TackyInstr::Copy {
@@ -1150,6 +1221,59 @@ fn cast_integer_constant(value: i64, dst_type: CType) -> i64 {
         CType::UInt => value as u32 as i64,
         CType::Long => value,
         CType::ULong => value as u64 as i64,
+        _ => value,
+    }
+}
+
+fn integer_tacky_constant(value: i128, dst_type: CType) -> TackyVal {
+    match dst_type {
+        CType::Int128 => TackyVal::Int128Constant(value),
+        CType::UInt128 => TackyVal::UInt128Constant(value as u128),
+        CType::UInt | CType::ULong | CType::Pointer => TackyVal::Constant(value as u64 as i64),
+        _ => TackyVal::Constant(value as i64),
+    }
+}
+
+fn cast_integer_constant_wide(value: i128, dst_type: CType) -> i128 {
+    match dst_type {
+        CType::Bool => (value != 0) as i128,
+        CType::Char | CType::SChar => value as i8 as i128,
+        CType::UChar => value as u8 as i128,
+        CType::Short => value as i16 as i128,
+        CType::UShort => value as u16 as i128,
+        CType::Int => value as i32 as i128,
+        CType::UInt => value as u32 as i128,
+        CType::Long => value as i64 as i128,
+        CType::ULong | CType::Pointer => value as u64 as i128,
+        CType::Int128 => value,
+        CType::UInt128 => value as u128 as i128,
+        _ => value,
+    }
+}
+
+fn sign_extend_integer_constant_wide(value: i128, src_type: CType) -> i128 {
+    match src_type {
+        CType::Bool => (value != 0) as i128,
+        CType::Char | CType::SChar => value as i8 as i128,
+        CType::UChar => value as u8 as i128,
+        CType::Short => value as i16 as i128,
+        CType::UShort => value as u16 as i128,
+        CType::Int => value as i32 as i128,
+        CType::UInt => value as u32 as i128,
+        CType::Long | CType::ULong => value as i64 as i128,
+        CType::Int128 | CType::UInt128 => value,
+        _ => value,
+    }
+}
+
+fn zero_extend_integer_constant_wide(value: i128, src_type: CType) -> i128 {
+    match src_type {
+        CType::Bool => (value != 0) as i128,
+        CType::Char | CType::SChar | CType::UChar => value as u8 as i128,
+        CType::Short | CType::UShort => value as u16 as i128,
+        CType::Int | CType::UInt => value as u32 as i128,
+        CType::Long | CType::ULong => value as u64 as i128,
+        CType::Int128 | CType::UInt128 => value as u128 as i128,
         _ => value,
     }
 }

@@ -147,6 +147,7 @@ struct Resolver {
     functions: HashMap<String, FunctionSignature>,
     var_full_types: HashMap<String, FullType>,
     struct_members: HashMap<String, Vec<MemberDeclaration>>,
+    struct_defs: HashMap<String, StructDef>,
     transparent_unions: HashMap<String, FullType>,
     implicit_functions: HashMap<String, FunctionSignature>,
     defined_labels: Vec<String>,
@@ -196,6 +197,7 @@ impl Resolver {
             functions: HashMap::new(),
             var_full_types: HashMap::new(),
             struct_members: HashMap::new(),
+            struct_defs: HashMap::new(),
             transparent_unions: HashMap::new(),
             implicit_functions: HashMap::new(),
             defined_labels: Vec::new(),
@@ -302,6 +304,13 @@ impl Resolver {
 
     fn record_struct_members(&mut self, tag: String, members: Vec<MemberDeclaration>) {
         self.struct_members.insert(tag, members);
+    }
+
+    fn record_struct_def(&mut self, declaration: &StructDeclaration) -> ResolveResult<()> {
+        let def = StructDef::from_declaration(declaration, &self.struct_defs)
+            .map_err(|message| Diagnostic::resolve(DiagnosticKind::ResolveError { message }))?;
+        self.struct_defs.insert(declaration.tag.clone(), def);
+        Ok(())
     }
 
     fn declare_block_function(&mut self, name: &str) -> ResolveResult<String> {
@@ -773,6 +782,7 @@ impl Resolver {
                     &mut cases,
                     &self.var_full_types,
                     &self.struct_members,
+                    &self.struct_defs,
                 )?;
                 Statement::Switch {
                     control: resolved_control,
@@ -935,7 +945,7 @@ impl Resolver {
                         })
                         .collect();
                     self.record_struct_members(unique_tag.clone(), resolved_members.clone());
-                    BlockItem::Declaration(Declaration::StructDecl(StructDeclaration {
+                    let resolved_decl = StructDeclaration {
                         tag: unique_tag,
                         members: resolved_members,
                         is_union: sd.is_union,
@@ -943,7 +953,9 @@ impl Resolver {
                         packed: sd.packed,
                         alignment: sd.alignment,
                         reverse_storage_order: sd.reverse_storage_order,
-                    }))
+                    };
+                    self.record_struct_def(&resolved_decl)?;
+                    BlockItem::Declaration(Declaration::StructDecl(resolved_decl))
                 }
                 BlockItem::Declaration(Declaration::TypedefDecl) => {
                     BlockItem::Declaration(Declaration::TypedefDecl)
@@ -1093,6 +1105,7 @@ fn collect_cases(
     cases: &mut Vec<SwitchCase>,
     var_full_types: &HashMap<String, FullType>,
     struct_members: &HashMap<String, Vec<MemberDeclaration>>,
+    struct_defs: &HashMap<String, StructDef>,
 ) -> ResolveResult<()> {
     match stmt {
         Statement::Case {
@@ -1105,6 +1118,7 @@ fn collect_cases(
                 value,
                 var_full_types,
                 struct_members,
+                struct_defs,
             )
             .map(switch_case_value_from_integer_constant)
             .ok_or_else(|| Diagnostic::resolve(DiagnosticKind::NonConstantCaseValue))?;
@@ -1114,6 +1128,7 @@ fn collect_cases(
                         end_value,
                         var_full_types,
                         struct_members,
+                        struct_defs,
                     )
                     .map(switch_case_value_from_integer_constant)
                     .ok_or_else(|| Diagnostic::resolve(DiagnosticKind::NonConstantCaseValue))?,
@@ -1126,7 +1141,7 @@ fn collect_cases(
                 end_value: end_val,
                 label: label.clone(),
             });
-            collect_cases(body, cases, var_full_types, struct_members)?;
+            collect_cases(body, cases, var_full_types, struct_members, struct_defs)?;
         }
         Statement::Default { body, label } => {
             cases.push(SwitchCase {
@@ -1134,29 +1149,33 @@ fn collect_cases(
                 end_value: None,
                 label: label.clone(),
             });
-            collect_cases(body, cases, var_full_types, struct_members)?;
+            collect_cases(body, cases, var_full_types, struct_members, struct_defs)?;
         }
         Statement::Block(items) => {
             for item in items {
                 if let BlockItem::Statement(s) = item {
-                    collect_cases(s, cases, var_full_types, struct_members)?;
+                    collect_cases(s, cases, var_full_types, struct_members, struct_defs)?;
                 }
             }
         }
         Statement::If(_, then_s, else_s) => {
-            collect_cases(then_s, cases, var_full_types, struct_members)?;
+            collect_cases(then_s, cases, var_full_types, struct_members, struct_defs)?;
             if let Some(e) = else_s {
-                collect_cases(e, cases, var_full_types, struct_members)?;
+                collect_cases(e, cases, var_full_types, struct_members, struct_defs)?;
             }
         }
         Statement::While { body, .. } => {
-            collect_cases(body, cases, var_full_types, struct_members)?
+            collect_cases(body, cases, var_full_types, struct_members, struct_defs)?
         }
         Statement::DoWhile { body, .. } => {
-            collect_cases(body, cases, var_full_types, struct_members)?
+            collect_cases(body, cases, var_full_types, struct_members, struct_defs)?
         }
-        Statement::For { body, .. } => collect_cases(body, cases, var_full_types, struct_members)?,
-        Statement::Label(_, body) => collect_cases(body, cases, var_full_types, struct_members)?,
+        Statement::For { body, .. } => {
+            collect_cases(body, cases, var_full_types, struct_members, struct_defs)?
+        }
+        Statement::Label(_, body) => {
+            collect_cases(body, cases, var_full_types, struct_members, struct_defs)?
+        }
         Statement::Switch { .. } => {}
         _ => {}
     }
@@ -1376,21 +1395,31 @@ fn eval_integer_constant_value_with_type_context(
     exp: &Exp,
     var_full_types: &HashMap<String, FullType>,
     struct_members: &HashMap<String, Vec<MemberDeclaration>>,
+    struct_defs: &HashMap<String, StructDef>,
 ) -> Option<IntegerConstantValue> {
     match exp {
         Exp::SizeOf(inner) => {
             let full_type =
                 expression_full_type_with_context(inner, var_full_types, struct_members)?;
             Some(IntegerConstantValue::new(
-                constant_type_size(&full_type)? as i128,
+                full_type.byte_size_with(struct_defs) as i128,
                 CType::ULong,
             ))
         }
+        Exp::SizeOfType(_, ft) => Some(IntegerConstantValue::new(
+            ft.byte_size_with(struct_defs) as i128,
+            CType::ULong,
+        )),
+        Exp::AlignOfType(ft) => Some(IntegerConstantValue::new(
+            ft.alignment_with(struct_defs) as i128,
+            CType::ULong,
+        )),
         Exp::Cast(target, ft, inner) => {
             let value = eval_integer_constant_value_with_type_context(
                 inner,
                 var_full_types,
                 struct_members,
+                struct_defs,
             )
             .or_else(|| eval_integer_constant_value(inner))?;
             Some(cast_integer_constant(
@@ -1403,6 +1432,7 @@ fn eval_integer_constant_value_with_type_context(
                 inner,
                 var_full_types,
                 struct_members,
+                struct_defs,
             )
             .or_else(|| eval_integer_constant_value(inner))?;
             eval_integer_constant_value(&Exp::Unary(
@@ -1411,13 +1441,18 @@ fn eval_integer_constant_value_with_type_context(
             ))
         }
         Exp::Binary(op, left, right) => {
-            let left =
-                eval_integer_constant_value_with_type_context(left, var_full_types, struct_members)
-                    .or_else(|| eval_integer_constant_value(left))?;
+            let left = eval_integer_constant_value_with_type_context(
+                left,
+                var_full_types,
+                struct_members,
+                struct_defs,
+            )
+            .or_else(|| eval_integer_constant_value(left))?;
             let right = eval_integer_constant_value_with_type_context(
                 right,
                 var_full_types,
                 struct_members,
+                struct_defs,
             )
             .or_else(|| eval_integer_constant_value(right))?;
             eval_integer_constant_value(&Exp::Binary(
@@ -1427,14 +1462,19 @@ fn eval_integer_constant_value_with_type_context(
             ))
         }
         Exp::Conditional(cond, then_exp, else_exp) => {
-            let cond =
-                eval_integer_constant_value_with_type_context(cond, var_full_types, struct_members)
-                    .or_else(|| eval_integer_constant_value(cond))?;
+            let cond = eval_integer_constant_value_with_type_context(
+                cond,
+                var_full_types,
+                struct_members,
+                struct_defs,
+            )
+            .or_else(|| eval_integer_constant_value(cond))?;
             if cond.value != 0 {
                 eval_integer_constant_value_with_type_context(
                     then_exp,
                     var_full_types,
                     struct_members,
+                    struct_defs,
                 )
                 .or_else(|| eval_integer_constant_value(then_exp))
             } else {
@@ -1442,6 +1482,7 @@ fn eval_integer_constant_value_with_type_context(
                     else_exp,
                     var_full_types,
                     struct_members,
+                    struct_defs,
                 )
                 .or_else(|| eval_integer_constant_value(else_exp))
             }
@@ -1698,7 +1739,7 @@ pub fn resolve(program: Program) -> ResolveResult<ResolveOutput> {
                         })
                         .collect();
                     resolver.record_struct_members(unique_tag.clone(), resolved_members.clone());
-                    Declaration::StructDecl(StructDeclaration {
+                    let resolved_decl = StructDeclaration {
                         tag: unique_tag,
                         members: resolved_members,
                         is_union: sd.is_union,
@@ -1706,7 +1747,9 @@ pub fn resolve(program: Program) -> ResolveResult<ResolveOutput> {
                         packed: sd.packed,
                         alignment: sd.alignment,
                         reverse_storage_order: sd.reverse_storage_order,
-                    })
+                    };
+                    resolver.record_struct_def(&resolved_decl)?;
+                    Declaration::StructDecl(resolved_decl)
                 }
                 Declaration::TypedefDecl => Declaration::TypedefDecl,
             })

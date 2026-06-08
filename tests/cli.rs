@@ -13531,6 +13531,44 @@ fn internal_cpp_ignores_malformed_nonconditional_directives_in_skipped_groups() 
 }
 
 #[test]
+fn internal_cpp_checks_conditional_structure_in_skipped_groups() {
+    for (name, source, expected, line) in [
+        (
+            "duplicate-else",
+            "#if 0\n#else\n#else\n#endif\nint kept = 1;\n",
+            "duplicate #else",
+            3usize,
+        ),
+        (
+            "elif-after-else",
+            "#if 0\n#else\n#elif 1\n#endif\nint kept = 1;\n",
+            "#elif after #else",
+            3usize,
+        ),
+    ] {
+        let src = temp_file(&format!("internal-cpp-skipped-conditional-{name}"), "c");
+        std::fs::write(&src, source).expect("failed to write source");
+
+        let output = Command::new(rnqcc())
+            .arg("--internal-cpp")
+            .arg("-E")
+            .arg(&src)
+            .output()
+            .expect("failed to run rnqcc");
+
+        assert!(!output.status.success(), "{name}");
+        let stderr = stderr(output);
+        assert!(
+            stderr.contains(&format!("{}:{line}:", src.display())),
+            "{name}: {stderr}"
+        );
+        assert!(stderr.contains(expected), "{name}: {stderr}");
+
+        let _ = std::fs::remove_file(src);
+    }
+}
+
+#[test]
 fn internal_cpp_handles_defined_elif_undef_and_expressions() {
     let src = temp_file("internal-cpp-defined-elif", "c");
     let exe = temp_file("internal-cpp-defined-elif", "bin");
@@ -20117,6 +20155,47 @@ fn internal_cpp_allows_guarded_recursive_include() {
 }
 
 #[test]
+fn internal_cpp_recursive_include_diagnostic_shows_include_chain() {
+    let include_dir = temp_file("internal-cpp-recursive-include-chain", "d");
+    let src = temp_file("internal-cpp-recursive-include-chain", "c");
+    std::fs::create_dir(&include_dir).expect("failed to create include dir");
+    let first = include_dir.join("first.h");
+    let second = include_dir.join("second.h");
+    std::fs::write(&first, "#include <second.h>\n#define FIRST_VALUE 1\n")
+        .expect("failed to write first header");
+    std::fs::write(&second, "#include <first.h>\n#define SECOND_VALUE 2\n")
+        .expect("failed to write second header");
+    std::fs::write(&src, "#include <first.h>\nint value = FIRST_VALUE;\n")
+        .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-I")
+        .arg(&include_dir)
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains(&format!("{}:1:", second.display())),
+        "{stderr}"
+    );
+    assert!(stderr.contains("recursive include"), "{stderr}");
+    assert!(stderr.contains("include chain:"), "{stderr}");
+    assert!(stderr.contains(&src.display().to_string()), "{stderr}");
+    assert!(stderr.contains(&first.display().to_string()), "{stderr}");
+    assert!(stderr.contains(&second.display().to_string()), "{stderr}");
+
+    let _ = std::fs::remove_file(first);
+    let _ = std::fs::remove_file(second);
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_dir(include_dir);
+}
+
+#[test]
 fn internal_cpp_rejects_unguarded_recursive_include() {
     let include_dir = temp_file("internal-cpp-unguarded-recursive-include", "d");
     let src = temp_file("internal-cpp-unguarded-recursive-include", "c");
@@ -21081,6 +21160,33 @@ fn internal_cpp_pragma_handler_errors_use_exact_source_line() {
         "{stderr}"
     );
     assert!(stderr.contains("malformed #pragma pack"), "{stderr}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn internal_cpp_macro_expanded_pragma_operator_errors_use_invocation_line() {
+    let src = temp_file("internal-cpp-located-macro-pragma-line", "c");
+    std::fs::write(
+        &src,
+        "#define BAD_PRAGMA _Pragma(42)\nint first;\nBAD_PRAGMA\nint after;\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains(&format!("{}:3:", src.display())),
+        "{stderr}"
+    );
+    assert!(stderr.contains("malformed _Pragma operator"), "{stderr}");
 
     let _ = std::fs::remove_file(src);
 }

@@ -4033,6 +4033,19 @@ fn pp_include_error(file: &str, line: usize, message: String) -> String {
     }
 }
 
+fn recursive_include_error(src: &Path, canonical: &Path, include_stack: &[PathBuf]) -> String {
+    let mut chain: Vec<String> = include_stack
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    chain.push(canonical.display().to_string());
+    format!(
+        "recursive include of {} (include chain: {})",
+        src.display(),
+        chain.join(" -> ")
+    )
+}
+
 fn push_line_marker(out: &mut String, line: usize, file: &str) {
     out.push_str(&format!("# {} \"{}\"\n", line, escape_c_string(file)));
 }
@@ -5456,7 +5469,11 @@ fn internal_preprocess_source(
         if inactive_recursive_include_guard(&source, macros) {
             return Ok(String::new());
         }
-        return Err(format!("recursive include of {}", src.display()));
+        return Err(recursive_include_error(
+            src,
+            &canonical,
+            context.include_stack,
+        ));
     }
     context.include_stack.push(canonical.clone());
 

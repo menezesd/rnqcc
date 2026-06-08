@@ -237,29 +237,25 @@ def skip_reason_for_test(src: Path, internal_cpp: bool = False) -> str | None:
     if "-fgimple" in text or "__GIMPLE" in text:
         return "unsupported GCC GIMPLE source extension"
     if internal_cpp and src.parent.name == "compile" and src.name in {
-        "limits-exprparen.c",
-    }:
-        return "internal-cpp translation-limit stress timeout"
-    if internal_cpp and src.parent.name == "execute" and src.name == "strlen-5.c":
-        return "internal-cpp strlen stress timeout"
-    if internal_cpp and src.parent.name == "compile" and src.name in {
         "20001226-1.c",
         "limits-blockid.c",
         "limits-caselabels.c",
-        "limits-declparen.c",
         "limits-enumconst.c",
         "limits-externalid.c",
         "limits-externdecl.c",
         "limits-fndefn.c",
-        "limits-structmem.c",
         "limits-structnest.c",
     }:
         return "internal-cpp translation-limit stress timeout"
-    if internal_cpp and src.parent.name == "compile" and src.name in {
-        "pr110386-2.c",
-    }:
-        return "internal-cpp expensive stress test"
-    if internal_cpp and "dg-require-effective-target run_expensive_tests" in text:
+    internal_cpp_expensive_exceptions = {
+        ("compile", "limits-fnargs.c"),
+        ("compile", "pr110386-2.c"),
+    }
+    if (
+        internal_cpp
+        and "dg-require-effective-target run_expensive_tests" in text
+        and (src.parent.name, src.name) not in internal_cpp_expensive_exceptions
+    ):
         return "internal-cpp expensive stress test"
     portable_expected_diagnostic_smoke = {
         "20030305-1.c",

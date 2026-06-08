@@ -10,16 +10,11 @@ compile | external | compile/pr115143-3.c | unsupported GCC GIMPLE source extens
 compile | internal-cpp | compile/20001226-1.c | internal-cpp translation-limit stress timeout
 compile | internal-cpp | compile/limits-blockid.c | internal-cpp translation-limit stress timeout
 compile | internal-cpp | compile/limits-caselabels.c | internal-cpp translation-limit stress timeout
-compile | internal-cpp | compile/limits-declparen.c | internal-cpp translation-limit stress timeout
 compile | internal-cpp | compile/limits-enumconst.c | internal-cpp translation-limit stress timeout
-compile | internal-cpp | compile/limits-exprparen.c | internal-cpp translation-limit stress timeout
 compile | internal-cpp | compile/limits-externalid.c | internal-cpp translation-limit stress timeout
 compile | internal-cpp | compile/limits-externdecl.c | internal-cpp translation-limit stress timeout
-compile | internal-cpp | compile/limits-fnargs.c | internal-cpp expensive stress test
 compile | internal-cpp | compile/limits-fndefn.c | internal-cpp translation-limit stress timeout
-compile | internal-cpp | compile/limits-structmem.c | internal-cpp translation-limit stress timeout
 compile | internal-cpp | compile/limits-structnest.c | internal-cpp translation-limit stress timeout
-compile | internal-cpp | compile/pr110386-2.c | internal-cpp expensive stress test
 compile | internal-cpp | compile/pr115143-2.c | unsupported GCC GIMPLE source extension
 compile | internal-cpp | compile/pr115143-3.c | unsupported GCC GIMPLE source extension
 execute | internal-cpp | execute/memclr.c | internal-cpp expensive stress test
@@ -27,4 +22,3 @@ execute | internal-cpp | execute/memcpy-a1.c | internal-cpp expensive stress tes
 execute | internal-cpp | execute/memcpy-a2.c | internal-cpp expensive stress test
 execute | internal-cpp | execute/memcpy-a4.c | internal-cpp expensive stress test
 execute | internal-cpp | execute/memcpy-a8.c | internal-cpp expensive stress test
-execute | internal-cpp | execute/strlen-5.c | internal-cpp strlen stress timeout

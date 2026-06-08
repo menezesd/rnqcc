@@ -25073,6 +25073,50 @@ int main(void) {
 }
 
 #[test]
+fn folds_c23_bitint_static_constant_contexts() {
+    let src = TempPath::new("c23-bitint-static-constant-contexts", "c");
+    let exe = TempPath::new("c23-bitint-static-constant-contexts", "bin");
+    std::fs::write(
+        src.path(),
+        r#"
+_Static_assert(((unsigned _BitInt(32))0U - 1U) == 4294967295U, "uint32 wrap");
+enum { BITINT_ENUM_WRAP = ((unsigned _BitInt(32))0U - 1U) == 4294967295U ? 42 : -1 };
+
+static unsigned _BitInt(32) folded_u32 = (unsigned _BitInt(32))0U - 1U;
+static int folded_cmp = ((unsigned _BitInt(32))0U - 1U) == 4294967295U;
+
+struct Bits {
+    unsigned _BitInt(32) x: 5;
+    unsigned int y: 3;
+};
+static struct Bits bits = { ((unsigned _BitInt(32))0U - 1U), 7U };
+
+int main(void) {
+    if (folded_u32 != 4294967295U) return 1;
+    if (folded_cmp != 1) return 2;
+    if (BITINT_ENUM_WRAP != 42) return 3;
+    if (bits.x != 31U || bits.y != 7U) return 4;
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(exe.path())
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(exe.path())
+        .status()
+        .expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+}
+
+#[test]
 fn supports_nested_function_local_label_addresses() {
     let src = temp_file("nested-local-label-address", "c");
     let exe = temp_file("nested-local-label-address", "bin");

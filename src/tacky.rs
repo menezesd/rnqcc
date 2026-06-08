@@ -14350,6 +14350,9 @@ fn eval_static_integer_expr_ctype(
         }
         Exp::Unary(UnaryOp::LogicalNot, _) => Some(CType::Int),
         Exp::Binary(op, left, right) => {
+            if static_binary_op_yields_int(op) {
+                return Some(CType::Int);
+            }
             let left_type = eval_static_integer_expr_ctype(left, full_types)?;
             let right_type = eval_static_integer_expr_ctype(right, full_types)?;
             if matches!(op, BinaryOp::ShiftLeft | BinaryOp::ShiftRight) {
@@ -14364,6 +14367,35 @@ fn eval_static_integer_expr_ctype(
             Some(CType::common(then_type, else_type))
         }
         _ => Some(eval_static_expr_full_type(exp, full_types)?.to_ctype()),
+    }
+}
+
+fn static_binary_op_yields_int(op: &BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::LogicalAnd
+            | BinaryOp::LogicalOr
+            | BinaryOp::Equal
+            | BinaryOp::NotEqual
+            | BinaryOp::LessThan
+            | BinaryOp::GreaterThan
+            | BinaryOp::LessEqual
+            | BinaryOp::GreaterEqual
+    )
+}
+
+fn eval_static_integer_binary_operand_ctype(
+    op: &BinaryOp,
+    left: &Exp,
+    right: &Exp,
+    full_types: &HashMap<String, FullType>,
+) -> Option<CType> {
+    let left_type = eval_static_integer_expr_ctype(left, full_types)?;
+    let right_type = eval_static_integer_expr_ctype(right, full_types)?;
+    if matches!(op, BinaryOp::ShiftLeft | BinaryOp::ShiftRight) {
+        Some(left_type.promote())
+    } else {
+        Some(CType::common(left_type, right_type))
     }
 }
 
@@ -14530,7 +14562,8 @@ fn eval_static_integer_constant_exp_with_context_and_values(
             }
         }
         Exp::Binary(op, left_exp, right_exp) => {
-            let op_type = eval_static_integer_expr_ctype(exp, full_types);
+            let op_type =
+                eval_static_integer_binary_operand_ctype(op, left_exp, right_exp, full_types);
             let left = eval_static_integer_constant_exp_with_context_and_values(
                 left_exp,
                 struct_defs,
@@ -14713,7 +14746,11 @@ fn eval_static_integer_constant_exp_with_context_and_values(
                 } else {
                     value as i64
                 };
-                return Some(static_integer_constant(value, false, true));
+                return Some(static_integer_constant(
+                    value,
+                    false,
+                    !static_binary_op_yields_int(op),
+                ));
             }
             let value = match op {
                 BinaryOp::Add => left.value.wrapping_add(right.value),
@@ -14752,7 +14789,11 @@ fn eval_static_integer_constant_exp_with_context_and_values(
                 BinaryOp::LessEqual => (left.value <= right.value) as i64,
                 BinaryOp::GreaterEqual => (left.value >= right.value) as i64,
             };
-            Some(static_integer_constant(value, false, is_unsigned))
+            Some(static_integer_constant(
+                value,
+                false,
+                is_unsigned && !static_binary_op_yields_int(op),
+            ))
         }
         Exp::Conditional(cond, then_exp, else_exp) => {
             let cond = eval_static_integer_constant_exp_with_context_and_values(
@@ -15580,6 +15621,60 @@ mod tests {
 
     fn require_some<T>(value: Option<T>, context: &str) -> TackyResult<T> {
         value.ok_or_else(|| context.to_string())
+    }
+
+    fn uint32_zero_minus_one_exp() -> Exp {
+        Exp::Binary(
+            BinaryOp::Sub,
+            Box::new(Exp::Cast(CType::UInt, None, Box::new(Exp::UIntConstant(0)))),
+            Box::new(Exp::UIntConstant(1)),
+        )
+    }
+
+    #[test]
+    fn static_integer_eval_preserves_uint32_wrap() -> Result<(), String> {
+        let constant = require_some(
+            eval_static_integer_constant_exp(&uint32_zero_minus_one_exp()),
+            "expected constant fold",
+        )?;
+
+        assert_eq!(constant.value, 4_294_967_295);
+        assert!(constant.is_unsigned);
+        Ok(())
+    }
+
+    #[test]
+    fn static_integer_eval_unsigned_comparison_returns_int() -> Result<(), String> {
+        let constant = require_some(
+            eval_static_integer_constant_exp(&Exp::Binary(
+                BinaryOp::Equal,
+                Box::new(uint32_zero_minus_one_exp()),
+                Box::new(Exp::UIntConstant(4_294_967_295)),
+            )),
+            "expected constant fold",
+        )?;
+
+        assert_eq!(constant.value, 1);
+        assert!(!constant.is_unsigned);
+        Ok(())
+    }
+
+    #[test]
+    fn static_integer_eval_reports_comparison_expression_type_as_int() -> Result<(), String> {
+        let ctype = require_some(
+            eval_static_integer_expr_ctype(
+                &Exp::Binary(
+                    BinaryOp::GreaterThan,
+                    Box::new(uint32_zero_minus_one_exp()),
+                    Box::new(Exp::UIntConstant(4_294_967_294)),
+                ),
+                &HashMap::new(),
+            ),
+            "expected expression type",
+        )?;
+
+        assert_eq!(ctype, CType::Int);
+        Ok(())
     }
 
     #[test]

@@ -36,6 +36,28 @@ struct BitIntSpec {
     storage: CType,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct IntegerConstantValue {
+    value: i64,
+    is_unsigned: bool,
+}
+
+impl IntegerConstantValue {
+    fn signed(value: i64) -> Self {
+        Self {
+            value,
+            is_unsigned: false,
+        }
+    }
+
+    fn unsigned(value: i64) -> Self {
+        Self {
+            value,
+            is_unsigned: true,
+        }
+    }
+}
+
 #[derive(Debug)]
 enum AbstractDecl {
     Base,
@@ -1006,58 +1028,220 @@ impl Parser {
     }
 
     fn eval_integer_constant_exp_with_layout(&self, exp: &Exp) -> Option<i64> {
+        self.eval_integer_constant_value_with_layout(exp)
+            .map(|constant| constant.value)
+    }
+
+    fn integer_constant_target_unsigned(ctype: CType) -> bool {
+        matches!(
+            ctype,
+            CType::Bool
+                | CType::UChar
+                | CType::UShort
+                | CType::UInt
+                | CType::ULong
+                | CType::UInt128
+        )
+    }
+
+    fn cast_integer_constant(value: IntegerConstantValue, target: CType) -> IntegerConstantValue {
+        let converted = match target {
+            CType::Char | CType::SChar => value.value as i8 as i64,
+            CType::UChar => value.value as u8 as i64,
+            CType::Short => value.value as i16 as i64,
+            CType::UShort => value.value as u16 as i64,
+            CType::Bool => (value.value != 0) as i64,
+            CType::Int => value.value as i32 as i64,
+            CType::UInt => value.value as u32 as i64,
+            CType::Long => value.value,
+            CType::ULong => value.value as u64 as i64,
+            CType::Int128 => value.value,
+            CType::UInt128 => value.value as u64 as i64,
+            _ => value.value,
+        };
+        IntegerConstantValue {
+            value: converted,
+            is_unsigned: Self::integer_constant_target_unsigned(target),
+        }
+    }
+
+    fn unsigned_integer_constant_value(value: IntegerConstantValue, ctype: CType) -> u64 {
+        if ctype.size() <= CType::UInt.size() {
+            value.value as u32 as u64
+        } else {
+            value.value as u64
+        }
+    }
+
+    fn integer_constant_from_unsigned(value: u64, ctype: CType) -> i64 {
+        if ctype.size() <= CType::UInt.size() {
+            value as u32 as i64
+        } else {
+            value as i64
+        }
+    }
+
+    fn binary_constant_operand_type(
+        &self,
+        op: &BinaryOp,
+        left: &Exp,
+        right: &Exp,
+    ) -> Option<CType> {
+        let left_type = self.typeof_expression(left).ok()?.to_ctype();
+        let right_type = self.typeof_expression(right).ok()?.to_ctype();
+        if matches!(op, BinaryOp::ShiftLeft | BinaryOp::ShiftRight) {
+            Some(left_type.promote())
+        } else {
+            Some(CType::common(left_type, right_type))
+        }
+    }
+
+    fn binary_constant_result_is_int(op: &BinaryOp) -> bool {
+        matches!(
+            op,
+            BinaryOp::LogicalAnd
+                | BinaryOp::LogicalOr
+                | BinaryOp::Equal
+                | BinaryOp::NotEqual
+                | BinaryOp::LessThan
+                | BinaryOp::GreaterThan
+                | BinaryOp::LessEqual
+                | BinaryOp::GreaterEqual
+        )
+    }
+
+    fn eval_integer_constant_value_with_layout(&self, exp: &Exp) -> Option<IntegerConstantValue> {
         match exp {
             Exp::SizeOf(inner) => {
                 let ft = self.typeof_expression(inner).ok()?;
-                Some(ft.byte_size_with(&self.struct_defs) as i64)
+                Some(IntegerConstantValue::unsigned(
+                    ft.byte_size_with(&self.struct_defs) as i64,
+                ))
             }
-            Exp::Cast(_, _, inner) => self.eval_integer_constant_exp_with_layout(inner),
+            Exp::Cast(target, _, inner) => {
+                let value = self.eval_integer_constant_value_with_layout(inner)?;
+                Some(Self::cast_integer_constant(value, *target))
+            }
             Exp::Unary(op, inner) => {
-                let value = self.eval_integer_constant_exp_with_layout(inner)?;
+                let value = self.eval_integer_constant_value_with_layout(inner)?;
                 match op {
-                    UnaryOp::Negate => Some(-value),
-                    UnaryOp::Complement => Some(!value),
-                    UnaryOp::LogicalNot => Some((value == 0) as i64),
+                    UnaryOp::Negate => Some(IntegerConstantValue {
+                        value: value.value.wrapping_neg(),
+                        is_unsigned: value.is_unsigned,
+                    }),
+                    UnaryOp::Complement => {
+                        let result_type = self
+                            .typeof_expression(exp)
+                            .ok()
+                            .map(|ft| ft.to_ctype())
+                            .unwrap_or(CType::Long);
+                        Some(Self::cast_integer_constant(
+                            IntegerConstantValue {
+                                value: !value.value,
+                                is_unsigned: value.is_unsigned,
+                            },
+                            result_type,
+                        ))
+                    }
+                    UnaryOp::LogicalNot => {
+                        Some(IntegerConstantValue::signed((value.value == 0) as i64))
+                    }
                     _ => None,
                 }
             }
             Exp::Binary(op, left, right) => {
-                let left = self.eval_integer_constant_exp_with_layout(left)?;
-                let right = self.eval_integer_constant_exp_with_layout(right)?;
-                match op {
-                    BinaryOp::Add => Some(left.wrapping_add(right)),
-                    BinaryOp::Sub => Some(left.wrapping_sub(right)),
-                    BinaryOp::Mul => Some(left.wrapping_mul(right)),
-                    BinaryOp::Div => left.checked_div(right),
-                    BinaryOp::Mod => left.checked_rem(right),
-                    BinaryOp::BitwiseAnd => Some(left & right),
-                    BinaryOp::BitwiseNand => Some(!(left & right)),
-                    BinaryOp::BitwiseOr => Some(left | right),
-                    BinaryOp::BitwiseXor => Some(left ^ right),
-                    BinaryOp::ShiftLeft => u32::try_from(right)
-                        .ok()
-                        .and_then(|amount| left.checked_shl(amount)),
-                    BinaryOp::ShiftRight => u32::try_from(right)
-                        .ok()
-                        .and_then(|amount| left.checked_shr(amount)),
-                    BinaryOp::LogicalAnd => Some((left != 0 && right != 0) as i64),
-                    BinaryOp::LogicalOr => Some((left != 0 || right != 0) as i64),
-                    BinaryOp::Equal => Some((left == right) as i64),
-                    BinaryOp::NotEqual => Some((left != right) as i64),
-                    BinaryOp::LessThan => Some((left < right) as i64),
-                    BinaryOp::GreaterThan => Some((left > right) as i64),
-                    BinaryOp::LessEqual => Some((left <= right) as i64),
-                    BinaryOp::GreaterEqual => Some((left >= right) as i64),
+                let left_value = self.eval_integer_constant_value_with_layout(left)?;
+                let right_value = self.eval_integer_constant_value_with_layout(right)?;
+                let op_type = self.binary_constant_operand_type(op, left, right);
+                let use_unsigned = op_type.is_some_and(|ctype| !ctype.is_signed())
+                    || left_value.is_unsigned
+                    || right_value.is_unsigned;
+                if use_unsigned {
+                    let op_type = op_type.unwrap_or(CType::ULong);
+                    let left = Self::unsigned_integer_constant_value(left_value, op_type);
+                    let right = Self::unsigned_integer_constant_value(right_value, op_type);
+                    let value = match op {
+                        BinaryOp::Add => left.wrapping_add(right),
+                        BinaryOp::Sub => left.wrapping_sub(right),
+                        BinaryOp::Mul => left.wrapping_mul(right),
+                        BinaryOp::Div => {
+                            if right == 0 {
+                                return None;
+                            }
+                            left / right
+                        }
+                        BinaryOp::Mod => {
+                            if right == 0 {
+                                return None;
+                            }
+                            left % right
+                        }
+                        BinaryOp::BitwiseAnd => left & right,
+                        BinaryOp::BitwiseNand => !(left & right),
+                        BinaryOp::BitwiseOr => left | right,
+                        BinaryOp::BitwiseXor => left ^ right,
+                        BinaryOp::ShiftLeft => {
+                            let amount = u32::try_from(right_value.value).ok()?;
+                            left.checked_shl(amount)?
+                        }
+                        BinaryOp::ShiftRight => {
+                            let amount = u32::try_from(right_value.value).ok()?;
+                            left.checked_shr(amount)?
+                        }
+                        BinaryOp::LogicalAnd => (left != 0 && right != 0) as u64,
+                        BinaryOp::LogicalOr => (left != 0 || right != 0) as u64,
+                        BinaryOp::Equal => (left == right) as u64,
+                        BinaryOp::NotEqual => (left != right) as u64,
+                        BinaryOp::LessThan => (left < right) as u64,
+                        BinaryOp::GreaterThan => (left > right) as u64,
+                        BinaryOp::LessEqual => (left <= right) as u64,
+                        BinaryOp::GreaterEqual => (left >= right) as u64,
+                    };
+                    return Some(IntegerConstantValue {
+                        value: Self::integer_constant_from_unsigned(value, op_type),
+                        is_unsigned: !Self::binary_constant_result_is_int(op),
+                    });
                 }
+                let left = left_value.value;
+                let right = right_value.value;
+                let value = match op {
+                    BinaryOp::Add => left.wrapping_add(right),
+                    BinaryOp::Sub => left.wrapping_sub(right),
+                    BinaryOp::Mul => left.wrapping_mul(right),
+                    BinaryOp::Div => left.checked_div(right)?,
+                    BinaryOp::Mod => left.checked_rem(right)?,
+                    BinaryOp::BitwiseAnd => left & right,
+                    BinaryOp::BitwiseNand => !(left & right),
+                    BinaryOp::BitwiseOr => left | right,
+                    BinaryOp::BitwiseXor => left ^ right,
+                    BinaryOp::ShiftLeft => {
+                        let amount = u32::try_from(right).ok()?;
+                        left.checked_shl(amount)?
+                    }
+                    BinaryOp::ShiftRight => {
+                        let amount = u32::try_from(right).ok()?;
+                        left.checked_shr(amount)?
+                    }
+                    BinaryOp::LogicalAnd => (left != 0 && right != 0) as i64,
+                    BinaryOp::LogicalOr => (left != 0 || right != 0) as i64,
+                    BinaryOp::Equal => (left == right) as i64,
+                    BinaryOp::NotEqual => (left != right) as i64,
+                    BinaryOp::LessThan => (left < right) as i64,
+                    BinaryOp::GreaterThan => (left > right) as i64,
+                    BinaryOp::LessEqual => (left <= right) as i64,
+                    BinaryOp::GreaterEqual => (left >= right) as i64,
+                };
+                Some(IntegerConstantValue::signed(value))
             }
             Exp::Conditional(cond, then_exp, else_exp) => {
-                if self.eval_integer_constant_exp_with_layout(cond)? != 0 {
-                    self.eval_integer_constant_exp_with_layout(then_exp)
+                if self.eval_integer_constant_value_with_layout(cond)?.value != 0 {
+                    self.eval_integer_constant_value_with_layout(then_exp)
                 } else {
-                    self.eval_integer_constant_exp_with_layout(else_exp)
+                    self.eval_integer_constant_value_with_layout(else_exp)
                 }
             }
-            _ => Self::eval_integer_constant_exp_with_defs(exp, &self.struct_defs),
+            _ => Self::eval_integer_constant_exp_with_defs(exp, &self.struct_defs)
+                .map(IntegerConstantValue::signed),
         }
     }
 
@@ -7415,6 +7599,28 @@ mod tests {
 
         assert!(matches!(a.init, Some(Exp::Cast(CType::Int, _, _))));
         assert_eq!(b.array_dims, Some(vec![8]));
+        Ok(())
+    }
+
+    #[test]
+    fn evaluates_bitint_unsigned_wrap_in_integer_constant_contexts() -> Result<(), String> {
+        let program = parse_source(
+            "_Static_assert(((unsigned _BitInt(32))0U - 1U) == 4294967295U, \"wrap\");\n\
+             enum { N = ((unsigned _BitInt(32))0U - 1U) == 4294967295U ? 5 : -1 };\n\
+             int a[N];\n",
+        )?;
+        let Some(a) = program
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::VarDecl(vd) if vd.name == "a" => Some(vd),
+                _ => None,
+            })
+        else {
+            return Err("expected array declaration".to_string());
+        };
+
+        assert_eq!(a.array_dims, Some(vec![5]));
         Ok(())
     }
 

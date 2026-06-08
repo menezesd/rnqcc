@@ -25764,6 +25764,58 @@ int main(void) {
 }
 
 #[test]
+fn static_initializers_narrow_high_int128_expressions() {
+    let src = TempPath::new("static-init-narrow-high-int128", "c");
+    let exe = TempPath::new("static-init-narrow-high-int128", "bin");
+    std::fs::write(
+        src.path(),
+        r#"
+static unsigned __int128 wide = ((unsigned __int128)1 << 100) | 42U;
+static unsigned low_from_expr = (unsigned)(((unsigned __int128)1 << 100) | 42U);
+static unsigned low_from_var = (unsigned)wide;
+static unsigned arr[] = {
+    (unsigned)(((unsigned __int128)1 << 100) | 5U),
+    (unsigned)(((unsigned __int128)1 << 65) | 7U)
+};
+
+struct Bits {
+    unsigned x: 5;
+    unsigned y: 3;
+};
+static struct Bits bits = {
+    ((unsigned __int128)1 << 100) | 31U,
+    ((unsigned __int128)1 << 65) | 7U
+};
+
+int main(void) {
+    static unsigned local = (unsigned)(((unsigned __int128)1 << 100) | 9U);
+    if ((unsigned)wide != 42U) return 1;
+    if (low_from_expr != 42U) return 2;
+    if (low_from_var != 42U) return 3;
+    if (arr[0] != 5U || arr[1] != 7U) return 4;
+    if (bits.x != 31U || bits.y != 7U) return 5;
+    if (local != 9U) return 6;
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(exe.path())
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(exe.path())
+        .status()
+        .expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+}
+
+#[test]
 fn supports_nested_function_local_label_addresses() {
     let src = temp_file("nested-local-label-address", "c");
     let exe = temp_file("nested-local-label-address", "bin");
@@ -27057,6 +27109,23 @@ int main(void) {
 }
 "#,
         ),
+        (
+            "x86-linux-uint-to-long-double-uses-unsigned-path",
+            r#"
+long double u2ld(unsigned u) {
+    return u;
+}
+
+long double ull2ld(unsigned long long u) {
+    return u;
+}
+
+int main(void) {
+    return u2ld(~0U) == (long double)~0U
+        && ull2ld(~0ULL) == (long double)~0ULL ? 0 : 1;
+}
+"#,
+        ),
     ]
 }
 
@@ -27210,6 +27279,32 @@ fn assert_x86_64_linux_assembly_regression_case(name: &str, source: &str) {
             "{name}: unsigned 64-bit conversion did not use the high-value unsigned path: {asm}"
         );
     }
+    if name == "x86-linux-uint-to-long-double-uses-unsigned-path" {
+        let u2ld_body = asm
+            .split("u2ld:")
+            .nth(1)
+            .and_then(|tail| tail.split("\t.text\n\t.globl ull2ld").next())
+            .unwrap_or(&asm);
+        assert!(u2ld_body.contains("movl %edi, %r10d"), "{name}: {asm}");
+        assert!(u2ld_body.contains("fildll"), "{name}: {asm}");
+        let ull2ld_body = asm
+            .split("ull2ld:")
+            .nth(1)
+            .and_then(|tail| tail.split("\t.text\n\t.globl main").next())
+            .unwrap_or(&asm);
+        assert!(
+            ull2ld_body.contains("uint_to_long_double_ok"),
+            "{name}: unsigned 64-bit long double conversion did not handle high values: {asm}"
+        );
+        assert!(
+            ull2ld_body.contains("salq $1") && ull2ld_body.contains("shrq $1"),
+            "{name}: unsigned 64-bit long double conversion did not clear the sign bit: {asm}"
+        );
+        assert!(
+            ull2ld_body.contains("faddp"),
+            "{name}: unsigned 64-bit long double conversion did not add the high-bit bias: {asm}"
+        );
+    }
     if name == "x86-linux-aligned-struct-shadow-va-arg" {
         assert!(asm.contains("subq $32, %rsp"), "{name}: {asm}");
         assert!(asm.contains("leaq 16(%rsp), %rdi"), "{name}: {asm}");
@@ -27294,6 +27389,7 @@ fn x86_64_linux_assembly_regression_buckets() -> &'static [(&'static str, &'stat
                 "x86-linux-byte-to-word-sign-extend",
                 "x86-linux-signed-long-mul-overflow",
                 "x86-linux-uint64-to-float-uses-unsigned-path",
+                "x86-linux-uint-to-long-double-uses-unsigned-path",
             ],
         ),
     ]

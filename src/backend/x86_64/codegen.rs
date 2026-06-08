@@ -266,7 +266,69 @@ fn x87_copy_to_long_double(
     dst: &TackyVal,
     types: &HashMap<String, CType>,
     static_doubles: &mut Vec<(String, f64)>,
+    label_counter: &mut usize,
+    function_name: &str,
 ) {
+    let src_t = val_type(src, types);
+    if is_unsigned_val(src, types) {
+        if matches!(src_t, AsmType::Byte | AsmType::Word | AsmType::Longword) {
+            out.push(AsmInstr::MovZeroExtend(
+                src_t,
+                AsmType::Quadword,
+                convert_val(src),
+                AsmOperand::Reg(Reg::R10),
+            ));
+            out.push(AsmInstr::X87Load(
+                AsmType::Quadword,
+                AsmOperand::Reg(Reg::R10),
+            ));
+            out.push(AsmInstr::X87Store(convert_val(dst)));
+            return;
+        }
+        if src_t == AsmType::Quadword {
+            let base = *label_counter;
+            *label_counter += 1;
+            let ok_label = format!("uint_to_long_double_ok.{}.{}", function_name, base);
+            let end_label = format!("uint_to_long_double_end.{}.{}", function_name, base);
+            out.push(AsmInstr::Cmp(
+                AsmType::Quadword,
+                AsmOperand::Imm(0),
+                convert_val(src),
+            ));
+            out.push(AsmInstr::JmpCC(CondCode::GE, ok_label.clone()));
+            out.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                convert_val(src),
+                AsmOperand::Reg(Reg::R10),
+            ));
+            out.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Sal,
+                AsmOperand::Imm(1),
+                AsmOperand::Reg(Reg::R10),
+            ));
+            out.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Shr,
+                AsmOperand::Imm(1),
+                AsmOperand::Reg(Reg::R10),
+            ));
+            out.push(AsmInstr::X87Load(
+                AsmType::Quadword,
+                AsmOperand::Reg(Reg::R10),
+            ));
+            let bias = intern_double_const(static_doubles, 9223372036854775808.0);
+            out.push(AsmInstr::X87Load(AsmType::Double, AsmOperand::Data(bias)));
+            out.push(AsmInstr::X87Binary(AsmX87BinaryOp::Add));
+            out.push(AsmInstr::X87Store(convert_val(dst)));
+            out.push(AsmInstr::Jmp(end_label.clone()));
+            out.push(AsmInstr::Label(ok_label));
+            out.push(AsmInstr::X87Load(src_t, convert_val(src)));
+            out.push(AsmInstr::X87Store(convert_val(dst)));
+            out.push(AsmInstr::Label(end_label));
+            return;
+        }
+    }
     x87_load_val(out, src, types, static_doubles);
     out.push(AsmInstr::X87Store(convert_val(dst)));
 }
@@ -1409,7 +1471,15 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
         TackyInstr::Copy { src, dst } => {
             let t = val_type(dst, types);
             if t == AsmType::LongDouble {
-                x87_copy_to_long_double(out, src, dst, types, static_doubles);
+                x87_copy_to_long_double(
+                    out,
+                    src,
+                    dst,
+                    types,
+                    static_doubles,
+                    label_counter,
+                    function_name,
+                );
                 return Ok(());
             }
             if matches!(t, AsmType::Float | AsmType::Double)

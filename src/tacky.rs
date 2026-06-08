@@ -11238,7 +11238,10 @@ impl TackyGen {
                     .find_member(name)
                     .ok_or_else(|| format!("struct '{}' has no member '{}'", tag, name))?;
                 if let Some(width) = mem.bit_width {
-                    let raw = self.eval_static_constant_init(&Some(value.as_ref().clone()))?;
+                    let raw = self.eval_static_scalar_init_for_type(
+                        &Some(value.as_ref().clone()),
+                        mem.member_type,
+                    )?;
                     let converted = convert_init_value(raw, mem.member_type);
                     builder.put_bit_field(
                         base_offset + mem.offset,
@@ -11528,7 +11531,10 @@ impl TackyGen {
                         (member, elem_init.clone())
                     };
                     if let Some(width) = member.bit_width {
-                        let raw = self.eval_static_constant_init(&Some(value.clone()))?;
+                        let raw = self.eval_static_scalar_init_for_type(
+                            &Some(value.clone()),
+                            member.member_type,
+                        )?;
                         let converted = convert_init_value(raw, member.member_type);
                         builder.put_bit_field(
                             base_offset + member.offset,
@@ -11636,7 +11642,7 @@ impl TackyGen {
                     )?;
                     return Ok(());
                 }
-                let v = self.eval_static_constant_init(&Some(init.clone()))?;
+                let v = self.eval_static_scalar_init_for_type(&Some(init.clone()), *ctype)?;
                 let cv = convert_init_value(v, *ctype);
                 builder.put(base_offset, make_static_init(cv, *ctype))?;
             }
@@ -11676,6 +11682,37 @@ impl TackyGen {
         } else {
             Ok(StaticScalarValue::integer(0))
         }
+    }
+
+    fn eval_static_scalar_init_for_type(
+        &self,
+        init: &Option<Exp>,
+        target: CType,
+    ) -> TackyResult<StaticScalarValue> {
+        if target.is_floating() {
+            return self.eval_static_constant_init(init);
+        }
+        let Some(exp) = init else {
+            return Ok(StaticScalarValue::integer(0));
+        };
+        if let Some(value) = eval_static_integer_constant_exp_with_context_and_values(
+            exp,
+            &self.struct_defs,
+            &self.full_types,
+            &self.static_const_values,
+        ) {
+            return Ok(value.as_scalar_value());
+        }
+        if let Some(value) = eval_static_wide_integer_constant_exp_with_context_and_values(
+            exp,
+            &self.struct_defs,
+            &self.full_types,
+            &self.static_const_values,
+            &self.static_wide_const_values,
+        ) {
+            return Ok(static_wide_integer_as_narrow_constant(value, target).as_scalar_value());
+        }
+        Err("Static variable initializer must be a constant".to_string())
     }
 
     fn eval_static_complex_constant_init(&self, init: &Exp) -> Option<StaticComplexValue> {
@@ -11840,7 +11877,10 @@ impl TackyGen {
                     }
                     let elem_init = &elems[*index];
                     if let Some(width) = mem.bit_width {
-                        let value = self.eval_static_constant_init(&Some(elem_init.clone()))?;
+                        let value = self.eval_static_scalar_init_for_type(
+                            &Some(elem_init.clone()),
+                            mem.member_type,
+                        )?;
                         builder.put_bit_field(
                             base_offset + mem.offset,
                             mem.member_type,
@@ -12529,7 +12569,7 @@ impl TackyGen {
                     vd.var_type,
                 )
             } else {
-                let raw_val = self.eval_static_constant_init(&init)?;
+                let raw_val = self.eval_static_scalar_init_for_type(&init, vd.var_type)?;
                 let init_val = convert_init_value(raw_val, vd.var_type);
                 make_static_init(init_val, vd.var_type)
             };
@@ -14916,6 +14956,14 @@ fn cast_static_wide_integer(
     StaticWideIntegerConstant::new(converted, !target.is_signed())
 }
 
+fn static_wide_integer_as_narrow_constant(
+    value: StaticWideIntegerConstant,
+    target: CType,
+) -> StaticIntegerConstant {
+    let converted = cast_static_wide_integer(value, target);
+    static_integer_constant(converted.value as i64, false, !target.is_signed())
+}
+
 fn eval_static_wide_integer_constant_exp_with_context_and_values(
     exp: &Exp,
     struct_defs: &HashMap<String, StructDef>,
@@ -15422,14 +15470,8 @@ pub fn generate_with_target_options_and_warnings(
                     .map(StaticScalarValue::integer),
                 Some(_) if matches!(vd.var_type, CType::Int128 | CType::UInt128) => None,
                 Some(exp) => Some(
-                    eval_static_integer_constant_exp_with_context_and_values(
-                        exp,
-                        &gen.struct_defs,
-                        &gen.full_types,
-                        &gen.static_const_values,
-                    )
-                    .map(StaticIntegerConstant::as_scalar_value)
-                    .ok_or_else(|| "Global initializer must be constant".to_string())?,
+                    gen.eval_static_scalar_init_for_type(&Some(exp.clone()), vd.var_type)
+                        .map_err(|_| "Global initializer must be constant".to_string())?,
                 ),
                 None => None,
             };

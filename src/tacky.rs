@@ -2647,11 +2647,15 @@ impl TackyGen {
             CType::UInt | CType::ULong => TackyVal::Constant(value.value as u64 as i64),
             _ => TackyVal::Constant(value.value as i64),
         };
-        if matches!(src_type, CType::Int128 | CType::UInt128) {
-            self.convert_to(src, src_type, target_type)
-        } else {
-            self.convert_to(src, CType::Int, target_type)
+        if src_type == target_type {
+            let dst = self.fresh_tmp(target_type);
+            self.emit(TackyInstr::Copy {
+                src,
+                dst: dst.clone(),
+            });
+            return dst;
         }
+        self.convert_to(src, src_type, target_type)
     }
 
     // --------------------------------------------------------

@@ -12512,6 +12512,44 @@ int main(void) {
 }
 
 #[test]
+fn fold_constants_preserves_unsigned_long_long_case_range_type() {
+    let src = TempPath::new("case-range-ullong-high-fold-constant-expression", "c");
+    let exe = TempPath::new("case-range-ullong-high-fold-constant-expression", "bin");
+    std::fs::write(
+        src.path(),
+        r#"
+int foo(unsigned long long value) {
+    switch (value) {
+    case 1000000000000000000ULL ... 9999999999999999999ULL:
+        return 19;
+    default:
+        return 20;
+    }
+}
+
+int main(void) {
+    return foo(1000000000000000000ULL) == 19 ? 42 : 1;
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--fold-constants")
+        .arg("-o")
+        .arg(exe.path())
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(exe.path())
+        .status()
+        .expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+}
+
+#[test]
 fn drops_unreachable_code_before_case_label_in_constant_false_if() {
     let src = temp_file("case-in-constant-false-if", "c");
     let exe = temp_file("case-in-constant-false-if", "bin");

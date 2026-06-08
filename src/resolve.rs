@@ -1224,6 +1224,24 @@ fn binary_constant_result_type(op: &BinaryOp, operand_type: CType) -> CType {
     }
 }
 
+fn constant_type_size(ft: &FullType) -> Option<usize> {
+    match ft {
+        FullType::Struct(_) => None,
+        FullType::Array { elem, size } => Some(constant_type_size(elem)? * size),
+        FullType::Vector { elem, lanes, .. } => Some(constant_type_size(elem)? * lanes),
+        _ => Some(ft.byte_size()),
+    }
+}
+
+fn constant_type_alignment(ft: &FullType) -> Option<usize> {
+    match ft {
+        FullType::Struct(_) => None,
+        FullType::Array { elem, .. } => constant_type_alignment(elem),
+        FullType::Vector { elem, .. } => constant_type_alignment(elem),
+        _ => Some(ft.alignment()),
+    }
+}
+
 fn eval_integer_constant_value(exp: &Exp) -> Option<IntegerConstantValue> {
     match exp {
         Exp::Constant(c) => Some(IntegerConstantValue::new(*c, CType::Int)),
@@ -1239,6 +1257,14 @@ fn eval_integer_constant_value(exp: &Exp) -> Option<IntegerConstantValue> {
         Exp::DoubleConstant(d) | Exp::LongDoubleConstant(d) => {
             Some(IntegerConstantValue::new(*d as i64, CType::Long))
         }
+        Exp::SizeOfType(_, ft) => Some(IntegerConstantValue::new(
+            constant_type_size(ft)? as i64,
+            CType::ULong,
+        )),
+        Exp::AlignOfType(ft) => Some(IntegerConstantValue::new(
+            constant_type_alignment(ft)? as i64,
+            CType::ULong,
+        )),
         Exp::Cast(target, _, inner) => {
             let value = eval_integer_constant_value(inner)?;
             Some(cast_integer_constant(value, *target))
@@ -1514,6 +1540,19 @@ mod tests {
         );
 
         assert_eq!(eval_integer_constant_exp(&exp), Some(i64::MIN));
+        Ok(())
+    }
+
+    #[test]
+    fn integer_constant_eval_accepts_sizeof_type_values() -> Result<(), String> {
+        assert_eq!(
+            eval_integer_constant_exp(&Exp::SizeOfType(CType::Int, FullType::Scalar(CType::Int))),
+            Some(4)
+        );
+        assert_eq!(
+            eval_integer_constant_exp(&Exp::AlignOfType(FullType::Scalar(CType::Long))),
+            Some(8)
+        );
         Ok(())
     }
 

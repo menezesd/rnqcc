@@ -425,6 +425,40 @@ fn constant_folding(
                     }
                 }
                 TackyInstr::Copy {
+                    src: TackyVal::Int128Constant(c),
+                    dst: TackyVal::Var(name),
+                } => {
+                    let dst_type = types.get(name).copied().unwrap_or(CType::Int128);
+                    if dst_type == CType::Int128 {
+                        const_map.insert(
+                            name.clone(),
+                            KnownConstant {
+                                value: TackyVal::Int128Constant(*c),
+                                value_type: CType::Int128,
+                            },
+                        );
+                    } else {
+                        const_map.remove(name);
+                    }
+                }
+                TackyInstr::Copy {
+                    src: TackyVal::UInt128Constant(c),
+                    dst: TackyVal::Var(name),
+                } => {
+                    let dst_type = types.get(name).copied().unwrap_or(CType::UInt128);
+                    if dst_type == CType::UInt128 {
+                        const_map.insert(
+                            name.clone(),
+                            KnownConstant {
+                                value: TackyVal::UInt128Constant(*c),
+                                value_type: CType::UInt128,
+                            },
+                        );
+                    } else {
+                        const_map.remove(name);
+                    }
+                }
+                TackyInstr::Copy {
                     src: TackyVal::Var(s),
                     dst: TackyVal::Var(name),
                 } => {
@@ -623,7 +657,13 @@ fn resolve_val_type(
             return *t;
         }
     }
-    CType::Int
+    match val {
+        TackyVal::Constant(_) => CType::Int,
+        TackyVal::Int128Constant(_) => CType::Int128,
+        TackyVal::UInt128Constant(_) => CType::UInt128,
+        TackyVal::DoubleConstant(_) => CType::Double,
+        TackyVal::Var(_) => CType::Int,
+    }
 }
 
 fn get_dst_name(instr: &TackyInstr) -> Option<String> {
@@ -720,14 +760,45 @@ fn fold_instruction(
             right,
             dst,
         } => {
+            let dst_type = if let TackyVal::Var(ref n) = dst {
+                types.get(n).copied().unwrap_or(CType::Int)
+            } else {
+                CType::Int
+            };
+            let op_type = if is_comparison(&op) {
+                src_type_hint.unwrap_or(dst_type)
+            } else {
+                dst_type
+            };
+            match op_type {
+                CType::Int128 => {
+                    if let (Some(l), Some(r)) = (const_i128_val(&left), const_i128_val(&right)) {
+                        if let Some(result) = eval_binary_i128(&op, l, r) {
+                            let src = if is_comparison(&op) {
+                                TackyVal::Constant(result as i64)
+                            } else {
+                                TackyVal::Int128Constant(result)
+                            };
+                            return TackyInstr::Copy { src, dst };
+                        }
+                    }
+                }
+                CType::UInt128 => {
+                    if let (Some(l), Some(r)) = (const_u128_val(&left), const_u128_val(&right)) {
+                        if let Some(result) = eval_binary_u128(&op, l, r) {
+                            let src = if is_comparison(&op) {
+                                TackyVal::Constant(result as i64)
+                            } else {
+                                TackyVal::UInt128Constant(result)
+                            };
+                            return TackyInstr::Copy { src, dst };
+                        }
+                    }
+                }
+                _ => {}
+            }
             // Try integer constant folding
             if let (Some(l), Some(r)) = (const_val(&left), const_val(&right)) {
-                // Determine the type of the operation from the destination
-                let dst_type = if let TackyVal::Var(ref n) = dst {
-                    types.get(n).copied().unwrap_or(CType::Int)
-                } else {
-                    CType::Int
-                };
                 if let Some(result) = eval_binary_typed(&op, l, r, dst_type, src_type_hint) {
                     return TackyInstr::Copy {
                         src: TackyVal::Constant(result),
@@ -760,6 +831,36 @@ fn fold_instruction(
             }
         }
         TackyInstr::Unary { op, src, dst } => {
+            let dst_type = if let TackyVal::Var(ref n) = dst {
+                types.get(n).copied().unwrap_or(CType::Int)
+            } else {
+                CType::Int
+            };
+            match dst_type {
+                CType::Int128 => {
+                    if let Some(v) = const_i128_val(&src) {
+                        if let Some(result) = eval_unary_i128(&op, v) {
+                            let src = match op {
+                                TackyUnaryOp::LogicalNot => TackyVal::Constant(result as i64),
+                                _ => TackyVal::Int128Constant(result),
+                            };
+                            return TackyInstr::Copy { src, dst };
+                        }
+                    }
+                }
+                CType::UInt128 => {
+                    if let Some(v) = const_u128_val(&src) {
+                        if let Some(result) = eval_unary_u128(&op, v) {
+                            let src = match op {
+                                TackyUnaryOp::LogicalNot => TackyVal::Constant(result as i64),
+                                _ => TackyVal::UInt128Constant(result),
+                            };
+                            return TackyInstr::Copy { src, dst };
+                        }
+                    }
+                }
+                _ => {}
+            }
             if let Some(v) = const_val(&src) {
                 if let Some(result) = eval_unary(&op, v) {
                     return TackyInstr::Copy {
@@ -788,6 +889,13 @@ fn fold_instruction(
             TackyInstr::Unary { op, src, dst }
         }
         TackyInstr::JumpIfZero(val, target) => {
+            if let Some(v) = const_i128_val(&val) {
+                if v == 0 {
+                    return TackyInstr::Jump(target);
+                } else {
+                    return TackyInstr::Nop;
+                }
+            }
             if let Some(v) = const_val(&val) {
                 if v == 0 {
                     return TackyInstr::Jump(target);
@@ -805,6 +913,13 @@ fn fold_instruction(
             TackyInstr::JumpIfZero(val, target)
         }
         TackyInstr::JumpIfNotZero(val, target) => {
+            if let Some(v) = const_i128_val(&val) {
+                if v != 0 {
+                    return TackyInstr::Jump(target);
+                } else {
+                    return TackyInstr::Nop;
+                }
+            }
             if let Some(v) = const_val(&val) {
                 if v != 0 {
                     return TackyInstr::Jump(target);
@@ -1006,6 +1121,24 @@ fn const_val(val: &TackyVal) -> Option<i64> {
     }
 }
 
+fn const_i128_val(val: &TackyVal) -> Option<i128> {
+    match val {
+        TackyVal::Constant(c) => Some(*c as i128),
+        TackyVal::Int128Constant(c) => Some(*c),
+        TackyVal::UInt128Constant(c) => Some(*c as i128),
+        _ => None,
+    }
+}
+
+fn const_u128_val(val: &TackyVal) -> Option<u128> {
+    match val {
+        TackyVal::Constant(c) => Some(*c as u128),
+        TackyVal::Int128Constant(c) => Some(*c as u128),
+        TackyVal::UInt128Constant(c) => Some(*c),
+        _ => None,
+    }
+}
+
 fn cast_integer_constant(value: i64, dst_type: CType) -> i64 {
     match dst_type {
         CType::Bool => (value != 0) as i64,
@@ -1180,6 +1313,68 @@ fn eval_binary_u64(op: &TackyBinaryOp, l: u64, r: u64) -> Option<u64> {
     }
 }
 
+fn eval_binary_i128(op: &TackyBinaryOp, l: i128, r: i128) -> Option<i128> {
+    match op {
+        TackyBinaryOp::Add => Some(l.wrapping_add(r)),
+        TackyBinaryOp::Sub => Some(l.wrapping_sub(r)),
+        TackyBinaryOp::Mul => Some(l.wrapping_mul(r)),
+        TackyBinaryOp::Div => {
+            if r == 0 {
+                None
+            } else {
+                Some(l.wrapping_div(r))
+            }
+        }
+        TackyBinaryOp::Mod => {
+            if r == 0 {
+                None
+            } else {
+                Some(l.wrapping_rem(r))
+            }
+        }
+        TackyBinaryOp::BitwiseAnd => Some(l & r),
+        TackyBinaryOp::BitwiseNand => Some(!(l & r)),
+        TackyBinaryOp::BitwiseOr => Some(l | r),
+        TackyBinaryOp::BitwiseXor => Some(l ^ r),
+        TackyBinaryOp::ShiftLeft => Some(l.wrapping_shl(r as u32)),
+        TackyBinaryOp::ShiftRight => Some(l.wrapping_shr(r as u32)),
+        TackyBinaryOp::Equal => Some((l == r) as i128),
+        TackyBinaryOp::NotEqual => Some((l != r) as i128),
+        TackyBinaryOp::LessThan => Some((l < r) as i128),
+        TackyBinaryOp::GreaterThan => Some((l > r) as i128),
+        TackyBinaryOp::LessEqual => Some((l <= r) as i128),
+        TackyBinaryOp::GreaterEqual => Some((l >= r) as i128),
+    }
+}
+
+fn eval_binary_u128(op: &TackyBinaryOp, l: u128, r: u128) -> Option<u128> {
+    match op {
+        TackyBinaryOp::Add => Some(l.wrapping_add(r)),
+        TackyBinaryOp::Sub => Some(l.wrapping_sub(r)),
+        TackyBinaryOp::Mul => Some(l.wrapping_mul(r)),
+        TackyBinaryOp::Div => l.checked_div(r),
+        TackyBinaryOp::Mod => {
+            if r == 0 {
+                None
+            } else {
+                Some(l % r)
+            }
+        }
+        TackyBinaryOp::BitwiseAnd => Some(l & r),
+        TackyBinaryOp::BitwiseNand => Some(!(l & r)),
+        TackyBinaryOp::BitwiseOr => Some(l | r),
+        TackyBinaryOp::BitwiseXor => Some(l ^ r),
+        TackyBinaryOp::ShiftLeft => Some(l.wrapping_shl(r as u32)),
+        TackyBinaryOp::ShiftRight => Some(l.wrapping_shr(r as u32)),
+        TackyBinaryOp::Equal => Some((l == r) as u128),
+        TackyBinaryOp::NotEqual => Some((l != r) as u128),
+        TackyBinaryOp::LessThan => Some((l < r) as u128),
+        TackyBinaryOp::GreaterThan => Some((l > r) as u128),
+        TackyBinaryOp::LessEqual => Some((l <= r) as u128),
+        TackyBinaryOp::GreaterEqual => Some((l >= r) as u128),
+    }
+}
+
 fn unsigned_integer_constant_as_u64(value: i64, src_type: CType) -> u64 {
     match src_type {
         CType::Bool => (value != 0) as u64,
@@ -1222,6 +1417,22 @@ fn eval_binary(op: &TackyBinaryOp, l: i64, r: i64) -> Option<i64> {
         TackyBinaryOp::GreaterThan => Some(if l > r { 1 } else { 0 }),
         TackyBinaryOp::LessEqual => Some(if l <= r { 1 } else { 0 }),
         TackyBinaryOp::GreaterEqual => Some(if l >= r { 1 } else { 0 }),
+    }
+}
+
+fn eval_unary_i128(op: &TackyUnaryOp, v: i128) -> Option<i128> {
+    match op {
+        TackyUnaryOp::Negate => Some(v.wrapping_neg()),
+        TackyUnaryOp::Complement => Some(!v),
+        TackyUnaryOp::LogicalNot => Some((v == 0) as i128),
+    }
+}
+
+fn eval_unary_u128(op: &TackyUnaryOp, v: u128) -> Option<u128> {
+    match op {
+        TackyUnaryOp::Negate => Some(v.wrapping_neg()),
+        TackyUnaryOp::Complement => Some(!v),
+        TackyUnaryOp::LogicalNot => Some((v == 0) as u128),
     }
 }
 

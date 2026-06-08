@@ -97,6 +97,26 @@ fn static_integer_constant(
     }
 }
 
+#[derive(Copy, Clone)]
+struct StaticWideIntegerConstant {
+    value: i128,
+    is_unsigned: bool,
+}
+
+impl StaticWideIntegerConstant {
+    fn new(value: i128, is_unsigned: bool) -> Self {
+        Self { value, is_unsigned }
+    }
+
+    fn is_zero(self) -> bool {
+        if self.is_unsigned {
+            self.value as u128 == 0
+        } else {
+            self.value == 0
+        }
+    }
+}
+
 struct StaticAddressConstant {
     base: Option<String>,
     offset: i64,
@@ -11614,6 +11634,23 @@ impl TackyGen {
                     builder.put(base_offset, make_static_init(pointer_diff, *ctype))?;
                     return Ok(());
                 }
+                if matches!(ctype, CType::Int128 | CType::UInt128) {
+                    let value = eval_static_wide_integer_constant_exp_with_context_and_values(
+                        init,
+                        &self.struct_defs,
+                        &self.full_types,
+                        &self.static_const_values,
+                    )
+                    .ok_or_else(|| "Static variable initializer must be a constant".to_string())?;
+                    builder.put(
+                        base_offset,
+                        make_static_wide_integer_init(
+                            cast_static_wide_integer(value, *ctype),
+                            *ctype,
+                        ),
+                    )?;
+                    return Ok(());
+                }
                 let v = self.eval_static_constant_init(&Some(init.clone()))?;
                 let cv = convert_init_value(v, *ctype);
                 builder.put(base_offset, make_static_init(cv, *ctype))?;
@@ -12483,15 +12520,33 @@ impl TackyGen {
                     }
                 }
             }
-            let raw_val = self.eval_static_constant_init(&init)?;
-            let init_val = convert_init_value(raw_val, vd.var_type);
             let align = if vd.var_type == CType::Double {
                 16
             } else {
                 std::cmp::max(vd.var_type.size() as usize, 1)
             };
             let align = vd.alignment.map_or(align, |a| a.get().max(align));
-            let init_v = make_static_init(init_val, vd.var_type);
+            let init_v = if matches!(vd.var_type, CType::Int128 | CType::UInt128) {
+                let value = if let Some(init) = init.as_ref() {
+                    eval_static_wide_integer_constant_exp_with_context_and_values(
+                        init,
+                        &self.struct_defs,
+                        &self.full_types,
+                        &self.static_const_values,
+                    )
+                    .ok_or_else(|| "Static variable initializer must be a constant".to_string())?
+                } else {
+                    StaticWideIntegerConstant::new(0, !vd.var_type.is_signed())
+                };
+                make_static_wide_integer_init(
+                    cast_static_wide_integer(value, vd.var_type),
+                    vd.var_type,
+                )
+            } else {
+                let raw_val = self.eval_static_constant_init(&init)?;
+                let init_val = convert_init_value(raw_val, vd.var_type);
+                make_static_init(init_val, vd.var_type)
+            };
             self.static_vars.push(TackyStaticVar {
                 name: vd.name,
                 global: false,
@@ -14299,6 +14354,17 @@ fn make_static_init(val: i64, t: CType) -> StaticInit {
     }
 }
 
+fn make_static_wide_integer_init(val: StaticWideIntegerConstant, t: CType) -> StaticInit {
+    if val.is_zero() {
+        return StaticInit::ZeroInit(t.size() as usize);
+    }
+    match t {
+        CType::Int128 => StaticInit::Int128Init(val.value),
+        CType::UInt128 => StaticInit::UInt128Init(val.value as u128),
+        _ => make_static_init(val.value as i64, t),
+    }
+}
+
 fn eval_static_expr_full_type(
     exp: &Exp,
     full_types: &HashMap<String, FullType>,
@@ -14836,6 +14902,260 @@ fn eval_static_integer_constant_exp(exp: &Exp) -> Option<StaticIntegerConstant> 
     eval_static_integer_constant_exp_with_context(exp, &HashMap::new(), &HashMap::new())
 }
 
+fn cast_static_wide_integer(
+    value: StaticWideIntegerConstant,
+    target: CType,
+) -> StaticWideIntegerConstant {
+    let signed_value = value.value;
+    let converted = match target {
+        CType::Bool => {
+            (if value.is_unsigned {
+                value.value as u128 != 0
+            } else {
+                value.value != 0
+            }) as i128
+        }
+        CType::Char | CType::SChar => signed_value as i8 as i128,
+        CType::UChar => signed_value as u8 as i128,
+        CType::Short => signed_value as i16 as i128,
+        CType::UShort => signed_value as u16 as i128,
+        CType::Int => signed_value as i32 as i128,
+        CType::UInt => signed_value as u32 as i128,
+        CType::Long => signed_value as i64 as i128,
+        CType::ULong => signed_value as u64 as i128,
+        CType::Int128 => signed_value,
+        CType::UInt128 => signed_value as u128 as i128,
+        _ => signed_value,
+    };
+    StaticWideIntegerConstant::new(converted, !target.is_signed())
+}
+
+fn eval_static_wide_integer_constant_exp_with_context_and_values(
+    exp: &Exp,
+    struct_defs: &HashMap<String, StructDef>,
+    full_types: &HashMap<String, FullType>,
+    static_const_values: &HashMap<String, StaticScalarValue>,
+) -> Option<StaticWideIntegerConstant> {
+    match exp {
+        Exp::Constant(c) | Exp::LongConstant(c) => {
+            Some(StaticWideIntegerConstant::new(*c as i128, false))
+        }
+        Exp::UIntConstant(c) | Exp::ULongConstant(c) => {
+            Some(StaticWideIntegerConstant::new(*c as u64 as i128, true))
+        }
+        Exp::Int128Constant(c) => Some(StaticWideIntegerConstant::new(*c, false)),
+        Exp::UInt128Constant(c) => Some(StaticWideIntegerConstant::new(*c as i128, true)),
+        Exp::Var(name) => static_const_values.get(name).and_then(|value| {
+            if value.source_is_double {
+                None
+            } else if value.source_is_unsigned {
+                Some(StaticWideIntegerConstant::new(
+                    value.value as u64 as i128,
+                    true,
+                ))
+            } else {
+                Some(StaticWideIntegerConstant::new(value.value as i128, false))
+            }
+        }),
+        Exp::SizeOf(inner) => {
+            let ft = eval_static_expr_full_type(inner, full_types)?;
+            Some(StaticWideIntegerConstant::new(
+                ft.byte_size_with(struct_defs) as i128,
+                true,
+            ))
+        }
+        Exp::SizeOfType(_, ft) => Some(StaticWideIntegerConstant::new(
+            ft.byte_size_with(struct_defs) as i128,
+            true,
+        )),
+        Exp::AlignOfType(ft) => Some(StaticWideIntegerConstant::new(
+            ft.alignment_with(struct_defs) as i128,
+            true,
+        )),
+        Exp::Cast(target, _, inner) => {
+            let value = if let Exp::ArrayInit(elems) = inner.as_ref() {
+                let [value] = elems.as_slice() else {
+                    return None;
+                };
+                eval_static_wide_integer_constant_exp_with_context_and_values(
+                    value,
+                    struct_defs,
+                    full_types,
+                    static_const_values,
+                )?
+            } else {
+                eval_static_wide_integer_constant_exp_with_context_and_values(
+                    inner,
+                    struct_defs,
+                    full_types,
+                    static_const_values,
+                )?
+            };
+            if target.is_floating() {
+                None
+            } else {
+                Some(cast_static_wide_integer(value, *target))
+            }
+        }
+        Exp::Unary(op, inner) => {
+            let value = eval_static_wide_integer_constant_exp_with_context_and_values(
+                inner,
+                struct_defs,
+                full_types,
+                static_const_values,
+            )?;
+            match op {
+                UnaryOp::Negate => {
+                    if value.is_unsigned {
+                        Some(StaticWideIntegerConstant::new(
+                            (value.value as u128).wrapping_neg() as i128,
+                            true,
+                        ))
+                    } else {
+                        Some(StaticWideIntegerConstant::new(
+                            value.value.wrapping_neg(),
+                            false,
+                        ))
+                    }
+                }
+                UnaryOp::Complement => Some(StaticWideIntegerConstant::new(
+                    !value.value,
+                    value.is_unsigned,
+                )),
+                UnaryOp::LogicalNot => Some(StaticWideIntegerConstant::new(
+                    value.is_zero() as i128,
+                    false,
+                )),
+                _ => None,
+            }
+        }
+        Exp::Binary(op, left_exp, right_exp) => {
+            let op_type =
+                eval_static_integer_binary_operand_ctype(op, left_exp, right_exp, full_types);
+            let left = eval_static_wide_integer_constant_exp_with_context_and_values(
+                left_exp,
+                struct_defs,
+                full_types,
+                static_const_values,
+            )?;
+            let right = eval_static_wide_integer_constant_exp_with_context_and_values(
+                right_exp,
+                struct_defs,
+                full_types,
+                static_const_values,
+            )?;
+            let unsigned = op_type.is_some_and(|ctype| !ctype.is_signed())
+                || left.is_unsigned
+                || right.is_unsigned;
+            let result_unsigned = unsigned && !static_binary_op_yields_int(op);
+            if unsigned {
+                let l = left.value as u128;
+                let r = right.value as u128;
+                let value = match op {
+                    BinaryOp::Add => l.wrapping_add(r),
+                    BinaryOp::Sub => l.wrapping_sub(r),
+                    BinaryOp::Mul => l.wrapping_mul(r),
+                    BinaryOp::Div => l.checked_div(r)?,
+                    BinaryOp::Mod => {
+                        if r == 0 {
+                            return None;
+                        }
+                        l % r
+                    }
+                    BinaryOp::BitwiseAnd => l & r,
+                    BinaryOp::BitwiseNand => !(l & r),
+                    BinaryOp::BitwiseOr => l | r,
+                    BinaryOp::BitwiseXor => l ^ r,
+                    BinaryOp::ShiftLeft => {
+                        let amount = u32::try_from(right.value).ok()?;
+                        l.checked_shl(amount)?
+                    }
+                    BinaryOp::ShiftRight => {
+                        let amount = u32::try_from(right.value).ok()?;
+                        l.checked_shr(amount)?
+                    }
+                    BinaryOp::LogicalAnd => (!left.is_zero() && !right.is_zero()) as u128,
+                    BinaryOp::LogicalOr => (!left.is_zero() || !right.is_zero()) as u128,
+                    BinaryOp::Equal => (l == r) as u128,
+                    BinaryOp::NotEqual => (l != r) as u128,
+                    BinaryOp::LessThan => (l < r) as u128,
+                    BinaryOp::GreaterThan => (l > r) as u128,
+                    BinaryOp::LessEqual => (l <= r) as u128,
+                    BinaryOp::GreaterEqual => (l >= r) as u128,
+                };
+                return Some(StaticWideIntegerConstant::new(
+                    value as i128,
+                    result_unsigned,
+                ));
+            }
+            let l = left.value;
+            let r = right.value;
+            let value = match op {
+                BinaryOp::Add => l.wrapping_add(r),
+                BinaryOp::Sub => l.wrapping_sub(r),
+                BinaryOp::Mul => l.wrapping_mul(r),
+                BinaryOp::Div => {
+                    if r == 0 {
+                        return None;
+                    }
+                    l.checked_div(r)?
+                }
+                BinaryOp::Mod => {
+                    if r == 0 {
+                        return None;
+                    }
+                    l.checked_rem(r)?
+                }
+                BinaryOp::BitwiseAnd => l & r,
+                BinaryOp::BitwiseNand => !(l & r),
+                BinaryOp::BitwiseOr => l | r,
+                BinaryOp::BitwiseXor => l ^ r,
+                BinaryOp::ShiftLeft => {
+                    let amount = u32::try_from(r).ok()?;
+                    l.checked_shl(amount)?
+                }
+                BinaryOp::ShiftRight => {
+                    let amount = u32::try_from(r).ok()?;
+                    l.checked_shr(amount)?
+                }
+                BinaryOp::LogicalAnd => (l != 0 && r != 0) as i128,
+                BinaryOp::LogicalOr => (l != 0 || r != 0) as i128,
+                BinaryOp::Equal => (l == r) as i128,
+                BinaryOp::NotEqual => (l != r) as i128,
+                BinaryOp::LessThan => (l < r) as i128,
+                BinaryOp::GreaterThan => (l > r) as i128,
+                BinaryOp::LessEqual => (l <= r) as i128,
+                BinaryOp::GreaterEqual => (l >= r) as i128,
+            };
+            Some(StaticWideIntegerConstant::new(value, result_unsigned))
+        }
+        Exp::Conditional(cond, then_exp, else_exp) => {
+            let cond = eval_static_wide_integer_constant_exp_with_context_and_values(
+                cond,
+                struct_defs,
+                full_types,
+                static_const_values,
+            )?;
+            if !cond.is_zero() {
+                eval_static_wide_integer_constant_exp_with_context_and_values(
+                    then_exp,
+                    struct_defs,
+                    full_types,
+                    static_const_values,
+                )
+            } else {
+                eval_static_wide_integer_constant_exp_with_context_and_values(
+                    else_exp,
+                    struct_defs,
+                    full_types,
+                    static_const_values,
+                )
+            }
+        }
+        _ => None,
+    }
+}
+
 fn push_raw_byte(out: &mut String, byte: u8) {
     out.push(char::from(byte));
 }
@@ -15103,6 +15423,7 @@ pub fn generate_with_target_options_and_warnings(
                 Some(exp) if gen.static_pointer_diff_integer(exp).is_some() => gen
                     .static_pointer_diff_integer(exp)
                     .map(StaticScalarValue::integer),
+                Some(_) if matches!(vd.var_type, CType::Int128 | CType::UInt128) => None,
                 Some(exp) => Some(
                     eval_static_integer_constant_exp_with_context_and_values(
                         exp,
@@ -15124,6 +15445,23 @@ pub fn generate_with_target_options_and_warnings(
             }
             if let Some(init) = symbolic_static_init {
                 file_scope_static_inits.insert(vd.name.clone(), init);
+            } else if matches!(vd.var_type, CType::Int128 | CType::UInt128) {
+                if let Some(exp) = vd.init.as_ref() {
+                    let value = eval_static_wide_integer_constant_exp_with_context_and_values(
+                        exp,
+                        &gen.struct_defs,
+                        &gen.full_types,
+                        &gen.static_const_values,
+                    )
+                    .ok_or_else(|| "Global initializer must be constant".to_string())?;
+                    file_scope_static_inits.insert(
+                        vd.name.clone(),
+                        make_static_wide_integer_init(
+                            cast_static_wide_integer(value, vd.var_type),
+                            vd.var_type,
+                        ),
+                    );
+                }
             } else if init_val.is_some() {
                 file_scope_static_inits.remove(&vd.name);
             }

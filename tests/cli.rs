@@ -10166,6 +10166,117 @@ int main(void) {
 }
 
 #[test]
+fn constant_folding_handles_int128_arithmetic_and_comparisons() {
+    let src = temp_file("folded-int128-arithmetic", "c");
+    let exe = temp_file("folded-int128-arithmetic", "bin");
+    std::fs::write(
+        &src,
+        r#"
+extern void abort(void);
+
+int main(void) {
+    __int128 high = ((__int128)1) << 100;
+    __int128 value = ((high + 7) - 3) ^ 4;
+    if (value != high) abort();
+    if (!(((value | 15) & 8) == 8)) abort();
+    if (!(-((__int128)5) < ((__int128)0))) abort();
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--fold-constants")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn constant_folding_handles_uint128_wraparound() {
+    let src = temp_file("folded-uint128-wraparound", "c");
+    let exe = temp_file("folded-uint128-wraparound", "bin");
+    std::fs::write(
+        &src,
+        r#"
+extern void abort(void);
+
+int main(void) {
+    unsigned __int128 all = (unsigned __int128)-1;
+    unsigned __int128 high = ((unsigned __int128)1) << 127;
+    if ((all + 1) != 0) abort();
+    if ((0 - ((unsigned __int128)1)) != all) abort();
+    if ((high >> 127) != 1) abort();
+    if (!(all > high)) abort();
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--fold-constants")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn static_initializers_preserve_int128_high_bits() {
+    let src = temp_file("static-init-int128-high-bits", "c");
+    let exe = temp_file("static-init-int128-high-bits", "bin");
+    std::fs::write(
+        &src,
+        r#"
+extern void abort(void);
+
+static unsigned __int128 high = ((unsigned __int128)1) << 100;
+static __int128 negative = -((__int128)1 << 100);
+
+int main(void) {
+    if ((unsigned long)(high >> 96) != 16UL) abort();
+    if ((unsigned long)((-negative) >> 96) != 16UL) abort();
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn compiles_alignof_type_expression() {
     let src = temp_file("alignof-src", "i");
     let exe = temp_file("alignof-exe", "bin");
@@ -11936,6 +12047,48 @@ int main(void) {
 }
 
 #[test]
+fn compiles_sizeof_expression_case_constant_expressions() {
+    let src = TempPath::new("case-sizeof-expression-constant-expression", "c");
+    let exe = TempPath::new("case-sizeof-expression-constant-expression", "bin");
+    std::fs::write(
+        src.path(),
+        r#"
+struct S { char c; long value; };
+
+int pick(long param[3], struct S *ptr) {
+    struct S local;
+    switch (sizeof(param[0]) + sizeof(local.value) + sizeof(ptr->value)) {
+    case sizeof param[0] + sizeof local.value + sizeof ptr->value:
+        return 42;
+    default:
+        return 1;
+    }
+}
+
+int main(void) {
+    long values[3];
+    struct S s;
+    return pick(values, &s);
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(exe.path())
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(exe.path())
+        .status()
+        .expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+}
+
+#[test]
 fn compiles_unsigned_bitint_case_constant_expressions() {
     let src = TempPath::new("case-unsigned-bitint-constant-expression", "c");
     let exe = TempPath::new("case-unsigned-bitint-constant-expression", "bin");
@@ -11978,6 +12131,72 @@ fn compiles_unsigned_bitint_case_range_constant_expressions() {
 int main(void) {
     switch ((unsigned _BitInt(32))4294967295U) {
     case ((unsigned _BitInt(32))0U - 2U) ... ((unsigned _BitInt(32))0U - 1U):
+        return 42;
+    default:
+        return 1;
+    }
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(exe.path())
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(exe.path())
+        .status()
+        .expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+}
+
+#[test]
+fn compiles_int128_case_range_constant_expressions() {
+    let src = TempPath::new("case-range-int128-constant-expression", "c");
+    let exe = TempPath::new("case-range-int128-constant-expression", "bin");
+    std::fs::write(
+        src.path(),
+        r#"
+int main(void) {
+    switch ((__int128)1099511627777LL) {
+    case ((__int128)1 << 40) ... (((__int128)1 << 40) + 2):
+        return 42;
+    default:
+        return 1;
+    }
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(exe.path())
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(exe.path())
+        .status()
+        .expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+}
+
+#[test]
+fn compiles_unsigned_long_wraparound_case_range_constant_expressions() {
+    let src = TempPath::new("case-range-ulong-wraparound-constant-expression", "c");
+    let exe = TempPath::new("case-range-ulong-wraparound-constant-expression", "bin");
+    std::fs::write(
+        src.path(),
+        r#"
+int main(void) {
+    switch ((unsigned long)-1) {
+    case 0UL - 2UL ... 0UL - 1UL:
         return 42;
     default:
         return 1;

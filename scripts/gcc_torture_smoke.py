@@ -238,18 +238,18 @@ def skip_reason_for_test(src: Path, internal_cpp: bool = False) -> str | None:
         return "unsupported GCC GIMPLE source extension"
     if internal_cpp and src.parent.name == "compile" and src.name in {
         "20001226-1.c",
-        "limits-blockid.c",
         "limits-caselabels.c",
-        "limits-enumconst.c",
-        "limits-externalid.c",
         "limits-externdecl.c",
-        "limits-fndefn.c",
-        "limits-structnest.c",
     }:
         return "internal-cpp translation-limit stress timeout"
     internal_cpp_expensive_exceptions = {
         ("compile", "limits-fnargs.c"),
         ("compile", "pr110386-2.c"),
+        ("execute", "memclr.c"),
+        ("execute", "memcpy-a1.c"),
+        ("execute", "memcpy-a2.c"),
+        ("execute", "memcpy-a4.c"),
+        ("execute", "memcpy-a8.c"),
     }
     if (
         internal_cpp

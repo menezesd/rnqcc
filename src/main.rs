@@ -1231,6 +1231,9 @@ struct PragmaOperatorError {
 fn process_pragma_operators_located(
     line: &str,
 ) -> Result<(String, Vec<LocatedPragma>), PragmaOperatorError> {
+    if !line.contains("_Pragma") {
+        return Ok((line.to_string(), Vec::new()));
+    }
     let tokens = preprocess::lexer::lex(line).map_err(|message| PragmaOperatorError {
         message,
         line_offset: 0,
@@ -1605,9 +1608,10 @@ fn emit_virtual_include(
     macros: &mut HashMap<String, MacroDef>,
     next_logical_line: usize,
     logical_file: &str,
-    context: &InternalPreprocessContext<'_>,
+    context: &mut InternalPreprocessContext<'_>,
 ) {
     let included = include_virtual_compat_header(name, macros);
+    context.invalidate_token_macro_cache();
     out.push_str(&included);
     if !included.is_empty() && !included.ends_with('\n') {
         out.push('\n');
@@ -3741,6 +3745,8 @@ struct InternalPreprocessContext<'a> {
     system_header_files: &'a mut HashSet<PathBuf>,
     poisoned_identifiers: &'a mut HashSet<String>,
     saved_macros: &'a mut HashMap<String, Vec<Option<MacroDef>>>,
+    token_macro_cache: preprocess::macro_expand::MacroTable,
+    token_macro_cache_dirty: bool,
     pragma_pack_stack: &'a mut Vec<Option<usize>>,
     pragma_pack_alignment: &'a mut Option<usize>,
     include_paths: &'a IncludePaths,
@@ -3750,6 +3756,23 @@ struct InternalPreprocessContext<'a> {
     suppress_preprocessed_output: bool,
     trace_includes: bool,
     line_markers: bool,
+}
+
+impl InternalPreprocessContext<'_> {
+    fn invalidate_token_macro_cache(&mut self) {
+        self.token_macro_cache_dirty = true;
+    }
+
+    fn token_macro_table(
+        &mut self,
+        macros: &HashMap<String, MacroDef>,
+    ) -> Result<&preprocess::macro_expand::MacroTable, String> {
+        if self.token_macro_cache_dirty {
+            self.token_macro_cache = token_macro_table(macros)?;
+            self.token_macro_cache_dirty = false;
+        }
+        Ok(&self.token_macro_cache)
+    }
 }
 
 fn canonical_path(path: &Path) -> PathBuf {
@@ -3909,6 +3932,7 @@ fn handle_internal_pragma(
                     macros.remove(&name);
                 }
             }
+            context.invalidate_token_macro_cache();
         }
     } else if pragma.trim().starts_with("pack") {
         let Some(action) = parse_pragma_pack(pragma) else {
@@ -4744,15 +4768,23 @@ fn flush_pending_source(
         return Ok(());
     }
 
-    let expanded = expand_macros_with_context(
-        &pending_source.text,
-        macros,
-        &pending_source.logical_file,
-        pending_source.start_line,
+    let tokens = preprocess::lexer::lex(&pending_source.text)
+        .map_err(|err| pp_location(&pending_source.logical_file, pending_source.start_line, err))?;
+    let token_macros = context
+        .token_macro_table(macros)
+        .map_err(|err| pp_location(&pending_source.logical_file, pending_source.start_line, err))?;
+    let mut hooks = LiveMacroExpansionHooks {
+        file: &pending_source.logical_file,
+        line_number: pending_source.start_line,
         include_level,
         state,
-    )
-    .map_err(|err| pp_location(&pending_source.logical_file, pending_source.start_line, err))?;
+    };
+    let expanded_tokens =
+        preprocess::macro_expand::expand_macros_with_hooks(&tokens, token_macros, &mut hooks)
+            .map_err(|err| {
+                pp_location(&pending_source.logical_file, pending_source.start_line, err)
+            })?;
+    let expanded = preprocess::emit::emit_tokens(&expanded_tokens);
     let (expanded, pragmas) = process_pragma_operators_located(&expanded).map_err(|err| {
         pp_location(
             &pending_source.logical_file,
@@ -5759,6 +5791,7 @@ fn internal_preprocess_source(
                             }
                         } else {
                             macros.insert(name, new_def);
+                            context.invalidate_token_macro_cache();
                         }
                         continue;
                     }
@@ -5771,6 +5804,7 @@ fn internal_preprocess_source(
                             ));
                         }
                         macros.remove(name.trim());
+                        context.invalidate_token_macro_cache();
                         continue;
                     }
                     Directive::Error { tokens } => {
@@ -5963,6 +5997,8 @@ fn internal_preprocess(
         system_header_files: &mut system_header_files,
         poisoned_identifiers: &mut poisoned_identifiers,
         saved_macros: &mut saved_macros,
+        token_macro_cache: preprocess::macro_expand::MacroTable::new(),
+        token_macro_cache_dirty: true,
         pragma_pack_stack: &mut pragma_pack_stack,
         pragma_pack_alignment: &mut pragma_pack_alignment,
         include_paths: &effective_include_paths,
@@ -7463,6 +7499,8 @@ mod tests {
             system_header_files: &mut system_header_files,
             poisoned_identifiers: &mut poisoned_identifiers,
             saved_macros: &mut saved_macros,
+            token_macro_cache: preprocess::macro_expand::MacroTable::new(),
+            token_macro_cache_dirty: true,
             pragma_pack_stack: &mut pragma_pack_stack,
             pragma_pack_alignment: &mut pragma_pack_alignment,
             include_paths: &include_paths,
@@ -7575,6 +7613,8 @@ mod tests {
             system_header_files: &mut system_header_files,
             poisoned_identifiers: &mut poisoned_identifiers,
             saved_macros: &mut saved_macros,
+            token_macro_cache: preprocess::macro_expand::MacroTable::new(),
+            token_macro_cache_dirty: true,
             pragma_pack_stack: &mut pragma_pack_stack,
             pragma_pack_alignment: &mut pragma_pack_alignment,
             include_paths: &include_paths,
@@ -7609,6 +7649,8 @@ mod tests {
             system_header_files: &mut system_header_files,
             poisoned_identifiers: &mut poisoned_identifiers,
             saved_macros: &mut saved_macros,
+            token_macro_cache: preprocess::macro_expand::MacroTable::new(),
+            token_macro_cache_dirty: true,
             pragma_pack_stack: &mut pragma_pack_stack,
             pragma_pack_alignment: &mut pragma_pack_alignment,
             include_paths: &include_paths,

@@ -16643,6 +16643,44 @@ fn internal_cpp_stdarg_header_exposes_standard_macros() {
 }
 
 #[test]
+fn internal_cpp_virtual_header_macros_invalidate_source_line_cache() {
+    let src = temp_file("internal-cpp-virtual-header-cache", "c");
+    let exe = temp_file("internal-cpp-virtual-header-cache", "bin");
+    std::fs::write(
+        &src,
+        "int before_include = 1;\n\
+         #include <stdarg.h>\n\
+         int take(int first, ...) {\n\
+             va_list ap;\n\
+             va_start(ap, first);\n\
+             int value = va_arg(ap, int);\n\
+             va_end(ap);\n\
+             return first + value;\n\
+         }\n\
+         int main(void) { return take(19, 23); }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-nostdinc")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn internal_cpp_va_end_preserves_argument_side_effects() {
     let src = temp_file("internal-cpp-va-end-side-effect", "c");
     let exe = temp_file("internal-cpp-va-end-side-effect", "bin");

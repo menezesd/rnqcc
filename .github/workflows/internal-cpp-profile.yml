@@ -1,0 +1,65 @@
+name: Internal CPP Profile
+
+on:
+  workflow_dispatch:
+    inputs:
+      test:
+        description: Optional gcc.c-torture test path, e.g. compile/pr110386-2.c
+        required: false
+        default: ""
+      timeout:
+        description: Per-test timeout in seconds
+        required: false
+        default: "600"
+
+jobs:
+  profile:
+    name: Internal CPP profile
+    runs-on: ubuntu-latest
+    env:
+      GCC_TORTURE_ROOT: /tmp/rnqcc-gcc-torture/gcc
+      GCC_TORTURE_SUITE: /tmp/rnqcc-gcc-torture/gcc/gcc/testsuite/gcc.c-torture
+      PROFILE_OUT: target/internal-cpp-profile.txt
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build rnqcc
+        run: cargo build
+
+      - name: Fetch GCC torture corpus
+        run: |
+          git clone --depth=1 --filter=blob:none --sparse https://github.com/gcc-mirror/gcc.git "$GCC_TORTURE_ROOT"
+          git -C "$GCC_TORTURE_ROOT" sparse-checkout set --no-cone \
+            /gcc/testsuite/gcc.c-torture \
+            /gcc/testsuite/gcc.dg/20030309-1.c \
+            /gcc/testsuite/gcc.dg/tree-ssa \
+            /gcc/testsuite/gcc.dg/pr98304-1.c \
+            /gcc/testsuite/gcc.target/powerpc/ppc-switch-2.c
+
+      - name: Run internal CPP profile
+        run: |
+          profile_args=()
+          if [ -n "${{ inputs.test || '' }}" ]; then
+            profile_args+=(--test "${{ inputs.test }}")
+          fi
+          mkdir -p "$(dirname "$PROFILE_OUT")"
+          python3 scripts/profile_internal_cpp.py \
+            --suite "$GCC_TORTURE_SUITE" \
+            --rnqcc target/debug/rnqcc \
+            --timeout "${{ inputs.timeout || '600' }}" \
+            "${profile_args[@]}" | tee "$PROFILE_OUT"
+
+      - name: Upload profile
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rnqcc-internal-cpp-profile
+          path: target/internal-cpp-profile.txt
+          if-no-files-found: ignore

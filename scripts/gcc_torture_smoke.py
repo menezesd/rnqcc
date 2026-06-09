@@ -43,6 +43,17 @@ DEFAULT_SUITE_CANDIDATES = [
     Path("/tmp/rnqcc-gcc-torture/gcc/testsuite/gcc.c-torture"),
     Path("/tmp/rnqcc-gcc-torture/gcc/gcc/testsuite/gcc.c-torture"),
 ]
+UNSUPPORTED_SOURCE_EXTENSION_MARKERS = (
+    "-fgimple",
+    "__GIMPLE",
+)
+INTERNAL_CPP_ONLY_SKIPS = {
+    # Ubuntu's GCC <immintrin.h> fan-out is still too expensive for the
+    # internal preprocessor smoke.  The external preprocessor job keeps
+    # compiling this file, and -nostdinc coverage exercises rnqcc's virtual
+    # immintrin.h path.
+    ("compile", "pr110386-2.c"): "internal-cpp Linux intrinsics header stress test",
+}
 SANDBOX_TMPNAM_HEADER = """\
 #include <stdio.h>
 #include <stdlib.h>
@@ -234,11 +245,14 @@ def skip_reason_for_test(src: Path, internal_cpp: bool = False) -> str | None:
         text = src.read_text(errors="ignore")
     except OSError:
         return None
-    if "-fgimple" in text or "__GIMPLE" in text:
+    if any(marker in text for marker in UNSUPPORTED_SOURCE_EXTENSION_MARKERS):
         return "unsupported GCC GIMPLE source extension"
+    if internal_cpp and (
+        reason := INTERNAL_CPP_ONLY_SKIPS.get((src.parent.name, src.name))
+    ):
+        return reason
     internal_cpp_expensive_exceptions = {
         ("compile", "limits-fnargs.c"),
-        ("compile", "pr110386-2.c"),
         ("execute", "memclr.c"),
         ("execute", "memcpy-a1.c"),
         ("execute", "memcpy-a2.c"),

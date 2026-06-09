@@ -1490,6 +1490,34 @@ fn gcc_torture_helpers_are_importable_from_repo_root() -> Result<(), String> {
 }
 
 #[test]
+fn gcc_torture_smoke_skips_internal_cpp_intrinsics_header_stress() -> Result<(), String> {
+    let suite = TempPath::new("gcc-smoke-intrinsics-skip-suite", "dir");
+    let compile_dir = suite.path().join("compile");
+    std::fs::create_dir_all(&compile_dir)
+        .map_err(|err| format!("failed to create fake suite: {err}"))?;
+    std::fs::write(compile_dir.join("pr110386-2.c"), "#include <immintrin.h>\n")
+        .map_err(|err| format!("failed to write fake source: {err}"))?;
+
+    let script = format!(
+        "from pathlib import Path\n\
+         import scripts.gcc_torture_smoke as smoke\n\
+         src = Path({:?}) / 'compile' / 'pr110386-2.c'\n\
+         assert smoke.skip_reason_for_test(src) is None\n\
+         assert smoke.skip_reason_for_test(src, True) == \
+             'internal-cpp Linux intrinsics header stress test'\n",
+        suite.path().display().to_string()
+    );
+    let output = match Command::new("python3").arg("-c").arg(script).output() {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run GCC torture skip check: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    Ok(())
+}
+
+#[test]
 fn gcc_torture_smoke_admits_portable_execute_stack_stress() -> Result<(), String> {
     let suite = TempPath::new("gcc-smoke-stack-stress-suite", "dir");
     let execute_dir = suite.path().join("execute");
@@ -16640,6 +16668,76 @@ fn internal_cpp_stdarg_header_exposes_standard_macros() {
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_immintrin_virtual_header_compiles_basic_intrinsics() {
+    let src = temp_file("internal-cpp-immintrin-virtual", "c");
+    let asm = temp_file("internal-cpp-immintrin-virtual", "s");
+    std::fs::write(
+        &src,
+        "#include <immintrin.h>\n\
+         __m128i do_stuff(__m128i x) {\n\
+             __m128i abs = _mm_abs_epi32(x);\n\
+             return _mm_mullo_epi32(abs, x);\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-nostdinc")
+        .arg("--target")
+        .arg("x86_64-linux")
+        .arg("-S")
+        .arg(&src)
+        .arg("-o")
+        .arg(&asm)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let assembly = std::fs::read_to_string(&asm).expect("failed to read assembly");
+    assert!(assembly.contains("do_stuff:"), "{assembly}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(asm);
+}
+
+#[test]
+fn internal_cpp_stats_env_reports_preprocessor_counters() {
+    let src = temp_file("internal-cpp-stats", "c");
+    let out = temp_file("internal-cpp-stats", "i");
+    std::fs::write(
+        &src,
+        "#define VALUE 42\n\
+         #include <stddef.h>\n\
+         int value = VALUE;\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .env("RNQCC_INTERNAL_CPP_STATS", "1")
+        .arg("--internal-cpp")
+        .arg("-nostdinc")
+        .arg("-E")
+        .arg(&src)
+        .arg("-o")
+        .arg(&out)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("rnqcc internal-cpp stats: files=")
+            && stderr.contains("directives=")
+            && stderr.contains("token_cache_rebuilds="),
+        "{stderr}"
+    );
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
 }
 
 #[test]

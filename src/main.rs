@@ -1612,6 +1612,9 @@ fn emit_virtual_include(
 ) {
     let included = include_virtual_compat_header(name, macros);
     context.invalidate_token_macro_cache();
+    if let Some(stats) = context.stats_mut() {
+        stats.virtual_includes += 1;
+    }
     out.push_str(&included);
     if !included.is_empty() && !included.ends_with('\n') {
         out.push('\n');
@@ -3756,6 +3759,7 @@ struct InternalPreprocessContext<'a> {
     suppress_preprocessed_output: bool,
     trace_includes: bool,
     line_markers: bool,
+    stats: Option<&'a mut InternalCppStats>,
 }
 
 impl InternalPreprocessContext<'_> {
@@ -3768,10 +3772,74 @@ impl InternalPreprocessContext<'_> {
         macros: &HashMap<String, MacroDef>,
     ) -> Result<&preprocess::macro_expand::MacroTable, String> {
         if self.token_macro_cache_dirty {
+            if let Some(stats) = self.stats.as_mut() {
+                stats.token_macro_cache_rebuilds += 1;
+            }
             self.token_macro_cache = token_macro_table(macros)?;
             self.token_macro_cache_dirty = false;
+        } else if let Some(stats) = self.stats.as_mut() {
+            stats.token_macro_cache_hits += 1;
         }
         Ok(&self.token_macro_cache)
+    }
+
+    fn stats_mut(&mut self) -> Option<&mut InternalCppStats> {
+        self.stats.as_deref_mut()
+    }
+}
+
+#[derive(Default)]
+struct InternalCppStats {
+    files: usize,
+    physical_lines: usize,
+    bytes: usize,
+    directives: usize,
+    includes: usize,
+    virtual_includes: usize,
+    macro_defines: usize,
+    macro_undefs: usize,
+    source_blocks: usize,
+    source_lines: usize,
+    token_macro_cache_rebuilds: usize,
+    token_macro_cache_hits: usize,
+    max_include_depth: usize,
+}
+
+impl InternalCppStats {
+    fn enabled_from_env() -> bool {
+        std::env::var_os("RNQCC_INTERNAL_CPP_STATS").is_some()
+    }
+
+    fn record_file(&mut self, bytes: usize, lines: usize, include_depth: usize) {
+        self.files += 1;
+        self.bytes += bytes;
+        self.physical_lines += lines;
+        self.max_include_depth = self.max_include_depth.max(include_depth);
+    }
+
+    fn report(&self) {
+        eprintln!(
+            concat!(
+                "rnqcc internal-cpp stats: ",
+                "files={}, bytes={}, physical_lines={}, directives={}, includes={}, ",
+                "virtual_includes={}, defines={}, undefs={}, source_blocks={}, ",
+                "source_lines={}, token_cache_rebuilds={}, token_cache_hits={}, ",
+                "max_include_depth={}"
+            ),
+            self.files,
+            self.bytes,
+            self.physical_lines,
+            self.directives,
+            self.includes,
+            self.virtual_includes,
+            self.macro_defines,
+            self.macro_undefs,
+            self.source_blocks,
+            self.source_lines,
+            self.token_macro_cache_rebuilds,
+            self.token_macro_cache_hits,
+            self.max_include_depth,
+        );
     }
 }
 
@@ -4761,6 +4829,10 @@ fn flush_pending_source(
     let Some(pending_source) = pending.take() else {
         return Ok(());
     };
+    if let Some(stats) = context.stats_mut() {
+        stats.source_blocks += 1;
+        stats.source_lines += pending_source.text.lines().count();
+    }
 
     check_poisoned_line(&pending_source.text, context)
         .map_err(|err| pp_location(&pending_source.logical_file, pending_source.start_line, err))?;
@@ -5493,6 +5565,7 @@ fn internal_preprocess_source(
     }
     let source_bytes =
         std::fs::read(src).map_err(|err| format!("could not read {}: {}", src.display(), err))?;
+    let source_byte_len = source_bytes.len();
     let source = compile::decode_c_source_bytes(&source_bytes);
     let source = strip_comments(&splice_continued_lines(
         &preprocess::lexer::replace_trigraphs(&source),
@@ -5508,6 +5581,10 @@ fn internal_preprocess_source(
         ));
     }
     context.include_stack.push(canonical.clone());
+    let include_depth = context.include_stack.len().saturating_sub(1);
+    if let Some(stats) = context.stats_mut() {
+        stats.record_file(source_byte_len, source.lines().count(), include_depth);
+    }
 
     let mut out = String::new();
     let base_dir = src.parent().unwrap_or_else(|| Path::new("."));
@@ -5516,7 +5593,7 @@ fn internal_preprocess_source(
     let display_file = src.to_string_lossy().into_owned();
     let mut logical_file = display_file.clone();
     let mut next_logical_line = 1usize;
-    let include_level = context.include_stack.len().saturating_sub(1);
+    let include_level = include_depth;
     let mut pending_source: Option<PendingSource> = None;
     if context.line_markers && !context.suppress_preprocessed_output {
         push_line_marker(&mut out, 1, &logical_file);
@@ -5526,6 +5603,9 @@ fn internal_preprocess_source(
         next_logical_line = next_logical_line.saturating_add(1);
         let trimmed = line.trim_start();
         if starts_preprocessor_directive(trimmed) {
+            if let Some(stats) = context.stats_mut() {
+                stats.directives += 1;
+            }
             flush_pending_source(
                 &mut pending_source,
                 &mut out,
@@ -5702,6 +5782,9 @@ fn internal_preprocess_source(
                         operand,
                         include_next,
                     } => {
+                        if let Some(stats) = context.stats_mut() {
+                            stats.includes += 1;
+                        }
                         let spec = parse_token_include_operand(
                             &operand,
                             macros,
@@ -5771,6 +5854,9 @@ fn internal_preprocess_source(
                         continue;
                     }
                     Directive::Define { name, def } => {
+                        if let Some(stats) = context.stats_mut() {
+                            stats.macro_defines += 1;
+                        }
                         if context.poisoned_identifiers.contains(&name) {
                             return Err(pp_location(
                                 &logical_file,
@@ -5796,6 +5882,9 @@ fn internal_preprocess_source(
                         continue;
                     }
                     Directive::Undef { name } => {
+                        if let Some(stats) = context.stats_mut() {
+                            stats.macro_undefs += 1;
+                        }
                         if context.poisoned_identifiers.contains(name.trim()) {
                             return Err(pp_location(
                                 &logical_file,
@@ -5991,6 +6080,7 @@ fn internal_preprocess(
     let mut effective_include_paths = invocation.include_paths.clone();
     effective_include_paths.append_system_defaults(invocation.target);
     let mut dependencies = Vec::new();
+    let mut stats = InternalCppStats::enabled_from_env().then(InternalCppStats::default);
     let mut context = InternalPreprocessContext {
         include_stack: &mut include_stack,
         once_files: &mut once_files,
@@ -6008,6 +6098,7 @@ fn internal_preprocess(
         suppress_preprocessed_output: invocation.suppress_preprocessed_output,
         trace_includes: invocation.trace_includes,
         line_markers: invocation.line_markers,
+        stats: stats.as_mut(),
     };
     let mut preprocessed = String::new();
     for macro_include in invocation.macro_includes {
@@ -6069,8 +6160,12 @@ fn internal_preprocess(
         }
         (false, _) => preprocessed,
     };
+    drop(context);
     std::fs::write(invocation.output, byte_preserving_source_bytes(&output))
         .map_err(|err| format!("could not write {}: {}", invocation.output, err))?;
+    if let Some(stats) = stats.as_ref() {
+        stats.report();
+    }
     Ok(dependencies)
 }
 
@@ -7510,6 +7605,7 @@ mod tests {
             suppress_preprocessed_output: false,
             trace_includes: false,
             line_markers: false,
+            stats: None,
         };
         let canonical = PathBuf::from("/tmp/pragma-test.h");
         let mut macros = HashMap::new();
@@ -7624,6 +7720,7 @@ mod tests {
             suppress_preprocessed_output: false,
             trace_includes: false,
             line_markers: false,
+            stats: None,
         };
         let canonical = PathBuf::from("/tmp/pragma-once-test.h");
         let mut macros = HashMap::new();
@@ -7660,6 +7757,7 @@ mod tests {
             suppress_preprocessed_output: false,
             trace_includes: false,
             line_markers: false,
+            stats: None,
         };
         let canonical = PathBuf::from("/tmp/pragma-malformed-test.h");
         let mut macros = HashMap::new();

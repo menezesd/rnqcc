@@ -11067,6 +11067,73 @@ int main(void) {
 }
 
 #[test]
+fn compiles_generic_selection_with_controlling_type() {
+    let src = temp_file("frontend-generic-control-type", "i");
+    let exe = temp_file("frontend-generic-control-type", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef unsigned long size_type;
+
+int main(void) {
+    int matched_int = _Generic(int, int: 10, long: 1, default: 2);
+    int matched_size = _Generic(size_type, int: 1, unsigned long: 11, default: 2);
+    int matched_ptr = _Generic(int *, int *: 12, default: 1);
+    int matched_default = _Generic(double, int: 1, long: 2, default: 9);
+    return matched_int + matched_size + matched_ptr + matched_default;
+}
+"#,
+    )
+    .expect("failed to write test input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn generic_selection_control_respects_typedef_shadowing() {
+    let src = temp_file("frontend-generic-control-typedef-shadow", "i");
+    let exe = temp_file("frontend-generic-control-typedef-shadow", "bin");
+    std::fs::write(
+        &src,
+        r#"
+typedef long choice;
+
+int main(void) {
+    int choice = 0;
+    return _Generic(choice, int: 42, long: 1, default: 2);
+}
+"#,
+    )
+    .expect("failed to write test input");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn compiles_gnu_auto_type_declarations() {
     let src = temp_file("frontend-auto-type", "i");
     let exe = temp_file("frontend-auto-type", "bin");
@@ -14461,6 +14528,46 @@ fn internal_cpp_handles_has_builtin_predicates() {
          #else\n\
          int has_bswap64 = 0;\n\
          #endif\n\
+         #if __has_builtin(__builtin_bswap16)\n\
+         int has_bswap16 = 1;\n\
+         #else\n\
+         int has_bswap16 = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin_popcount) && __has_builtin(__builtin_popcountl) && __has_builtin(__builtin_popcountll)\n\
+         int has_popcount_builtins = 1;\n\
+         #else\n\
+         int has_popcount_builtins = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin_ffs) && __has_builtin(__builtin_ffsl) && __has_builtin(__builtin_ffsll)\n\
+         int has_ffs_builtins = 1;\n\
+         #else\n\
+         int has_ffs_builtins = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin_clz) && __has_builtin(__builtin_clzl) && __has_builtin(__builtin_clzll)\n\
+         int has_clz_builtins = 1;\n\
+         #else\n\
+         int has_clz_builtins = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin_ctz) && __has_builtin(__builtin_ctzl) && __has_builtin(__builtin_ctzll)\n\
+         int has_ctz_builtins = 1;\n\
+         #else\n\
+         int has_ctz_builtins = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin_clrsb) && __has_builtin(__builtin_clrsbl) && __has_builtin(__builtin_clrsbll)\n\
+         int has_clrsb_builtins = 1;\n\
+         #else\n\
+         int has_clrsb_builtins = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin_parity) && __has_builtin(__builtin_parityl) && __has_builtin(__builtin_parityll)\n\
+         int has_parity_builtins = 1;\n\
+         #else\n\
+         int has_parity_builtins = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin_add_overflow) && __has_builtin(__builtin_sub_overflow) && __has_builtin(__builtin_mul_overflow) && __has_builtin(__builtin_mul_overflow_p)\n\
+         int has_overflow_builtins = 1;\n\
+         #else\n\
+         int has_overflow_builtins = 0;\n\
+         #endif\n\
          #if __has_builtin(__builtin_expect_with_probability) && __has_builtin(__atomic_thread_fence) && __has_builtin(__sync_synchronize)\n\
          int has_more_compat_builtins = 1;\n\
          #else\n\
@@ -14471,15 +14578,90 @@ fn internal_cpp_handles_has_builtin_predicates() {
          #else\n\
          int has_object_size = 0;\n\
          #endif\n\
+         #if __has_builtin(__builtin_classify_type) && __has_builtin(__builtin_signbit)\n\
+         int has_classify_helpers = 1;\n\
+         #else\n\
+         int has_classify_helpers = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin_inf) && __has_builtin(__builtin_inff) && __has_builtin(__builtin_infl) && __has_builtin(__builtin_huge_val) && __has_builtin(__builtin_huge_valf) && __has_builtin(__builtin_huge_vall)\n\
+         int has_infinity_builtins = 1;\n\
+         #else\n\
+         int has_infinity_builtins = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin_isinf) && __has_builtin(__builtin_isinff) && __has_builtin(__builtin_isinfl)\n\
+         int has_isinf_builtins = 1;\n\
+         #else\n\
+         int has_isinf_builtins = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin_fabs) && __has_builtin(__builtin_fabsf) && __has_builtin(__builtin_fabsl) && __has_builtin(__builtin_copysign) && __has_builtin(__builtin_copysignf) && __has_builtin(__builtin_copysignl) && __has_builtin(__builtin_pow) && __has_builtin(__builtin_powf)\n\
+         int has_float_math_builtins = 1;\n\
+         #else\n\
+         int has_float_math_builtins = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin_conj) && __has_builtin(__builtin_conjf) && __has_builtin(__builtin_conjl)\n\
+         int has_complex_math_builtins = 1;\n\
+         #else\n\
+         int has_complex_math_builtins = 0;\n\
+         #endif\n\
          #if __has_builtin(__builtin_trap)\n\
          int has_trap = 1;\n\
          #else\n\
          int has_trap = 0;\n\
          #endif\n\
+         #if __has_builtin(__builtin_return_address) && __has_builtin(__builtin_frame_address) && __has_builtin(__builtin_extract_return_addr)\n\
+         int has_address_builtins = 1;\n\
+         #else\n\
+         int has_address_builtins = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin_apply) && __has_builtin(__builtin_apply_args)\n\
+         int has_apply_builtins = 1;\n\
+         #else\n\
+         int has_apply_builtins = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin_convertvector) && __has_builtin(__builtin_shuffle)\n\
+         int has_vector_builtins = 1;\n\
+         #else\n\
+         int has_vector_builtins = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin_setjmp) && __has_builtin(__builtin_longjmp)\n\
+         int has_jump_builtins = 1;\n\
+         #else\n\
+         int has_jump_builtins = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin_va_start) && __has_builtin(__builtin_va_end) && __has_builtin(__builtin_va_copy) && __has_builtin(__va_copy) && __has_builtin(__builtin_va_arg)\n\
+         int has_va_builtins = 1;\n\
+         #else\n\
+         int has_va_builtins = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin_va_arg_pack)\n\
+         int has_va_arg_pack_builtin = 1;\n\
+         #else\n\
+         int has_va_arg_pack_builtin = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin_abort) && __has_builtin(__builtin_exit) && __has_builtin(__builtin_printf) && __has_builtin(__builtin_sprintf) && __has_builtin(__builtin_snprintf) && __has_builtin(__builtin_puts)\n\
+         int has_stdio_control_builtins = 1;\n\
+         #else\n\
+         int has_stdio_control_builtins = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin_alloca) && __has_builtin(__builtin_malloc) && __has_builtin(__builtin_free)\n\
+         int has_alloc_builtins = 1;\n\
+         #else\n\
+         int has_alloc_builtins = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin_abs) && __has_builtin(__builtin_labs) && __has_builtin(__builtin_llabs)\n\
+         int has_abs_builtins = 1;\n\
+         #else\n\
+         int has_abs_builtins = 0;\n\
+         #endif\n\
          #if __has_builtin(__builtin___memcpy_chk) && __has_builtin(__builtin___strncpy_chk)\n\
          int has_fortified_builtins = 1;\n\
          #else\n\
          int has_fortified_builtins = 0;\n\
+         #endif\n\
+         #if __has_builtin(__builtin___sprintf_chk)\n\
+         int has_fortified_stdio_builtins = 1;\n\
+         #else\n\
+         int has_fortified_stdio_builtins = 0;\n\
          #endif\n\
          #if __has_builtin(__builtin_memchr) && __has_builtin(__builtin_strstr) && __has_builtin(__builtin_strspn)\n\
          int has_search_builtins = 1;\n\
@@ -14507,14 +14689,61 @@ fn internal_cpp_handles_has_builtin_predicates() {
     assert!(stdout.contains("int missing_builtin = 0;"), "{stdout}");
     assert!(stdout.contains("int has_atomic_add_fetch = 1;"), "{stdout}");
     assert!(stdout.contains("int has_bswap64 = 1;"), "{stdout}");
+    assert!(stdout.contains("int has_bswap16 = 1;"), "{stdout}");
+    assert!(
+        stdout.contains("int has_popcount_builtins = 1;"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("int has_ffs_builtins = 1;"), "{stdout}");
+    assert!(stdout.contains("int has_clz_builtins = 1;"), "{stdout}");
+    assert!(stdout.contains("int has_ctz_builtins = 1;"), "{stdout}");
+    assert!(stdout.contains("int has_clrsb_builtins = 1;"), "{stdout}");
+    assert!(stdout.contains("int has_parity_builtins = 1;"), "{stdout}");
+    assert!(
+        stdout.contains("int has_overflow_builtins = 1;"),
+        "{stdout}"
+    );
     assert!(
         stdout.contains("int has_more_compat_builtins = 1;"),
         "{stdout}"
     );
     assert!(stdout.contains("int has_object_size = 1;"), "{stdout}");
+    assert!(stdout.contains("int has_classify_helpers = 1;"), "{stdout}");
+    assert!(
+        stdout.contains("int has_infinity_builtins = 1;"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("int has_isinf_builtins = 1;"), "{stdout}");
+    assert!(
+        stdout.contains("int has_float_math_builtins = 1;"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("int has_complex_math_builtins = 1;"),
+        "{stdout}"
+    );
     assert!(stdout.contains("int has_trap = 1;"), "{stdout}");
+    assert!(stdout.contains("int has_address_builtins = 1;"), "{stdout}");
+    assert!(stdout.contains("int has_apply_builtins = 1;"), "{stdout}");
+    assert!(stdout.contains("int has_vector_builtins = 1;"), "{stdout}");
+    assert!(stdout.contains("int has_jump_builtins = 1;"), "{stdout}");
+    assert!(stdout.contains("int has_va_builtins = 1;"), "{stdout}");
+    assert!(
+        stdout.contains("int has_va_arg_pack_builtin = 1;"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("int has_stdio_control_builtins = 1;"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("int has_alloc_builtins = 1;"), "{stdout}");
+    assert!(stdout.contains("int has_abs_builtins = 1;"), "{stdout}");
     assert!(
         stdout.contains("int has_fortified_builtins = 1;"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("int has_fortified_stdio_builtins = 1;"),
         "{stdout}"
     );
     assert!(stdout.contains("int has_search_builtins = 1;"), "{stdout}");
@@ -14536,6 +14765,11 @@ fn internal_cpp_handles_common_has_attribute_predicates() {
          #else\n\
          int has_attrs = 0;\n\
          #endif\n\
+         #if __has_attribute(align) && __has_attribute(__align__) && __has_attribute(__deprecated__)\n\
+         int has_accepted_attr_aliases = 1;\n\
+         #else\n\
+         int has_accepted_attr_aliases = 0;\n\
+         #endif\n\
          #if __has_attribute(nonnull) && __has_attribute(__warn_unused_result__) && __has_attribute(returns_nonnull) && __has_attribute(__noinline__)\n\
          int has_common_function_attrs = 1;\n\
          #else\n\
@@ -14546,15 +14780,75 @@ fn internal_cpp_handles_common_has_attribute_predicates() {
          #else\n\
          int has_optimizer_attrs = 0;\n\
          #endif\n\
-         #if __has_declspec_attribute(dllexport)\n\
+         #if __has_attribute(weak) && __has_attribute(__used__) && __has_attribute(section) && __has_attribute(__gnu_inline__)\n\
+         int has_linkage_compat_attrs = 1;\n\
+         #else\n\
+         int has_linkage_compat_attrs = 0;\n\
+         #endif\n\
+         #if __has_attribute(alloc_size) && __has_attribute(__alloc_align__) && __has_attribute(format_arg) && __has_attribute(__format_strfmon__) && __has_attribute(unavailable) && __has_attribute(__unavailable__)\n\
+         int has_header_compat_attrs = 1;\n\
+         #else\n\
+         int has_header_compat_attrs = 0;\n\
+         #endif\n\
+         #if __has_attribute(alias) && __has_attribute(__mode__) && __has_attribute(__vector_size__)\n\
+         int has_type_codegen_attrs = 1;\n\
+         #else\n\
+         int has_type_codegen_attrs = 0;\n\
+         #endif\n\
+         #if __has_attribute(transparent_union) && __has_attribute(no_instrument_function) && __has_attribute(scalar_storage_order)\n\
+         int has_special_semantic_attrs = 1;\n\
+         #else\n\
+         int has_special_semantic_attrs = 0;\n\
+         #endif\n\
+         #if __has_attribute(rnqcc_missing_attribute)\n\
+         int missing_attribute = 1;\n\
+         #else\n\
+         int missing_attribute = 0;\n\
+         #endif\n\
+         #if __has_declspec_attribute(dllexport) && __has_declspec_attribute(__dllexport__) && __has_declspec_attribute(align) && __has_declspec_attribute(deprecated) && __has_declspec_attribute(noreturn)\n\
          int has_declspec = 1;\n\
          #else\n\
          int has_declspec = 0;\n\
          #endif\n\
-         #if __has_feature(c_static_assert) && __has_extension(c_atomic)\n\
+         #if __has_declspec_attribute(rnqcc_missing_declspec)\n\
+         int missing_declspec = 1;\n\
+         #else\n\
+         int missing_declspec = 0;\n\
+         #endif\n\
+         #if __has_feature(c_static_assert) && __has_feature(__c_static_assert__) && __has_extension(c_atomic) && __has_extension(__c_atomic__)\n\
          int has_features = 1;\n\
          #else\n\
          int has_features = 0;\n\
+         #endif\n\
+         #if __has_feature(rnqcc_missing_feature) || __has_extension(rnqcc_missing_extension)\n\
+         int missing_features = 1;\n\
+         #else\n\
+         int missing_features = 0;\n\
+         #endif\n\
+         #if __has_feature(c_generic_selections) && __has_extension(c_generic_selections) && __has_extension(c_generic_selection_with_controlling_type)\n\
+         int has_generic_selection_feature = 1;\n\
+         #else\n\
+         int has_generic_selection_feature = 0;\n\
+         #endif\n\
+         #if __has_feature(c_bitint) && __has_extension(c_bitint)\n\
+         int has_bitint_feature = 1;\n\
+         #else\n\
+         int has_bitint_feature = 0;\n\
+         #endif\n\
+         #if __has_feature(c_variadic_macros) && __has_extension(c_variadic_macros)\n\
+         int has_variadic_macro_feature = 1;\n\
+         #else\n\
+         int has_variadic_macro_feature = 0;\n\
+         #endif\n\
+         #if __has_feature(attribute_deprecated_with_message) && __has_extension(attribute_unavailable_with_message)\n\
+         int has_attribute_message_features = 1;\n\
+         #else\n\
+         int has_attribute_message_features = 0;\n\
+         #endif\n\
+         #if __has_feature(nullability) && __has_extension(nullability)\n\
+         int has_nullability_feature = 1;\n\
+         #else\n\
+         int has_nullability_feature = 0;\n\
          #endif\n",
     )
     .expect("failed to write source");
@@ -14570,14 +14864,391 @@ fn internal_cpp_handles_common_has_attribute_predicates() {
     let stdout = stdout(output);
     assert!(stdout.contains("int has_attrs = 1;"), "{stdout}");
     assert!(
+        stdout.contains("int has_accepted_attr_aliases = 1;"),
+        "{stdout}"
+    );
+    assert!(
         stdout.contains("int has_common_function_attrs = 1;"),
         "{stdout}"
     );
     assert!(stdout.contains("int has_optimizer_attrs = 1;"), "{stdout}");
+    assert!(
+        stdout.contains("int has_linkage_compat_attrs = 1;"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("int has_header_compat_attrs = 1;"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("int has_type_codegen_attrs = 1;"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("int has_special_semantic_attrs = 1;"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("int missing_attribute = 0;"), "{stdout}");
     assert!(stdout.contains("int has_declspec = 1;"), "{stdout}");
+    assert!(stdout.contains("int missing_declspec = 0;"), "{stdout}");
     assert!(stdout.contains("int has_features = 1;"), "{stdout}");
+    assert!(stdout.contains("int missing_features = 0;"), "{stdout}");
+    assert!(
+        stdout.contains("int has_generic_selection_feature = 1;"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("int has_bitint_feature = 1;"), "{stdout}");
+    assert!(
+        stdout.contains("int has_variadic_macro_feature = 1;"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("int has_attribute_message_features = 1;"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("int has_nullability_feature = 1;"),
+        "{stdout}"
+    );
 
     let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn internal_cpp_has_feature_guards_supported_bitint() {
+    let src = temp_file("internal-cpp-bitint-feature-guard", "c");
+    let exe = temp_file("internal-cpp-bitint-feature-guard", "bin");
+    std::fs::write(
+        &src,
+        "int main(void) {\n\
+         #if __has_feature(c_bitint) && __has_extension(c_bitint)\n\
+           unsigned _BitInt(32) u32 = (unsigned _BitInt(32))0U - 1U;\n\
+           _BitInt(64) s64 = (_BitInt(64))1 << 40;\n\
+           int ok = u32 == 4294967295U && s64 / ((_BitInt(64))1 << 20) == ((_BitInt(64))1 << 20);\n\
+           return ok ? 42 : 1;\n\
+         #else\n\
+           return 2;\n\
+         #endif\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_has_feature_guards_core_c_features() {
+    let src = temp_file("internal-cpp-core-c-feature-guards", "c");
+    let exe = temp_file("internal-cpp-core-c-feature-guards", "bin");
+    std::fs::write(
+        &src,
+        "#if __has_feature(c_alignas) && __has_feature(c_alignof) && \\\n\
+             __has_feature(c_atomic) && __has_feature(c_static_assert) && \\\n\
+             __has_feature(c_thread_local) && __has_extension(c_thread_local)\n\
+         _Alignas(16) int aligned_value = 7;\n\
+         _Thread_local int tls_value = 35;\n\
+         _Atomic int atomic_value;\n\
+         _Static_assert(_Alignof(int) == 4, \"int alignment\");\n\
+         #else\n\
+         int missing_core_c_features[-1];\n\
+         #endif\n\
+         int main(void) {\n\
+             atomic_value = aligned_value;\n\
+             return atomic_value + tls_value;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_has_extension_guards_generic_selection_control_types() {
+    let src = temp_file("internal-cpp-generic-control-type-guard", "c");
+    let exe = temp_file("internal-cpp-generic-control-type-guard", "bin");
+    std::fs::write(
+        &src,
+        "#if __has_extension(c_generic_selection_with_controlling_type)\n\
+         typedef unsigned long size_type;\n\
+         int matched = _Generic(size_type, int: 1, unsigned long: 42, default: 2);\n\
+         #else\n\
+         int missing_generic_control_type_extension[-1];\n\
+         #endif\n\
+         int main(void) { return matched; }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_has_attribute_guards_common_gnu_compat_attributes() {
+    let src = temp_file("internal-cpp-gnu-compat-attribute-guards", "c");
+    let exe = temp_file("internal-cpp-gnu-compat-attribute-guards", "bin");
+    std::fs::write(
+        &src,
+        "#if __has_attribute(weak) && __has_attribute(used) && __has_attribute(section) && \\\n\
+             __has_attribute(gnu_inline) && __has_attribute(alloc_size) && \\\n\
+             __has_attribute(alloc_align) && __has_attribute(format_arg) && \\\n\
+             __has_attribute(format_strfmon)\n\
+         __attribute__((weak)) int weak_value(void) { return 40; }\n\
+         static int section_value __attribute__((used, section(\".rnqcc_test\"))) = 2;\n\
+         static inline __attribute__((gnu_inline, always_inline)) int inline_value(void) { return section_value; }\n\
+         void *make_ptr(unsigned long size, unsigned long align) __attribute__((alloc_size(1), alloc_align(2)));\n\
+         void *make_ptr(unsigned long size, unsigned long align) { return size == align ? (void *)0 : (void *)0; }\n\
+         const char *fmt(const char *s) __attribute__((format_arg(1)));\n\
+         const char *fmt(const char *s) { return s; }\n\
+         int money(char *s, unsigned long n, const char *format, ...) __attribute__((format_strfmon(3, 4)));\n\
+         int money(char *s, unsigned long n, const char *format, ...) { return s == 0 && n == 0 && format == 0 ? 0 : 1; }\n\
+         #else\n\
+         int missing_gnu_compat_attributes[-1];\n\
+         #endif\n\
+         int main(void) {\n\
+             int ok = weak_value() == 40 && inline_value() == 2 && fmt(\"x\")[0] == 'x' &&\n\
+                      money((char *)0, 0, (const char *)0) == 0 && make_ptr(1, 1) == 0;\n\
+             return ok ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_has_attribute_guards_accepted_attribute_aliases() {
+    let src = temp_file("internal-cpp-attribute-alias-guards", "c");
+    let exe = temp_file("internal-cpp-attribute-alias-guards", "bin");
+    std::fs::write(
+        &src,
+        "#if __has_attribute(align) && __has_attribute(__align__) && __has_attribute(__deprecated__)\n\
+         __attribute__((__align__(16))) int aligned_value = 40;\n\
+         __attribute__((__deprecated__(\"old\"))) int old_value(void) { return 2; }\n\
+         #else\n\
+         int missing_attribute_aliases[-1];\n\
+         #endif\n\
+         int main(void) { return aligned_value + old_value(); }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-Wno-deprecated-declarations")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_has_feature_guards_deprecated_attribute_message() {
+    let src = temp_file("internal-cpp-deprecated-message-feature-guard", "c");
+    let exe = temp_file("internal-cpp-deprecated-message-feature-guard", "bin");
+    std::fs::write(
+        &src,
+        "#if __has_feature(attribute_deprecated_with_message) && __has_extension(attribute_deprecated_with_message)\n\
+         __attribute__((deprecated(\"old\"))) int old_value(void) { return 42; }\n\
+         #else\n\
+         int missing_deprecated_attribute_message[-1];\n\
+         #endif\n\
+         int main(void) { return old_value(); }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-Wno-deprecated-declarations")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_has_feature_guards_nullability_annotations() {
+    let src = temp_file("internal-cpp-nullability-feature-guard", "c");
+    let exe = temp_file("internal-cpp-nullability-feature-guard", "bin");
+    std::fs::write(
+        &src,
+        "#if __has_feature(nullability) && __has_extension(nullability)\n\
+         int read_value(int *_Nonnull p, int *_Nullable fallback) {\n\
+             int *_Null_unspecified selected = p ? p : fallback;\n\
+             return selected ? *selected : 0;\n\
+         }\n\
+         #else\n\
+         int missing_nullability_feature[-1];\n\
+         #endif\n\
+         int main(void) { int value = 42; return read_value(&value, 0); }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_has_attribute_guards_unavailable_attribute_message() {
+    let src = temp_file("internal-cpp-unavailable-message-attribute-guard", "c");
+    let exe = temp_file("internal-cpp-unavailable-message-attribute-guard", "bin");
+    std::fs::write(
+        &src,
+        "#if __has_attribute(unavailable) && __has_attribute(__unavailable__) && \\\n\
+             __has_feature(attribute_unavailable_with_message)\n\
+         __attribute__((unavailable(\"old\"))) int unavailable_value(void) { return 0; }\n\
+         __attribute__((__unavailable__(\"old\"))) int other_unavailable_value(void) { return 0; }\n\
+         #else\n\
+         int missing_unavailable_attribute_message[-1];\n\
+         #endif\n\
+         int main(void) { return 42; }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_has_declspec_attribute_guards_common_declspecs() {
+    let src = temp_file("internal-cpp-declspec-attribute-guards", "c");
+    let exe = temp_file("internal-cpp-declspec-attribute-guards", "bin");
+    std::fs::write(
+        &src,
+        "#if __has_declspec_attribute(align) && __has_declspec_attribute(deprecated) && __has_declspec_attribute(noreturn) && __has_declspec_attribute(dllexport)\n\
+         __declspec(align(16)) int aligned_value = 42;\n\
+         __declspec(deprecated(\"old\")) int old_value(void) { return 0; }\n\
+         __declspec(noreturn) void stop(void);\n\
+         __declspec(dllexport) int exported_value(void) { return 0; }\n\
+         #else\n\
+         int missing_declspec_attributes[-1];\n\
+         #endif\n\
+         int main(void) { return aligned_value + old_value() + exported_value(); }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-Wno-deprecated-declarations")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
 }
 
 #[test]
@@ -14585,10 +15256,15 @@ fn internal_cpp_handles_has_c_attribute_predicates() {
     let src = temp_file("internal-cpp-has-c-attribute", "c");
     std::fs::write(
         &src,
-        "#if __has_c_attribute(fallthrough) && __has_c_attribute(nodiscard)\n\
+        "#if __has_c_attribute(fallthrough) && __has_c_attribute(nodiscard) && __has_c_attribute(reproducible) && __has_c_attribute(unsequenced)\n\
          int has_c_attrs = 1;\n\
          #else\n\
          int has_c_attrs = 0;\n\
+         #endif\n\
+         #if __has_c_attribute(gnu::unused) && __has_c_attribute(gnu::noreturn) && __has_c_attribute(gcc::unused) && __has_c_attribute(gcc::noreturn) && __has_c_attribute(__gnu__::__unused__) && __has_c_attribute(__gcc__::__unused__) && __has_c_attribute(gnu::__noreturn__) && __has_c_attribute(clang::fallthrough) && __has_c_attribute(_Clang::fallthrough) && __has_c_attribute(__clang__::__fallthrough__)\n\
+         int has_scoped_c_attrs = 1;\n\
+         #else\n\
+         int has_scoped_c_attrs = 0;\n\
          #endif\n\
          #if __has_c_attribute(unrecognized_vendor_attribute)\n\
          int missing_c_attr = 1;\n\
@@ -14608,9 +15284,103 @@ fn internal_cpp_handles_has_c_attribute_predicates() {
     assert!(output.status.success(), "{}", stderr(output));
     let stdout = stdout(output);
     assert!(stdout.contains("int has_c_attrs = 1;"), "{stdout}");
+    assert!(stdout.contains("int has_scoped_c_attrs = 1;"), "{stdout}");
     assert!(stdout.contains("int missing_c_attr = 0;"), "{stdout}");
 
     let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn internal_cpp_has_c_attribute_guards_standard_attributes() {
+    let src = temp_file("internal-cpp-standard-c-attribute-guards", "c");
+    let exe = temp_file("internal-cpp-standard-c-attribute-guards", "bin");
+    std::fs::write(
+        &src,
+        "#if __has_c_attribute(deprecated) && __has_c_attribute(fallthrough) && \\\n\
+             __has_c_attribute(maybe_unused) && __has_c_attribute(nodiscard) && \\\n\
+             __has_c_attribute(noreturn) && __has_c_attribute(reproducible) && \\\n\
+             __has_c_attribute(unsequenced)\n\
+         [[maybe_unused]] static int ignored_value = 0;\n\
+         [[nodiscard]] int value(void) { return 40; }\n\
+         [[reproducible]] int double_value(int x) { return x + x; }\n\
+         [[unsequenced]] int increment(int x) { return x + 1; }\n\
+         [[deprecated(\"old\")]] int old_value(void) { return 2; }\n\
+         [[noreturn]] void stop(void);\n\
+         #else\n\
+         int missing_standard_c_attributes[-1];\n\
+         #endif\n\
+         int main(void) {\n\
+             int result = value() + old_value() + ignored_value;\n\
+             result += double_value(1) - increment(1);\n\
+             switch (0) {\n\
+             case 0:\n\
+                 [[fallthrough]];\n\
+             default:\n\
+                 return result;\n\
+             }\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_has_c_attribute_guards_scoped_attributes() {
+    let src = temp_file("internal-cpp-scoped-c-attribute-guards", "c");
+    let exe = temp_file("internal-cpp-scoped-c-attribute-guards", "bin");
+    std::fs::write(
+        &src,
+        "#if __has_c_attribute(gnu::unused) && __has_c_attribute(gnu::noreturn) && __has_c_attribute(gcc::unused) && __has_c_attribute(gcc::noreturn) && __has_c_attribute(__gnu__::__unused__) && __has_c_attribute(__gcc__::__unused__) && __has_c_attribute(gnu::__noreturn__) && __has_c_attribute(clang::fallthrough) && __has_c_attribute(_Clang::fallthrough) && __has_c_attribute(__clang__::__fallthrough__)\n\
+         [[gnu::unused]] static int local_value = 42;\n\
+         [[gnu::noreturn]] void stop(void);\n\
+         [[gcc::unused]] static int other_value = 0;\n\
+         [[gcc::noreturn]] void stop_again(void);\n\
+         #else\n\
+         int missing_scoped_c_attributes[-1];\n\
+         #endif\n\
+         int main(void) {\n\
+             switch (0) {\n\
+             case 0:\n\
+                 [[__clang__::__fallthrough__]];\n\
+             default:\n\
+                 return local_value + other_value;\n\
+             }\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
 }
 
 #[test]
@@ -14632,6 +15402,11 @@ fn internal_cpp_handles_has_warning_predicates() {
          int has_unknown_pragmas_warning = 1;\n\
          #else\n\
          int has_unknown_pragmas_warning = 0;\n\
+         #endif\n\
+         #if __has_warning(\"-Wextra\") && __has_warning(\"-Wpedantic\")\n\
+         int has_driver_compat_warnings = 1;\n\
+         #else\n\
+         int has_driver_compat_warnings = 0;\n\
          #endif\n",
     )
     .expect("failed to write source");
@@ -14649,6 +15424,117 @@ fn internal_cpp_handles_has_warning_predicates() {
     assert!(stdout.contains("int missing_warning = 0;"), "{stdout}");
     assert!(
         stdout.contains("int has_unknown_pragmas_warning = 1;"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("int has_driver_compat_warnings = 1;"),
+        "{stdout}"
+    );
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn internal_cpp_predicate_matrix_keeps_unknown_probes_false() {
+    let src = temp_file("internal-cpp-unknown-predicate-matrix", "c");
+    std::fs::write(
+        &src,
+        "#if __has_builtin(__builtin_rnqcc_missing) || \\\n\
+             __has_builtin(__builtin_stack_save) || \\\n\
+             __has_builtin(__builtin_stack_restore) || \\\n\
+             __has_attribute(rnqcc_missing_attribute) || \\\n\
+             __has_c_attribute(rnqcc::missing) || \\\n\
+             __has_declspec_attribute(rnqcc_missing_declspec) || \\\n\
+             __has_feature(c_rnqcc_missing_feature) || \\\n\
+             __has_extension(c_rnqcc_missing_extension) || \\\n\
+             __has_warning(\"-Wrnqcc-missing-warning\")\n\
+         int unknown_predicates = 1;\n\
+         #else\n\
+         int unknown_predicates = 0;\n\
+         #endif\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("int unknown_predicates = 0;"), "{stdout}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn internal_cpp_keeps_c23_embed_unsupported() {
+    let src = temp_file("internal-cpp-c23-embed-unsupported", "c");
+    std::fs::write(
+        &src,
+        "#ifdef __has_embed\n\
+         int has_embed_operator = 1;\n\
+         #else\n\
+         int has_embed_operator = 0;\n\
+         #endif\n\
+         #if __has_feature(c_embed) || __has_extension(c_embed)\n\
+         int has_embed_feature = 1;\n\
+         #else\n\
+         int has_embed_feature = 0;\n\
+         #endif\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("int has_embed_operator = 0;"), "{stdout}");
+    assert!(stdout.contains("int has_embed_feature = 0;"), "{stdout}");
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn internal_cpp_handles_is_identifier_predicates() {
+    let src = temp_file("internal-cpp-is-identifier", "c");
+    std::fs::write(
+        &src,
+        "#if __is_identifier(__wchar_t) && __is_identifier(nullptr_t) && __is_identifier(rnqcc_regular_name)\n\
+         int has_regular_identifiers = 1;\n\
+         #else\n\
+         int has_regular_identifiers = 0;\n\
+         #endif\n\
+         #if __is_identifier(int) || __is_identifier(struct) || __is_identifier(union) || __is_identifier(_Atomic) || __is_identifier(_Complex) || __is_identifier(__complex__) || __is_identifier(_BitInt) || __is_identifier(__int128) || __is_identifier(_Float16) || __is_identifier(_Float128) || __is_identifier(_Decimal64) || __is_identifier(__bf16) || __is_identifier(__float128) || __is_identifier(__fp16) || __is_identifier(__auto_type) || __is_identifier(_Nullable) || __is_identifier(__attribute__)\n\
+         int treats_keywords_as_identifiers = 1;\n\
+         #else\n\
+         int treats_keywords_as_identifiers = 0;\n\
+         #endif\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(
+        stdout.contains("int has_regular_identifiers = 1;"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("int treats_keywords_as_identifiers = 0;"),
         "{stdout}"
     );
 
@@ -15491,9 +16377,14 @@ fn internal_cpp_provides_basic_virtual_compatibility_headers() {
              ptrdiff_t diff = (char *)&ok - (char *)&ok;\n\
              nullptr_t nil = nullptr;\n\
              va_list ap;\n\
+             int flags = 7;\n\
+             flags and_eq 6;\n\
+             flags or_eq 8;\n\
+             flags xor_eq 10;\n\
              return ok && !false && NULL == (void *)0 && nil == nullptr && offset == 4 &&\n\
                     diff == 0 && sizeof(ap) == sizeof(char *) && (ok and not false) &&\n\
                     (1 bitand 3) == 1 && (1 bitor 2) == 3 && (1 xor 3) == 2 &&\n\
+                    flags == 4 && (compl 0) == -1 && (1 not_eq 2) &&\n\
                     CHAR_BIT == 8 &&\n\
                     SHRT_MAX == 32767 && USHRT_MAX == 65535 ? 42 : 1;\n\
          }\n",
@@ -16509,8 +17400,10 @@ fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
         "signal.h",
         "stdalign.h",
         "stdarg.h",
-        "stdatomic.h",
         "stdbool.h",
+        "stdatomic.h",
+        "stdckdint.h",
+        "stdnoreturn.h",
         "stddef.h",
         "stdint.h",
         "stdio.h",
@@ -16582,6 +17475,46 @@ fn internal_cpp_preprocesses_virtual_headers_as_fixtures() {
     assert!(stdout.contains("pthread_create"), "{stdout}");
 
     let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn internal_cpp_provides_stdckdint_virtual_header() {
+    let src = temp_file("internal-cpp-stdckdint", "c");
+    let exe = temp_file("internal-cpp-stdckdint", "bin");
+    std::fs::write(
+        &src,
+        "#include <stdckdint.h>\n\
+         int main(void) {\n\
+             int sum = 0;\n\
+             int diff = 0;\n\
+             int product = 0;\n\
+             int overflow = 0;\n\
+             int ok = !ckd_add(&sum, 20, 22) && sum == 42;\n\
+             ok = ok && !ckd_sub(&diff, 50, 8) && diff == 42;\n\
+             ok = ok && !ckd_mul(&product, 6, 7) && product == 42;\n\
+             ok = ok && ckd_add(&overflow, 2147483647, 1);\n\
+             return ok ? 42 : 1;\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-nostdinc")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
 }
 
 #[test]
@@ -17314,8 +18247,12 @@ fn internal_cpp_handles_variadic_macros_comments_and_continuations() {
     let exe = temp_file("internal-cpp-variadic", "bin");
     std::fs::write(
         &src,
-        "#define SUM(first, ...) first + __VA_ARGS__\n\
+        "#if __has_feature(c_variadic_macros) && __has_extension(c_variadic_macros)\n\
+         #define SUM(first, ...) first + __VA_ARGS__\n\
          #define OPTIONAL(first, ...) first, ##__VA_ARGS__\n\
+         #else\n\
+         int missing_variadic_macro_feature[-1];\n\
+         #endif\n\
          #define CONTINUED \\\n\
          39\n\
          /* block comments are removed */\n\
@@ -18678,6 +19615,412 @@ fn accepts_more_common_gnu_builtin_compatibility() {
     assert_eq!(status.code(), Some(42));
 
     let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_has_builtin_guards_bit_operation_builtins() {
+    let src = temp_file("internal-cpp-bit-builtin-guards", "c");
+    let exe = temp_file("internal-cpp-bit-builtin-guards", "bin");
+    std::fs::write(
+        &src,
+        "int main(void) {\n\
+         #if __has_builtin(__builtin_bswap16) && __has_builtin(__builtin_ffs) && __has_builtin(__builtin_ffsl) && __has_builtin(__builtin_ffsll) && \\\n\
+             __has_builtin(__builtin_clz) && __has_builtin(__builtin_clzl) && __has_builtin(__builtin_clzll) && \\\n\
+             __has_builtin(__builtin_ctz) && __has_builtin(__builtin_ctzl) && __has_builtin(__builtin_ctzll) && \\\n\
+             __has_builtin(__builtin_clrsb) && __has_builtin(__builtin_clrsbl) && __has_builtin(__builtin_clrsbll) && \\\n\
+             __has_builtin(__builtin_popcount) && __has_builtin(__builtin_popcountl) && __has_builtin(__builtin_popcountll) && \\\n\
+             __has_builtin(__builtin_parity) && __has_builtin(__builtin_parityl) && __has_builtin(__builtin_parityll)\n\
+           int bswap_ok = __builtin_bswap16(0x1234U) == 0x3412U;\n\
+           int ffs_ok = __builtin_ffs(16) == 5 && __builtin_ffsl(0L) == 0 && __builtin_ffsll(1LL << 40) == 41;\n\
+           int clz_ok = __builtin_clz(1U) == 31 && __builtin_clzl(1UL) == 63 && __builtin_clzll(1ULL) == 63;\n\
+           int ctz_ok = __builtin_ctz(16U) == 4 && __builtin_ctzl(1UL << 40) == 40 && __builtin_ctzll(1ULL << 63) == 63;\n\
+           int clrsb_ok = __builtin_clrsb(1) == 30 && __builtin_clrsbl(-2L) == 62 && __builtin_clrsbll(-1LL) == 63;\n\
+           int popcount_ok = __builtin_popcount(0xf0f0U) == 8 && __builtin_popcountl(0xffff0000ffff0000UL) == 32 && __builtin_popcountll(0xffULL) == 8;\n\
+           int parity_ok = __builtin_parity(0xbU) == 1 && __builtin_parityl(0x3UL) == 0 && __builtin_parityll(0x8000000000000001ULL) == 0;\n\
+           return bswap_ok && ffs_ok && clz_ok && ctz_ok && clrsb_ok && popcount_ok && parity_ok ? 42 : 1;\n\
+         #else\n\
+           return 2;\n\
+         #endif\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_has_builtin_guards_overflow_builtins() {
+    let src = temp_file("internal-cpp-overflow-builtin-guards", "c");
+    let exe = temp_file("internal-cpp-overflow-builtin-guards", "bin");
+    std::fs::write(
+        &src,
+        "int main(void) {\n\
+         #if __has_builtin(__builtin_add_overflow) && __has_builtin(__builtin_sub_overflow) && \\\n\
+             __has_builtin(__builtin_mul_overflow) && __has_builtin(__builtin_mul_overflow_p)\n\
+           unsigned int u = 0;\n\
+           unsigned long ul = 0;\n\
+           long l = 0;\n\
+           int add_ov = __builtin_add_overflow(16UL, -16UL, &ul);\n\
+           int sub_ov = __builtin_sub_overflow(0u, 6u, &u);\n\
+           int mul_ov = __builtin_mul_overflow(975L * 975L * 975L * 975L * 975L * 975L, 975L, &l);\n\
+           int mul_p = __builtin_mul_overflow_p(__INT_MAX__ / 2 + 1, 3, 0);\n\
+           return add_ov && ul == 0UL && sub_ov && u == (unsigned int)-6 && mul_ov && mul_p ? 42 : 1;\n\
+         #else\n\
+           return 2;\n\
+         #endif\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_has_builtin_guards_floating_classification_builtins() {
+    let src = temp_file("internal-cpp-floating-builtin-guards", "c");
+    let exe = temp_file("internal-cpp-floating-builtin-guards", "bin");
+    std::fs::write(
+        &src,
+        "int main(void) {\n\
+         #if __has_builtin(__builtin_classify_type) && __has_builtin(__builtin_signbit) && \\\n\
+             __has_builtin(__builtin_inf) && __has_builtin(__builtin_inff) && __has_builtin(__builtin_infl) && \\\n\
+             __has_builtin(__builtin_huge_val) && __has_builtin(__builtin_huge_valf) && __has_builtin(__builtin_huge_vall) && \\\n\
+             __has_builtin(__builtin_isinf) && __has_builtin(__builtin_isinff) && __has_builtin(__builtin_isinfl)\n\
+           float f = __builtin_huge_valf();\n\
+           double d = -__builtin_inf();\n\
+           long double l = __builtin_huge_vall();\n\
+           int classify_ok = __builtin_classify_type(f) == 8 && __builtin_classify_type(1) == 1;\n\
+           int sign_ok = __builtin_signbit(-0.0);\n\
+           int inf_ok = __builtin_isinff(f) && __builtin_isinf(d) && __builtin_isinfl(l) &&\n\
+                        !__builtin_isinf(1.0) && __builtin_inff() == f && __builtin_infl() == l;\n\
+           return classify_ok && sign_ok && inf_ok ? 42 : 1;\n\
+         #else\n\
+           return 2;\n\
+         #endif\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_has_builtin_guards_floating_math_builtins() {
+    let src = temp_file("internal-cpp-floating-math-builtin-guards", "c");
+    std::fs::write(
+        &src,
+        "double f(double x) {\n\
+         #if __has_builtin(__builtin_fabs) && __has_builtin(__builtin_copysign) && __has_builtin(__builtin_pow)\n\
+           return __builtin_fabs(x) + __builtin_copysign(1.0, x) + __builtin_pow(x, 2.0);\n\
+         #else\n\
+           int missing_double_math[-1];\n\
+           return 0.0;\n\
+         #endif\n\
+         }\n\
+         float g(float x) {\n\
+         #if __has_builtin(__builtin_fabsf) && __has_builtin(__builtin_copysignf) && __has_builtin(__builtin_powf)\n\
+           return __builtin_fabsf(x) + __builtin_copysignf(1.0f, x) + __builtin_powf(x, 2.0f);\n\
+         #else\n\
+           int missing_float_math[-1];\n\
+           return 0.0f;\n\
+         #endif\n\
+         }\n\
+         long double h(long double x) {\n\
+         #if __has_builtin(__builtin_fabsl) && __has_builtin(__builtin_copysignl)\n\
+           return __builtin_fabsl(x) + __builtin_copysignl(1.0L, x);\n\
+         #else\n\
+           int missing_long_double_math[-1];\n\
+           return 0.0L;\n\
+         #endif\n\
+         }\n\
+         __complex__ double cd(__complex__ double z) {\n\
+         #if __has_builtin(__builtin_conj)\n\
+           return __builtin_conj(z);\n\
+         #else\n\
+           int missing_conj[-1];\n\
+           return z;\n\
+         #endif\n\
+         }\n\
+         __complex__ float cf(__complex__ float z) {\n\
+         #if __has_builtin(__builtin_conjf)\n\
+           return __builtin_conjf(z);\n\
+         #else\n\
+           int missing_conjf[-1];\n\
+           return z;\n\
+         #endif\n\
+         }\n\
+         __complex__ long double cl(__complex__ long double z) {\n\
+         #if __has_builtin(__builtin_conjl)\n\
+           return __builtin_conjl(z);\n\
+         #else\n\
+           int missing_conjl[-1];\n\
+           return z;\n\
+         #endif\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn internal_cpp_has_builtin_guards_address_builtins() {
+    let src = temp_file("internal-cpp-address-builtin-guards", "c");
+    let exe = temp_file("internal-cpp-address-builtin-guards", "bin");
+    std::fs::write(
+        &src,
+        "int main(void) {\n\
+         #if __has_builtin(__builtin_return_address) && __has_builtin(__builtin_frame_address) && __has_builtin(__builtin_extract_return_addr)\n\
+           void *ret = __builtin_return_address(0);\n\
+           void *extracted = __builtin_extract_return_addr(ret);\n\
+           void *frame = __builtin_frame_address(0);\n\
+           return extracted == ret && frame != 0 ? 42 : 1;\n\
+         #else\n\
+           return 2;\n\
+         #endif\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_has_builtin_guards_va_builtins() {
+    let src = temp_file("internal-cpp-va-builtin-guards", "c");
+    let exe = temp_file("internal-cpp-va-builtin-guards", "bin");
+    std::fs::write(
+        &src,
+        "int f(int first, ...) {\n\
+           __builtin_va_list ap;\n\
+           __builtin_va_list copy;\n\
+           __builtin_va_list alias_copy;\n\
+         #if __has_builtin(__builtin_va_start) && __has_builtin(__builtin_va_end) && __has_builtin(__builtin_va_copy) && __has_builtin(__va_copy) && __has_builtin(__builtin_va_arg)\n\
+           __builtin_va_start(ap, first);\n\
+           int second = __builtin_va_arg(ap, int);\n\
+           __builtin_va_copy(copy, ap);\n\
+           int third = __builtin_va_arg(copy, int);\n\
+           __va_copy(alias_copy, copy);\n\
+           int fourth = __builtin_va_arg(alias_copy, int);\n\
+           __builtin_va_end(alias_copy);\n\
+           __builtin_va_end(copy);\n\
+           __builtin_va_end(ap);\n\
+           return first == 1 && second == 2 && third == 3 && fourth == 4 ? 42 : 1;\n\
+         #else\n\
+           return 2;\n\
+         #endif\n\
+         }\n\
+         int main(void) { return f(1, 2, 3, 4); }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_has_builtin_guards_libc_compat_builtins() {
+    let src = temp_file("internal-cpp-libc-builtin-guards", "c");
+    let exe = temp_file("internal-cpp-libc-builtin-guards", "bin");
+    std::fs::write(
+        &src,
+        "int main(void) {\n\
+         #if __has_builtin(__builtin_sprintf) && __has_builtin(__builtin_snprintf) && \\\n\
+             __has_builtin(__builtin___sprintf_chk) && __has_builtin(__builtin_alloca) && \\\n\
+             __has_builtin(__builtin_malloc) && __has_builtin(__builtin_free) && \\\n\
+             __has_builtin(__builtin_abs) && __has_builtin(__builtin_labs) && __has_builtin(__builtin_llabs)\n\
+           char formatted[16];\n\
+           char clipped[4];\n\
+           char fortified[16];\n\
+           int n1 = __builtin_sprintf(formatted, \"%d\", 42);\n\
+           int n2 = __builtin_snprintf(clipped, sizeof clipped, \"%s\", \"abcd\");\n\
+           int n3 = __builtin___sprintf_chk(fortified, 0, sizeof fortified, \"%s\", \"ok\");\n\
+           int *stack = __builtin_alloca(2 * sizeof(int));\n\
+           stack[0] = 5;\n\
+           stack[1] = 7;\n\
+           char *heap = __builtin_malloc(4);\n\
+           if (!heap) return 3;\n\
+           __builtin_memcpy(heap, \"xy\", 3);\n\
+           int ok = n1 == 2 && __builtin_strcmp(formatted, \"42\") == 0 &&\n\
+                    n2 == 4 && __builtin_strcmp(clipped, \"abc\") == 0 &&\n\
+                    n3 == 2 && __builtin_strcmp(fortified, \"ok\") == 0 &&\n\
+                    stack[0] + stack[1] == 12 && __builtin_strcmp(heap, \"xy\") == 0 &&\n\
+                    __builtin_abs(-3) == 3 && __builtin_labs(-4L) == 4L && __builtin_llabs(-5LL) == 5L;\n\
+           __builtin_free(heap);\n\
+           return ok ? 42 : 1;\n\
+         #else\n\
+           return 2;\n\
+         #endif\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn internal_cpp_has_builtin_guards_vector_builtins() {
+    let convert_src = temp_file("internal-cpp-convertvector-builtin-guard", "c");
+    std::fs::write(
+        &convert_src,
+        "typedef long long V __attribute__((vector_size(16)));\n\
+         typedef double W __attribute__((vector_size(16)));\n\
+         void convert(V *v) {\n\
+         #if __has_builtin(__builtin_convertvector)\n\
+           __builtin_convertvector(*v, W);\n\
+         #else\n\
+           int missing_convertvector[-1];\n\
+         #endif\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let convert_output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .args(["--target", "x86_64-linux", "--stage", "tacky"])
+        .arg(&convert_src)
+        .output()
+        .expect("failed to run rnqcc");
+    assert!(
+        convert_output.status.success(),
+        "{}",
+        stderr(convert_output)
+    );
+
+    let shuffle_src = temp_file("internal-cpp-shuffle-builtin-guard", "c");
+    let exe = temp_file("internal-cpp-shuffle-builtin-guard", "bin");
+    std::fs::write(
+        &shuffle_src,
+        "typedef double V __attribute__((__vector_size__ (16)));\n\
+         typedef long long W __attribute__((__vector_size__ (16)));\n\
+         int main(void) {\n\
+         #if __has_builtin(__builtin_shuffle)\n\
+           V y = { 1.0, 2.0 };\n\
+           W mask = { 10000000001LL, 0LL };\n\
+           V r = __builtin_shuffle(y, mask);\n\
+           return r[0] == 2.0 && r[1] == 1.0 ? 42 : 1;\n\
+         #else\n\
+           return 2;\n\
+         #endif\n\
+         }\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&shuffle_src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let status = Command::new(&exe)
+        .status()
+        .expect("failed to run executable");
+    assert_eq!(status.code(), Some(42));
+
+    let _ = std::fs::remove_file(convert_src);
+    let _ = std::fs::remove_file(shuffle_src);
     let _ = std::fs::remove_file(exe);
 }
 
@@ -20640,6 +21983,43 @@ fn internal_cpp_handles_has_include_and_elifdef() {
 }
 
 #[test]
+fn internal_cpp_has_include_reports_virtual_headers_without_system_includes() {
+    let src = temp_file("internal-cpp-has-include-virtual-headers", "c");
+    std::fs::write(
+        &src,
+        "#if __has_include(<assert.h>) && __has_include(<stdbool.h>) && __has_include(<stdalign.h>) && __has_include(<stdckdint.h>) && __has_include(<stdnoreturn.h>) && __has_include(<iso646.h>)\n\
+         int has_virtual_headers = 1;\n\
+         #else\n\
+         int has_virtual_headers = 0;\n\
+         #endif\n\
+         #if __has_include(<rnqcc_missing_virtual_probe.h>)\n\
+         int has_missing_virtual_header = 1;\n\
+         #else\n\
+         int has_missing_virtual_header = 0;\n\
+         #endif\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-nostdinc")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let stdout = stdout(output);
+    assert!(stdout.contains("int has_virtual_headers = 1;"), "{stdout}");
+    assert!(
+        stdout.contains("int has_missing_virtual_header = 0;"),
+        "{stdout}"
+    );
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
 fn internal_cpp_handles_include_next() {
     let first_dir = temp_file("internal-cpp-include-next-first", "d");
     let second_dir = temp_file("internal-cpp-include-next-second", "d");
@@ -21098,6 +22478,28 @@ fn internal_cpp_rejects_unsupported_directives() {
 
     assert!(!output.status.success());
     assert!(stderr(output).contains("include not found: <rnqcc_missing_system_header.h>"));
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn internal_cpp_rejects_c23_embed_directive() {
+    let src = temp_file("internal-cpp-c23-embed-directive", "c");
+    std::fs::write(&src, "#embed <rnqcc_missing_resource.bin>\n").expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("unsupported preprocessor directive: #embed"),
+        "{stderr}"
+    );
 
     let _ = std::fs::remove_file(src);
 }
@@ -25742,8 +27144,15 @@ fn runs_c23_nullptr_pointer_operations() {
 int main(void) {
     int value = 7;
     int *p = nullptr;
+    int *alt = __nullptr;
     int *q = &value;
-    return p == nullptr && q != nullptr ? 42 : 1;
+    typeof(nullptr) typed_null = __nullptr;
+    int null_type_ok = __builtin_types_compatible_p(typeof(nullptr), void *);
+    int generic_null_ok = _Generic(nullptr, void *: 1, default: 0);
+    return p == nullptr && alt == __nullptr && q != __nullptr && typed_null == nullptr
+               && null_type_ok && generic_null_ok
+           ? 42
+           : 1;
 }
 "#,
     )

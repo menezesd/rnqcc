@@ -31,6 +31,9 @@ pub enum PredicateOperand {
     HasWarning {
         name: String,
     },
+    IsIdentifier {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,50 +50,53 @@ pub fn parse_predicate_operand(
         Some("defined") => parse_defined_operand(tokens, start),
         Some("__has_include") => parse_has_include_operand(tokens, start, false),
         Some("__has_include_next") => parse_has_include_operand(tokens, start, true),
-        Some("__has_builtin") => parse_identifier_call_operand(tokens, start).map(|parsed| {
-            parsed.map(|parsed| ParsedPredicateOperand {
-                operand: PredicateOperand::HasBuiltin { name: parsed.name },
-                next_index: parsed.next_index,
-            })
-        }),
-        Some("__has_attribute") => parse_identifier_call_operand(tokens, start).map(|parsed| {
-            parsed.map(|parsed| ParsedPredicateOperand {
-                operand: PredicateOperand::HasAttribute { name: parsed.name },
-                next_index: parsed.next_index,
-            })
-        }),
-        Some("__has_c_attribute") => parse_identifier_call_operand(tokens, start).map(|parsed| {
-            parsed.map(|parsed| ParsedPredicateOperand {
-                operand: PredicateOperand::HasCAttribute { name: parsed.name },
-                next_index: parsed.next_index,
-            })
-        }),
-        Some("__has_declspec_attribute") => {
-            parse_identifier_call_operand(tokens, start).map(|parsed| {
-                parsed.map(|parsed| ParsedPredicateOperand {
-                    operand: PredicateOperand::HasDeclspecAttribute { name: parsed.name },
-                    next_index: parsed.next_index,
-                })
+        Some("__has_builtin") => parse_named_call_predicate_operand(
+            tokens,
+            start,
+            parse_identifier_call_operand,
+            |name| PredicateOperand::HasBuiltin { name },
+        ),
+        Some("__has_attribute") => parse_named_call_predicate_operand(
+            tokens,
+            start,
+            parse_identifier_call_operand,
+            |name| PredicateOperand::HasAttribute { name },
+        ),
+        Some("__has_c_attribute") => parse_named_call_predicate_operand(
+            tokens,
+            start,
+            parse_c_attribute_call_operand,
+            |name| PredicateOperand::HasCAttribute { name },
+        ),
+        Some("__has_declspec_attribute") => parse_named_call_predicate_operand(
+            tokens,
+            start,
+            parse_identifier_call_operand,
+            |name| PredicateOperand::HasDeclspecAttribute { name },
+        ),
+        Some("__has_feature") => parse_named_call_predicate_operand(
+            tokens,
+            start,
+            parse_identifier_call_operand,
+            |name| PredicateOperand::HasFeature { name },
+        ),
+        Some("__has_extension") => parse_named_call_predicate_operand(
+            tokens,
+            start,
+            parse_identifier_call_operand,
+            |name| PredicateOperand::HasExtension { name },
+        ),
+        Some("__has_warning") => {
+            parse_named_call_predicate_operand(tokens, start, parse_string_call_operand, |name| {
+                PredicateOperand::HasWarning { name }
             })
         }
-        Some("__has_feature") => parse_identifier_call_operand(tokens, start).map(|parsed| {
-            parsed.map(|parsed| ParsedPredicateOperand {
-                operand: PredicateOperand::HasFeature { name: parsed.name },
-                next_index: parsed.next_index,
-            })
-        }),
-        Some("__has_extension") => parse_identifier_call_operand(tokens, start).map(|parsed| {
-            parsed.map(|parsed| ParsedPredicateOperand {
-                operand: PredicateOperand::HasExtension { name: parsed.name },
-                next_index: parsed.next_index,
-            })
-        }),
-        Some("__has_warning") => parse_string_call_operand(tokens, start).map(|parsed| {
-            parsed.map(|parsed| ParsedPredicateOperand {
-                operand: PredicateOperand::HasWarning { name: parsed.name },
-                next_index: parsed.next_index,
-            })
-        }),
+        Some("__is_identifier") => parse_named_call_predicate_operand(
+            tokens,
+            start,
+            parse_identifier_call_operand,
+            |name| PredicateOperand::IsIdentifier { name },
+        ),
         _ => Ok(None),
     }
 }
@@ -98,6 +104,23 @@ pub fn parse_predicate_operand(
 struct ParsedIdentifierCallOperand {
     name: String,
     next_index: usize,
+}
+
+fn parse_named_call_predicate_operand<F>(
+    tokens: &[PpToken],
+    start: usize,
+    parser: fn(&[PpToken], usize) -> Result<Option<ParsedIdentifierCallOperand>, String>,
+    make_operand: F,
+) -> Result<Option<ParsedPredicateOperand>, String>
+where
+    F: FnOnce(String) -> PredicateOperand,
+{
+    parser(tokens, start).map(|parsed| {
+        parsed.map(|parsed| ParsedPredicateOperand {
+            operand: make_operand(parsed.name),
+            next_index: parsed.next_index,
+        })
+    })
 }
 
 fn parse_identifier_call_operand(
@@ -119,6 +142,44 @@ fn parse_identifier_call_operand(
     Ok(Some(ParsedIdentifierCallOperand {
         name: name.to_string(),
         next_index: close + 1,
+    }))
+}
+
+fn parse_c_attribute_call_operand(
+    tokens: &[PpToken],
+    ident_index: usize,
+) -> Result<Option<ParsedIdentifierCallOperand>, String> {
+    let open = skip_ws(tokens, ident_index + 1);
+    if !is_punct(tokens.get(open), "(") {
+        return Ok(None);
+    }
+    let namespace_or_name_index = skip_ws(tokens, open + 1);
+    let Some(namespace_or_name) = ident_text(tokens.get(namespace_or_name_index)) else {
+        return Err("expected identifier in predicate operand".to_string());
+    };
+    let after_first = skip_ws(tokens, namespace_or_name_index + 1);
+    let (name, close_index) = if is_punct(tokens.get(after_first), ":") {
+        let second_colon = skip_ws(tokens, after_first + 1);
+        if !is_punct(tokens.get(second_colon), ":") {
+            return Err("missing '::' in scoped C attribute predicate operand".to_string());
+        }
+        let attr_index = skip_ws(tokens, second_colon + 1);
+        let Some(attr_name) = ident_text(tokens.get(attr_index)) else {
+            return Err("expected scoped C attribute name in predicate operand".to_string());
+        };
+        (
+            format!("{namespace_or_name}::{attr_name}"),
+            skip_ws(tokens, attr_index + 1),
+        )
+    } else {
+        (namespace_or_name.to_string(), after_first)
+    };
+    if !is_punct(tokens.get(close_index), ")") {
+        return Err("missing ')' in predicate operand".to_string());
+    }
+    Ok(Some(ParsedIdentifierCallOperand {
+        name,
+        next_index: close_index + 1,
     }))
 }
 
@@ -345,6 +406,19 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_has_attribute_identifier_operand() -> Result<(), String> {
+        assert_eq!(
+            operand("__has_attribute(__unused__)")?,
+            PredicateOperand::HasAttribute {
+                name: "__unused__".to_string()
+            }
+        );
+        assert!(parse_predicate_operand_all(&lex("__has_attribute(123)")?).is_err());
+        assert!(parse_predicate_operand_all(&lex("__has_attribute(unused, 1)")?).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn recognizes_has_c_attribute_identifier_operand() -> Result<(), String> {
         assert_eq!(
             operand("__has_c_attribute(fallthrough)")?,
@@ -352,8 +426,111 @@ mod tests {
                 name: "fallthrough".to_string()
             }
         );
+        assert_eq!(
+            operand("__has_c_attribute(gnu::unused)")?,
+            PredicateOperand::HasCAttribute {
+                name: "gnu::unused".to_string()
+            }
+        );
+        assert_eq!(
+            operand("__has_c_attribute(gnu :: noreturn)")?,
+            PredicateOperand::HasCAttribute {
+                name: "gnu::noreturn".to_string()
+            }
+        );
+        assert_eq!(
+            operand("__has_c_attribute(gcc::unused)")?,
+            PredicateOperand::HasCAttribute {
+                name: "gcc::unused".to_string()
+            }
+        );
+        assert_eq!(
+            operand("__has_c_attribute(__gnu__::__unused__)")?,
+            PredicateOperand::HasCAttribute {
+                name: "__gnu__::__unused__".to_string()
+            }
+        );
+        assert_eq!(
+            operand("__has_c_attribute(_Clang::fallthrough)")?,
+            PredicateOperand::HasCAttribute {
+                name: "_Clang::fallthrough".to_string()
+            }
+        );
+        assert_eq!(
+            operand("__has_c_attribute(__clang__::__fallthrough__)")?,
+            PredicateOperand::HasCAttribute {
+                name: "__clang__::__fallthrough__".to_string()
+            }
+        );
+        assert_eq!(
+            operand("__has_c_attribute(__gcc__::__unused__)")?,
+            PredicateOperand::HasCAttribute {
+                name: "__gcc__::__unused__".to_string()
+            }
+        );
         assert!(parse_predicate_operand_all(&lex("__has_c_attribute(123)")?).is_err());
         assert!(parse_predicate_operand_all(&lex("__has_c_attribute(fallthrough, 1)")?).is_err());
+        assert!(parse_predicate_operand_all(&lex("__has_c_attribute(gnu:unused)")?).is_err());
+        assert!(parse_predicate_operand_all(&lex("__has_c_attribute(gnu::)")?).is_err());
+        assert!(parse_predicate_operand_all(&lex("__has_c_attribute(::unused)")?).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recognizes_has_declspec_attribute_identifier_operand() -> Result<(), String> {
+        assert_eq!(
+            operand("__has_declspec_attribute(dllexport)")?,
+            PredicateOperand::HasDeclspecAttribute {
+                name: "dllexport".to_string()
+            }
+        );
+        assert_eq!(
+            operand("__has_declspec_attribute(align)")?,
+            PredicateOperand::HasDeclspecAttribute {
+                name: "align".to_string()
+            }
+        );
+        assert_eq!(
+            operand("__has_declspec_attribute(deprecated)")?,
+            PredicateOperand::HasDeclspecAttribute {
+                name: "deprecated".to_string()
+            }
+        );
+        assert_eq!(
+            operand("__has_declspec_attribute(__dllexport__)")?,
+            PredicateOperand::HasDeclspecAttribute {
+                name: "__dllexport__".to_string()
+            }
+        );
+        assert!(parse_predicate_operand_all(&lex("__has_declspec_attribute(123)")?).is_err());
+        assert!(
+            parse_predicate_operand_all(&lex("__has_declspec_attribute(dllexport, 1)")?).is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recognizes_has_feature_and_extension_identifier_operands() -> Result<(), String> {
+        assert_eq!(
+            operand("__has_feature(c_static_assert)")?,
+            PredicateOperand::HasFeature {
+                name: "c_static_assert".to_string()
+            }
+        );
+        assert_eq!(
+            operand("__has_extension(c_atomic)")?,
+            PredicateOperand::HasExtension {
+                name: "c_atomic".to_string()
+            }
+        );
+        assert_eq!(
+            operand("__has_feature(__c_static_assert__)")?,
+            PredicateOperand::HasFeature {
+                name: "__c_static_assert__".to_string()
+            }
+        );
+        assert!(parse_predicate_operand_all(&lex("__has_feature(123)")?).is_err());
+        assert!(parse_predicate_operand_all(&lex("__has_extension(c_atomic, 1)")?).is_err());
         Ok(())
     }
 
@@ -367,6 +544,19 @@ mod tests {
         );
         assert!(parse_predicate_operand_all(&lex("__has_warning(-Wunreachable)")?).is_err());
         assert!(parse_predicate_operand_all(&lex("__has_warning(\"-Wunreachable\", 1)")?).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recognizes_is_identifier_operand() -> Result<(), String> {
+        assert_eq!(
+            operand("__is_identifier(__wchar_t)")?,
+            PredicateOperand::IsIdentifier {
+                name: "__wchar_t".to_string()
+            }
+        );
+        assert!(parse_predicate_operand_all(&lex("__is_identifier(123)")?).is_err());
+        assert!(parse_predicate_operand_all(&lex("__is_identifier(__wchar_t, 1)")?).is_err());
         Ok(())
     }
 

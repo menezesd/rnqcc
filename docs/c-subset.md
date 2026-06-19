@@ -19,7 +19,9 @@ single target.
   string literals
 - `if`, `while`, `do`, `for`, `break`, `continue`, `goto`, labels, and `switch`
 - C11 `_Generic` selections resolved by the frontend for ordinary scalar,
-  pointer, array-decayed, function-decayed, and aggregate expression types
+  pointer, array-decayed, function-decayed, and aggregate expression types;
+  Clang-style controlling type operands such as `_Generic(int, ...)` are also
+  accepted
 - structs and unions, including copies, member access, nested aggregates,
   anonymous aggregate members, aggregate definitions with declarators, and
   aggregate arguments/returns; trailing flexible array members are supported in
@@ -83,7 +85,27 @@ assembly/linking.
   aggregate alignment and size padding, including in combination with `packed`.
 - Additional GNU builtin compatibility includes `__builtin_constant_p`,
   `__builtin_expect_with_probability`, `__builtin_assume_aligned`,
-  `__builtin_prefetch`, `__builtin_bswap32`, `__builtin_bswap64`,
+  `__builtin_prefetch`, `__builtin_bswap16`, `__builtin_bswap32`,
+  `__builtin_bswap64`, bit operation helpers including `__builtin_ffs`,
+  `__builtin_clz`, `__builtin_ctz`, `__builtin_clrsb`, `__builtin_popcount`,
+  and `__builtin_parity` with `l`/`ll` suffix variants, common checked
+  arithmetic helpers including `__builtin_add_overflow`,
+  `__builtin_sub_overflow`, `__builtin_mul_overflow`, and
+  `__builtin_mul_overflow_p`, floating classification and infinity helpers
+  including `__builtin_classify_type`, `__builtin_signbit`, `__builtin_inf`,
+  `__builtin_huge_val`, and `__builtin_isinf` families, address helpers such
+  as `__builtin_return_address`, `__builtin_frame_address`, and
+  `__builtin_extract_return_addr`, and direct stdarg helpers including
+  `__builtin_va_start`, `__builtin_va_end`, `__builtin_va_copy`, `__va_copy`,
+  and `__builtin_va_arg`, GNU variadic forwarding helpers including
+  `__builtin_apply`, `__builtin_apply_args`, and `__builtin_va_arg_pack`,
+  vector helpers including `__builtin_convertvector` and `__builtin_shuffle`,
+  libc-style control/allocation helpers including
+  `__builtin_abort`, `__builtin_exit`, `__builtin_printf`,
+  `__builtin_sprintf`, `__builtin_snprintf`, `__builtin_puts`,
+  `__builtin_alloca`, `__builtin_malloc`, `__builtin_free`, and standard
+  absolute-value helpers, floating math aliases including `__builtin_fabs`,
+  `__builtin_copysign`, `__builtin_pow`, and complex conjugate families,
   `__builtin_object_size`, `__builtin_dynamic_object_size`, and libc-style
   aliases such as `__builtin_memcpy`, `__builtin_memmove`,
   `__builtin_memset`, `__builtin_memcmp`, `__builtin_strlen`, and
@@ -96,6 +118,8 @@ assembly/linking.
   `__typeof_unqual__` are accepted for type-name and expression operands; rnqcc
   does not model C qualifiers, so the unqualified form shares the same internal
   representation as `typeof`.
+- C23 `nullptr` and the Clang/GNU-compatible `__nullptr` spelling are accepted
+  as null pointer constants when not shadowed by a visible object.
 - C23 `_BitInt(N)` is accepted only for widths that map exactly to existing
   storage and lowering paths: signed/unsigned 32, 64, and 128 bits. Other
   widths, duplicate `_BitInt` specifiers, and combinations with another
@@ -132,8 +156,35 @@ assembly/linking.
   object/function/variadic macros, stringification, token pasting,
   `__FILE__`, `__LINE__`, stateful/source builtins, common predefined ABI macros,
   `#undef`, conditional directives including `#elifdef`/`#elifndef`,
-  `defined`, `__has_include`, `__has_attribute` / `__has_warning` probes for
-  common GNU/Clang compatibility attributes and warnings, richer integer `#if` expressions, comments,
+  `defined`, `__has_include`, `__is_identifier`, `__has_attribute` /
+  `__has_warning` probes for
+  common GNU/Clang compatibility attributes and warnings, including supported
+  type/codegen attributes such as `alias`, `mode`, `vector_size`,
+  `transparent_union`, `no_instrument_function`, and `scalar_storage_order`,
+  common no-op compatibility attributes such as `weak`, `used`, `section`,
+  `gnu_inline`, `alloc_size`, `alloc_align`, `format_arg`, and `unavailable`,
+  accepted double-underscore aliases such as `align`, `__align__`, and
+  `__deprecated__`,
+  standard C attribute probes such as `__has_c_attribute(nodiscard)`,
+  `__has_c_attribute(maybe_unused)`, `__has_c_attribute(reproducible)`, and
+  `__has_c_attribute(unsequenced)`, scoped C attribute probes such as
+  `__has_c_attribute(gnu::unused)`, `__has_c_attribute(__gnu__::__unused__)`,
+  `__has_c_attribute(__gcc__::__unused__)`,
+  `__has_c_attribute(gcc::unused)`, `__has_c_attribute(clang::fallthrough)`,
+  and `__has_c_attribute(__clang__::__fallthrough__)`,
+  declspec probes such as `__has_declspec_attribute(align)` and
+  `__has_declspec_attribute(deprecated)`,
+  accepted warning probes such as `-Wextra` and `-Wpedantic`,
+  `__has_feature(c_variadic_macros)` for variadic macros,
+  `__has_feature(c_generic_selections)` for `_Generic`,
+  `__has_extension(c_generic_selection_with_controlling_type)` for controlling
+  type operands, `__has_feature(c_bitint)` for supported `_BitInt` widths,
+  attribute-message feature probes such as
+  `__has_feature(attribute_deprecated_with_message)`, and
+  `__has_feature(nullability)` for no-op nullability annotations, with
+  double-underscore aliases accepted for feature and declspec probe names;
+  `__is_identifier` rejects parser-reserved extension type names,
+  richer integer `#if` expressions, comments,
   continued lines, `#line`, GCC line markers, `#error`, `#warning`, ignored
   pragmas, `#pragma once`, and common `#pragma pack` push/pop alignments
   for subsequent struct/union definitions. Angle includes search user include paths,
@@ -143,7 +194,7 @@ assembly/linking.
   `errno.h`, `fcntl.h`, `fnmatch.h`, `getopt.h`, `glob.h`, `grp.h`, `ifaddrs.h`,
   `iso646.h`, `libgen.h`, `limits.h`, `linux/limits.h`, `locale.h`, `malloc.h`, `math.h`, `memory.h`, `net/if.h`, `netdb.h`, `netinet/in.h`,
   `netinet/ip.h`, `netinet/tcp.h`, `netinet/udp.h`, `paths.h`, `poll.h`, `pthread.h`, `pwd.h`, `regex.h`, `resolv.h`, `setjmp.h`, `signal.h`,
-  `stdalign.h`, `stdatomic.h`,
+  `stdalign.h`, `stdatomic.h`, `stdckdint.h`,
   `stdnoreturn.h`, `stdio.h`, `stdlib.h`, `string.h`, `strings.h`,
   `sysexits.h`, `sys/errno.h`, `sys/file.h`, `sys/ioctl.h`, `sys/mman.h`, `sys/param.h`, `sys/poll.h`, `sys/resource.h`, `sys/select.h`,
   `sys/socket.h`, `sys/stat.h`, `sys/sysmacros.h`, `sys/time.h`, `sys/types.h`, `sys/uio.h`,
@@ -157,7 +208,8 @@ assembly/linking.
 - Full source spans are not carried through every diagnostic yet.
 - The internal preprocessor intentionally does not exactly mirror every hosted
   compiler predefined macro, compiler-specific header directive, or macro
-  expansion corner case yet.
+  expansion corner case yet. C23 `#embed` / `__has_embed` is currently
+  unsupported and intentionally not advertised through feature probes.
 - Full arbitrary-width `_BitInt(N)` needs a real bit-precise integer type in the
   rich type representation, usual arithmetic conversions that preserve precision
   and signedness, constant folding with unsigned modulo behavior at result

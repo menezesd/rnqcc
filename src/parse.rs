@@ -465,6 +465,14 @@ impl Parser {
         name == "__int128" || name == "__int128__"
     }
 
+    fn nullptr_expression() -> Exp {
+        Exp::Cast(
+            CType::Pointer,
+            Some(FullType::Pointer(Box::new(FullType::Scalar(CType::Void)))),
+            Box::new(Exp::Constant(0)),
+        )
+    }
+
     fn is_gnu_qualifier_name(name: &str) -> bool {
         matches!(
             name,
@@ -6073,8 +6081,12 @@ impl Parser {
     fn parse_generic_selection(&mut self) -> ParseResult<Exp> {
         self.expect_token(Token::KWGeneric)?;
         self.expect_token(Token::OpenParen)?;
-        let control = self.parse_assignment()?;
-        let control_type = self.typeof_expression(&control)?;
+        let control_type = if self.is_type_keyword_at_pos() {
+            self.parse_type_name_full()?
+        } else {
+            let control = self.parse_assignment()?;
+            self.typeof_expression(&control)?
+        };
         self.expect_token(Token::Comma)?;
 
         let mut selected = None;
@@ -6545,7 +6557,8 @@ impl Parser {
                 } else if self.lookup_value_type(&name).is_none() {
                     match name.as_str() {
                         "true" => Ok(Exp::Constant(1)),
-                        "false" | "nullptr" => Ok(Exp::Constant(0)),
+                        "false" => Ok(Exp::Constant(0)),
+                        "nullptr" | "__nullptr" => Ok(Self::nullptr_expression()),
                         _ => Ok(Exp::Var(name)),
                     }
                 } else {
@@ -7846,11 +7859,21 @@ mod tests {
 
     #[test]
     fn parses_unshadowed_nullptr_as_c23_null_pointer_constant() -> Result<(), String> {
-        let program = parse_source("int a = nullptr;\n")?;
+        let program = parse_source("int a = nullptr;\nint b = __nullptr;\n")?;
         let Declaration::VarDecl(a) = &program.declarations[0] else {
             return Err("expected a declaration".to_string());
         };
-        assert!(matches!(a.init, Some(Exp::Constant(0))));
+        let Declaration::VarDecl(b) = &program.declarations[1] else {
+            return Err("expected b declaration".to_string());
+        };
+        assert!(matches!(
+            a.init,
+            Some(Exp::Cast(CType::Pointer, Some(FullType::Pointer(_)), _))
+        ));
+        assert!(matches!(
+            b.init,
+            Some(Exp::Cast(CType::Pointer, Some(FullType::Pointer(_)), _))
+        ));
         Ok(())
     }
 
@@ -7873,6 +7896,24 @@ mod tests {
             return Err("expected variable declaration".to_string());
         };
         let Declaration::VarDecl(b) = &program.declarations[3] else {
+            return Err("expected variable declaration".to_string());
+        };
+        assert!(matches!(a.init, Some(Exp::Constant(1))));
+        assert!(matches!(b.init, Some(Exp::Constant(2))));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_generic_selection_with_controlling_type() -> Result<(), String> {
+        let program = parse_source(
+            "typedef unsigned long size_type;\n\
+             int a = _Generic(int, int: 1, long: 2, default: 3);\n\
+             int b = _Generic(size_type, int: 1, unsigned long: 2, default: 3);\n",
+        )?;
+        let Declaration::VarDecl(a) = &program.declarations[1] else {
+            return Err("expected variable declaration".to_string());
+        };
+        let Declaration::VarDecl(b) = &program.declarations[2] else {
             return Err("expected variable declaration".to_string());
         };
         assert!(matches!(a.init, Some(Exp::Constant(1))));

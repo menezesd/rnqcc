@@ -42,9 +42,33 @@ The internal preprocessor supports:
 - `__has_include(...)` and `__has_include_next(...)`
 - `__has_builtin(...)`, `__has_attribute(...)`, `__has_c_attribute(...)`,
   `__has_declspec_attribute(...)`, `__has_feature(...)`,
-  `__has_extension(...)`, and `__has_warning(...)`, including common GNU/Clang
+  `__has_extension(...)`, `__has_warning(...)`, and `__is_identifier(...)`,
+  including common GNU/Clang
   attribute probes such as `nonnull`, `warn_unused_result`, `returns_nonnull`,
-  `noinline`, `pure`, `const`, `malloc`, `cold`, and `hot`
+  `noinline`, `pure`, `const`, `malloc`, `cold`, `hot`, `weak`, `used`,
+  `section`, `gnu_inline`, `alloc_size`, `alloc_align`, `format_arg`,
+  `unavailable`, accepted double-underscore aliases such as `align`,
+  `__align__`, and `__deprecated__`, plus `alias`, `mode`, `vector_size`,
+  `transparent_union`,
+  `no_instrument_function`, and `scalar_storage_order`, standard C attribute
+  probes such as `nodiscard`, `maybe_unused`, `reproducible`, and
+  `unsequenced`, scoped C attribute probes such
+  as `gnu::unused`, `__gnu__::__unused__`, `__gcc__::__unused__`,
+  `gcc::unused`, `clang::fallthrough`, and `__clang__::__fallthrough__`,
+  declspec probes such as `align` and `deprecated`,
+  feature probes for implemented C features such as variadic macros, `_Generic`,
+  `_Generic` controlling type operands, supported `_BitInt` widths, and
+  compatibility probes for
+  attribute messages and no-op nullability annotations; feature and declspec
+  probes also accept double-underscore aliases such as `__c_static_assert__`
+  and `__dllexport__`, while `__is_identifier` rejects parser-reserved
+  extension type names,
+  plus supported GNU builtin probes including byte-swap, bit-count, checked
+  arithmetic, floating
+  classification/infinity, address introspection, stdarg, atomic, vector,
+  allocation, formatted-output, floating math aliases, fortified libc, and
+  string/memory helpers; accepted warning probes include active diagnostics and
+  compatibility switches such as `-Wextra` and `-Wpedantic`
 - integer `#if` expressions using unary, arithmetic, shift, comparison,
   equality, bitwise, logical, conditional, and parenthesized operators, including
   decimal, octal, hexadecimal, binary, character constants, and common integer
@@ -64,6 +88,7 @@ Known internal preprocessor gaps:
 
 - exact host compiler predefined macro parity
 - compiler-specific system header extensions beyond `#include_next`
+- C23 `#embed` / `__has_embed`
 - macro expansion corner cases around disabled/re-enabled macro identifiers
 - full source-map propagation from preprocessing tokens into later diagnostics
 

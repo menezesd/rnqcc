@@ -1533,6 +1533,7 @@ const VIRTUAL_COMPAT_HEADERS: &[VirtualHeaderInfo] = &[
     virtual_header("string.h", Some("__rnqcc_string_h")),
     virtual_header("strings.h", Some("__rnqcc_strings_h")),
     virtual_header("stdalign.h", None),
+    virtual_header("stdckdint.h", Some("__rnqcc_stdckdint_h")),
     virtual_header("stdnoreturn.h", None),
     virtual_header("sys/stat.h", Some("__rnqcc_sys_stat_h")),
     virtual_header("sys/cdefs.h", Some("__rnqcc_sys_cdefs_h")),
@@ -3642,6 +3643,24 @@ fn include_virtual_compat_header(name: &str, macros: &mut HashMap<String, MacroD
             );
             String::new()
         }
+        "stdckdint.h" => {
+            for (name, builtin) in [
+                ("ckd_add", "__builtin_add_overflow"),
+                ("ckd_sub", "__builtin_sub_overflow"),
+                ("ckd_mul", "__builtin_mul_overflow"),
+            ] {
+                define_builtin_function_macro(
+                    macros,
+                    name,
+                    &["result", "a", "b"],
+                    &format!("{builtin}((a), (b), (result))"),
+                );
+            }
+            if virtual_header_include_once(macros, "stdckdint.h") {
+                return String::new();
+            }
+            include_str!("virtual_headers/stdckdint.h").to_string()
+        }
         "stdnoreturn.h" => {
             macros.insert(
                 "noreturn".to_string(),
@@ -4901,10 +4920,9 @@ fn replace_preprocessor_predicates(
         if let Some(parsed) = preprocess::predicate::parse_predicate_operand(&tokens, index)? {
             match parsed.operand {
                 preprocess::predicate::PredicateOperand::Defined { name } => {
-                    out.push(tokens[index].clone_with_text(
-                        preprocess::token::PpTokenKind::Number(
-                            if macros.contains_key(&name) { "1" } else { "0" }.to_string(),
-                        ),
+                    out.push(predicate_number_token(
+                        &tokens[index],
+                        macros.contains_key(&name),
                     ));
                     index = parsed.next_index;
                 }
@@ -4939,102 +4957,63 @@ fn replace_preprocessor_predicates(
                     )
                     .is_some();
                     let found = found || virtual_header_is_available(&spec, include_next);
-                    out.push(tokens[index].clone_with_text(
-                        preprocess::token::PpTokenKind::Number(
-                            if found { "1" } else { "0" }.to_string(),
-                        ),
-                    ));
+                    out.push(predicate_number_token(&tokens[index], found));
                     index = parsed.next_index;
                 }
                 preprocess::predicate::PredicateOperand::HasBuiltin { name } => {
-                    out.push(
-                        tokens[index].clone_with_text(preprocess::token::PpTokenKind::Number(
-                            if internal_has_builtin(&name) {
-                                "1"
-                            } else {
-                                "0"
-                            }
-                            .to_string(),
-                        )),
-                    );
+                    out.push(predicate_number_token(
+                        &tokens[index],
+                        preprocess::probes::has_builtin(&name),
+                    ));
                     index = parsed.next_index;
                 }
                 preprocess::predicate::PredicateOperand::HasAttribute { name } => {
-                    out.push(
-                        tokens[index].clone_with_text(preprocess::token::PpTokenKind::Number(
-                            if internal_has_attribute(&name) {
-                                "1"
-                            } else {
-                                "0"
-                            }
-                            .to_string(),
-                        )),
-                    );
+                    out.push(predicate_number_token(
+                        &tokens[index],
+                        preprocess::probes::has_attribute(&name),
+                    ));
                     index = parsed.next_index;
                 }
                 preprocess::predicate::PredicateOperand::HasCAttribute { name } => {
-                    out.push(
-                        tokens[index].clone_with_text(preprocess::token::PpTokenKind::Number(
-                            if internal_has_c_attribute(&name) {
-                                "1"
-                            } else {
-                                "0"
-                            }
-                            .to_string(),
-                        )),
-                    );
+                    out.push(predicate_number_token(
+                        &tokens[index],
+                        preprocess::probes::has_c_attribute(&name),
+                    ));
                     index = parsed.next_index;
                 }
                 preprocess::predicate::PredicateOperand::HasDeclspecAttribute { name } => {
-                    out.push(
-                        tokens[index].clone_with_text(preprocess::token::PpTokenKind::Number(
-                            if internal_has_declspec_attribute(&name) {
-                                "1"
-                            } else {
-                                "0"
-                            }
-                            .to_string(),
-                        )),
-                    );
+                    out.push(predicate_number_token(
+                        &tokens[index],
+                        preprocess::probes::has_declspec_attribute(&name),
+                    ));
                     index = parsed.next_index;
                 }
                 preprocess::predicate::PredicateOperand::HasFeature { name } => {
-                    out.push(
-                        tokens[index].clone_with_text(preprocess::token::PpTokenKind::Number(
-                            if internal_has_feature(&name) {
-                                "1"
-                            } else {
-                                "0"
-                            }
-                            .to_string(),
-                        )),
-                    );
+                    out.push(predicate_number_token(
+                        &tokens[index],
+                        preprocess::probes::has_feature(&name),
+                    ));
                     index = parsed.next_index;
                 }
                 preprocess::predicate::PredicateOperand::HasExtension { name } => {
-                    out.push(
-                        tokens[index].clone_with_text(preprocess::token::PpTokenKind::Number(
-                            if internal_has_extension(&name) {
-                                "1"
-                            } else {
-                                "0"
-                            }
-                            .to_string(),
-                        )),
-                    );
+                    out.push(predicate_number_token(
+                        &tokens[index],
+                        preprocess::probes::has_extension(&name),
+                    ));
                     index = parsed.next_index;
                 }
                 preprocess::predicate::PredicateOperand::HasWarning { name } => {
-                    out.push(
-                        tokens[index].clone_with_text(preprocess::token::PpTokenKind::Number(
-                            if internal_has_warning(&name) {
-                                "1"
-                            } else {
-                                "0"
-                            }
-                            .to_string(),
-                        )),
-                    );
+                    out.push(predicate_number_token(
+                        &tokens[index],
+                        preprocess::probes::has_warning(&name),
+                    ));
+                    index = parsed.next_index;
+                }
+                preprocess::predicate::PredicateOperand::IsIdentifier { name } => {
+                    out.push(predicate_number_token(
+                        &tokens[index],
+                        preprocess::probes::is_identifier(&name),
+                    ));
                     index = parsed.next_index;
                 }
             }
@@ -5046,171 +5025,13 @@ fn replace_preprocessor_predicates(
     Ok(preprocess::emit::emit_tokens(&out))
 }
 
-fn internal_has_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "__builtin_expect"
-            | "__builtin_expect_with_probability"
-            | "__builtin_types_compatible_p"
-            | "__builtin_choose_expr"
-            | "__builtin_offsetof"
-            | "__builtin_unreachable"
-            | "__builtin_trap"
-            | "__builtin_constant_p"
-            | "__builtin_assume_aligned"
-            | "__builtin_prefetch"
-            | "__builtin_bswap32"
-            | "__builtin_bswap64"
-            | "__builtin_object_size"
-            | "__builtin_dynamic_object_size"
-            | "__builtin_memcpy"
-            | "__builtin_memmove"
-            | "__builtin_memset"
-            | "__builtin_memcmp"
-            | "__builtin_memchr"
-            | "__builtin_mempcpy"
-            | "__builtin_strlen"
-            | "__builtin_strcmp"
-            | "__builtin_strncmp"
-            | "__builtin_strchr"
-            | "__builtin_strrchr"
-            | "__builtin_strstr"
-            | "__builtin_strspn"
-            | "__builtin_strcspn"
-            | "__builtin_strcpy"
-            | "__builtin_stpcpy"
-            | "__builtin_strncpy"
-            | "__builtin_strcat"
-            | "__builtin_strncat"
-            | "__builtin_extract_return_addr"
-            | "__builtin_stack_save"
-            | "__builtin_stack_restore"
-            | "__builtin_sqrtl"
-            | "__builtin_atan2l"
-            | "__builtin___memcpy_chk"
-            | "__builtin___memmove_chk"
-            | "__builtin___memset_chk"
-            | "__builtin___strcpy_chk"
-            | "__builtin___stpcpy_chk"
-            | "__builtin___strncpy_chk"
-            | "__builtin___strcat_chk"
-            | "__builtin___strncat_chk"
-            | "__atomic_load_n"
-            | "__atomic_store_n"
-            | "__atomic_exchange_n"
-            | "__atomic_compare_exchange_n"
-            | "__atomic_thread_fence"
-            | "__atomic_signal_fence"
-            | "__atomic_add_fetch"
-            | "__atomic_sub_fetch"
-            | "__atomic_and_fetch"
-            | "__atomic_or_fetch"
-            | "__atomic_xor_fetch"
-            | "__atomic_fetch_add"
-            | "__atomic_fetch_sub"
-            | "__atomic_fetch_and"
-            | "__atomic_fetch_nand"
-            | "__atomic_fetch_or"
-            | "__atomic_fetch_xor"
-            | "__atomic_nand_fetch"
-            | "__sync_add_and_fetch"
-            | "__sync_sub_and_fetch"
-            | "__sync_and_and_fetch"
-            | "__sync_nand_and_fetch"
-            | "__sync_or_and_fetch"
-            | "__sync_xor_and_fetch"
-            | "__sync_fetch_and_add"
-            | "__sync_fetch_and_sub"
-            | "__sync_fetch_and_and"
-            | "__sync_fetch_and_nand"
-            | "__sync_fetch_and_or"
-            | "__sync_fetch_and_xor"
-            | "__sync_bool_compare_and_swap"
-            | "__sync_val_compare_and_swap"
-            | "__sync_synchronize"
-    )
-}
-
-fn internal_has_attribute(name: &str) -> bool {
-    matches!(
-        name,
-        "aligned"
-            | "__aligned__"
-            | "always_inline"
-            | "__always_inline__"
-            | "deprecated"
-            | "fallthrough"
-            | "__fallthrough__"
-            | "format"
-            | "__format__"
-            | "cold"
-            | "__cold__"
-            | "const"
-            | "__const__"
-            | "hot"
-            | "__hot__"
-            | "malloc"
-            | "__malloc__"
-            | "noinline"
-            | "__noinline__"
-            | "nonnull"
-            | "__nonnull__"
-            | "noreturn"
-            | "__noreturn__"
-            | "packed"
-            | "__packed__"
-            | "pure"
-            | "__pure__"
-            | "returns_nonnull"
-            | "__returns_nonnull__"
-            | "unused"
-            | "__unused__"
-            | "visibility"
-            | "__visibility__"
-            | "warn_unused_result"
-            | "__warn_unused_result__"
-    )
-}
-
-fn internal_has_c_attribute(name: &str) -> bool {
-    matches!(
-        name,
-        "deprecated" | "fallthrough" | "maybe_unused" | "nodiscard" | "noreturn"
-    )
-}
-
-fn internal_has_declspec_attribute(name: &str) -> bool {
-    matches!(name, "dllexport" | "dllimport" | "noreturn")
-}
-
-fn internal_has_feature(name: &str) -> bool {
-    matches!(
-        name,
-        "c_alignas"
-            | "c_alignof"
-            | "c_atomic"
-            | "c_static_assert"
-            | "c_thread_local"
-            | "attribute_deprecated_with_message"
-            | "attribute_unavailable_with_message"
-    )
-}
-
-fn internal_has_extension(name: &str) -> bool {
-    internal_has_feature(name)
-}
-
-fn internal_has_warning(name: &str) -> bool {
-    matches!(
-        name,
-        "-Wall"
-            | "-Wunreachable"
-            | "-Wmissing-return"
-            | "-Werror"
-            | "-Wunknown-pragmas"
-            | "-Wcompare-distinct-pointer-types"
-            | "-Wdeprecated-declarations"
-    )
+fn predicate_number_token(
+    token: &preprocess::token::PpToken,
+    value: bool,
+) -> preprocess::token::PpToken {
+    token.clone_with_text(preprocess::token::PpTokenKind::Number(
+        if value { "1" } else { "0" }.to_string(),
+    ))
 }
 
 fn define_builtin_macro(macros: &mut HashMap<String, MacroDef>, name: &str, value: &str) {

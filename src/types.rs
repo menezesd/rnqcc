@@ -1,229 +1,9 @@
 // ============================================================
-// Target & Compiler Stage
+// Target & Compiler Stage (re-exported from target module)
 // ============================================================
-#![allow(dead_code)]
+pub use crate::target::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Arch {
-    X86_64,
-    AArch64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TargetOs {
-    MacOs,
-    Linux,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Target {
-    pub arch: Arch,
-    pub os: TargetOs,
-}
-
-impl Target {
-    pub const SUPPORTED: [Self; 4] = [
-        Self::x86_64_linux(),
-        Self::x86_64_macos(),
-        Self::aarch64_linux(),
-        Self::aarch64_macos(),
-    ];
-    pub const ALIASES: [(&'static str, Self); 14] = [
-        ("linux", Self::x86_64_linux()),
-        ("osx", Self::x86_64_macos()),
-        ("macos", Self::x86_64_macos()),
-        ("x86_64-linux", Self::x86_64_linux()),
-        ("x86_64-unknown-linux-gnu", Self::x86_64_linux()),
-        ("x86_64-osx", Self::x86_64_macos()),
-        ("x86_64-macos", Self::x86_64_macos()),
-        ("x86_64-apple-darwin", Self::x86_64_macos()),
-        ("arm64-linux", Self::aarch64_linux()),
-        ("aarch64-linux", Self::aarch64_linux()),
-        ("aarch64-unknown-linux-gnu", Self::aarch64_linux()),
-        ("arm64-macos", Self::aarch64_macos()),
-        ("aarch64-macos", Self::aarch64_macos()),
-        ("aarch64-apple-darwin", Self::aarch64_macos()),
-    ];
-    pub const fn x86_64_linux() -> Self {
-        Target {
-            arch: Arch::X86_64,
-            os: TargetOs::Linux,
-        }
-    }
-
-    pub const fn x86_64_macos() -> Self {
-        Target {
-            arch: Arch::X86_64,
-            os: TargetOs::MacOs,
-        }
-    }
-
-    pub const fn aarch64_linux() -> Self {
-        Target {
-            arch: Arch::AArch64,
-            os: TargetOs::Linux,
-        }
-    }
-
-    pub const fn aarch64_macos() -> Self {
-        Target {
-            arch: Arch::AArch64,
-            os: TargetOs::MacOs,
-        }
-    }
-
-    pub fn show_symbol(&self, name: &str) -> String {
-        let name = mangle_assembly_label(name);
-        match self.os {
-            TargetOs::MacOs => format!("_{}", name),
-            TargetOs::Linux => name,
-        }
-    }
-
-    pub fn show_symbol_with_offset(&self, name: &str, offset: i64) -> String {
-        let mut name = self.show_symbol(name);
-        name.push_str(&assembly_offset_suffix(offset));
-        name
-    }
-
-    pub fn show_data_label_expr(&self, name: &str) -> String {
-        let Some(offset) = split_data_offset(name) else {
-            return self.show_symbol(name);
-        };
-        self.show_symbol_with_offset(offset.base, offset.offset)
-    }
-
-    pub fn parse(name: &str) -> Option<Self> {
-        Self::ALIASES
-            .iter()
-            .find_map(|(alias, target)| (*alias == name).then_some(*target))
-    }
-
-    pub fn triple_name(&self) -> &'static str {
-        match (self.arch, self.os) {
-            (Arch::X86_64, TargetOs::Linux) => "x86_64-linux",
-            (Arch::X86_64, TargetOs::MacOs) => "x86_64-macos",
-            (Arch::AArch64, TargetOs::Linux) => "aarch64-linux",
-            (Arch::AArch64, TargetOs::MacOs) => "aarch64-macos",
-        }
-    }
-
-    pub fn host() -> Self {
-        match (std::env::consts::ARCH, std::env::consts::OS) {
-            ("aarch64", "macos") => Self::aarch64_macos(),
-            ("x86_64", "macos") => Self::x86_64_macos(),
-            ("aarch64", _) => Self::aarch64_linux(),
-            _ => Self::x86_64_linux(),
-        }
-    }
-
-    pub fn cc_arch_args(&self) -> Vec<&'static str> {
-        match (self.arch, self.os) {
-            (Arch::X86_64, TargetOs::MacOs) => vec!["-arch", "x86_64"],
-            (Arch::AArch64, TargetOs::MacOs) => vec!["-arch", "arm64"],
-            (_, TargetOs::Linux) => Vec::new(),
-        }
-    }
-
-    pub fn can_use_host_driver(&self) -> bool {
-        let host = Self::host();
-        *self == host || (self.os == TargetOs::MacOs && host.os == TargetOs::MacOs)
-    }
-
-    pub fn long_double_size(&self) -> usize {
-        match (self.arch, self.os) {
-            (Arch::AArch64, TargetOs::MacOs) => 8,
-            _ => 16,
-        }
-    }
-}
-
-fn is_assembly_label_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '.')
-}
-
-pub struct DataOffset<'a> {
-    pub base: &'a str,
-    pub offset: i64,
-}
-
-pub fn split_data_offset(name: &str) -> Option<DataOffset<'_>> {
-    let pos = name
-        .char_indices()
-        .rev()
-        .find(|(idx, ch)| *idx > 0 && matches!(ch, '+' | '-'))?
-        .0;
-    let offset = name[pos..].parse().ok()?;
-    Some(DataOffset {
-        base: &name[..pos],
-        offset,
-    })
-}
-
-pub fn assembly_offset_suffix(offset: i64) -> String {
-    if offset >= 0 {
-        format!("+{offset}")
-    } else {
-        offset.to_string()
-    }
-}
-
-pub fn is_valid_universal_character_value(value: u32) -> bool {
-    validate_universal_character_value(value).is_ok()
-}
-
-pub fn validate_universal_character_value(value: u32) -> Result<(), &'static str> {
-    if matches!(value, 0x24 | 0x40 | 0x60)
-        || (0xA0..=0xD7FF).contains(&value)
-        || (0xE000..=0x10FFFF).contains(&value)
-    {
-        Ok(())
-    } else if value > 0x10FFFF || (0xD800..=0xDFFF).contains(&value) {
-        Err("out-of-range universal character")
-    } else {
-        Err("basic character universal character")
-    }
-}
-
-pub fn universal_character_error_message(context: &str, reason: &str) -> String {
-    format!("invalid {context}: {reason}")
-}
-
-pub fn universal_character_escape_error(reason: &str) -> String {
-    universal_character_error_message("universal character escape", reason)
-}
-
-pub fn universal_character_name_error(reason: &str) -> String {
-    universal_character_error_message("universal character name", reason)
-}
-
-fn mangle_assembly_label(name: &str) -> String {
-    if name.chars().all(is_assembly_label_char) && !name.starts_with("__rnqcc_u") {
-        return name.to_string();
-    }
-
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in name.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-
-    let mut out = String::from("__rnqcc_u");
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch);
-        } else if ch == '_' {
-            out.push_str("__");
-        } else {
-            out.push_str("_x");
-            out.push_str(&format!("{:x}", ch as u32));
-            out.push('_');
-        }
-    }
-    out.push_str("_h");
-    out.push_str(&format!("{hash:016x}"));
-    out
-}
+use indexmap::IndexMap;
 
 #[derive(Debug, PartialEq)]
 pub enum Stage {
@@ -269,7 +49,7 @@ impl Stage {
 // C Types
 // ============================================================
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CType {
     Char,
     SChar,
@@ -494,10 +274,7 @@ impl FullType {
     }
 
     /// Total byte size with struct definitions
-    pub fn byte_size_with(
-        &self,
-        struct_defs: &std::collections::HashMap<String, StructDef>,
-    ) -> usize {
+    pub fn byte_size_with(&self, struct_defs: &IndexMap<String, StructDef>) -> usize {
         match self {
             FullType::Struct(tag) => struct_defs.get(tag).map(|d| d.size).unwrap_or(0),
             FullType::Array { elem, size } => elem.byte_size_with(struct_defs) * size,
@@ -526,10 +303,7 @@ impl FullType {
     }
 
     /// Alignment requirement with struct definitions available.
-    pub fn alignment_with(
-        &self,
-        struct_defs: &std::collections::HashMap<String, StructDef>,
-    ) -> usize {
+    pub fn alignment_with(&self, struct_defs: &IndexMap<String, StructDef>) -> usize {
         match self {
             FullType::Struct(tag) => struct_defs.get(tag).map(|d| d.alignment).unwrap_or(1),
             FullType::Array { elem, .. } => elem.alignment_with(struct_defs),
@@ -645,7 +419,7 @@ impl StructDef {
     fn flatten_fields(
         &self,
         base_offset: usize,
-        struct_defs: &std::collections::HashMap<String, StructDef>,
+        struct_defs: &IndexMap<String, StructDef>,
     ) -> Vec<(usize, CType)> {
         let mut fields = Vec::new();
         for mem in &self.members {
@@ -692,7 +466,7 @@ impl StructDef {
         &self,
         mem: &StructMember,
         base_offset: usize,
-        struct_defs: &std::collections::HashMap<String, StructDef>,
+        struct_defs: &IndexMap<String, StructDef>,
     ) -> Vec<(usize, CType)> {
         let abs_offset = base_offset + mem.offset;
         match &mem.member_full_type {
@@ -722,10 +496,7 @@ impl StructDef {
         }
     }
 
-    pub fn classify_with(
-        &self,
-        struct_defs: &std::collections::HashMap<String, StructDef>,
-    ) -> Vec<ParamClass> {
+    pub fn classify_with(&self, struct_defs: &IndexMap<String, StructDef>) -> Vec<ParamClass> {
         if self.size > 16 {
             return vec![ParamClass::Memory];
         }
@@ -802,7 +573,7 @@ impl StructDef {
 
     pub fn classify(&self) -> Vec<ParamClass> {
         // Legacy version without struct_defs — works for structs without nested structs
-        self.classify_with(&std::collections::HashMap::new())
+        self.classify_with(&IndexMap::new())
     }
 }
 
@@ -822,7 +593,7 @@ pub struct StructMember {
 impl StructDef {
     pub fn from_declaration(
         declaration: &StructDeclaration,
-        struct_defs: &std::collections::HashMap<String, StructDef>,
+        struct_defs: &IndexMap<String, StructDef>,
     ) -> Result<Self, String> {
         Self::from_members_ex(
             &declaration.tag,
@@ -839,107 +610,23 @@ impl StructDef {
     pub fn from_members(
         tag: &str,
         members: &[MemberDeclaration],
-        struct_defs: &std::collections::HashMap<String, StructDef>,
+        struct_defs: &IndexMap<String, StructDef>,
     ) -> Result<Self, String> {
         Self::from_members_ex(tag, members, struct_defs, false, false, None, false)
-    }
-
-    pub fn from_members_packed(
-        tag: &str,
-        members: &[MemberDeclaration],
-        struct_defs: &std::collections::HashMap<String, StructDef>,
-    ) -> Result<Self, String> {
-        Self::from_members_ex(tag, members, struct_defs, false, true, None, false)
-    }
-
-    pub fn from_members_aligned(
-        tag: &str,
-        members: &[MemberDeclaration],
-        struct_defs: &std::collections::HashMap<String, StructDef>,
-        alignment: std::num::NonZeroUsize,
-    ) -> Result<Self, String> {
-        Self::from_members_ex(
-            tag,
-            members,
-            struct_defs,
-            false,
-            false,
-            Some(alignment),
-            false,
-        )
-    }
-
-    pub fn from_members_packed_aligned(
-        tag: &str,
-        members: &[MemberDeclaration],
-        struct_defs: &std::collections::HashMap<String, StructDef>,
-        alignment: std::num::NonZeroUsize,
-    ) -> Result<Self, String> {
-        Self::from_members_ex(
-            tag,
-            members,
-            struct_defs,
-            false,
-            true,
-            Some(alignment),
-            false,
-        )
     }
 
     pub fn from_members_union(
         tag: &str,
         members: &[MemberDeclaration],
-        struct_defs: &std::collections::HashMap<String, StructDef>,
+        struct_defs: &IndexMap<String, StructDef>,
     ) -> Result<Self, String> {
         Self::from_members_ex(tag, members, struct_defs, true, false, None, false)
-    }
-
-    pub fn from_members_union_packed(
-        tag: &str,
-        members: &[MemberDeclaration],
-        struct_defs: &std::collections::HashMap<String, StructDef>,
-    ) -> Result<Self, String> {
-        Self::from_members_ex(tag, members, struct_defs, true, true, None, false)
-    }
-
-    pub fn from_members_union_aligned(
-        tag: &str,
-        members: &[MemberDeclaration],
-        struct_defs: &std::collections::HashMap<String, StructDef>,
-        alignment: std::num::NonZeroUsize,
-    ) -> Result<Self, String> {
-        Self::from_members_ex(
-            tag,
-            members,
-            struct_defs,
-            true,
-            false,
-            Some(alignment),
-            false,
-        )
-    }
-
-    pub fn from_members_union_packed_aligned(
-        tag: &str,
-        members: &[MemberDeclaration],
-        struct_defs: &std::collections::HashMap<String, StructDef>,
-        alignment: std::num::NonZeroUsize,
-    ) -> Result<Self, String> {
-        Self::from_members_ex(
-            tag,
-            members,
-            struct_defs,
-            true,
-            true,
-            Some(alignment),
-            false,
-        )
     }
 
     fn from_members_ex(
         tag: &str,
         members: &[MemberDeclaration],
-        struct_defs: &std::collections::HashMap<String, StructDef>,
+        struct_defs: &IndexMap<String, StructDef>,
         is_union: bool,
         packed: bool,
         aggregate_alignment: Option<std::num::NonZeroUsize>,
@@ -1190,7 +877,7 @@ fn round_up_to(value: usize, alignment: usize) -> Result<usize, String> {
 
 fn member_size_align(
     ft: &FullType,
-    struct_defs: &std::collections::HashMap<String, StructDef>,
+    struct_defs: &IndexMap<String, StructDef>,
 ) -> Result<(usize, usize), String> {
     match ft {
         FullType::Scalar(t) => Ok((
@@ -1734,14 +1421,14 @@ impl PartialEq for TackyVal {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TackyUnaryOp {
     Negate,
     Complement,
     LogicalNot,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TackyBinaryOp {
     Add,
     Sub,
@@ -1940,7 +1627,7 @@ pub enum TackyInstr {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TackyFunction {
     pub name: String,
     pub return_type: CType,
@@ -1958,7 +1645,7 @@ pub struct TackyFunction {
     pub struct_param_groups: Vec<(usize, usize, Vec<bool>)>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TackyStaticVar {
     pub name: String,
     pub global: bool,
@@ -1967,14 +1654,14 @@ pub struct TackyStaticVar {
     pub init_values: Vec<StaticInit>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TackyStaticConstant {
     pub name: String,
     pub alignment: usize,
     pub init: StaticInit,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TackyTopLevel {
     Function(TackyFunction),
     StaticVar(TackyStaticVar),
@@ -1982,268 +1669,28 @@ pub enum TackyTopLevel {
     Alias { name: String, target: String },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TackyProgram {
     pub top_level: Vec<TackyTopLevel>,
     pub global_vars: std::collections::HashSet<String>,
     pub thread_local_vars: std::collections::HashSet<String>,
-    pub symbol_types: std::collections::HashMap<String, CType>,
-    pub symbol_alignments: std::collections::HashMap<String, usize>,
+    pub symbol_types: IndexMap<String, CType>,
+    pub symbol_alignments: IndexMap<String, usize>,
     /// Array/struct storage sizes
-    pub array_sizes: std::collections::HashMap<String, usize>,
+    pub array_sizes: IndexMap<String, usize>,
     /// Struct definitions for ABI classification
-    pub struct_defs: std::collections::HashMap<String, StructDef>,
+    pub struct_defs: IndexMap<String, StructDef>,
     /// Map from variable name to struct tag
     pub var_struct_tags: std::collections::HashMap<String, String>,
 }
 
 // ============================================================
-// Assembly IR
+// Assembly IR (re-exported from backend::common)
 // ============================================================
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum AsmType {
-    Byte,       // 1-byte char
-    Word,       // 16-bit short
-    Longword,   // 32-bit int
-    Quadword,   // 64-bit long
-    Octword,    // 128-bit integer
-    Float,      // 32-bit float (XMM)
-    Double,     // 64-bit float (XMM)
-    LongDouble, // target long double storage: x87 extended or binary128
-}
-
-impl From<CType> for AsmType {
-    fn from(t: CType) -> Self {
-        match t {
-            CType::Char | CType::SChar | CType::UChar | CType::Bool => AsmType::Byte,
-            CType::Short | CType::UShort => AsmType::Word,
-            CType::Int | CType::UInt => AsmType::Longword,
-            CType::Long | CType::ULong | CType::Pointer => AsmType::Quadword,
-            CType::Int128 | CType::UInt128 => AsmType::Octword,
-            CType::Float => AsmType::Float,
-            CType::Double => AsmType::Double,
-            CType::LongDouble => AsmType::LongDouble,
-            CType::Void => AsmType::Longword,
-            CType::Struct => AsmType::Longword, // struct size tracked separately
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum XmmReg {
-    XMM0,
-    XMM1,
-    XMM2,
-    XMM3,
-    XMM4,
-    XMM5,
-    XMM6,
-    XMM7,
-    XMM8,
-    XMM9,
-    XMM10,
-    XMM11,
-    XMM12,
-    XMM13,
-    XMM14,
-    XMM15,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Reg {
-    AX,
-    BX,
-    CX,
-    DX,
-    DI,
-    SI,
-    R8,
-    R9,
-    R10,
-    R11,
-    R12,
-    R13,
-    R14,
-    R15,
-    SP,
-    BP,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum AsmOperand {
-    Imm(i64),
-    Reg(Reg),
-    Xmm(XmmReg),
-    Pseudo(String),
-    /// Aggregate object at byte offset (for arrays/structs)
-    PseudoMem(String, i32),
-    Stack(i64),
-    StackArg(i32),
-    Data(String),
-    TlsData(String, i32),
-    /// Indexed addressing: base_reg + index_reg * scale
-    Indexed(Reg, Reg, i32),
-}
-
-#[derive(Debug, Clone)]
-pub enum AsmUnaryOp {
-    Neg,
-    Not,
-}
-
-#[derive(Debug, Clone)]
-pub enum AsmBinaryOp {
-    Add,
-    AddSetFlags,
-    Adc,
-    Sub,
-    SubSetFlags,
-    Sbb,
-    Mul,
-    SDiv,
-    UDiv,
-    DivDouble, // divsd (double division only)
-    And,
-    Nand,
-    Or,
-    Xor,
-    Sal,
-    Sar,
-    Shr,
-}
-
-#[derive(Debug, Clone)]
-pub enum AsmX87BinaryOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-}
-
-#[derive(Debug, Clone)]
-pub enum CondCode {
-    E,
-    NE,
-    L,
-    LE,
-    G,
-    GE,
-    // Unsigned
-    A,  // above
-    AE, // above or equal
-    B,  // below
-    BE, // below or equal
-    P,  // parity set
-    NP, // parity clear
-}
-
-#[derive(Debug, Clone)]
-pub enum AsmInstr {
-    Mov(AsmType, AsmOperand, AsmOperand),
-    Movsx(AsmType, AsmType, AsmOperand, AsmOperand), // (src_type, dst_type, src, dst) sign-extend
-    MovZeroExtend(AsmType, AsmType, AsmOperand, AsmOperand), // (src_type, dst_type, src, dst) zero-extend
-    Unary(AsmType, AsmUnaryOp, AsmOperand),
-    Binary(AsmType, AsmBinaryOp, AsmOperand, AsmOperand),
-    MulFull(AsmType, AsmOperand), // RDX:RAX = RAX * operand
-    Idiv(AsmType, AsmOperand),
-    Div(AsmType, AsmOperand), // unsigned division
-    Cdq(AsmType),             // Longword=cdq, Quadword=cqo
-    Cmp(AsmType, AsmOperand, AsmOperand),
-    Jmp(String),
-    NonlocalJmp(String),
-    JmpIndirect(AsmOperand),
-    JmpCC(CondCode, String),
-    SetCC(CondCode, AsmOperand),
-    Label(String),
-    LoadLabelAddress(String, AsmOperand),
-    BuiltinSetjmp {
-        buf: AsmOperand,
-        dst: AsmOperand,
-        label: String,
-        end_label: String,
-    },
-    BuiltinLongjmp {
-        buf: AsmOperand,
-        value: AsmOperand,
-    },
-    Push(AsmOperand),
-    Call(String, usize, usize, bool, bool), // name, int_reg_args, sse_reg_args, indirect, local
-    Pop(Reg),
-    Cvtsi2sd(AsmType, AsmOperand, AsmOperand), // int/long → double
-    Cvtsi2ss(AsmType, AsmOperand, AsmOperand), // int/long → float
-    Cvttsd2si(AsmType, AsmOperand, AsmOperand), // double → int/long (truncate)
-    Cvttss2si(AsmType, AsmOperand, AsmOperand), // float → int/long (truncate)
-    Cvtss2sd(AsmOperand, AsmOperand),          // float → double
-    Cvtsd2ss(AsmOperand, AsmOperand),          // double → float
-    X87Load(AsmType, AsmOperand),
-    X87Store(AsmOperand),
-    X87StoreFloat(AsmType, AsmOperand),
-    X87StoreInt(AsmType, AsmOperand),
-    X87LoadIndirect(AsmType, Reg),
-    X87StoreIndirect(Reg),
-    X87UnaryNeg,
-    X87Binary(AsmX87BinaryOp),
-    X87Compare,
-    /// AArch64-only unsigned integer to double conversion.
-    AArch64UIntToDouble(AsmType, AsmOperand, AsmOperand), // src_type, src, dst
-    /// AArch64-only unsigned integer to float conversion.
-    AArch64UIntToFloat(AsmType, AsmOperand, AsmOperand), // src_type, src, dst
-    /// AArch64-only double to unsigned integer conversion.
-    AArch64DoubleToUInt(AsmType, AsmOperand, AsmOperand), // dst_type, src, dst
-    /// AArch64-only float to unsigned integer conversion.
-    AArch64FloatToUInt(AsmType, AsmOperand, AsmOperand), // dst_type, src, dst
-    /// AArch64-only float/double conversion.
-    AArch64FloatToDouble(AsmOperand, AsmOperand),
-    /// AArch64-only double/float conversion.
-    AArch64DoubleToFloat(AsmOperand, AsmOperand),
-    /// x86-64 SysV varargs call metadata: write the XMM argument count to %al.
-    X86SetVarargsXmmCount(usize),
-    AtomicFence,
-    AtomicRmw(AsmType, AsmBinaryOp, bool, AsmOperand),
-    AtomicExchange(AsmType, AsmOperand),
-    AtomicCompareExchange(AsmType, AsmOperand),
-    AtomicCompareSwap(AsmType, bool, AsmOperand),
-    Lea(AsmOperand, AsmOperand), // leaq src, dst
-    /// Load from memory pointed to by a register: mov (reg), dst
-    LoadIndirect(AsmType, Reg, AsmOperand),
-    /// Store to memory pointed to by a register: mov src, (reg)
-    StoreIndirect(AsmType, AsmOperand, Reg),
-    /// Copy `size` bytes from pointer operand to outgoing call stack at `%rsp + dst_offset`.
-    CopyToStackArg {
-        src_ptr: AsmOperand,
-        dst_offset: i32,
-        size: usize,
-    },
-    /// Copy `size` bytes from incoming call stack at `%rbp + src_offset` to aggregate storage.
-    CopyFromStackArg {
-        src_offset: i32,
-        dst: AsmOperand,
-        size: usize,
-    },
-    /// AArch64-only pointer addition: dst = ptr + index * scale.
-    AArch64AddPtr(AsmOperand, AsmOperand, i64, AsmOperand), // ptr, index, scale, dst
-    /// AArch64-only load after temporary stack allocation rebases local stack operands.
-    AArch64LoadAdjusted(AsmType, AsmOperand, Reg, i32), // type, src, dst register, local rebase
-    /// AArch64-only outgoing call argument store after temporary stack allocation.
-    AArch64StoreOutgoingArg(AsmType, AsmOperand, i32, i32), // type, src, outgoing offset, local rebase
-    /// AArch64-only integer remainder: dst = left % right.
-    AArch64Rem(AsmType, bool, AsmOperand, AsmOperand, AsmOperand), // type, unsigned, left, right, dst
-    /// AArch64-only save/restore of the link register in non-leaf functions.
-    AArch64SaveLink(i32), // stack offset from sp
-    AArch64RestoreLink(i32), // stack offset from sp
-    /// AArch64-only large local storage area support.
-    AArch64AllocateLargeStack(i64),
-    AArch64DeallocateLargeStack(i64),
-    AArch64StoreLargeLocalBase {
-        base_offset: i64,
-        dst_offset: i32,
-    },
-    Unreachable,
-    Ret,
-    AllocateStack(i64),
-    DeallocateStack(i64),
-}
+pub use crate::backend::common::{
+    AsmBinaryOp, AsmInstr, AsmOperand, AsmType, AsmUnaryOp, AsmX87BinaryOp, CondCode, Reg, XmmReg,
+};
 
 #[derive(Debug)]
 pub struct AsmFunction {
@@ -2284,7 +1731,6 @@ pub struct AsmProgram {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     #[test]
     fn host_target_matches_compilation_platform() {
@@ -2402,13 +1848,13 @@ mod tests {
                 packed: false,
             },
         ];
-        let union = StructDef::from_members_union("U", &members, &HashMap::new())?;
+        let union = StructDef::from_members_union("U", &members, &IndexMap::new())?;
 
         assert_eq!(union.size, 8);
         assert_eq!(union.alignment, 8);
         assert!(union.is_union);
         assert_eq!(
-            union.classify_with(&HashMap::new()),
+            union.classify_with(&IndexMap::new()),
             vec![ParamClass::Integer]
         );
         Ok(())

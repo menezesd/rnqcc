@@ -1,5 +1,7 @@
 use crate::types::*;
+use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
 
 const ARG_REGS: [Reg; 8] = [
     Reg::AX,
@@ -21,6 +23,8 @@ const FP_ARG_REGS: [XmmReg; 8] = [
     XmmReg::XMM6,
     XmmReg::XMM7,
 ];
+const RETURN_GP_REGS: [Reg; 2] = [Reg::AX, Reg::DI];
+const RETURN_FP_REGS: [XmmReg; 2] = [XmmReg::XMM0, XmmReg::XMM1];
 const STACK_ALIGNMENT: i32 = 16;
 const STACK_SLOT_SIZE: i32 = 8;
 const MIN_STACK_SLOT_SIZE: i32 = 4;
@@ -39,6 +43,43 @@ struct StackLayout {
     slots: HashMap<String, i32>,
     local_stack_size: i32,
     large_locals: Vec<LargeLocal>,
+}
+
+trait StackSlotLookup {
+    fn stack_slot(&self, name: &str) -> Option<i32>;
+
+    fn is_register_candidate(&self, _name: &str) -> bool {
+        false
+    }
+}
+
+impl StackSlotLookup for HashMap<String, i32> {
+    fn stack_slot(&self, name: &str) -> Option<i32> {
+        self.get(name).copied()
+    }
+}
+
+struct RegisterStackSlots<'a> {
+    slots: &'a HashMap<String, i32>,
+    register_vars: &'a HashSet<String>,
+}
+
+impl StackSlotLookup for RegisterStackSlots<'_> {
+    fn stack_slot(&self, name: &str) -> Option<i32> {
+        self.slots.get(name).copied()
+    }
+
+    fn is_register_candidate(&self, name: &str) -> bool {
+        self.register_vars.contains(name)
+    }
+}
+
+impl Deref for RegisterStackSlots<'_> {
+    type Target = HashMap<String, i32>;
+
+    fn deref(&self) -> &Self::Target {
+        self.slots
+    }
 }
 
 fn align_to(value: i32, alignment: i32) -> i32 {
@@ -107,14 +148,6 @@ fn emit_epilogue(
     instructions.push(AsmInstr::Ret);
 }
 
-fn i128_parts_signed(value: i128) -> (i64, i64) {
-    (value as i64, (value >> 64) as i64)
-}
-
-fn i128_parts_unsigned(value: u128) -> (i64, i64) {
-    (value as u64 as i64, (value >> 64) as u64 as i64)
-}
-
 fn low64_operand(op: &AsmOperand) -> Result<AsmOperand, String> {
     match op {
         AsmOperand::Stack(offset) => Ok(AsmOperand::Stack(*offset)),
@@ -169,11 +202,11 @@ fn i128_part_operands(
             AsmOperand::Imm(if *value < 0 { -1 } else { 0 }),
         )),
         TackyVal::Int128Constant(value) => {
-            let (low, high) = i128_parts_signed(*value);
+            let (low, high) = crate::backend::common::i128_parts_signed(*value);
             Ok((AsmOperand::Imm(low), AsmOperand::Imm(high)))
         }
         TackyVal::UInt128Constant(value) => {
-            let (low, high) = i128_parts_unsigned(*value);
+            let (low, high) = crate::backend::common::i128_parts_unsigned(*value);
             Ok((AsmOperand::Imm(low), AsmOperand::Imm(high)))
         }
         _ => {
@@ -183,19 +216,18 @@ fn i128_part_operands(
     }
 }
 
-fn emit_i128_copy(
+fn emit_i128_copy_to_operand(
     instructions: &mut Vec<AsmInstr>,
     src: &TackyVal,
-    dst: &TackyVal,
+    dst: AsmOperand,
     stack_slots: &HashMap<String, i32>,
     global_vars: &HashSet<String>,
 ) -> Result<(), String> {
-    let dst_op = val_operand(dst, stack_slots, global_vars)?;
-    let dst_low = low64_operand(&dst_op)?;
-    let dst_high = high64_operand(&dst_op)?;
+    let dst_low = low64_operand(&dst)?;
+    let dst_high = high64_operand(&dst)?;
     match src {
         TackyVal::Int128Constant(value) => {
-            let (low, high) = i128_parts_signed(*value);
+            let (low, high) = crate::backend::common::i128_parts_signed(*value);
             instructions.push(AsmInstr::Mov(
                 AsmType::Quadword,
                 AsmOperand::Imm(low),
@@ -208,7 +240,7 @@ fn emit_i128_copy(
             ));
         }
         TackyVal::UInt128Constant(value) => {
-            let (low, high) = i128_parts_unsigned(*value);
+            let (low, high) = crate::backend::common::i128_parts_unsigned(*value);
             instructions.push(AsmInstr::Mov(
                 AsmType::Quadword,
                 AsmOperand::Imm(low),
@@ -227,6 +259,17 @@ fn emit_i128_copy(
         }
     }
     Ok(())
+}
+
+fn emit_i128_copy(
+    instructions: &mut Vec<AsmInstr>,
+    src: &TackyVal,
+    dst: &TackyVal,
+    stack_slots: &HashMap<String, i32>,
+    global_vars: &HashSet<String>,
+) -> Result<(), String> {
+    let dst_op = val_operand(dst, stack_slots, global_vars)?;
+    emit_i128_copy_to_operand(instructions, src, dst_op, stack_slots, global_vars)
 }
 
 fn emit_i128_zero_cmp(
@@ -255,9 +298,197 @@ fn emit_i128_zero_cmp(
     Ok(())
 }
 
+fn emit_i128_unary(
+    instructions: &mut Vec<AsmInstr>,
+    src: &TackyVal,
+    dst: AsmOperand,
+    op: AsmUnaryOp,
+    stack_slots: &HashMap<String, i32>,
+    global_vars: &HashSet<String>,
+) -> Result<(), String> {
+    let (src_low, src_high) = i128_part_operands(src, stack_slots, global_vars)?;
+    let dst_low = low64_operand(&dst)?;
+    let dst_high = high64_operand(&dst)?;
+    instructions.push(AsmInstr::Mov(AsmType::Quadword, src_low, dst_low.clone()));
+    instructions.push(AsmInstr::Mov(AsmType::Quadword, src_high, dst_high.clone()));
+    match op {
+        AsmUnaryOp::Not => {
+            instructions.push(AsmInstr::Unary(AsmType::Quadword, AsmUnaryOp::Not, dst_low));
+            instructions.push(AsmInstr::Unary(
+                AsmType::Quadword,
+                AsmUnaryOp::Not,
+                dst_high,
+            ));
+        }
+        AsmUnaryOp::Neg => {
+            instructions.push(AsmInstr::Unary(
+                AsmType::Quadword,
+                AsmUnaryOp::Not,
+                dst_low.clone(),
+            ));
+            instructions.push(AsmInstr::Unary(
+                AsmType::Quadword,
+                AsmUnaryOp::Not,
+                dst_high.clone(),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::AddSetFlags,
+                AsmOperand::Imm(1),
+                dst_low,
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Adc,
+                AsmOperand::Imm(0),
+                dst_high,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn emit_i128_basic_binary(
+    instructions: &mut Vec<AsmInstr>,
+    op: &TackyBinaryOp,
+    left: &TackyVal,
+    right: &TackyVal,
+    dst: AsmOperand,
+    stack_slots: &HashMap<String, i32>,
+    global_vars: &HashSet<String>,
+) -> Result<bool, String> {
+    if !matches!(
+        op,
+        TackyBinaryOp::Add
+            | TackyBinaryOp::Sub
+            | TackyBinaryOp::BitwiseAnd
+            | TackyBinaryOp::BitwiseOr
+            | TackyBinaryOp::BitwiseXor
+    ) {
+        return Ok(false);
+    }
+
+    emit_i128_copy_to_operand(instructions, left, dst.clone(), stack_slots, global_vars)?;
+    let dst_low = low64_operand(&dst)?;
+    let dst_high = high64_operand(&dst)?;
+    let (right_low, right_high) = i128_part_operands(right, stack_slots, global_vars)?;
+    match op {
+        TackyBinaryOp::BitwiseAnd | TackyBinaryOp::BitwiseOr | TackyBinaryOp::BitwiseXor => {
+            let asm_op = match op {
+                TackyBinaryOp::BitwiseAnd => AsmBinaryOp::And,
+                TackyBinaryOp::BitwiseOr => AsmBinaryOp::Or,
+                TackyBinaryOp::BitwiseXor => AsmBinaryOp::Xor,
+                _ => return Err("internal error: expected bitwise binary op".to_string()),
+            };
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                asm_op.clone(),
+                right_low,
+                dst_low,
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                asm_op,
+                right_high,
+                dst_high,
+            ));
+        }
+        TackyBinaryOp::Add | TackyBinaryOp::Sub => {
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                if matches!(op, TackyBinaryOp::Add) {
+                    AsmBinaryOp::AddSetFlags
+                } else {
+                    AsmBinaryOp::SubSetFlags
+                },
+                right_low,
+                dst_low,
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                if matches!(op, TackyBinaryOp::Add) {
+                    AsmBinaryOp::Adc
+                } else {
+                    AsmBinaryOp::Sbb
+                },
+                right_high,
+                dst_high,
+            ));
+        }
+        _ => return Err("internal error: expected basic 128-bit binary op".to_string()),
+    }
+    Ok(true)
+}
+
+fn emit_i128_return_regs_to_operand(
+    instructions: &mut Vec<AsmInstr>,
+    dst: AsmOperand,
+) -> Result<(), String> {
+    let dst_low = low64_operand(&dst)?;
+    let dst_high = high64_operand(&dst)?;
+    if dst_low != AsmOperand::Reg(Reg::AX) {
+        instructions.push(AsmInstr::Mov(
+            AsmType::Quadword,
+            AsmOperand::Reg(Reg::AX),
+            dst_low,
+        ));
+    }
+    if dst_high != AsmOperand::Reg(Reg::DI) {
+        instructions.push(AsmInstr::Mov(
+            AsmType::Quadword,
+            AsmOperand::Reg(Reg::DI),
+            dst_high,
+        ));
+    }
+    Ok(())
+}
+
+fn emit_i128_helper_binary(
+    instructions: &mut Vec<AsmInstr>,
+    op: &TackyBinaryOp,
+    left: &TackyVal,
+    right: &TackyVal,
+    dst: AsmOperand,
+    ctx: &Aarch64I128Context<'_>,
+) -> Result<bool, String> {
+    let helper = match (op, is_unsigned_val(left, ctx.types)) {
+        (TackyBinaryOp::Mul, _) => "__multi3",
+        (TackyBinaryOp::Div, true) => "__udivti3",
+        (TackyBinaryOp::Div, false) => "__divti3",
+        (TackyBinaryOp::Mod, true) => "__umodti3",
+        (TackyBinaryOp::Mod, false) => "__modti3",
+        _ => return Ok(false),
+    };
+    let (left_low, left_high) = i128_part_operands(left, ctx.stack_slots, ctx.global_vars)?;
+    let (right_low, right_high) = i128_part_operands(right, ctx.stack_slots, ctx.global_vars)?;
+    instructions.push(AsmInstr::Mov(
+        AsmType::Quadword,
+        left_low,
+        AsmOperand::Reg(Reg::AX),
+    ));
+    instructions.push(AsmInstr::Mov(
+        AsmType::Quadword,
+        left_high,
+        AsmOperand::Reg(Reg::DI),
+    ));
+    instructions.push(AsmInstr::Mov(
+        AsmType::Quadword,
+        right_low,
+        AsmOperand::Reg(Reg::SI),
+    ));
+    instructions.push(AsmInstr::Mov(
+        AsmType::Quadword,
+        right_high,
+        AsmOperand::Reg(Reg::DX),
+    ));
+    instructions.push(AsmInstr::Call(helper.to_string(), 4, 0, false, false));
+    emit_i128_return_regs_to_operand(instructions, dst)?;
+    Ok(true)
+}
+
 struct Aarch64I128Context<'a> {
     function_name: &'a str,
-    types: &'a HashMap<String, CType>,
+    types: &'a IndexMap<String, CType>,
     stack_slots: &'a HashMap<String, i32>,
     global_vars: &'a HashSet<String>,
 }
@@ -300,6 +531,99 @@ fn emit_i128_signed_cmp(
     Ok(())
 }
 
+fn emit_i128_unsigned_cmp(
+    instructions: &mut Vec<AsmInstr>,
+    left: &TackyVal,
+    right: &TackyVal,
+    op: &TackyBinaryOp,
+    dst: AsmOperand,
+    ctx: &Aarch64I128Context<'_>,
+) -> Result<(), String> {
+    let (left_low, left_high) = i128_part_operands(left, ctx.stack_slots, ctx.global_vars)?;
+    let (right_low, right_high) = i128_part_operands(right, ctx.stack_slots, ctx.global_vars)?;
+    let id = instructions.len();
+    let true_label = format!("u128_cmp_true.{}.{}", ctx.function_name, id);
+    let end_label = format!("u128_cmp_end.{}.{}", ctx.function_name, id);
+    let (high_true, high_false, low_true) = match op {
+        TackyBinaryOp::GreaterThan => (CondCode::A, CondCode::B, CondCode::A),
+        TackyBinaryOp::GreaterEqual => (CondCode::A, CondCode::B, CondCode::AE),
+        TackyBinaryOp::LessThan => (CondCode::B, CondCode::A, CondCode::B),
+        TackyBinaryOp::LessEqual => (CondCode::B, CondCode::A, CondCode::BE),
+        _ => return Err(format!("unsupported 128-bit unsigned comparison: {:?}", op)),
+    };
+
+    instructions.push(AsmInstr::Mov(
+        AsmType::Longword,
+        AsmOperand::Imm(0),
+        dst.clone(),
+    ));
+    instructions.push(AsmInstr::Cmp(AsmType::Quadword, right_high, left_high));
+    instructions.push(AsmInstr::JmpCC(high_true, true_label.clone()));
+    instructions.push(AsmInstr::JmpCC(high_false, end_label.clone()));
+    instructions.push(AsmInstr::Cmp(AsmType::Quadword, right_low, left_low));
+    instructions.push(AsmInstr::JmpCC(low_true, true_label.clone()));
+    instructions.push(AsmInstr::Jmp(end_label.clone()));
+    instructions.push(AsmInstr::Label(true_label));
+    instructions.push(AsmInstr::Mov(AsmType::Longword, AsmOperand::Imm(1), dst));
+    instructions.push(AsmInstr::Label(end_label));
+    Ok(())
+}
+
+fn emit_i128_eq_cmp(
+    instructions: &mut Vec<AsmInstr>,
+    left: &TackyVal,
+    right: &TackyVal,
+    op: &TackyBinaryOp,
+    dst: AsmOperand,
+    stack_slots: &HashMap<String, i32>,
+    global_vars: &HashSet<String>,
+) -> Result<(), String> {
+    let (left_low, left_high) = i128_part_operands(left, stack_slots, global_vars)?;
+    let (right_low, right_high) = i128_part_operands(right, stack_slots, global_vars)?;
+    instructions.push(AsmInstr::Mov(
+        AsmType::Quadword,
+        left_low,
+        AsmOperand::Reg(Reg::R10),
+    ));
+    instructions.push(AsmInstr::Binary(
+        AsmType::Quadword,
+        AsmBinaryOp::Xor,
+        right_low,
+        AsmOperand::Reg(Reg::R10),
+    ));
+    instructions.push(AsmInstr::Mov(
+        AsmType::Quadword,
+        left_high,
+        AsmOperand::Reg(Reg::R13),
+    ));
+    instructions.push(AsmInstr::Binary(
+        AsmType::Quadword,
+        AsmBinaryOp::Xor,
+        right_high,
+        AsmOperand::Reg(Reg::R13),
+    ));
+    instructions.push(AsmInstr::Binary(
+        AsmType::Quadword,
+        AsmBinaryOp::Or,
+        AsmOperand::Reg(Reg::R13),
+        AsmOperand::Reg(Reg::R10),
+    ));
+    instructions.push(AsmInstr::Cmp(
+        AsmType::Quadword,
+        AsmOperand::Imm(0),
+        AsmOperand::Reg(Reg::R10),
+    ));
+    instructions.push(AsmInstr::SetCC(
+        if matches!(op, TackyBinaryOp::Equal) {
+            CondCode::E
+        } else {
+            CondCode::NE
+        },
+        dst,
+    ));
+    Ok(())
+}
+
 fn emit_i128_return(
     instructions: &mut Vec<AsmInstr>,
     val: &TackyVal,
@@ -320,7 +644,7 @@ fn emit_i128_return(
             ));
         }
         TackyVal::Int128Constant(value) => {
-            let (low, high) = i128_parts_signed(*value);
+            let (low, high) = crate::backend::common::i128_parts_signed(*value);
             instructions.push(AsmInstr::Mov(
                 AsmType::Quadword,
                 AsmOperand::Imm(low),
@@ -333,7 +657,7 @@ fn emit_i128_return(
             ));
         }
         TackyVal::UInt128Constant(value) => {
-            let (low, high) = i128_parts_unsigned(*value);
+            let (low, high) = crate::backend::common::i128_parts_unsigned(*value);
             instructions.push(AsmInstr::Mov(
                 AsmType::Quadword,
                 AsmOperand::Imm(low),
@@ -367,13 +691,12 @@ fn emit_i128_variable_shift(
     op: &TackyBinaryOp,
     left: &TackyVal,
     right: &TackyVal,
-    dst: &TackyVal,
+    dst: AsmOperand,
     ctx: &Aarch64I128Context<'_>,
 ) -> Result<(), String> {
     let (left_low, left_high) = i128_part_operands(left, ctx.stack_slots, ctx.global_vars)?;
-    let dst_op = val_operand(dst, ctx.stack_slots, ctx.global_vars)?;
-    let dst_low = low64_operand(&dst_op)?;
-    let dst_high = high64_operand(&dst_op)?;
+    let dst_low = low64_operand(&dst)?;
+    let dst_high = high64_operand(&dst)?;
     let right_ty = asm_type_for_val(right, ctx.types)?;
     let amount_src = if right_ty == AsmType::Octword {
         low64_operand(&val_operand(right, ctx.stack_slots, ctx.global_vars)?)?
@@ -499,7 +822,141 @@ fn emit_i128_variable_shift(
     Ok(())
 }
 
-fn asm_type_for_val(val: &TackyVal, types: &HashMap<String, CType>) -> Result<AsmType, String> {
+fn emit_i128_shift(
+    instructions: &mut Vec<AsmInstr>,
+    op: &TackyBinaryOp,
+    left: &TackyVal,
+    right: &TackyVal,
+    dst: AsmOperand,
+    ctx: &Aarch64I128Context<'_>,
+) -> Result<bool, String> {
+    if !matches!(op, TackyBinaryOp::ShiftLeft | TackyBinaryOp::ShiftRight) {
+        return Ok(false);
+    }
+
+    let TackyVal::Constant(amount) = right else {
+        emit_i128_variable_shift(instructions, op, left, right, dst, ctx)?;
+        return Ok(true);
+    };
+    if !(0..=64).contains(amount) {
+        emit_i128_variable_shift(instructions, op, left, right, dst, ctx)?;
+        return Ok(true);
+    }
+
+    emit_i128_copy_to_operand(
+        instructions,
+        left,
+        dst.clone(),
+        ctx.stack_slots,
+        ctx.global_vars,
+    )?;
+    if *amount == 0 {
+        return Ok(true);
+    }
+
+    let dst_low = low64_operand(&dst)?;
+    let dst_high = high64_operand(&dst)?;
+    match op {
+        TackyBinaryOp::ShiftLeft => {
+            if *amount == 64 {
+                instructions.push(AsmInstr::Mov(AsmType::Quadword, dst_low.clone(), dst_high));
+                instructions.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    AsmOperand::Imm(0),
+                    dst_low,
+                ));
+            } else {
+                instructions.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    dst_low.clone(),
+                    AsmOperand::Reg(Reg::R13),
+                ));
+                instructions.push(AsmInstr::Binary(
+                    AsmType::Quadword,
+                    AsmBinaryOp::Sal,
+                    AsmOperand::Imm(*amount),
+                    dst_high.clone(),
+                ));
+                instructions.push(AsmInstr::Binary(
+                    AsmType::Quadword,
+                    AsmBinaryOp::Shr,
+                    AsmOperand::Imm(64 - *amount),
+                    AsmOperand::Reg(Reg::R13),
+                ));
+                instructions.push(AsmInstr::Binary(
+                    AsmType::Quadword,
+                    AsmBinaryOp::Or,
+                    AsmOperand::Reg(Reg::R13),
+                    dst_high,
+                ));
+                instructions.push(AsmInstr::Binary(
+                    AsmType::Quadword,
+                    AsmBinaryOp::Sal,
+                    AsmOperand::Imm(*amount),
+                    dst_low,
+                ));
+            }
+        }
+        TackyBinaryOp::ShiftRight => {
+            let high_shift = if is_unsigned_val(left, ctx.types) {
+                AsmBinaryOp::Shr
+            } else {
+                AsmBinaryOp::Sar
+            };
+            if *amount == 64 {
+                instructions.push(AsmInstr::Mov(AsmType::Quadword, dst_high.clone(), dst_low));
+                if is_unsigned_val(left, ctx.types) {
+                    instructions.push(AsmInstr::Mov(
+                        AsmType::Quadword,
+                        AsmOperand::Imm(0),
+                        dst_high,
+                    ));
+                } else {
+                    instructions.push(AsmInstr::Binary(
+                        AsmType::Quadword,
+                        AsmBinaryOp::Sar,
+                        AsmOperand::Imm(63),
+                        dst_high,
+                    ));
+                }
+            } else {
+                instructions.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    dst_high.clone(),
+                    AsmOperand::Reg(Reg::R13),
+                ));
+                instructions.push(AsmInstr::Binary(
+                    AsmType::Quadword,
+                    AsmBinaryOp::Shr,
+                    AsmOperand::Imm(*amount),
+                    dst_low.clone(),
+                ));
+                instructions.push(AsmInstr::Binary(
+                    AsmType::Quadword,
+                    AsmBinaryOp::Sal,
+                    AsmOperand::Imm(64 - *amount),
+                    AsmOperand::Reg(Reg::R13),
+                ));
+                instructions.push(AsmInstr::Binary(
+                    AsmType::Quadword,
+                    AsmBinaryOp::Or,
+                    AsmOperand::Reg(Reg::R13),
+                    dst_low,
+                ));
+                instructions.push(AsmInstr::Binary(
+                    AsmType::Quadword,
+                    high_shift,
+                    AsmOperand::Imm(*amount),
+                    dst_high,
+                ));
+            }
+        }
+        _ => return Err("internal error: expected i128 shift op".to_string()),
+    }
+    Ok(true)
+}
+
+fn asm_type_for_val(val: &TackyVal, types: &IndexMap<String, CType>) -> Result<AsmType, String> {
     match val {
         TackyVal::Constant(c) => {
             if *c > i32::MAX as i64 || *c < i32::MIN as i64 {
@@ -525,9 +982,9 @@ fn asm_type_for_val(val: &TackyVal, types: &HashMap<String, CType>) -> Result<As
     }
 }
 
-fn val_operand(
+fn val_operand<S: StackSlotLookup + ?Sized>(
     val: &TackyVal,
-    stack_slots: &HashMap<String, i32>,
+    stack_slots: &S,
     global_vars: &HashSet<String>,
 ) -> Result<AsmOperand, String> {
     match val {
@@ -538,10 +995,11 @@ fn val_operand(
         TackyVal::Var(name) => {
             if global_vars.contains(name) {
                 Ok(AsmOperand::Data(name.clone()))
+            } else if stack_slots.is_register_candidate(name) {
+                Ok(AsmOperand::Pseudo(name.clone()))
             } else {
                 stack_slots
-                    .get(name)
-                    .copied()
+                    .stack_slot(name)
                     .map(|offset| AsmOperand::Stack(i64::from(offset)))
                     .ok_or_else(|| format!("AArch64 backend missing stack slot for {}", name))
             }
@@ -549,10 +1007,10 @@ fn val_operand(
     }
 }
 
-fn floating_return_operand(
+fn floating_return_operand<S: StackSlotLookup + ?Sized>(
     ty: AsmType,
     val: &TackyVal,
-    stack_slots: &HashMap<String, i32>,
+    stack_slots: &S,
     global_vars: &HashSet<String>,
 ) -> Result<AsmOperand, String> {
     match (ty, val) {
@@ -631,7 +1089,7 @@ fn collect_var(
     }
 }
 
-fn val_ctype(val: &TackyVal, types: &HashMap<String, CType>) -> Option<CType> {
+fn val_ctype(val: &TackyVal, types: &IndexMap<String, CType>) -> Option<CType> {
     match val {
         TackyVal::Var(name) => types.get(name).copied(),
         TackyVal::Constant(_) => Some(CType::Int),
@@ -722,6 +1180,20 @@ fn rewrite_tls_operands(func: &mut AsmFunction, tls_vars: &HashSet<String>) {
                 rewrite_tls_operand(src, tls_vars);
                 rewrite_tls_operand(dst, tls_vars);
             }
+            AsmInstr::AArch64AddPtr(ptr, index, _, dst) => {
+                rewrite_tls_operand(ptr, tls_vars);
+                rewrite_tls_operand(index, tls_vars);
+                rewrite_tls_operand(dst, tls_vars);
+            }
+            AsmInstr::AArch64LoadAdjusted(_, src, _, _)
+            | AsmInstr::AArch64StoreOutgoingArg(_, src, _, _) => {
+                rewrite_tls_operand(src, tls_vars);
+            }
+            AsmInstr::AArch64Rem(_, _, left, right, dst) => {
+                rewrite_tls_operand(left, tls_vars);
+                rewrite_tls_operand(right, tls_vars);
+                rewrite_tls_operand(dst, tls_vars);
+            }
             AsmInstr::AtomicRmw(_, _, _, dst)
             | AsmInstr::AtomicExchange(_, dst)
             | AsmInstr::AtomicCompareExchange(_, dst)
@@ -793,9 +1265,9 @@ fn emit_copy_incoming_arg_to_aggregate(
 
 fn aggregate_size(
     name: &str,
-    array_sizes: &HashMap<String, usize>,
+    array_sizes: &IndexMap<String, usize>,
     var_struct_tags: &HashMap<String, String>,
-    struct_defs: &HashMap<String, StructDef>,
+    struct_defs: &IndexMap<String, StructDef>,
 ) -> Option<usize> {
     array_sizes.get(name).copied().or_else(|| {
         var_struct_tags
@@ -808,7 +1280,7 @@ fn aggregate_size(
 fn struct_classes_for_val(
     val: &TackyVal,
     var_struct_tags: &HashMap<String, String>,
-    struct_defs: &HashMap<String, StructDef>,
+    struct_defs: &IndexMap<String, StructDef>,
 ) -> Option<Vec<ParamClass>> {
     let TackyVal::Var(name) = val else {
         return None;
@@ -821,14 +1293,20 @@ fn struct_classes_for_val(
 
 fn struct_size_for_val(
     val: &TackyVal,
-    array_sizes: &HashMap<String, usize>,
+    array_sizes: &IndexMap<String, usize>,
     var_struct_tags: &HashMap<String, String>,
-    struct_defs: &HashMap<String, StructDef>,
+    struct_defs: &IndexMap<String, StructDef>,
 ) -> Option<usize> {
     let TackyVal::Var(name) = val else {
         return None;
     };
     aggregate_size(name, array_sizes, var_struct_tags, struct_defs)
+}
+
+fn struct_classes_return_in_registers(classes: &[ParamClass]) -> bool {
+    classes
+        .iter()
+        .all(|class| matches!(class, ParamClass::Integer | ParamClass::Sse))
 }
 
 fn copy_bytes(
@@ -898,27 +1376,25 @@ fn move_struct_to_return_regs(
     let TackyVal::Var(name) = val else {
         return Err("AArch64 backend can only return struct variables".to_string());
     };
-    let gp_regs = [Reg::AX, Reg::DX];
-    let fp_regs = [XmmReg::XMM0, XmmReg::XMM1];
     let mut gp_idx = 0usize;
     let mut fp_idx = 0usize;
     for (chunk_idx, class) in classes.iter().enumerate() {
         let offset = i32::try_from(chunk_idx * 8)
             .map_err(|_| format!("AArch64 backend aggregate offset too large: {}", name))?;
         match class {
-            ParamClass::Integer if gp_idx < gp_regs.len() => {
+            ParamClass::Integer if gp_idx < RETURN_GP_REGS.len() => {
                 instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     stack_or_data_operand(name, offset, stack_slots, global_vars)?,
-                    AsmOperand::Reg(gp_regs[gp_idx]),
+                    AsmOperand::Reg(RETURN_GP_REGS[gp_idx]),
                 ));
                 gp_idx += 1;
             }
-            ParamClass::Sse if fp_idx < fp_regs.len() => {
+            ParamClass::Sse if fp_idx < RETURN_FP_REGS.len() => {
                 instructions.push(AsmInstr::Mov(
                     AsmType::Double,
                     stack_or_data_operand(name, offset, stack_slots, global_vars)?,
-                    AsmOperand::Xmm(fp_regs[fp_idx]),
+                    AsmOperand::Xmm(RETURN_FP_REGS[fp_idx]),
                 ));
                 fp_idx += 1;
             }
@@ -949,26 +1425,24 @@ fn move_return_regs_to_struct(
     let TackyVal::Var(name) = dst else {
         return Err("AArch64 backend can only store struct returns into variables".to_string());
     };
-    let gp_regs = [Reg::AX, Reg::DX];
-    let fp_regs = [XmmReg::XMM0, XmmReg::XMM1];
     let mut gp_idx = 0usize;
     let mut fp_idx = 0usize;
     for (chunk_idx, class) in classes.iter().enumerate() {
         let offset = i32::try_from(chunk_idx * 8)
             .map_err(|_| format!("AArch64 backend aggregate offset too large: {}", name))?;
         match class {
-            ParamClass::Integer if gp_idx < gp_regs.len() => {
+            ParamClass::Integer if gp_idx < RETURN_GP_REGS.len() => {
                 instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
-                    AsmOperand::Reg(gp_regs[gp_idx]),
+                    AsmOperand::Reg(RETURN_GP_REGS[gp_idx]),
                     stack_or_data_operand(name, offset, stack_slots, global_vars)?,
                 ));
                 gp_idx += 1;
             }
-            ParamClass::Sse if fp_idx < fp_regs.len() => {
+            ParamClass::Sse if fp_idx < RETURN_FP_REGS.len() => {
                 instructions.push(AsmInstr::Mov(
                     AsmType::Double,
-                    AsmOperand::Xmm(fp_regs[fp_idx]),
+                    AsmOperand::Xmm(RETURN_FP_REGS[fp_idx]),
                     stack_or_data_operand(name, offset, stack_slots, global_vars)?,
                 ));
                 fp_idx += 1;
@@ -992,15 +1466,17 @@ fn move_return_regs_to_struct(
 
 fn collect_stack_slots(
     function: &TackyFunction,
-    types: &HashMap<String, CType>,
-    array_sizes: &HashMap<String, usize>,
+    types: &IndexMap<String, CType>,
+    array_sizes: &IndexMap<String, usize>,
     var_struct_tags: &HashMap<String, String>,
-    struct_defs: &HashMap<String, StructDef>,
+    struct_defs: &IndexMap<String, StructDef>,
     global_vars: &HashSet<String>,
-    alignments: &HashMap<String, usize>,
+    alignments: &IndexMap<String, usize>,
 ) -> Result<StackLayout, String> {
-    let mut vars = Vec::new();
-    let mut seen_vars = HashSet::new();
+    let mut vars = Vec::with_capacity(
+        function.params.len() + function.memory_param_blocks.len() + function.body.len() * 2,
+    );
+    let mut seen_vars = HashSet::with_capacity(vars.capacity());
     for param in &function.params {
         collect_name(param, &mut vars, &mut seen_vars, global_vars);
     }
@@ -1149,8 +1625,8 @@ fn collect_stack_slots(
         }
     }
 
-    let mut slots = HashMap::new();
-    let mut large_locals = Vec::new();
+    let mut slots = HashMap::with_capacity(vars.len());
+    let mut large_locals = Vec::with_capacity(vars.len());
     let mut offset = 0i32;
     for var in vars {
         let size =
@@ -1269,13 +1745,13 @@ fn long_double_comparison_helper(op: &TackyBinaryOp) -> Option<LongDoubleCompari
     }
 }
 
-fn emit_long_double_helper_call(
+fn emit_long_double_helper_call<S: StackSlotLookup + ?Sized>(
     instructions: &mut Vec<AsmInstr>,
     helper: &str,
     left: &TackyVal,
     right: &TackyVal,
-    dst: &TackyVal,
-    stack_slots: &HashMap<String, i32>,
+    dst: AsmOperand,
+    stack_slots: &S,
     global_vars: &HashSet<String>,
 ) -> Result<(), String> {
     instructions.push(AsmInstr::Mov(
@@ -1292,18 +1768,18 @@ fn emit_long_double_helper_call(
     instructions.push(AsmInstr::Mov(
         AsmType::LongDouble,
         AsmOperand::Xmm(XmmReg::XMM0),
-        val_operand(dst, stack_slots, global_vars)?,
+        dst,
     ));
     Ok(())
 }
 
-fn emit_long_double_comparison(
+fn emit_long_double_comparison<S: StackSlotLookup + ?Sized>(
     instructions: &mut Vec<AsmInstr>,
     comparison: LongDoubleComparison,
     left: &TackyVal,
     right: &TackyVal,
-    dst: &TackyVal,
-    stack_slots: &HashMap<String, i32>,
+    dst: AsmOperand,
+    stack_slots: &S,
     global_vars: &HashSet<String>,
 ) -> Result<(), String> {
     instructions.push(AsmInstr::Mov(
@@ -1328,10 +1804,7 @@ fn emit_long_double_comparison(
         AsmOperand::Imm(0),
         AsmOperand::Reg(Reg::AX),
     ));
-    instructions.push(AsmInstr::SetCC(
-        comparison.condition,
-        val_operand(dst, stack_slots, global_vars)?,
-    ));
+    instructions.push(AsmInstr::SetCC(comparison.condition, dst));
     Ok(())
 }
 
@@ -1384,7 +1857,7 @@ fn convert_comparison_op(op: &TackyBinaryOp, is_unsigned: bool) -> Option<CondCo
     }
 }
 
-fn is_unsigned_val(val: &TackyVal, types: &HashMap<String, CType>) -> bool {
+fn is_unsigned_val(val: &TackyVal, types: &IndexMap<String, CType>) -> bool {
     match val {
         TackyVal::Var(name) => types
             .get(name)
@@ -1394,7 +1867,7 @@ fn is_unsigned_val(val: &TackyVal, types: &HashMap<String, CType>) -> bool {
     }
 }
 
-fn is_unsigned_comparison_val(val: &TackyVal, types: &HashMap<String, CType>) -> bool {
+fn is_unsigned_comparison_val(val: &TackyVal, types: &IndexMap<String, CType>) -> bool {
     match val {
         TackyVal::Var(name) => types
             .get(name)
@@ -1404,17 +1877,317 @@ fn is_unsigned_comparison_val(val: &TackyVal, types: &HashMap<String, CType>) ->
     }
 }
 
+fn is_aarch64_register_candidate_type(ctype: CType) -> bool {
+    matches!(
+        ctype,
+        CType::Char
+            | CType::SChar
+            | CType::UChar
+            | CType::Bool
+            | CType::Short
+            | CType::UShort
+            | CType::Int
+            | CType::UInt
+            | CType::Long
+            | CType::ULong
+            | CType::Pointer
+    )
+}
+
+fn aarch64_register_allocation_enabled_value(value: &str) -> bool {
+    matches!(value, "1" | "true" | "on" | "yes")
+}
+
+fn aarch64_register_allocation_enabled() -> bool {
+    std::env::var("RNQCC_AARCH64_REGALLOC")
+        .map(|value| aarch64_register_allocation_enabled_value(&value))
+        .unwrap_or(false)
+}
+
+fn compute_register_candidates(
+    body: &[TackyInstr],
+    stack_slots: &HashMap<String, i32>,
+    aliased: &HashSet<String>,
+    types: &IndexMap<String, CType>,
+    array_sizes: &IndexMap<String, usize>,
+    var_struct_tags: &HashMap<String, String>,
+    global_vars: &HashSet<String>,
+) -> HashSet<String> {
+    if !aarch64_register_allocation_enabled() {
+        return HashSet::new();
+    }
+
+    let mut blocked = HashSet::with_capacity(body.len());
+    for instr in body {
+        if let TackyInstr::FunCall {
+            name, args, dst, ..
+        } = instr
+        {
+            if let TackyVal::Var(name) = dst {
+                blocked.insert(name.clone());
+            }
+            blocked.insert(name.clone());
+            for arg in args {
+                if let TackyVal::Var(name) = arg {
+                    blocked.insert(name.clone());
+                }
+            }
+        }
+    }
+
+    let mut candidates = HashSet::with_capacity(stack_slots.len());
+    for name in stack_slots.keys() {
+        if name.starts_with("__rnqcc_tmp.")
+            && !blocked.contains(name)
+            && !aliased.contains(name)
+            && !global_vars.contains(name)
+            && !array_sizes.contains_key(name)
+            && !var_struct_tags.contains_key(name)
+            && is_aarch64_register_candidate_type(types.get(name).copied().unwrap_or(CType::Int))
+        {
+            candidates.insert(name.clone());
+        }
+    }
+    candidates
+}
+
+fn compute_ret_regs(
+    function: &TackyFunction,
+    types: &IndexMap<String, CType>,
+    var_struct_tags: &HashMap<String, String>,
+    struct_defs: &IndexMap<String, StructDef>,
+) -> Vec<crate::backend::x86_64::regalloc::RegId> {
+    use crate::backend::x86_64::regalloc::RegId;
+
+    let struct_return_regs = |name: &str| -> Option<Vec<RegId>> {
+        if types.get(name).copied() != Some(CType::Struct) {
+            return None;
+        }
+        let tag = var_struct_tags.get(name)?;
+        let def = struct_defs.get(tag)?;
+        let classes = def.classify_with(struct_defs);
+        if !struct_classes_return_in_registers(&classes) {
+            return Some(vec![RegId::Gp(Reg::AX)]);
+        }
+
+        let mut gp_idx = 0usize;
+        let mut fp_idx = 0usize;
+        let mut regs = Vec::with_capacity(classes.len());
+        for class in classes {
+            match class {
+                ParamClass::Integer if gp_idx < RETURN_GP_REGS.len() => {
+                    regs.push(RegId::Gp(RETURN_GP_REGS[gp_idx]));
+                    gp_idx += 1;
+                }
+                ParamClass::Sse if fp_idx < RETURN_FP_REGS.len() => {
+                    regs.push(RegId::Xmm(RETURN_FP_REGS[fp_idx]));
+                    fp_idx += 1;
+                }
+                _ => return Some(vec![RegId::Gp(Reg::AX)]),
+            }
+        }
+        Some(regs)
+    };
+
+    for instr in &function.body {
+        if let TackyInstr::Return(TackyVal::Var(name)) = instr {
+            if let Some(regs) = struct_return_regs(name) {
+                return regs;
+            }
+        }
+    }
+
+    match function.return_type {
+        CType::Void => vec![],
+        CType::Float | CType::Double | CType::LongDouble => vec![RegId::Xmm(XmmReg::XMM0)],
+        CType::Int128 | CType::UInt128 => vec![RegId::Gp(Reg::AX), RegId::Gp(Reg::DI)],
+        _ => vec![RegId::Gp(Reg::AX)],
+    }
+}
+
+fn scalar_load_return_type(
+    return_type: CType,
+    loaded: &TackyVal,
+    types: &IndexMap<String, CType>,
+) -> Result<Option<AsmType>, String> {
+    if matches!(
+        return_type,
+        CType::Void | CType::Struct | CType::Int128 | CType::UInt128 | CType::LongDouble
+    ) {
+        return Ok(None);
+    }
+
+    let ty = asm_type_for_val(loaded, types)?;
+    if matches!(ty, AsmType::Octword | AsmType::LongDouble) {
+        Ok(None)
+    } else {
+        Ok(Some(ty))
+    }
+}
+
+fn scalar_return_operand(ty: AsmType) -> AsmOperand {
+    if matches!(ty, AsmType::Float | AsmType::Double) {
+        AsmOperand::Xmm(XmmReg::XMM0)
+    } else {
+        AsmOperand::Reg(Reg::AX)
+    }
+}
+
+fn scalar_computed_return_type(
+    return_type: CType,
+    computed: &TackyVal,
+    types: &IndexMap<String, CType>,
+) -> Result<Option<AsmType>, String> {
+    Ok(
+        match scalar_load_return_type(return_type, computed, types)? {
+            Some(
+                ty @ (AsmType::Longword | AsmType::Quadword | AsmType::Float | AsmType::Double),
+            ) => Some(ty),
+            _ => None,
+        },
+    )
+}
+
+fn is_thread_local_val(val: &TackyVal, thread_local_vars: &HashSet<String>) -> bool {
+    matches!(val, TackyVal::Var(name) if thread_local_vars.contains(name))
+}
+
+fn is_returned_local(
+    dst: &TackyVal,
+    next: Option<&TackyInstr>,
+    global_vars: &HashSet<String>,
+) -> bool {
+    let TackyVal::Var(dst_name) = dst else {
+        return false;
+    };
+    if global_vars.contains(dst_name) {
+        return false;
+    }
+    matches!(next, Some(TackyInstr::Return(TackyVal::Var(ret_name))) if ret_name == dst_name)
+}
+
+fn replace_spilled_pseudos(
+    function: &mut AsmFunction,
+    stack_slots: &HashMap<String, i32>,
+) -> Result<(), String> {
+    fn replace_op(op: &mut AsmOperand, stack_slots: &HashMap<String, i32>) -> Result<(), String> {
+        if let AsmOperand::Pseudo(name) = op {
+            let offset = stack_slots
+                .get(name)
+                .copied()
+                .ok_or_else(|| format!("AArch64 backend missing spill slot for {}", name))?;
+            *op = AsmOperand::Stack(i64::from(offset));
+        }
+        Ok(())
+    }
+
+    let old_instructions = std::mem::take(&mut function.instructions);
+    let mut new_instructions = Vec::with_capacity(old_instructions.len());
+
+    for mut instr in old_instructions {
+        match &mut instr {
+            AsmInstr::Mov(_, src, dst)
+            | AsmInstr::Movsx(_, _, src, dst)
+            | AsmInstr::MovZeroExtend(_, _, src, dst)
+            | AsmInstr::Binary(_, _, src, dst)
+            | AsmInstr::Cmp(_, src, dst)
+            | AsmInstr::Lea(src, dst)
+            | AsmInstr::Cvtsi2sd(_, src, dst)
+            | AsmInstr::Cvttsd2si(_, src, dst)
+            | AsmInstr::Cvtsi2ss(_, src, dst)
+            | AsmInstr::Cvttss2si(_, src, dst)
+            | AsmInstr::Cvtss2sd(src, dst)
+            | AsmInstr::Cvtsd2ss(src, dst)
+            | AsmInstr::AArch64UIntToDouble(_, src, dst)
+            | AsmInstr::AArch64DoubleToUInt(_, src, dst)
+            | AsmInstr::AArch64UIntToFloat(_, src, dst)
+            | AsmInstr::AArch64FloatToUInt(_, src, dst)
+            | AsmInstr::AArch64FloatToDouble(src, dst)
+            | AsmInstr::AArch64DoubleToFloat(src, dst) => {
+                replace_op(src, stack_slots)?;
+                replace_op(dst, stack_slots)?;
+            }
+            AsmInstr::Unary(_, _, op)
+            | AsmInstr::Idiv(_, op)
+            | AsmInstr::Div(_, op)
+            | AsmInstr::SetCC(_, op)
+            | AsmInstr::Push(op)
+            | AsmInstr::JmpIndirect(op)
+            | AsmInstr::LoadIndirect(_, _, op)
+            | AsmInstr::StoreIndirect(_, op, _) => {
+                replace_op(op, stack_slots)?;
+            }
+            AsmInstr::AArch64AddPtr(ptr, index, _, dst) => {
+                replace_op(ptr, stack_slots)?;
+                replace_op(index, stack_slots)?;
+                replace_op(dst, stack_slots)?;
+            }
+            AsmInstr::AArch64LoadAdjusted(_, src, _, _) => {
+                replace_op(src, stack_slots)?;
+            }
+            AsmInstr::AArch64StoreOutgoingArg(_, src, _, _) => {
+                replace_op(src, stack_slots)?;
+            }
+            AsmInstr::AArch64Rem(_, _, left, right, dst) => {
+                replace_op(left, stack_slots)?;
+                replace_op(right, stack_slots)?;
+                replace_op(dst, stack_slots)?;
+            }
+            AsmInstr::CopyToStackArg { src_ptr, .. } => {
+                replace_op(src_ptr, stack_slots)?;
+            }
+            AsmInstr::CopyFromStackArg { dst, .. } => {
+                replace_op(dst, stack_slots)?;
+            }
+            AsmInstr::BuiltinSetjmp { buf, dst, .. } => {
+                replace_op(buf, stack_slots)?;
+                replace_op(dst, stack_slots)?;
+            }
+            AsmInstr::BuiltinLongjmp { buf, value } => {
+                replace_op(buf, stack_slots)?;
+                replace_op(value, stack_slots)?;
+            }
+            AsmInstr::AtomicRmw(_, _, _, dst)
+            | AsmInstr::AtomicExchange(_, dst)
+            | AsmInstr::AtomicCompareExchange(_, dst)
+            | AsmInstr::AtomicCompareSwap(_, _, dst)
+            | AsmInstr::X87Store(dst)
+            | AsmInstr::X87StoreFloat(_, dst)
+            | AsmInstr::X87StoreInt(_, dst)
+            | AsmInstr::Fld(_, dst)
+            | AsmInstr::Fstp(_, dst)
+            | AsmInstr::Fisttp(_, dst)
+            | AsmInstr::FldQ(dst)
+            | AsmInstr::X87Push(_, dst)
+            | AsmInstr::X87Pop(_, dst) => {
+                replace_op(dst, stack_slots)?;
+            }
+            _ => {}
+        }
+
+        if !matches!(&instr, AsmInstr::Mov(_, src, dst) if src == dst) {
+            new_instructions.push(instr);
+        }
+    }
+
+    function.instructions = new_instructions;
+
+    Ok(())
+}
+
 fn convert_function(
     function: &TackyFunction,
     target: &Target,
     program: &TackyProgram,
     long_double_consts: &mut Vec<(String, f64)>,
+    no_coalescing: bool,
 ) -> Result<AsmFunction, String> {
     let types = &program.symbol_types;
     let array_sizes = &program.array_sizes;
     let var_struct_tags = &program.var_struct_tags;
     let struct_defs = &program.struct_defs;
     let global_vars = &program.global_vars;
+    let thread_local_vars = &program.thread_local_vars;
     let alignments = &program.symbol_alignments;
     let stack_layout = collect_stack_slots(
         function,
@@ -1425,7 +2198,21 @@ fn convert_function(
         global_vars,
         alignments,
     )?;
-    let stack_slots = stack_layout.slots;
+    let raw_stack_slots = stack_layout.slots;
+    let aliased = crate::backend::common::compute_aliased(&function.body, global_vars);
+    let register_vars = compute_register_candidates(
+        &function.body,
+        &raw_stack_slots,
+        &aliased,
+        types,
+        array_sizes,
+        var_struct_tags,
+        global_vars,
+    );
+    let stack_slots = RegisterStackSlots {
+        slots: &raw_stack_slots,
+        register_vars: &register_vars,
+    };
     let stack_size = stack_layout.local_stack_size;
     let saves_link_register = function.body.iter().any(|instr| match instr {
         TackyInstr::FunCall { .. } => true,
@@ -1453,7 +2240,7 @@ fn convert_function(
     let frame_size = compute_frame_size(stack_size, saves_link_register);
     let link_register_offset =
         saves_link_register.then(|| compute_link_register_offset(frame_size));
-    let mut large_local_offsets = HashMap::new();
+    let mut large_local_offsets = HashMap::with_capacity(stack_layout.large_locals.len());
     let mut large_stack_size = 0i64;
     for local in &stack_layout.large_locals {
         let base_offset = frame_size as i64 + large_stack_size;
@@ -1480,7 +2267,9 @@ fn convert_function(
             function.name
         ));
     }
-    let mut instructions = Vec::new();
+    let mut instructions = Vec::with_capacity(
+        function.body.len() + function.params.len() + stack_layout.large_locals.len() + 8,
+    );
     if large_stack_size > 0 {
         instructions.push(AsmInstr::AArch64AllocateLargeStack(large_stack_size));
     }
@@ -1499,16 +2288,16 @@ fn convert_function(
             dst_offset: base_slot,
         });
     }
-    let param_groups: HashMap<usize, (usize, Vec<bool>)> = function
-        .struct_param_groups
-        .iter()
-        .map(|(start, count, is_sse)| (*start, (*count, is_sse.clone())))
-        .collect();
-    let memory_param_blocks: HashMap<usize, (&String, usize)> = function
-        .memory_param_blocks
-        .iter()
-        .map(|(index, name, size)| (*index, (name, *size)))
-        .collect();
+    let mut param_groups: HashMap<usize, (usize, &[bool])> =
+        HashMap::with_capacity(function.struct_param_groups.len());
+    for (start, count, is_sse) in &function.struct_param_groups {
+        param_groups.insert(*start, (*count, is_sse.as_slice()));
+    }
+    let mut memory_param_blocks: HashMap<usize, (&String, usize)> =
+        HashMap::with_capacity(function.memory_param_blocks.len());
+    for (index, name, size) in &function.memory_param_blocks {
+        memory_param_blocks.insert(*index, (name, *size));
+    }
     let mut gp_param_count = 0usize;
     let mut fp_param_count = 0usize;
     let mut stack_param_count = 0usize;
@@ -1671,11 +2460,845 @@ fn convert_function(
     let i128_ctx = Aarch64I128Context {
         function_name: &function.name,
         types,
-        stack_slots: &stack_slots,
+        stack_slots: &raw_stack_slots,
         global_vars,
     };
 
-    for instr in &function.body {
+    let mut body_iter = function.body.iter().peekable();
+    while let Some(instr) = body_iter.next() {
+        let next_instr = body_iter.peek().copied();
+        if next_instr.is_some() {
+            let returned_dst = match instr {
+                TackyInstr::Copy { dst, .. }
+                | TackyInstr::SignExtend { dst, .. }
+                | TackyInstr::ZeroExtend { dst, .. }
+                | TackyInstr::Truncate { dst, .. }
+                | TackyInstr::IntToDouble { dst, .. }
+                | TackyInstr::IntToFloat { dst, .. }
+                | TackyInstr::UIntToDouble { dst, .. }
+                | TackyInstr::UIntToFloat { dst, .. }
+                | TackyInstr::DoubleToInt { dst, .. }
+                | TackyInstr::FloatToInt { dst, .. }
+                | TackyInstr::DoubleToUInt { dst, .. }
+                | TackyInstr::FloatToUInt { dst, .. }
+                | TackyInstr::FloatToDouble { dst, .. }
+                | TackyInstr::DoubleToFloat { dst, .. } => match dst {
+                    _ if is_returned_local(dst, next_instr, global_vars) => Some(dst),
+                    _ => None,
+                },
+                _ => None,
+            };
+
+            if let Some(dst) = returned_dst {
+                if let TackyInstr::Copy { src, .. } = instr {
+                    if matches!(function.return_type, CType::LongDouble)
+                        && asm_type_for_val(dst, types)? == AsmType::LongDouble
+                    {
+                        instructions.push(AsmInstr::Mov(
+                            AsmType::LongDouble,
+                            val_operand(src, &stack_slots, global_vars)?,
+                            AsmOperand::Xmm(XmmReg::XMM0),
+                        ));
+                        emit_epilogue(
+                            &mut instructions,
+                            frame_size,
+                            large_stack_size,
+                            link_register_offset,
+                        );
+                        body_iter.next();
+                        continue;
+                    }
+                }
+                if let Some(dst_ty) = scalar_load_return_type(function.return_type, dst, types)? {
+                    let ret_dst = scalar_return_operand(dst_ty);
+                    match instr {
+                        TackyInstr::Copy { src, .. } => {
+                            if dst_ty == AsmType::Octword {
+                                emit_i128_return(
+                                    &mut instructions,
+                                    src,
+                                    &stack_slots,
+                                    global_vars,
+                                )?;
+                            } else {
+                                let src_operand =
+                                    if matches!(dst_ty, AsmType::Float | AsmType::Double) {
+                                        floating_return_operand(
+                                            dst_ty,
+                                            src,
+                                            &stack_slots,
+                                            global_vars,
+                                        )?
+                                    } else {
+                                        val_operand(src, &stack_slots, global_vars)?
+                                    };
+                                instructions.push(AsmInstr::Mov(dst_ty, src_operand, ret_dst));
+                            }
+                        }
+                        TackyInstr::SignExtend { src, .. } => {
+                            let src_ty = asm_type_for_val(src, types)?;
+                            match src {
+                                TackyVal::Constant(c) if dst_ty != AsmType::Byte => {
+                                    instructions.push(AsmInstr::Mov(
+                                        dst_ty,
+                                        AsmOperand::Imm(*c),
+                                        ret_dst,
+                                    ));
+                                }
+                                _ => {
+                                    instructions.push(AsmInstr::Movsx(
+                                        src_ty,
+                                        dst_ty,
+                                        val_operand(src, &stack_slots, global_vars)?,
+                                        ret_dst,
+                                    ));
+                                }
+                            }
+                        }
+                        TackyInstr::ZeroExtend { src, .. } => {
+                            let src_ty = asm_type_for_val(src, types)?;
+                            match src {
+                                TackyVal::Constant(c) if dst_ty != AsmType::Byte => {
+                                    instructions.push(AsmInstr::Mov(
+                                        dst_ty,
+                                        AsmOperand::Imm(*c),
+                                        ret_dst,
+                                    ));
+                                }
+                                _ => {
+                                    instructions.push(AsmInstr::MovZeroExtend(
+                                        src_ty,
+                                        dst_ty,
+                                        val_operand(src, &stack_slots, global_vars)?,
+                                        ret_dst,
+                                    ));
+                                }
+                            }
+                        }
+                        TackyInstr::Truncate { src, .. } => {
+                            let src_op = if asm_type_for_val(src, types)? == AsmType::Octword {
+                                low64_operand(&val_operand(src, &stack_slots, global_vars)?)?
+                            } else {
+                                val_operand(src, &stack_slots, global_vars)?
+                            };
+                            instructions.push(AsmInstr::Mov(dst_ty, src_op, ret_dst));
+                        }
+                        TackyInstr::IntToDouble { src, .. } => {
+                            let src_ty = asm_type_for_val(src, types)?;
+                            if matches!(src_ty, AsmType::Byte | AsmType::Word) {
+                                instructions.push(AsmInstr::Movsx(
+                                    src_ty,
+                                    AsmType::Longword,
+                                    val_operand(src, &stack_slots, global_vars)?,
+                                    AsmOperand::Reg(Reg::R10),
+                                ));
+                                instructions.push(AsmInstr::Cvtsi2sd(
+                                    AsmType::Longword,
+                                    AsmOperand::Reg(Reg::R10),
+                                    ret_dst,
+                                ));
+                            } else {
+                                instructions.push(AsmInstr::Cvtsi2sd(
+                                    src_ty,
+                                    val_operand(src, &stack_slots, global_vars)?,
+                                    ret_dst,
+                                ));
+                            }
+                        }
+                        TackyInstr::IntToFloat { src, .. } => {
+                            let src_ty = asm_type_for_val(src, types)?;
+                            if matches!(src_ty, AsmType::Byte | AsmType::Word) {
+                                instructions.push(AsmInstr::Movsx(
+                                    src_ty,
+                                    AsmType::Longword,
+                                    val_operand(src, &stack_slots, global_vars)?,
+                                    AsmOperand::Reg(Reg::R10),
+                                ));
+                                instructions.push(AsmInstr::Cvtsi2ss(
+                                    AsmType::Longword,
+                                    AsmOperand::Reg(Reg::R10),
+                                    ret_dst,
+                                ));
+                            } else {
+                                instructions.push(AsmInstr::Cvtsi2ss(
+                                    src_ty,
+                                    val_operand(src, &stack_slots, global_vars)?,
+                                    ret_dst,
+                                ));
+                            }
+                        }
+                        TackyInstr::UIntToDouble { src, .. } => {
+                            instructions.push(AsmInstr::AArch64UIntToDouble(
+                                asm_type_for_val(src, types)?,
+                                val_operand(src, &stack_slots, global_vars)?,
+                                ret_dst,
+                            ));
+                        }
+                        TackyInstr::UIntToFloat { src, .. } => {
+                            instructions.push(AsmInstr::AArch64UIntToFloat(
+                                asm_type_for_val(src, types)?,
+                                val_operand(src, &stack_slots, global_vars)?,
+                                ret_dst,
+                            ));
+                        }
+                        TackyInstr::DoubleToInt { src, .. } => {
+                            if matches!(dst_ty, AsmType::Byte | AsmType::Word) {
+                                instructions.push(AsmInstr::Cvttsd2si(
+                                    AsmType::Longword,
+                                    val_operand(src, &stack_slots, global_vars)?,
+                                    AsmOperand::Reg(Reg::R10),
+                                ));
+                                instructions.push(AsmInstr::Mov(
+                                    dst_ty,
+                                    AsmOperand::Reg(Reg::R10),
+                                    ret_dst,
+                                ));
+                            } else {
+                                instructions.push(AsmInstr::Cvttsd2si(
+                                    dst_ty,
+                                    val_operand(src, &stack_slots, global_vars)?,
+                                    ret_dst,
+                                ));
+                            }
+                        }
+                        TackyInstr::FloatToInt { src, .. } => {
+                            if matches!(dst_ty, AsmType::Byte | AsmType::Word) {
+                                instructions.push(AsmInstr::Cvttss2si(
+                                    AsmType::Longword,
+                                    val_operand(src, &stack_slots, global_vars)?,
+                                    AsmOperand::Reg(Reg::R10),
+                                ));
+                                instructions.push(AsmInstr::Mov(
+                                    dst_ty,
+                                    AsmOperand::Reg(Reg::R10),
+                                    ret_dst,
+                                ));
+                            } else {
+                                instructions.push(AsmInstr::Cvttss2si(
+                                    dst_ty,
+                                    val_operand(src, &stack_slots, global_vars)?,
+                                    ret_dst,
+                                ));
+                            }
+                        }
+                        TackyInstr::DoubleToUInt { src, .. } => {
+                            if matches!(dst_ty, AsmType::Byte | AsmType::Word) {
+                                instructions.push(AsmInstr::AArch64DoubleToUInt(
+                                    AsmType::Longword,
+                                    val_operand(src, &stack_slots, global_vars)?,
+                                    AsmOperand::Reg(Reg::R10),
+                                ));
+                                instructions.push(AsmInstr::Mov(
+                                    dst_ty,
+                                    AsmOperand::Reg(Reg::R10),
+                                    ret_dst,
+                                ));
+                            } else {
+                                instructions.push(AsmInstr::AArch64DoubleToUInt(
+                                    dst_ty,
+                                    val_operand(src, &stack_slots, global_vars)?,
+                                    ret_dst,
+                                ));
+                            }
+                        }
+                        TackyInstr::FloatToUInt { src, .. } => {
+                            if matches!(dst_ty, AsmType::Byte | AsmType::Word) {
+                                instructions.push(AsmInstr::AArch64FloatToUInt(
+                                    AsmType::Longword,
+                                    val_operand(src, &stack_slots, global_vars)?,
+                                    AsmOperand::Reg(Reg::R10),
+                                ));
+                                instructions.push(AsmInstr::Mov(
+                                    dst_ty,
+                                    AsmOperand::Reg(Reg::R10),
+                                    ret_dst,
+                                ));
+                            } else {
+                                instructions.push(AsmInstr::AArch64FloatToUInt(
+                                    dst_ty,
+                                    val_operand(src, &stack_slots, global_vars)?,
+                                    ret_dst,
+                                ));
+                            }
+                        }
+                        TackyInstr::FloatToDouble { src, .. } => {
+                            instructions.push(AsmInstr::AArch64FloatToDouble(
+                                val_operand(src, &stack_slots, global_vars)?,
+                                ret_dst,
+                            ));
+                        }
+                        TackyInstr::DoubleToFloat { src, .. } => {
+                            instructions.push(AsmInstr::AArch64DoubleToFloat(
+                                val_operand(src, &stack_slots, global_vars)?,
+                                ret_dst,
+                            ));
+                        }
+                        _ => unreachable!(),
+                    }
+                    emit_epilogue(
+                        &mut instructions,
+                        frame_size,
+                        large_stack_size,
+                        link_register_offset,
+                    );
+                    body_iter.next();
+                    continue;
+                }
+            }
+        }
+        if let TackyInstr::AddPtr {
+            ptr,
+            index,
+            scale,
+            dst,
+        } = instr
+        {
+            if is_returned_local(dst, next_instr, global_vars) {
+                if let Some(ty) = scalar_computed_return_type(function.return_type, dst, types)? {
+                    let ret_dst = scalar_return_operand(ty);
+                    instructions.push(AsmInstr::AArch64AddPtr(
+                        val_operand(ptr, &stack_slots, global_vars)?,
+                        val_operand(index, &stack_slots, global_vars)?,
+                        *scale,
+                        ret_dst,
+                    ));
+                    emit_epilogue(
+                        &mut instructions,
+                        frame_size,
+                        large_stack_size,
+                        link_register_offset,
+                    );
+                    body_iter.next();
+                    continue;
+                }
+            }
+        }
+        if let TackyInstr::LoadLabelAddress(label, dst) = instr {
+            if is_returned_local(dst, next_instr, global_vars) {
+                if let Some(ty) = scalar_computed_return_type(function.return_type, dst, types)? {
+                    instructions.push(AsmInstr::LoadLabelAddress(
+                        label.clone(),
+                        scalar_return_operand(ty),
+                    ));
+                    emit_epilogue(
+                        &mut instructions,
+                        frame_size,
+                        large_stack_size,
+                        link_register_offset,
+                    );
+                    body_iter.next();
+                    continue;
+                }
+            }
+        }
+        if let TackyInstr::FrameAddress { dst } = instr {
+            if is_returned_local(dst, next_instr, global_vars) {
+                if let Some(ty) = scalar_computed_return_type(function.return_type, dst, types)? {
+                    instructions.push(AsmInstr::Lea(
+                        AsmOperand::Stack(i64::from(frame_size)),
+                        scalar_return_operand(ty),
+                    ));
+                    emit_epilogue(
+                        &mut instructions,
+                        frame_size,
+                        large_stack_size,
+                        link_register_offset,
+                    );
+                    body_iter.next();
+                    continue;
+                }
+            }
+        }
+        if let TackyInstr::GetAddress { src, dst } = instr {
+            if is_returned_local(dst, next_instr, global_vars) {
+                if let Some(ty) = scalar_computed_return_type(function.return_type, dst, types)? {
+                    let TackyVal::Var(name) = src else {
+                        return Err("AArch64 backend can only take addresses of local variables"
+                            .to_string());
+                    };
+                    let ret_dst = scalar_return_operand(ty);
+                    if let Some((base_slot, _)) = large_local_offsets.get(name) {
+                        instructions.push(AsmInstr::Mov(
+                            AsmType::Quadword,
+                            AsmOperand::Stack(i64::from(*base_slot)),
+                            ret_dst,
+                        ));
+                    } else {
+                        instructions.push(AsmInstr::Lea(
+                            stack_or_data_operand(name, 0, &stack_slots, global_vars)?,
+                            ret_dst,
+                        ));
+                    }
+                    emit_epilogue(
+                        &mut instructions,
+                        frame_size,
+                        large_stack_size,
+                        link_register_offset,
+                    );
+                    body_iter.next();
+                    continue;
+                }
+            }
+        }
+        if let TackyInstr::Load { src_ptr, dst } = instr {
+            if is_returned_local(dst, next_instr, global_vars) {
+                if matches!(function.return_type, CType::Int128 | CType::UInt128)
+                    && asm_type_for_val(dst, types)? == AsmType::Octword
+                {
+                    instructions.push(AsmInstr::Mov(
+                        AsmType::Quadword,
+                        val_operand(src_ptr, &stack_slots, global_vars)?,
+                        AsmOperand::Reg(Reg::R11),
+                    ));
+                    instructions.push(AsmInstr::LoadIndirect(
+                        AsmType::Octword,
+                        Reg::R11,
+                        AsmOperand::Reg(Reg::AX),
+                    ));
+                    emit_epilogue(
+                        &mut instructions,
+                        frame_size,
+                        large_stack_size,
+                        link_register_offset,
+                    );
+                    body_iter.next();
+                    continue;
+                }
+                if let Some(ty) = scalar_computed_return_type(function.return_type, dst, types)? {
+                    let ret_dst = scalar_return_operand(ty);
+                    instructions.push(AsmInstr::Mov(
+                        AsmType::Quadword,
+                        val_operand(src_ptr, &stack_slots, global_vars)?,
+                        AsmOperand::Reg(Reg::R11),
+                    ));
+                    instructions.push(AsmInstr::LoadIndirect(ty, Reg::R11, ret_dst));
+                    emit_epilogue(
+                        &mut instructions,
+                        frame_size,
+                        large_stack_size,
+                        link_register_offset,
+                    );
+                    body_iter.next();
+                    continue;
+                }
+            }
+        }
+        if let TackyInstr::CopyFromOffset {
+            src_name,
+            offset,
+            dst,
+        } = instr
+        {
+            if is_returned_local(dst, next_instr, global_vars) {
+                if matches!(function.return_type, CType::Int128 | CType::UInt128)
+                    && asm_type_for_val(dst, types)? == AsmType::Octword
+                {
+                    let src_op =
+                        stack_or_data_operand(src_name, *offset as i32, &stack_slots, global_vars)?;
+                    instructions.push(AsmInstr::Mov(
+                        AsmType::Quadword,
+                        low64_operand(&src_op)?,
+                        AsmOperand::Reg(Reg::AX),
+                    ));
+                    instructions.push(AsmInstr::Mov(
+                        AsmType::Quadword,
+                        high64_operand(&src_op)?,
+                        AsmOperand::Reg(Reg::DI),
+                    ));
+                    emit_epilogue(
+                        &mut instructions,
+                        frame_size,
+                        large_stack_size,
+                        link_register_offset,
+                    );
+                    body_iter.next();
+                    continue;
+                }
+                if let Some(ty) = scalar_load_return_type(function.return_type, dst, types)? {
+                    let ret_dst = scalar_return_operand(ty);
+                    instructions.push(AsmInstr::Mov(
+                        ty,
+                        stack_or_data_operand(src_name, *offset as i32, &stack_slots, global_vars)?,
+                        ret_dst,
+                    ));
+                    emit_epilogue(
+                        &mut instructions,
+                        frame_size,
+                        large_stack_size,
+                        link_register_offset,
+                    );
+                    body_iter.next();
+                    continue;
+                }
+            }
+        }
+        if let TackyInstr::Unary { op, src, dst } = instr {
+            if is_returned_local(dst, next_instr, global_vars) {
+                if asm_type_for_val(dst, types)? == AsmType::Octword
+                    && matches!(function.return_type, CType::Int128 | CType::UInt128)
+                {
+                    match op {
+                        TackyUnaryOp::LogicalNot => {}
+                        TackyUnaryOp::Negate | TackyUnaryOp::Complement => {
+                            let asm_op = match op {
+                                TackyUnaryOp::Negate => AsmUnaryOp::Neg,
+                                TackyUnaryOp::Complement => AsmUnaryOp::Not,
+                                TackyUnaryOp::LogicalNot => unreachable!(),
+                            };
+                            emit_i128_unary(
+                                &mut instructions,
+                                src,
+                                AsmOperand::Reg(Reg::AX),
+                                asm_op,
+                                &stack_slots,
+                                global_vars,
+                            )?;
+                            emit_epilogue(
+                                &mut instructions,
+                                frame_size,
+                                large_stack_size,
+                                link_register_offset,
+                            );
+                            body_iter.next();
+                            continue;
+                        }
+                    }
+                }
+                if let Some(ty) = scalar_load_return_type(function.return_type, dst, types)? {
+                    let ret_dst = scalar_return_operand(ty);
+                    if matches!(op, TackyUnaryOp::LogicalNot) {
+                        let src_ty = asm_type_for_val(src, types)?;
+                        if src_ty == AsmType::Octword {
+                            emit_i128_zero_cmp(&mut instructions, src, &stack_slots, global_vars)?;
+                            instructions.push(AsmInstr::SetCC(CondCode::E, ret_dst));
+                            emit_epilogue(
+                                &mut instructions,
+                                frame_size,
+                                large_stack_size,
+                                link_register_offset,
+                            );
+                            body_iter.next();
+                            continue;
+                        } else {
+                            instructions.push(AsmInstr::Cmp(
+                                src_ty,
+                                AsmOperand::Imm(0),
+                                val_operand(src, &stack_slots, global_vars)?,
+                            ));
+                            instructions.push(AsmInstr::SetCC(CondCode::E, ret_dst));
+                            emit_epilogue(
+                                &mut instructions,
+                                frame_size,
+                                large_stack_size,
+                                link_register_offset,
+                            );
+                            body_iter.next();
+                            continue;
+                        }
+                    } else {
+                        let asm_op = match op {
+                            TackyUnaryOp::Negate => AsmUnaryOp::Neg,
+                            TackyUnaryOp::Complement => AsmUnaryOp::Not,
+                            TackyUnaryOp::LogicalNot => unreachable!(),
+                        };
+                        instructions.push(AsmInstr::Mov(
+                            ty,
+                            val_operand(src, &stack_slots, global_vars)?,
+                            ret_dst.clone(),
+                        ));
+                        instructions.push(AsmInstr::Unary(ty, asm_op, ret_dst));
+                        emit_epilogue(
+                            &mut instructions,
+                            frame_size,
+                            large_stack_size,
+                            link_register_offset,
+                        );
+                        body_iter.next();
+                        continue;
+                    }
+                }
+            }
+        }
+        if let TackyInstr::Binary {
+            op,
+            left,
+            right,
+            dst,
+        } = instr
+        {
+            if is_returned_local(dst, next_instr, global_vars) {
+                let left_ty = asm_type_for_val(left, types)?;
+                let right_ty = asm_type_for_val(right, types)?;
+                let special_operand = matches!(left_ty, AsmType::Octword | AsmType::LongDouble)
+                    || matches!(right_ty, AsmType::Octword | AsmType::LongDouble)
+                    || is_thread_local_val(right, thread_local_vars);
+                if matches!(op, TackyBinaryOp::Equal | TackyBinaryOp::NotEqual)
+                    && (matches!(left_ty, AsmType::Octword) || matches!(right_ty, AsmType::Octword))
+                {
+                    if let Some(ty) = scalar_computed_return_type(function.return_type, dst, types)?
+                    {
+                        emit_i128_eq_cmp(
+                            &mut instructions,
+                            left,
+                            right,
+                            op,
+                            scalar_return_operand(ty),
+                            &stack_slots,
+                            global_vars,
+                        )?;
+                        emit_epilogue(
+                            &mut instructions,
+                            frame_size,
+                            large_stack_size,
+                            link_register_offset,
+                        );
+                        body_iter.next();
+                        continue;
+                    }
+                }
+                if matches!(
+                    op,
+                    TackyBinaryOp::LessThan
+                        | TackyBinaryOp::LessEqual
+                        | TackyBinaryOp::GreaterThan
+                        | TackyBinaryOp::GreaterEqual
+                ) && (matches!(left_ty, AsmType::Octword)
+                    || matches!(right_ty, AsmType::Octword))
+                {
+                    if let Some(ty) = scalar_computed_return_type(function.return_type, dst, types)?
+                    {
+                        if is_unsigned_comparison_val(left, types) {
+                            emit_i128_unsigned_cmp(
+                                &mut instructions,
+                                left,
+                                right,
+                                op,
+                                scalar_return_operand(ty),
+                                &i128_ctx,
+                            )?;
+                        } else {
+                            emit_i128_signed_cmp(
+                                &mut instructions,
+                                left,
+                                right,
+                                op,
+                                scalar_return_operand(ty),
+                                &i128_ctx,
+                            )?;
+                        }
+                        emit_epilogue(
+                            &mut instructions,
+                            frame_size,
+                            large_stack_size,
+                            link_register_offset,
+                        );
+                        body_iter.next();
+                        continue;
+                    }
+                }
+                if matches!(function.return_type, CType::Int128 | CType::UInt128)
+                    && matches!(left_ty, AsmType::Octword)
+                    && asm_type_for_val(dst, types)? == AsmType::Octword
+                    && emit_i128_shift(
+                        &mut instructions,
+                        op,
+                        left,
+                        right,
+                        AsmOperand::Reg(Reg::AX),
+                        &i128_ctx,
+                    )?
+                {
+                    emit_epilogue(
+                        &mut instructions,
+                        frame_size,
+                        large_stack_size,
+                        link_register_offset,
+                    );
+                    body_iter.next();
+                    continue;
+                }
+                if matches!(function.return_type, CType::Int128 | CType::UInt128)
+                    && matches!(left_ty, AsmType::Octword)
+                    && matches!(right_ty, AsmType::Octword)
+                    && asm_type_for_val(dst, types)? == AsmType::Octword
+                    && (emit_i128_basic_binary(
+                        &mut instructions,
+                        op,
+                        left,
+                        right,
+                        AsmOperand::Reg(Reg::AX),
+                        &stack_slots,
+                        global_vars,
+                    )? || emit_i128_helper_binary(
+                        &mut instructions,
+                        op,
+                        left,
+                        right,
+                        AsmOperand::Reg(Reg::AX),
+                        &i128_ctx,
+                    )?)
+                {
+                    emit_epilogue(
+                        &mut instructions,
+                        frame_size,
+                        large_stack_size,
+                        link_register_offset,
+                    );
+                    body_iter.next();
+                    continue;
+                }
+                if matches!(left_ty, AsmType::LongDouble) || matches!(right_ty, AsmType::LongDouble)
+                {
+                    if let Some(comparison) = long_double_comparison_helper(op) {
+                        if let Some(ty) =
+                            scalar_computed_return_type(function.return_type, dst, types)?
+                        {
+                            emit_long_double_comparison(
+                                &mut instructions,
+                                comparison,
+                                left,
+                                right,
+                                scalar_return_operand(ty),
+                                &stack_slots,
+                                global_vars,
+                            )?;
+                            emit_epilogue(
+                                &mut instructions,
+                                frame_size,
+                                large_stack_size,
+                                link_register_offset,
+                            );
+                            body_iter.next();
+                            continue;
+                        }
+                    }
+                    if let Some(helper) = long_double_helper(op) {
+                        if matches!(function.return_type, CType::LongDouble)
+                            && asm_type_for_val(dst, types)? == AsmType::LongDouble
+                        {
+                            emit_long_double_helper_call(
+                                &mut instructions,
+                                helper,
+                                left,
+                                right,
+                                AsmOperand::Xmm(XmmReg::XMM0),
+                                &stack_slots,
+                                global_vars,
+                            )?;
+                            emit_epilogue(
+                                &mut instructions,
+                                frame_size,
+                                large_stack_size,
+                                link_register_offset,
+                            );
+                            body_iter.next();
+                            continue;
+                        }
+                    }
+                }
+                if !special_operand {
+                    if let Some(ty) = scalar_computed_return_type(function.return_type, dst, types)?
+                    {
+                        let ret_dst = scalar_return_operand(ty);
+                        if let Some(cc) =
+                            convert_comparison_op(op, is_unsigned_comparison_val(left, types))
+                        {
+                            let cmp_ty = match (left_ty, right_ty) {
+                                (AsmType::Double, _) | (_, AsmType::Double) => AsmType::Double,
+                                (AsmType::Float, _) | (_, AsmType::Float) => AsmType::Float,
+                                (AsmType::Quadword, _) | (_, AsmType::Quadword) => {
+                                    AsmType::Quadword
+                                }
+                                (AsmType::Longword, _) | (_, AsmType::Longword) => {
+                                    AsmType::Longword
+                                }
+                                (AsmType::Word, _) | (_, AsmType::Word) => AsmType::Word,
+                                _ => AsmType::Byte,
+                            };
+                            let right_op = if matches!(cmp_ty, AsmType::Float | AsmType::Double) {
+                                floating_return_operand(cmp_ty, right, &stack_slots, global_vars)?
+                            } else {
+                                val_operand(right, &stack_slots, global_vars)?
+                            };
+                            let left_op = if matches!(cmp_ty, AsmType::Float | AsmType::Double) {
+                                floating_return_operand(cmp_ty, left, &stack_slots, global_vars)?
+                            } else {
+                                val_operand(left, &stack_slots, global_vars)?
+                            };
+                            instructions.push(AsmInstr::Cmp(cmp_ty, right_op, left_op));
+                            instructions.push(AsmInstr::SetCC(cc, ret_dst));
+                            emit_epilogue(
+                                &mut instructions,
+                                frame_size,
+                                large_stack_size,
+                                link_register_offset,
+                            );
+                            body_iter.next();
+                            continue;
+                        }
+                        let asm_op = match op {
+                            TackyBinaryOp::Div
+                                if matches!(ty, AsmType::Float | AsmType::Double) =>
+                            {
+                                AsmBinaryOp::DivDouble
+                            }
+                            TackyBinaryOp::Div => {
+                                if is_unsigned_val(dst, types) {
+                                    AsmBinaryOp::UDiv
+                                } else {
+                                    AsmBinaryOp::SDiv
+                                }
+                            }
+                            TackyBinaryOp::ShiftRight => {
+                                if is_unsigned_val(left, types) {
+                                    AsmBinaryOp::Shr
+                                } else {
+                                    AsmBinaryOp::Sar
+                                }
+                            }
+                            TackyBinaryOp::Mod => {
+                                instructions.push(AsmInstr::AArch64Rem(
+                                    ty,
+                                    is_unsigned_val(dst, types),
+                                    val_operand(left, &stack_slots, global_vars)?,
+                                    val_operand(right, &stack_slots, global_vars)?,
+                                    ret_dst,
+                                ));
+                                emit_epilogue(
+                                    &mut instructions,
+                                    frame_size,
+                                    large_stack_size,
+                                    link_register_offset,
+                                );
+                                body_iter.next();
+                                continue;
+                            }
+                            _ => convert_binary_op(op)?,
+                        };
+                        let left_op = if matches!(ty, AsmType::Float | AsmType::Double) {
+                            floating_return_operand(ty, left, &stack_slots, global_vars)?
+                        } else {
+                            val_operand(left, &stack_slots, global_vars)?
+                        };
+                        let right_op = if matches!(ty, AsmType::Float | AsmType::Double) {
+                            floating_return_operand(ty, right, &stack_slots, global_vars)?
+                        } else {
+                            val_operand(right, &stack_slots, global_vars)?
+                        };
+                        instructions.push(AsmInstr::Mov(ty, left_op, ret_dst.clone()));
+                        instructions.push(AsmInstr::Binary(ty, asm_op, right_op, ret_dst));
+                        emit_epilogue(
+                            &mut instructions,
+                            frame_size,
+                            large_stack_size,
+                            link_register_offset,
+                        );
+                        body_iter.next();
+                        continue;
+                    }
+                }
+            }
+        }
         match instr {
             TackyInstr::Unreachable => {
                 instructions.push(AsmInstr::Unreachable);
@@ -2196,11 +3819,6 @@ fn convert_function(
                     )?;
                     continue;
                 }
-                instructions.push(AsmInstr::Mov(
-                    ty,
-                    val_operand(src, &stack_slots, global_vars)?,
-                    dst_op.clone(),
-                ));
                 let asm_op = match op {
                     TackyUnaryOp::Negate => AsmUnaryOp::Neg,
                     TackyUnaryOp::Complement => AsmUnaryOp::Not,
@@ -2212,49 +3830,21 @@ fn convert_function(
                     }
                 };
                 if ty == AsmType::Octword {
-                    emit_i128_copy(&mut instructions, src, dst, &stack_slots, global_vars)?;
-                    let dst_low = low64_operand(&dst_op)?;
-                    let dst_high = high64_operand(&dst_op)?;
-                    match asm_op {
-                        AsmUnaryOp::Not => {
-                            instructions.push(AsmInstr::Unary(
-                                AsmType::Quadword,
-                                AsmUnaryOp::Not,
-                                dst_low,
-                            ));
-                            instructions.push(AsmInstr::Unary(
-                                AsmType::Quadword,
-                                AsmUnaryOp::Not,
-                                dst_high,
-                            ));
-                        }
-                        AsmUnaryOp::Neg => {
-                            instructions.push(AsmInstr::Unary(
-                                AsmType::Quadword,
-                                AsmUnaryOp::Not,
-                                dst_low.clone(),
-                            ));
-                            instructions.push(AsmInstr::Unary(
-                                AsmType::Quadword,
-                                AsmUnaryOp::Not,
-                                dst_high.clone(),
-                            ));
-                            instructions.push(AsmInstr::Binary(
-                                AsmType::Quadword,
-                                AsmBinaryOp::AddSetFlags,
-                                AsmOperand::Imm(1),
-                                dst_low,
-                            ));
-                            instructions.push(AsmInstr::Binary(
-                                AsmType::Quadword,
-                                AsmBinaryOp::Adc,
-                                AsmOperand::Imm(0),
-                                dst_high,
-                            ));
-                        }
-                    }
+                    emit_i128_unary(
+                        &mut instructions,
+                        src,
+                        dst_op,
+                        asm_op,
+                        &stack_slots,
+                        global_vars,
+                    )?;
                     continue;
                 }
+                instructions.push(AsmInstr::Mov(
+                    ty,
+                    val_operand(src, &stack_slots, global_vars)?,
+                    dst_op.clone(),
+                ));
                 instructions.push(AsmInstr::Unary(ty, asm_op, dst_op));
             }
             TackyInstr::Jump(label) => {
@@ -2459,14 +4049,16 @@ fn convert_function(
                 hidden_return,
                 indirect,
             } => {
-                let arg_groups: HashMap<usize, (usize, Vec<bool>)> = struct_arg_groups
-                    .iter()
-                    .map(|(start, count, is_sse)| (*start, (*count, is_sse.clone())))
-                    .collect();
-                let memory_blocks: HashMap<usize, (usize, usize)> = memory_arg_blocks
-                    .iter()
-                    .map(|(index, size, align)| (*index, (*size, *align)))
-                    .collect();
+                let mut arg_groups: HashMap<usize, (usize, &[bool])> =
+                    HashMap::with_capacity(struct_arg_groups.len());
+                for (start, count, is_sse) in struct_arg_groups {
+                    arg_groups.insert(*start, (*count, is_sse.as_slice()));
+                }
+                let mut memory_blocks: HashMap<usize, (usize, usize)> =
+                    HashMap::with_capacity(memory_arg_blocks.len());
+                for (index, size, align) in memory_arg_blocks {
+                    memory_blocks.insert(*index, (*size, *align));
+                }
                 enum StackArg<'a> {
                     Scalar(AsmType, &'a TackyVal),
                     MemoryBlock {
@@ -2498,7 +4090,7 @@ fn convert_function(
 
                 let mut gp_arg_count = 0usize;
                 let mut fp_arg_count = 0usize;
-                let mut stack_args = Vec::new();
+                let mut stack_args = Vec::with_capacity(args.len());
                 let mut arg_index = 0usize;
                 while arg_index < args.len() {
                     if let Some((size, align)) = memory_blocks.get(&arg_index).copied() {
@@ -2677,16 +4269,68 @@ fn convert_function(
                 if *hidden_return {
                     continue;
                 }
+                if is_returned_local(dst, next_instr, global_vars)
+                    && matches!(function.return_type, CType::Int128 | CType::UInt128)
+                    && asm_type_for_val(dst, types)? == AsmType::Octword
+                {
+                    emit_epilogue(
+                        &mut instructions,
+                        frame_size,
+                        large_stack_size,
+                        link_register_offset,
+                    );
+                    body_iter.next();
+                    continue;
+                }
+                if is_returned_local(dst, next_instr, global_vars)
+                    && matches!(function.return_type, CType::LongDouble)
+                    && asm_type_for_val(dst, types)? == AsmType::LongDouble
+                {
+                    emit_epilogue(
+                        &mut instructions,
+                        frame_size,
+                        large_stack_size,
+                        link_register_offset,
+                    );
+                    body_iter.next();
+                    continue;
+                }
+                if is_returned_local(dst, next_instr, global_vars)
+                    && scalar_computed_return_type(function.return_type, dst, types)?.is_some()
+                {
+                    emit_epilogue(
+                        &mut instructions,
+                        frame_size,
+                        large_stack_size,
+                        link_register_offset,
+                    );
+                    body_iter.next();
+                    continue;
+                }
                 if val_ctype(dst, types) == Some(CType::Struct) {
-                    if struct_size_for_val(dst, array_sizes, var_struct_tags, struct_defs)
-                        .is_some_and(|size| size > 16)
-                    {
+                    let returns_via_memory =
+                        struct_size_for_val(dst, array_sizes, var_struct_tags, struct_defs)
+                            .is_some_and(|size| size > 16);
+                    if returns_via_memory {
                         continue;
                     }
                     let classes = struct_classes_for_val(dst, var_struct_tags, struct_defs)
                         .ok_or_else(|| {
                             "AArch64 backend missing struct class for call return".to_string()
                         })?;
+                    if is_returned_local(dst, next_instr, global_vars)
+                        && matches!(function.return_type, CType::Struct)
+                        && struct_classes_return_in_registers(&classes)
+                    {
+                        emit_epilogue(
+                            &mut instructions,
+                            frame_size,
+                            large_stack_size,
+                            link_register_offset,
+                        );
+                        body_iter.next();
+                        continue;
+                    }
                     move_return_regs_to_struct(
                         &mut instructions,
                         dst,
@@ -2742,7 +4386,7 @@ fn convert_function(
                             comparison,
                             left,
                             right,
-                            dst,
+                            dst_op.clone(),
                             &stack_slots,
                             global_vars,
                         )?;
@@ -2759,7 +4403,7 @@ fn convert_function(
                         helper,
                         left,
                         right,
-                        dst,
+                        dst_op.clone(),
                         &stack_slots,
                         global_vars,
                     )?;
@@ -2769,51 +4413,15 @@ fn convert_function(
                     && (asm_type_for_val(left, types)? == AsmType::Octword
                         || asm_type_for_val(right, types)? == AsmType::Octword)
                 {
-                    let (left_low, left_high) =
-                        i128_part_operands(left, &stack_slots, global_vars)?;
-                    let (right_low, right_high) =
-                        i128_part_operands(right, &stack_slots, global_vars)?;
-                    instructions.push(AsmInstr::Mov(
-                        AsmType::Quadword,
-                        left_low,
-                        AsmOperand::Reg(Reg::R10),
-                    ));
-                    instructions.push(AsmInstr::Binary(
-                        AsmType::Quadword,
-                        AsmBinaryOp::Xor,
-                        right_low,
-                        AsmOperand::Reg(Reg::R10),
-                    ));
-                    instructions.push(AsmInstr::Mov(
-                        AsmType::Quadword,
-                        left_high,
-                        AsmOperand::Reg(Reg::R13),
-                    ));
-                    instructions.push(AsmInstr::Binary(
-                        AsmType::Quadword,
-                        AsmBinaryOp::Xor,
-                        right_high,
-                        AsmOperand::Reg(Reg::R13),
-                    ));
-                    instructions.push(AsmInstr::Binary(
-                        AsmType::Quadword,
-                        AsmBinaryOp::Or,
-                        AsmOperand::Reg(Reg::R13),
-                        AsmOperand::Reg(Reg::R10),
-                    ));
-                    instructions.push(AsmInstr::Cmp(
-                        AsmType::Quadword,
-                        AsmOperand::Imm(0),
-                        AsmOperand::Reg(Reg::R10),
-                    ));
-                    instructions.push(AsmInstr::SetCC(
-                        if matches!(op, TackyBinaryOp::Equal) {
-                            CondCode::E
-                        } else {
-                            CondCode::NE
-                        },
+                    emit_i128_eq_cmp(
+                        &mut instructions,
+                        left,
+                        right,
+                        op,
                         dst_op,
-                    ));
+                        &stack_slots,
+                        global_vars,
+                    )?;
                     continue;
                 }
                 if matches!(
@@ -2825,339 +4433,63 @@ fn convert_function(
                 ) && (asm_type_for_val(left, types)? == AsmType::Octword
                     || asm_type_for_val(right, types)? == AsmType::Octword)
                 {
-                    emit_i128_signed_cmp(&mut instructions, left, right, op, dst_op, &i128_ctx)?;
+                    if is_unsigned_comparison_val(left, types) {
+                        emit_i128_unsigned_cmp(
+                            &mut instructions,
+                            left,
+                            right,
+                            op,
+                            dst_op,
+                            &i128_ctx,
+                        )?;
+                    } else {
+                        emit_i128_signed_cmp(
+                            &mut instructions,
+                            left,
+                            right,
+                            op,
+                            dst_op,
+                            &i128_ctx,
+                        )?;
+                    }
                     continue;
                 }
                 if ty == AsmType::Octword {
-                    match op {
-                        TackyBinaryOp::Add
-                        | TackyBinaryOp::Sub
-                        | TackyBinaryOp::Mul
-                        | TackyBinaryOp::BitwiseAnd
-                        | TackyBinaryOp::BitwiseOr
-                        | TackyBinaryOp::BitwiseXor
-                        | TackyBinaryOp::ShiftLeft
-                        | TackyBinaryOp::ShiftRight => {
-                            emit_i128_copy(
-                                &mut instructions,
-                                left,
-                                dst,
-                                &stack_slots,
-                                global_vars,
-                            )?;
-                            let dst_low = low64_operand(&dst_op)?;
-                            let dst_high = high64_operand(&dst_op)?;
-                            if matches!(op, TackyBinaryOp::ShiftLeft) {
-                                let TackyVal::Constant(amount) = right else {
-                                    emit_i128_variable_shift(
-                                        &mut instructions,
-                                        op,
-                                        left,
-                                        right,
-                                        dst,
-                                        &i128_ctx,
-                                    )?;
-                                    continue;
-                                };
-                                if *amount == 0 {
-                                    continue;
-                                }
-                                if *amount == 64 {
-                                    instructions.push(AsmInstr::Mov(
-                                        AsmType::Quadword,
-                                        dst_low.clone(),
-                                        dst_high,
-                                    ));
-                                    instructions.push(AsmInstr::Mov(
-                                        AsmType::Quadword,
-                                        AsmOperand::Imm(0),
-                                        dst_low,
-                                    ));
-                                    continue;
-                                }
-                                if (1..64).contains(amount) {
-                                    instructions.push(AsmInstr::Mov(
-                                        AsmType::Quadword,
-                                        dst_low.clone(),
-                                        AsmOperand::Reg(Reg::R13),
-                                    ));
-                                    instructions.push(AsmInstr::Binary(
-                                        AsmType::Quadword,
-                                        AsmBinaryOp::Sal,
-                                        AsmOperand::Imm(*amount),
-                                        dst_high.clone(),
-                                    ));
-                                    instructions.push(AsmInstr::Binary(
-                                        AsmType::Quadword,
-                                        AsmBinaryOp::Shr,
-                                        AsmOperand::Imm(64 - *amount),
-                                        AsmOperand::Reg(Reg::R13),
-                                    ));
-                                    instructions.push(AsmInstr::Binary(
-                                        AsmType::Quadword,
-                                        AsmBinaryOp::Or,
-                                        AsmOperand::Reg(Reg::R13),
-                                        dst_high,
-                                    ));
-                                    instructions.push(AsmInstr::Binary(
-                                        AsmType::Quadword,
-                                        AsmBinaryOp::Sal,
-                                        AsmOperand::Imm(*amount),
-                                        dst_low,
-                                    ));
-                                    continue;
-                                }
-                                emit_i128_variable_shift(
-                                    &mut instructions,
-                                    op,
-                                    left,
-                                    right,
-                                    dst,
-                                    &i128_ctx,
-                                )?;
-                                continue;
-                            }
-                            if matches!(op, TackyBinaryOp::ShiftRight) {
-                                let TackyVal::Constant(amount) = right else {
-                                    emit_i128_variable_shift(
-                                        &mut instructions,
-                                        op,
-                                        left,
-                                        right,
-                                        dst,
-                                        &i128_ctx,
-                                    )?;
-                                    continue;
-                                };
-                                let high_shift = if is_unsigned_val(left, types) {
-                                    AsmBinaryOp::Shr
-                                } else {
-                                    AsmBinaryOp::Sar
-                                };
-                                if *amount == 0 {
-                                    continue;
-                                }
-                                if *amount == 64 {
-                                    instructions.push(AsmInstr::Mov(
-                                        AsmType::Quadword,
-                                        dst_high.clone(),
-                                        dst_low,
-                                    ));
-                                    if is_unsigned_val(left, types) {
-                                        instructions.push(AsmInstr::Mov(
-                                            AsmType::Quadword,
-                                            AsmOperand::Imm(0),
-                                            dst_high,
-                                        ));
-                                    } else {
-                                        instructions.push(AsmInstr::Binary(
-                                            AsmType::Quadword,
-                                            AsmBinaryOp::Sar,
-                                            AsmOperand::Imm(63),
-                                            dst_high,
-                                        ));
-                                    }
-                                    continue;
-                                }
-                                if (1..64).contains(amount) {
-                                    instructions.push(AsmInstr::Mov(
-                                        AsmType::Quadword,
-                                        dst_high.clone(),
-                                        AsmOperand::Reg(Reg::R13),
-                                    ));
-                                    instructions.push(AsmInstr::Binary(
-                                        AsmType::Quadword,
-                                        AsmBinaryOp::Shr,
-                                        AsmOperand::Imm(*amount),
-                                        dst_low.clone(),
-                                    ));
-                                    instructions.push(AsmInstr::Binary(
-                                        AsmType::Quadword,
-                                        AsmBinaryOp::Sal,
-                                        AsmOperand::Imm(64 - *amount),
-                                        AsmOperand::Reg(Reg::R13),
-                                    ));
-                                    instructions.push(AsmInstr::Binary(
-                                        AsmType::Quadword,
-                                        AsmBinaryOp::Or,
-                                        AsmOperand::Reg(Reg::R13),
-                                        dst_low,
-                                    ));
-                                    instructions.push(AsmInstr::Binary(
-                                        AsmType::Quadword,
-                                        high_shift,
-                                        AsmOperand::Imm(*amount),
-                                        dst_high,
-                                    ));
-                                    continue;
-                                }
-                                emit_i128_variable_shift(
-                                    &mut instructions,
-                                    op,
-                                    left,
-                                    right,
-                                    dst,
-                                    &i128_ctx,
-                                )?;
-                                continue;
-                            }
-                            let (right_low, right_high) =
-                                i128_part_operands(right, &stack_slots, global_vars)?;
-                            if matches!(op, TackyBinaryOp::Mul) {
-                                let (left_low, left_high) =
-                                    i128_part_operands(left, &stack_slots, global_vars)?;
-                                instructions.push(AsmInstr::Mov(
-                                    AsmType::Quadword,
-                                    left_low,
-                                    AsmOperand::Reg(Reg::AX),
-                                ));
-                                instructions.push(AsmInstr::Mov(
-                                    AsmType::Quadword,
-                                    left_high,
-                                    AsmOperand::Reg(Reg::DI),
-                                ));
-                                instructions.push(AsmInstr::Mov(
-                                    AsmType::Quadword,
-                                    right_low,
-                                    AsmOperand::Reg(Reg::SI),
-                                ));
-                                instructions.push(AsmInstr::Mov(
-                                    AsmType::Quadword,
-                                    right_high,
-                                    AsmOperand::Reg(Reg::DX),
-                                ));
-                                instructions.push(AsmInstr::Call(
-                                    "__multi3".to_string(),
-                                    4,
-                                    0,
-                                    false,
-                                    false,
-                                ));
-                                instructions.push(AsmInstr::Mov(
-                                    AsmType::Quadword,
-                                    AsmOperand::Reg(Reg::AX),
-                                    dst_low,
-                                ));
-                                instructions.push(AsmInstr::Mov(
-                                    AsmType::Quadword,
-                                    AsmOperand::Reg(Reg::DI),
-                                    dst_high,
-                                ));
-                                continue;
-                            }
-                            if matches!(
-                                op,
-                                TackyBinaryOp::BitwiseAnd
-                                    | TackyBinaryOp::BitwiseOr
-                                    | TackyBinaryOp::BitwiseXor
-                            ) {
-                                let asm_op = match op {
-                                    TackyBinaryOp::BitwiseAnd => AsmBinaryOp::And,
-                                    TackyBinaryOp::BitwiseOr => AsmBinaryOp::Or,
-                                    TackyBinaryOp::BitwiseXor => AsmBinaryOp::Xor,
-                                    _ => {
-                                        return Err("internal error: expected bitwise binary op"
-                                            .to_string())
-                                    }
-                                };
-                                instructions.push(AsmInstr::Binary(
-                                    AsmType::Quadword,
-                                    asm_op.clone(),
-                                    right_low,
-                                    dst_low,
-                                ));
-                                instructions.push(AsmInstr::Binary(
-                                    AsmType::Quadword,
-                                    asm_op,
-                                    right_high,
-                                    dst_high,
-                                ));
-                                continue;
-                            }
-                            instructions.push(AsmInstr::Binary(
-                                AsmType::Quadword,
-                                if matches!(op, TackyBinaryOp::Add) {
-                                    AsmBinaryOp::AddSetFlags
-                                } else {
-                                    AsmBinaryOp::SubSetFlags
-                                },
-                                right_low,
-                                dst_low,
-                            ));
-                            instructions.push(AsmInstr::Binary(
-                                AsmType::Quadword,
-                                if matches!(op, TackyBinaryOp::Add) {
-                                    AsmBinaryOp::Adc
-                                } else {
-                                    AsmBinaryOp::Sbb
-                                },
-                                right_high,
-                                dst_high,
-                            ));
-                        }
-                        TackyBinaryOp::Div | TackyBinaryOp::Mod => {
-                            let is_unsigned = is_unsigned_val(left, types);
-                            let helper = match (op, is_unsigned) {
-                                (TackyBinaryOp::Div, true) => "__udivti3",
-                                (TackyBinaryOp::Div, false) => "__divti3",
-                                (TackyBinaryOp::Mod, true) => "__umodti3",
-                                (TackyBinaryOp::Mod, false) => "__modti3",
-                                _ => {
-                                    return Err(
-                                        "internal error: expected div/mod operation".to_string()
-                                    )
-                                }
-                            };
-                            let (left_low, left_high) =
-                                i128_part_operands(left, &stack_slots, global_vars)?;
-                            let (right_low, right_high) =
-                                i128_part_operands(right, &stack_slots, global_vars)?;
-                            instructions.push(AsmInstr::Mov(
-                                AsmType::Quadword,
-                                left_low,
-                                AsmOperand::Reg(Reg::AX),
-                            ));
-                            instructions.push(AsmInstr::Mov(
-                                AsmType::Quadword,
-                                left_high,
-                                AsmOperand::Reg(Reg::DI),
-                            ));
-                            instructions.push(AsmInstr::Mov(
-                                AsmType::Quadword,
-                                right_low,
-                                AsmOperand::Reg(Reg::SI),
-                            ));
-                            instructions.push(AsmInstr::Mov(
-                                AsmType::Quadword,
-                                right_high,
-                                AsmOperand::Reg(Reg::DX),
-                            ));
-                            instructions.push(AsmInstr::Call(
-                                helper.to_string(),
-                                4,
-                                0,
-                                false,
-                                false,
-                            ));
-                            instructions.push(AsmInstr::Mov(
-                                AsmType::Quadword,
-                                AsmOperand::Reg(Reg::AX),
-                                low64_operand(&dst_op)?,
-                            ));
-                            instructions.push(AsmInstr::Mov(
-                                AsmType::Quadword,
-                                AsmOperand::Reg(Reg::DI),
-                                high64_operand(&dst_op)?,
-                            ));
-                        }
-                        _ => {
-                            return Err(format!(
-                                "AArch64 backend does not support 128-bit binary op yet: {:?}",
-                                op
-                            ));
-                        }
+                    if emit_i128_basic_binary(
+                        &mut instructions,
+                        op,
+                        left,
+                        right,
+                        dst_op.clone(),
+                        &stack_slots,
+                        global_vars,
+                    )? {
+                        continue;
                     }
-                    continue;
+                    if emit_i128_helper_binary(
+                        &mut instructions,
+                        op,
+                        left,
+                        right,
+                        dst_op.clone(),
+                        &i128_ctx,
+                    )? {
+                        continue;
+                    }
+                    if emit_i128_shift(
+                        &mut instructions,
+                        op,
+                        left,
+                        right,
+                        dst_op.clone(),
+                        &i128_ctx,
+                    )? {
+                        continue;
+                    }
+                    return Err(format!(
+                        "AArch64 backend does not support 128-bit binary op yet: {:?}",
+                        op
+                    ));
                 }
                 if let Some(cc) = convert_comparison_op(op, is_unsigned_comparison_val(left, types))
                 {
@@ -3233,21 +4565,44 @@ fn convert_function(
 
     rewrite_long_double_immediates(&mut instructions, long_double_consts);
 
-    Ok(AsmFunction {
+    let mut asm_function = AsmFunction {
         name: function.name.clone(),
         global: function.global,
         instructions,
-    })
+    };
+    let ret_regs = compute_ret_regs(function, types, var_struct_tags, struct_defs);
+    let allocation = crate::backend::x86_64::regalloc::allocate_registers_with_profile(
+        &mut asm_function,
+        &aliased,
+        types,
+        array_sizes,
+        &ret_regs,
+        &crate::backend::x86_64::regalloc::AARCH64_REG_ALLOC_PROFILE,
+        no_coalescing,
+    );
+    debug_assert!(allocation.callee_saved.is_empty());
+    replace_spilled_pseudos(&mut asm_function, &raw_stack_slots)?;
+
+    Ok(asm_function)
 }
 
-pub fn gen(program: &TackyProgram, target: &Target) -> Result<AsmProgram, String> {
-    let mut top_level = Vec::new();
-    let mut long_double_consts = Vec::new();
+pub fn gen(
+    program: &TackyProgram,
+    target: &Target,
+    no_coalescing: bool,
+) -> Result<AsmProgram, String> {
+    let mut top_level = Vec::with_capacity(program.top_level.len());
+    let mut long_double_consts = Vec::with_capacity(program.top_level.len());
     for item in &program.top_level {
         match item {
             TackyTopLevel::Function(function) => {
-                let mut function =
-                    convert_function(function, target, program, &mut long_double_consts)?;
+                let mut function = convert_function(
+                    function,
+                    target,
+                    program,
+                    &mut long_double_consts,
+                    no_coalescing,
+                )?;
                 rewrite_tls_operands(&mut function, &program.thread_local_vars);
                 top_level.push(AsmTopLevel::Function(function));
             }
@@ -3288,6 +4643,7 @@ pub fn gen(program: &TackyProgram, target: &Target) -> Result<AsmProgram, String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::x86_64::regalloc::RegId;
     use crate::{lex, parse, resolve, tacky};
 
     fn codegen_source(source: &str) -> Result<AsmProgram, String> {
@@ -3295,7 +4651,7 @@ mod tests {
         let ast = parse::parse(tokens)?;
         let resolved = resolve::resolve(ast).map_err(|err| err.render())?.program;
         let tacky = tacky::generate(resolved)?;
-        gen(&tacky, &Target::aarch64_linux())
+        gen(&tacky, &Target::aarch64_linux(), false)
     }
 
     fn function<'a>(program: &'a AsmProgram, name: &str) -> Result<&'a AsmFunction, String> {
@@ -3307,6 +4663,149 @@ mod tests {
                 _ => None,
             })
             .ok_or_else(|| format!("function `{name}` should exist"))
+    }
+
+    fn struct_member(name: &str, member_type: CType, offset: usize) -> StructMember {
+        StructMember {
+            name: name.to_string(),
+            member_type,
+            member_full_type: FullType::Scalar(member_type),
+            flexible_array: false,
+            offset,
+            size: member_type.size() as usize,
+            bit_width: None,
+            bit_offset: 0,
+            reverse_storage_order: false,
+        }
+    }
+
+    fn struct_function_returning() -> TackyFunction {
+        TackyFunction {
+            name: "f".to_string(),
+            return_type: CType::Struct,
+            params: Vec::new(),
+            global: false,
+            body: vec![TackyInstr::Return(TackyVal::Var("ret".to_string()))],
+            stack_params: HashSet::new(),
+            memory_param_blocks: Vec::new(),
+            struct_param_groups: Vec::new(),
+        }
+    }
+
+    fn struct_ret_regs(def: StructDef) -> Vec<RegId> {
+        let mut types = IndexMap::new();
+        types.insert("ret".to_string(), CType::Struct);
+        let mut var_struct_tags = HashMap::new();
+        var_struct_tags.insert("ret".to_string(), def.tag.clone());
+        let mut struct_defs = IndexMap::new();
+        let tag = def.tag.clone();
+        struct_defs.insert(tag.clone(), def);
+
+        compute_ret_regs(
+            &struct_function_returning(),
+            &types,
+            &var_struct_tags,
+            &struct_defs,
+        )
+    }
+
+    #[test]
+    fn aarch64_register_allocation_env_value_parser_is_explicit() {
+        for value in ["1", "true", "on", "yes"] {
+            assert!(aarch64_register_allocation_enabled_value(value));
+        }
+
+        for value in ["", "0", "false", "off", "no", "TRUE", "yes "] {
+            assert!(!aarch64_register_allocation_enabled_value(value));
+        }
+    }
+
+    #[test]
+    fn aarch64_ret_regs_include_both_integer_halves_for_small_struct_returns() {
+        let regs = struct_ret_regs(StructDef {
+            tag: "pair".to_string(),
+            members: vec![
+                struct_member("a", CType::Long, 0),
+                struct_member("b", CType::Long, 8),
+            ],
+            size: 16,
+            alignment: 8,
+            is_union: false,
+        });
+
+        assert_eq!(regs, vec![RegId::Gp(Reg::AX), RegId::Gp(Reg::DI)]);
+    }
+
+    #[test]
+    fn aarch64_integer_struct_returns_use_x1_for_second_eightbyte() -> Result<(), String> {
+        let program = codegen_source(
+            "struct pair { long a; long b; };\n\
+             struct pair make_pair(long a, long b) { return (struct pair){a, b}; }\n\
+             long read_second(void) { struct pair p = make_pair(1, 2); return p.b; }\n",
+        )?;
+        let make_pair = function(&program, "make_pair")?;
+        assert!(make_pair.instructions.iter().any(|instr| {
+            matches!(
+                instr,
+                AsmInstr::Mov(AsmType::Quadword, _, AsmOperand::Reg(Reg::DI))
+            )
+        }));
+        assert!(!make_pair.instructions.iter().any(|instr| {
+            matches!(
+                instr,
+                AsmInstr::Mov(AsmType::Quadword, _, AsmOperand::Reg(Reg::DX))
+            )
+        }));
+
+        let read_second = function(&program, "read_second")?;
+        assert!(read_second.instructions.iter().any(|instr| {
+            matches!(
+                instr,
+                AsmInstr::Mov(AsmType::Quadword, AsmOperand::Reg(Reg::DI), _)
+            )
+        }));
+        assert!(!read_second.instructions.iter().any(|instr| {
+            matches!(
+                instr,
+                AsmInstr::Mov(AsmType::Quadword, AsmOperand::Reg(Reg::DX), _)
+            )
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn aarch64_ret_regs_include_fp_registers_for_small_struct_returns() {
+        let regs = struct_ret_regs(StructDef {
+            tag: "box2".to_string(),
+            members: vec![
+                struct_member("a", CType::Double, 0),
+                struct_member("b", CType::Double, 8),
+            ],
+            size: 16,
+            alignment: 8,
+            is_union: false,
+        });
+
+        assert_eq!(
+            regs,
+            vec![RegId::Xmm(XmmReg::XMM0), RegId::Xmm(XmmReg::XMM1)]
+        );
+    }
+
+    #[test]
+    fn aarch64_ret_regs_include_mixed_registers_for_small_struct_returns() {
+        let regs = struct_ret_regs(StructDef {
+            tag: "mixed".to_string(),
+            members: vec![
+                struct_member("a", CType::Long, 0),
+                struct_member("b", CType::Double, 8),
+            ],
+            size: 16,
+            alignment: 8,
+            is_union: false,
+        });
+
+        assert_eq!(regs, vec![RegId::Gp(Reg::AX), RegId::Xmm(XmmReg::XMM0)]);
     }
 
     #[test]
@@ -3331,6 +4830,25 @@ mod tests {
             )
         }));
         Ok(())
+    }
+
+    #[test]
+    fn spilled_pseudo_self_moves_are_removed_during_rewrite() {
+        let mut function = AsmFunction {
+            name: "f".to_string(),
+            global: false,
+            instructions: vec![AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Pseudo("tmp".to_string()),
+                AsmOperand::Pseudo("tmp".to_string()),
+            )],
+        };
+        let mut stack_slots = HashMap::new();
+        stack_slots.insert("tmp".to_string(), 16);
+
+        replace_spilled_pseudos(&mut function, &stack_slots).unwrap();
+
+        assert!(function.instructions.is_empty());
     }
 
     #[test]

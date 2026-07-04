@@ -8,5 +8,6 @@ pub mod parse;
 pub mod preprocess;
 pub mod resolve;
 pub mod tacky;
+pub mod target;
 pub mod tempfile;
 pub mod types;

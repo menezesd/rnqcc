@@ -30,3 +30,6 @@ __pycache__/
 /sub_*
 /test_*
 /union_*
+
+# Local sisyphus/ralph-loop state
+/.sisyphus/

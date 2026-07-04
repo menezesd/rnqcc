@@ -1,7 +1,9 @@
 use crate::types::*;
+use indexmap::IndexMap;
 use std::collections::HashMap;
 
 const ARG_REGISTERS: [Reg; 6] = [Reg::DI, Reg::SI, Reg::DX, Reg::CX, Reg::R8, Reg::R9];
+const ARG_SSE_REGISTERS: usize = 8;
 
 // ============================================================
 // Phase 1: TACKY → Assembly (with pseudo-registers)
@@ -20,7 +22,7 @@ fn convert_val(val: &TackyVal) -> AsmOperand {
     }
 }
 
-fn val_type(val: &TackyVal, types: &HashMap<String, CType>) -> AsmType {
+fn val_type(val: &TackyVal, types: &IndexMap<String, CType>) -> AsmType {
     match val {
         TackyVal::Constant(c) => {
             if *c > i32::MAX as i64 || *c < i32::MIN as i64 {
@@ -43,7 +45,7 @@ fn promoted_cmp_operand(
     val: &TackyVal,
     cmp_type: AsmType,
     scratch: Reg,
-    types: &HashMap<String, CType>,
+    types: &IndexMap<String, CType>,
 ) -> AsmOperand {
     if !matches!(cmp_type, AsmType::Longword | AsmType::Quadword) {
         return convert_val(val);
@@ -240,7 +242,7 @@ fn is_positive_float_zero_return(t: AsmType, val: &TackyVal) -> bool {
 fn x87_load_val(
     out: &mut Vec<AsmInstr>,
     val: &TackyVal,
-    types: &HashMap<String, CType>,
+    types: &IndexMap<String, CType>,
     static_doubles: &mut Vec<(String, f64)>,
 ) {
     let ty = val_type(val, types);
@@ -264,7 +266,7 @@ fn x87_copy_to_long_double(
     out: &mut Vec<AsmInstr>,
     src: &TackyVal,
     dst: &TackyVal,
-    types: &HashMap<String, CType>,
+    types: &IndexMap<String, CType>,
     static_doubles: &mut Vec<(String, f64)>,
     label_counter: &mut usize,
     function_name: &str,
@@ -333,14 +335,6 @@ fn x87_copy_to_long_double(
     out.push(AsmInstr::X87Store(convert_val(dst)));
 }
 
-fn i128_parts_signed(value: i128) -> (i64, i64) {
-    (value as i64, (value >> 64) as i64)
-}
-
-fn i128_parts_unsigned(value: u128) -> (i64, i64) {
-    (value as u64 as i64, (value >> 64) as u64 as i64)
-}
-
 fn low64_operand(op: AsmOperand) -> Result<AsmOperand, String> {
     match op {
         AsmOperand::Pseudo(name) => Ok(AsmOperand::PseudoMem(name, 0)),
@@ -380,11 +374,11 @@ fn i128_part_operands(val: &TackyVal) -> Result<(AsmOperand, AsmOperand), String
             AsmOperand::Imm(if *value < 0 { -1 } else { 0 }),
         )),
         TackyVal::Int128Constant(value) => {
-            let (low, high) = i128_parts_signed(*value);
+            let (low, high) = crate::backend::common::i128_parts_signed(*value);
             Ok((AsmOperand::Imm(low), AsmOperand::Imm(high)))
         }
         TackyVal::UInt128Constant(value) => {
-            let (low, high) = i128_parts_unsigned(*value);
+            let (low, high) = crate::backend::common::i128_parts_unsigned(*value);
             Ok((AsmOperand::Imm(low), AsmOperand::Imm(high)))
         }
         _ => {
@@ -414,8 +408,12 @@ fn emit_i128_parts_to_operands(
     dst_low: AsmOperand,
     dst_high: AsmOperand,
 ) {
-    out.push(AsmInstr::Mov(AsmType::Quadword, low, dst_low));
-    out.push(AsmInstr::Mov(AsmType::Quadword, high, dst_high));
+    if low != dst_low {
+        out.push(AsmInstr::Mov(AsmType::Quadword, low, dst_low));
+    }
+    if high != dst_high {
+        out.push(AsmInstr::Mov(AsmType::Quadword, high, dst_high));
+    }
 }
 
 fn clamp_floating_to_signed_int_overflow(
@@ -452,7 +450,7 @@ fn clamp_floating_to_signed_int_overflow(
     out.push(AsmInstr::Label(end_label));
 }
 
-fn is_unsigned_val(val: &TackyVal, types: &HashMap<String, CType>) -> bool {
+fn is_unsigned_val(val: &TackyVal, types: &IndexMap<String, CType>) -> bool {
     match val {
         TackyVal::UInt128Constant(_) => true,
         TackyVal::Int128Constant(_) | TackyVal::Constant(_) | TackyVal::DoubleConstant(_) => false,
@@ -474,7 +472,7 @@ fn emit_i128_variable_shift(
     left: &TackyVal,
     right: &TackyVal,
     dst: &TackyVal,
-    types: &HashMap<String, CType>,
+    types: &IndexMap<String, CType>,
 ) -> Result<(), String> {
     let (left_low, left_high) = i128_part_operands(left)?;
     let dst_op = convert_val(dst);
@@ -666,7 +664,7 @@ fn emit_i128_store(
 fn get_struct_def<'a>(
     name: &str,
     var_struct_tags: &HashMap<String, String>,
-    struct_defs: &'a HashMap<String, StructDef>,
+    struct_defs: &'a IndexMap<String, StructDef>,
 ) -> Option<&'a StructDef> {
     var_struct_tags
         .get(name)
@@ -676,7 +674,7 @@ fn get_struct_def<'a>(
 fn get_struct_classes(
     name: &str,
     var_struct_tags: &HashMap<String, String>,
-    struct_defs: &HashMap<String, StructDef>,
+    struct_defs: &IndexMap<String, StructDef>,
 ) -> Option<Vec<ParamClass>> {
     if let Some(tag) = var_struct_tags.get(name) {
         if let Some(def) = struct_defs.get(tag) {
@@ -719,13 +717,13 @@ struct InstructionContext<'a> {
     function_name: &'a str,
     return_type: CType,
     target: &'a Target,
-    types: &'a HashMap<String, CType>,
+    types: &'a IndexMap<String, CType>,
     out: &'a mut Vec<AsmInstr>,
     static_doubles: &'a mut Vec<(String, f64)>,
     static_floats: &'a mut Vec<(String, f32)>,
     label_counter: &'a mut usize,
     var_struct_tags: &'a HashMap<String, String>,
-    struct_defs: &'a HashMap<String, StructDef>,
+    struct_defs: &'a IndexMap<String, StructDef>,
     local_function_names: &'a std::collections::HashSet<String>,
     va_start_stack_offset: i32,
 }
@@ -1962,19 +1960,22 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                         convert_val(dst),
                     ));
                 } else {
-                    // Use lea to avoid add instruction
                     out.push(AsmInstr::Mov(
                         AsmType::Quadword,
                         convert_val(ptr),
-                        AsmOperand::Reg(Reg::AX),
+                        convert_val(dst),
                     ));
-                    out.push(AsmInstr::Mov(
+                    let (op, imm) = if offset == i64::MIN {
+                        (AsmBinaryOp::Add, offset)
+                    } else if offset < 0 {
+                        (AsmBinaryOp::Sub, -offset)
+                    } else {
+                        (AsmBinaryOp::Add, offset)
+                    };
+                    out.push(AsmInstr::Binary(
                         AsmType::Quadword,
-                        AsmOperand::Imm(offset),
-                        AsmOperand::Reg(Reg::DX),
-                    ));
-                    out.push(AsmInstr::Lea(
-                        AsmOperand::Indexed(Reg::AX, Reg::DX, 1),
+                        op,
+                        AsmOperand::Imm(imm),
                         convert_val(dst),
                     ));
                 }
@@ -2235,11 +2236,11 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
 }
 
 struct FuncallContext<'a> {
-    types: &'a HashMap<String, CType>,
+    types: &'a IndexMap<String, CType>,
     out: &'a mut Vec<AsmInstr>,
     static_doubles: &'a mut Vec<(String, f64)>,
     var_struct_tags: &'a HashMap<String, String>,
-    struct_defs: &'a HashMap<String, StructDef>,
+    struct_defs: &'a IndexMap<String, StructDef>,
     local_function_names: &'a std::collections::HashSet<String>,
     target: &'a Target,
     variadic: bool,
@@ -2292,15 +2293,16 @@ fn convert_funcall(call: &FuncallArgs<'_>, ctx: &mut FuncallContext<'_>) -> Resu
     } else {
         None
     };
-    let memory_blocks: std::collections::HashMap<usize, (usize, usize)> = memory_arg_blocks
-        .iter()
-        .map(|(index, size, align)| (*index, (*size, *align)))
-        .collect();
+    let mut memory_blocks: std::collections::HashMap<usize, (usize, usize)> =
+        std::collections::HashMap::with_capacity(memory_arg_blocks.len());
+    for (index, size, align) in memory_arg_blocks {
+        memory_blocks.insert(*index, (*size, *align));
+    }
 
     {
         // Pre-compute which args must go on stack due to struct group overflow
         let mut force_stack_args: std::collections::HashSet<usize> =
-            std::collections::HashSet::new();
+            std::collections::HashSet::with_capacity(args.len());
         {
             let mut sim_int = 0usize;
             let mut sim_xmm = 0usize;
@@ -2371,10 +2373,10 @@ fn convert_funcall(call: &FuncallArgs<'_>, ctx: &mut FuncallContext<'_>) -> Resu
         }
 
         // Classify args into int regs, xmm regs, and stack
-        let mut int_reg_args = Vec::new();
-        let mut wide_int_reg_args = Vec::new();
-        let mut xmm_reg_args = Vec::new();
-        let mut stack_args_list = Vec::new();
+        let mut int_reg_args = Vec::with_capacity(args.len().min(ARG_REGISTERS.len()));
+        let mut wide_int_reg_args = Vec::with_capacity(args.len() / 2);
+        let mut xmm_reg_args = Vec::with_capacity(args.len().min(ARG_SSE_REGISTERS));
+        let mut stack_args_list = Vec::with_capacity(args.len());
         let mut int_idx = 0usize;
         let mut xmm_idx = 0usize;
 
@@ -2673,7 +2675,7 @@ fn convert_funcall(call: &FuncallArgs<'_>, ctx: &mut FuncallContext<'_>) -> Resu
 }
 
 struct BinaryContext<'a> {
-    types: &'a HashMap<String, CType>,
+    types: &'a IndexMap<String, CType>,
     out: &'a mut Vec<AsmInstr>,
     static_doubles: &'a mut Vec<(String, f64)>,
     static_floats: &'a mut Vec<(String, f32)>,
@@ -2881,8 +2883,6 @@ fn convert_binary(
                 | TackyBinaryOp::BitwiseXor
                 | TackyBinaryOp::ShiftLeft
                 | TackyBinaryOp::ShiftRight => {
-                    emit_i128_copy(out, left, dst)?;
-                    let (right_low, right_high) = i128_part_operands(right)?;
                     let dst_op = convert_val(dst);
                     if matches!(op, TackyBinaryOp::ShiftLeft) {
                         let TackyVal::Constant(amount) = right else {
@@ -2901,6 +2901,23 @@ fn convert_binary(
                             )?;
                             return Ok(());
                         };
+                        if !(0..128).contains(amount) {
+                            let mut labels = LabelContext {
+                                function_name: ctx.function_name,
+                                counter: ctx.label_counter,
+                            };
+                            emit_i128_variable_shift(
+                                out,
+                                &mut labels,
+                                op,
+                                left,
+                                right,
+                                dst,
+                                types,
+                            )?;
+                            return Ok(());
+                        }
+                        emit_i128_copy(out, left, dst)?;
                         if *amount == 0 {
                             return Ok(());
                         }
@@ -2971,7 +2988,7 @@ fn convert_binary(
                             return Ok(());
                         }
                         return Err(format!(
-                            "x86-64 backend does not support 128-bit shift amount yet: {}",
+                            "internal error: unhandled 128-bit left shift amount: {}",
                             amount
                         ));
                     }
@@ -2992,6 +3009,23 @@ fn convert_binary(
                             )?;
                             return Ok(());
                         };
+                        if !(0..128).contains(amount) {
+                            let mut labels = LabelContext {
+                                function_name: ctx.function_name,
+                                counter: ctx.label_counter,
+                            };
+                            emit_i128_variable_shift(
+                                out,
+                                &mut labels,
+                                op,
+                                left,
+                                right,
+                                dst,
+                                types,
+                            )?;
+                            return Ok(());
+                        }
+                        emit_i128_copy(out, left, dst)?;
                         let dst_low = low64_operand(dst_op.clone())?;
                         let dst_high = high64_operand(dst_op.clone())?;
                         let high_shift = if is_unsigned {
@@ -3084,10 +3118,12 @@ fn convert_binary(
                             return Ok(());
                         }
                         return Err(format!(
-                            "x86-64 backend does not support 128-bit shift amount yet: {}",
+                            "internal error: unhandled 128-bit right shift amount: {}",
                             amount
                         ));
                     }
+                    emit_i128_copy(out, left, dst)?;
+                    let (right_low, right_high) = i128_part_operands(right)?;
                     if matches!(op, TackyBinaryOp::Mul) {
                         let left_low = low64_operand(dst_op.clone())?;
                         let left_high = high64_operand(dst_op.clone())?;
@@ -3258,9 +3294,9 @@ const XMM_ARG_REGISTERS: [XmmReg; 8] = [
 
 struct X86FunctionContext<'a> {
     target: &'a Target,
-    types: &'a HashMap<String, CType>,
+    types: &'a IndexMap<String, CType>,
     var_struct_tags: &'a HashMap<String, String>,
-    struct_defs: &'a HashMap<String, StructDef>,
+    struct_defs: &'a IndexMap<String, StructDef>,
     local_function_names: &'a std::collections::HashSet<String>,
 }
 
@@ -3270,7 +3306,7 @@ fn convert_function(
     static_doubles: &mut Vec<(String, f64)>,
     static_floats: &mut Vec<(String, f32)>,
 ) -> Result<AsmFunction, String> {
-    let mut instructions = Vec::new();
+    let mut instructions = Vec::with_capacity(func.body.len() + func.params.len() * 2 + 8);
     static I128_LABEL_BASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let mut label_counter = I128_LABEL_BASE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -3278,14 +3314,15 @@ fn convert_function(
     let mut int_reg_idx = 0usize;
     let mut xmm_reg_idx = 0usize;
     let mut stack_arg_offset = 0usize;
-    let memory_param_blocks: HashMap<usize, (&String, usize)> = func
-        .memory_param_blocks
-        .iter()
-        .map(|(index, name, size)| (*index, (name, *size)))
-        .collect();
+    let mut memory_param_blocks: HashMap<usize, (&String, usize)> =
+        HashMap::with_capacity(func.memory_param_blocks.len());
+    for (index, name, size) in &func.memory_param_blocks {
+        memory_param_blocks.insert(*index, (name, *size));
+    }
 
     // Pre-compute which params must go on stack due to struct group overflow
-    let mut force_stack: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut force_stack: std::collections::HashSet<usize> =
+        std::collections::HashSet::with_capacity(func.params.len());
     {
         let mut sim_int_idx = 0usize;
         let mut sim_xmm_idx = 0usize;
@@ -3339,8 +3376,8 @@ fn convert_function(
         }
     }
 
-    let mut register_param_instructions = Vec::new();
-    let mut stack_param_instructions = Vec::new();
+    let mut register_param_instructions = Vec::with_capacity(func.params.len());
+    let mut stack_param_instructions = Vec::with_capacity(func.params.len());
 
     for (i, param) in func.params.iter().enumerate() {
         if let Some((dst_name, size)) = memory_param_blocks.get(&i).copied() {
@@ -3506,15 +3543,15 @@ fn convert_function(
 struct ReplacePseudoContext<'a> {
     statics: &'a std::collections::HashSet<String>,
     tls_vars: &'a std::collections::HashSet<String>,
-    types: &'a HashMap<String, CType>,
-    arr_sizes: &'a HashMap<String, usize>,
-    alignments: &'a HashMap<String, usize>,
+    types: &'a IndexMap<String, CType>,
+    arr_sizes: &'a IndexMap<String, usize>,
+    alignments: &'a IndexMap<String, usize>,
     var_struct_tags: &'a HashMap<String, String>,
-    struct_defs: &'a HashMap<String, StructDef>,
+    struct_defs: &'a IndexMap<String, StructDef>,
 }
 
 fn replace_pseudos(func: &mut AsmFunction, ctx: &ReplacePseudoContext<'_>) -> Result<i64, String> {
-    let mut pseudo_map: HashMap<String, i64> = HashMap::new();
+    let mut pseudo_map: HashMap<String, i64> = HashMap::with_capacity(func.instructions.len());
     let mut stack_offset: i64 = 0;
 
     fn stack_size_for_name(name: &str, ctx: &ReplacePseudoContext<'_>) -> Result<i64, String> {
@@ -3762,7 +3799,7 @@ fn fixup_instructions(func: &mut AsmFunction, stack_size: i64, callee_saved: &[R
     let total_aligned = (stack_size + 8 * num_cs + 15) & !15;
     let adjusted_stack = total_aligned - 8 * num_cs;
     let old_instructions = std::mem::take(&mut func.instructions);
-    let mut new_instructions = Vec::new();
+    let mut new_instructions = Vec::with_capacity(old_instructions.len() + callee_saved.len() + 2);
 
     // Prologue placeholder
     new_instructions.push(AsmInstr::Push(AsmOperand::Reg(Reg::AX)));
@@ -4338,6 +4375,15 @@ fn fixup_instructions(func: &mut AsmFunction, stack_size: i64, callee_saved: &[R
         }
     }
 
+    new_instructions.retain(|instr| match instr {
+        AsmInstr::Mov(AsmType::Longword, AsmOperand::Reg(src), AsmOperand::Reg(dst))
+            if src == dst =>
+        {
+            true
+        }
+        AsmInstr::Mov(_, src, dst) => src != dst,
+        _ => true,
+    });
     func.instructions = new_instructions;
 }
 
@@ -4448,28 +4494,11 @@ fn verify_final_function(func: &AsmFunction) -> Result<(), String> {
 // Public API
 // ============================================================
 
-fn compute_aliased(
-    body: &[TackyInstr],
-    static_vars: &std::collections::HashSet<String>,
-) -> std::collections::HashSet<String> {
-    let mut aliased = static_vars.clone();
-    for instr in body {
-        if let TackyInstr::GetAddress {
-            src: TackyVal::Var(name),
-            ..
-        } = instr
-        {
-            aliased.insert(name.clone());
-        }
-    }
-    aliased
-}
-
 fn compute_ret_regs(
     func: &TackyFunction,
-    types: &HashMap<String, CType>,
+    types: &IndexMap<String, CType>,
     var_struct_tags: &HashMap<String, String>,
-    struct_defs: &HashMap<String, StructDef>,
+    struct_defs: &IndexMap<String, StructDef>,
 ) -> Vec<super::regalloc::RegId> {
     use super::regalloc::RegId;
     for instr in &func.body {
@@ -4482,17 +4511,23 @@ fn compute_ret_regs(
                     CType::Float | CType::Double | CType::LongDouble => {
                         vec![RegId::Xmm(XmmReg::XMM0)]
                     }
+                    CType::Int128 | CType::UInt128 => vec![RegId::Gp(Reg::AX), RegId::Gp(Reg::DX)],
                     CType::Void => vec![],
                     _ => vec![RegId::Gp(Reg::AX)],
                 };
+            }
+            TackyInstr::Return(TackyVal::Int128Constant(_))
+            | TackyInstr::Return(TackyVal::UInt128Constant(_)) => {
+                return vec![RegId::Gp(Reg::AX), RegId::Gp(Reg::DX)];
             }
             TackyInstr::Return(TackyVal::Var(name)) => {
                 let ct = types.get(name).copied().unwrap_or(CType::Int);
                 return match ct {
                     CType::Float | CType::Double => vec![RegId::Xmm(XmmReg::XMM0)],
+                    CType::Int128 | CType::UInt128 => vec![RegId::Gp(Reg::AX), RegId::Gp(Reg::DX)],
                     CType::Void => vec![],
                     CType::Struct => {
-                        let mut regs = Vec::new();
+                        let mut regs = Vec::with_capacity(2);
                         if let Some(tag) = var_struct_tags.get(name) {
                             if let Some(def) = struct_defs.get(tag) {
                                 let classes = def.classify_with(struct_defs);
@@ -4538,17 +4573,16 @@ pub fn gen(
     let types = &program.symbol_types;
     let array_sizes = &program.array_sizes;
     let alignments = &program.symbol_alignments;
-    let local_function_names: std::collections::HashSet<String> = program
-        .top_level
-        .iter()
-        .filter_map(|tl| match tl {
-            TackyTopLevel::Function(tf) => Some(tf.name.clone()),
-            _ => None,
-        })
-        .collect();
-    let mut top_level = Vec::new();
-    let mut static_doubles = Vec::new();
-    let mut static_floats = Vec::new();
+    let mut local_function_names: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(program.top_level.len());
+    for tl in &program.top_level {
+        if let TackyTopLevel::Function(tf) = tl {
+            local_function_names.insert(tf.name.clone());
+        }
+    }
+    let mut top_level = Vec::with_capacity(program.top_level.len());
+    let mut static_doubles = Vec::with_capacity(program.top_level.len());
+    let mut static_floats = Vec::with_capacity(program.top_level.len());
     let function_ctx = X86FunctionContext {
         target,
         types,
@@ -4564,7 +4598,7 @@ pub fn gen(
                     convert_function(tf, &function_ctx, &mut static_doubles, &mut static_floats)?;
 
                 // Compute aliased variables (address-taken + static)
-                let aliased = compute_aliased(&tf.body, static_vars);
+                let aliased = crate::backend::common::compute_aliased(&tf.body, static_vars);
 
                 // Compute return value registers for EXIT node liveness
                 let ret_regs =
@@ -4644,4 +4678,232 @@ pub fn gen(
     }
 
     Ok(AsmProgram { top_level })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::regalloc::RegId;
+    use super::*;
+    use std::collections::HashSet;
+
+    fn function_returning(return_type: CType, val: TackyVal) -> TackyFunction {
+        TackyFunction {
+            name: "f".to_string(),
+            return_type,
+            params: Vec::new(),
+            global: false,
+            body: vec![TackyInstr::Return(val)],
+            stack_params: HashSet::new(),
+            memory_param_blocks: Vec::new(),
+            struct_param_groups: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn x86_64_ret_regs_include_both_halves_for_int128_constant_returns() {
+        let types = IndexMap::new();
+        let regs = compute_ret_regs(
+            &function_returning(CType::Int128, TackyVal::Int128Constant(1)),
+            &types,
+            &HashMap::new(),
+            &IndexMap::new(),
+        );
+
+        assert_eq!(regs, vec![RegId::Gp(Reg::AX), RegId::Gp(Reg::DX)]);
+    }
+
+    #[test]
+    fn x86_64_ret_regs_include_both_halves_for_int128_variable_returns() {
+        let mut types = IndexMap::new();
+        types.insert("v".to_string(), CType::UInt128);
+        let regs = compute_ret_regs(
+            &function_returning(CType::UInt128, TackyVal::Var("v".to_string())),
+            &types,
+            &HashMap::new(),
+            &IndexMap::new(),
+        );
+
+        assert_eq!(regs, vec![RegId::Gp(Reg::AX), RegId::Gp(Reg::DX)]);
+    }
+
+    #[test]
+    fn x86_64_i128_part_moves_skip_exact_self_moves() {
+        let mut out = Vec::new();
+        emit_i128_parts_to_operands(
+            &mut out,
+            AsmOperand::Reg(Reg::AX),
+            AsmOperand::Reg(Reg::DX),
+            AsmOperand::Reg(Reg::AX),
+            AsmOperand::Reg(Reg::DX),
+        );
+
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn x86_64_variable_i128_shift_skips_redundant_dst_precopy() -> Result<(), String> {
+        let mut types = IndexMap::new();
+        types.insert("x".to_string(), CType::UInt128);
+        types.insert("n".to_string(), CType::Int);
+        types.insert("dst".to_string(), CType::UInt128);
+        let mut out = Vec::new();
+        let mut static_doubles = Vec::new();
+        let mut static_floats = Vec::new();
+        let mut label_counter = 0;
+        let mut ctx = BinaryContext {
+            types: &types,
+            out: &mut out,
+            static_doubles: &mut static_doubles,
+            static_floats: &mut static_floats,
+            label_counter: &mut label_counter,
+            function_name: "f",
+        };
+
+        convert_binary(
+            &TackyBinaryOp::ShiftLeft,
+            &TackyVal::Var("x".to_string()),
+            &TackyVal::Var("n".to_string()),
+            &TackyVal::Var("dst".to_string()),
+            &mut ctx,
+        )?;
+
+        let loop_start = out
+            .iter()
+            .position(|instr| matches!(instr, AsmInstr::Label(label) if label.starts_with("i128_shift_loop.")))
+            .expect("missing variable shift loop");
+        let writes_dst_before_loop = out[..loop_start].iter().any(|instr| {
+            matches!(
+                instr,
+                AsmInstr::Mov(
+                    AsmType::Quadword,
+                    _,
+                    AsmOperand::PseudoMem(name, 0 | 8)
+                ) if name == "dst"
+            )
+        });
+
+        assert!(!writes_dst_before_loop, "{out:#?}");
+        Ok(())
+    }
+
+    #[test]
+    fn x86_64_out_of_range_constant_i128_shift_uses_variable_fallback() -> Result<(), String> {
+        let mut types = IndexMap::new();
+        types.insert("x".to_string(), CType::UInt128);
+        types.insert("dst".to_string(), CType::UInt128);
+        let mut out = Vec::new();
+        let mut static_doubles = Vec::new();
+        let mut static_floats = Vec::new();
+        let mut label_counter = 0;
+        let mut ctx = BinaryContext {
+            types: &types,
+            out: &mut out,
+            static_doubles: &mut static_doubles,
+            static_floats: &mut static_floats,
+            label_counter: &mut label_counter,
+            function_name: "f",
+        };
+
+        convert_binary(
+            &TackyBinaryOp::ShiftLeft,
+            &TackyVal::Var("x".to_string()),
+            &TackyVal::Constant(128),
+            &TackyVal::Var("dst".to_string()),
+            &mut ctx,
+        )?;
+
+        assert!(
+            out.iter()
+                .any(|instr| matches!(instr, AsmInstr::Label(label) if label.starts_with("i128_shift_loop."))),
+            "{out:#?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn x86_64_fixup_removes_non_widening_self_moves() {
+        let mut func = AsmFunction {
+            name: "f".to_string(),
+            global: false,
+            instructions: vec![
+                AsmInstr::Mov(
+                    AsmType::Quadword,
+                    AsmOperand::Reg(Reg::AX),
+                    AsmOperand::Reg(Reg::AX),
+                ),
+                AsmInstr::Mov(
+                    AsmType::Longword,
+                    AsmOperand::Reg(Reg::AX),
+                    AsmOperand::Reg(Reg::AX),
+                ),
+            ],
+        };
+
+        fixup_instructions(&mut func, 0, &[]);
+
+        assert!(!func.instructions.iter().any(|instr| matches!(
+            instr,
+            AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Reg(Reg::AX),
+                AsmOperand::Reg(Reg::AX)
+            )
+        )));
+        assert!(func.instructions.iter().any(|instr| matches!(
+            instr,
+            AsmInstr::Mov(
+                AsmType::Longword,
+                AsmOperand::Reg(Reg::AX),
+                AsmOperand::Reg(Reg::AX)
+            )
+        )));
+    }
+
+    #[test]
+    fn x86_64_fixup_keeps_longword_register_self_moves_for_zero_extension() {
+        let mut func = AsmFunction {
+            name: "f".to_string(),
+            global: false,
+            instructions: vec![AsmInstr::Mov(
+                AsmType::Longword,
+                AsmOperand::Reg(Reg::AX),
+                AsmOperand::Reg(Reg::AX),
+            )],
+        };
+
+        fixup_instructions(&mut func, 0, &[]);
+
+        assert!(func.instructions.iter().any(|instr| matches!(
+            instr,
+            AsmInstr::Mov(
+                AsmType::Longword,
+                AsmOperand::Reg(Reg::AX),
+                AsmOperand::Reg(Reg::AX)
+            )
+        )));
+    }
+
+    #[test]
+    fn x86_64_fixup_removes_longword_memory_self_moves() {
+        let mut func = AsmFunction {
+            name: "f".to_string(),
+            global: false,
+            instructions: vec![AsmInstr::Mov(
+                AsmType::Longword,
+                AsmOperand::Stack(-4),
+                AsmOperand::Stack(-4),
+            )],
+        };
+
+        fixup_instructions(&mut func, 0, &[]);
+
+        assert!(!func.instructions.iter().any(|instr| matches!(
+            instr,
+            AsmInstr::Mov(
+                AsmType::Longword,
+                AsmOperand::Stack(-4),
+                AsmOperand::Stack(-4)
+            )
+        )));
+    }
 }

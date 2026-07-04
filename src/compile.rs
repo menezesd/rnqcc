@@ -480,11 +480,6 @@ struct LineMarkerFilename {
     file: String,
 }
 
-#[allow(dead_code)]
-fn strip_preprocessor_line_markers(source: &str) -> String {
-    strip_preprocessor_line_markers_with_map(source).source
-}
-
 fn strip_preprocessor_line_markers_with_map(source: &str) -> MappedSource {
     let mut out = String::with_capacity(source.len());
     let mut line_map = Vec::new();
@@ -672,13 +667,6 @@ mod tests {
         )?;
         assert!(err.contains("unresolved pseudo operand"));
         Ok(())
-    }
-
-    #[test]
-    fn strips_preprocessor_line_markers_before_lexing() {
-        let source = "# 1 \"input.c\"\n#line 20 \"generated.c\"\nint main(void) { return 0; }\n";
-        let stripped = strip_preprocessor_line_markers(source);
-        assert_eq!(stripped, "\n\nint main(void) { return 0; }\n");
     }
 
     #[test]

@@ -10,3 +10,11 @@ license = "MIT"
 [dependencies]
 clap = "3.0"
 unicode-ident = "1.0"
+indexmap = "2.0"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "compiler"
+harness = false

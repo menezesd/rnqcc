@@ -1,5 +1,6 @@
 use crate::diagnostic::{Diagnostic, DiagnosticKind, Warning, WarningKind};
 use crate::types::*;
+use indexmap::IndexMap;
 use std::collections::HashMap;
 
 type ResolveResult<T> = Result<T, Diagnostic>;
@@ -147,7 +148,7 @@ struct Resolver {
     functions: HashMap<String, FunctionSignature>,
     var_full_types: HashMap<String, FullType>,
     struct_members: HashMap<String, Vec<MemberDeclaration>>,
-    struct_defs: HashMap<String, StructDef>,
+    struct_defs: IndexMap<String, StructDef>,
     transparent_unions: HashMap<String, FullType>,
     implicit_functions: HashMap<String, FunctionSignature>,
     defined_labels: Vec<String>,
@@ -197,7 +198,7 @@ impl Resolver {
             functions: HashMap::new(),
             var_full_types: HashMap::new(),
             struct_members: HashMap::new(),
-            struct_defs: HashMap::new(),
+            struct_defs: IndexMap::new(),
             transparent_unions: HashMap::new(),
             implicit_functions: HashMap::new(),
             defined_labels: Vec::new(),
@@ -1105,7 +1106,7 @@ fn collect_cases(
     cases: &mut Vec<SwitchCase>,
     var_full_types: &HashMap<String, FullType>,
     struct_members: &HashMap<String, Vec<MemberDeclaration>>,
-    struct_defs: &HashMap<String, StructDef>,
+    struct_defs: &IndexMap<String, StructDef>,
 ) -> ResolveResult<()> {
     match stmt {
         Statement::Case {
@@ -1395,7 +1396,7 @@ fn eval_integer_constant_value_with_type_context(
     exp: &Exp,
     var_full_types: &HashMap<String, FullType>,
     struct_members: &HashMap<String, Vec<MemberDeclaration>>,
-    struct_defs: &HashMap<String, StructDef>,
+    struct_defs: &IndexMap<String, StructDef>,
 ) -> Option<IntegerConstantValue> {
     match exp {
         Exp::SizeOf(inner) => {

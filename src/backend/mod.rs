@@ -1,4 +1,5 @@
 pub mod aarch64;
+pub mod common;
 pub mod x86_64;
 
 use crate::types::*;
@@ -10,7 +11,7 @@ pub fn codegen(
 ) -> Result<AsmProgram, String> {
     match target.arch {
         Arch::X86_64 => x86_64::codegen::gen(program, target, no_coalescing),
-        Arch::AArch64 => aarch64::codegen::gen(program, target),
+        Arch::AArch64 => aarch64::codegen::gen(program, target, no_coalescing),
     }
 }
 

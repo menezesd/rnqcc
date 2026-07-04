@@ -475,6 +475,8 @@ fn show_cc(cc: &CondCode) -> &'static str {
         CondCode::BE => "be",
         CondCode::P => "p",
         CondCode::NP => "np",
+        CondCode::S => "s",
+        CondCode::NS => "ns",
     }
 }
 
@@ -488,6 +490,9 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                 if let AsmOperand::TlsData(name, offset) = dst {
                     return emit_macho_tls_store(w, *t, src, name, *offset, platform);
                 }
+            }
+            if src == dst && *t != AsmType::Longword {
+                return Ok(());
             }
             if matches!(*t, AsmType::Float | AsmType::Double) {
                 writeln!(
@@ -649,6 +654,7 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                 AsmX87BinaryOp::Sub => "fsubrp",
                 AsmX87BinaryOp::Mul => "fmulp",
                 AsmX87BinaryOp::Div => "fdivrp",
+                AsmX87BinaryOp::Cmp => "fucomip",
             };
             writeln!(w, "\t{} %st, %st(1)", mnemonic)
         }
@@ -791,12 +797,15 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                 AsmBinaryOp::SubSetFlags => "sub",
                 AsmBinaryOp::Sbb => "sbb",
                 AsmBinaryOp::Mul => "imul",
+                AsmBinaryOp::Imul => "imul",
                 AsmBinaryOp::SDiv | AsmBinaryOp::UDiv => {
                     return invalid_input("AArch64 integer division op reached x86_64 emitter")
                 }
                 AsmBinaryOp::DivDouble => {
                     return invalid_input("DivDouble should only be used with Double type")
                 }
+                AsmBinaryOp::Div => "div",
+                AsmBinaryOp::Idiv => "idiv",
                 AsmBinaryOp::And => "and",
                 AsmBinaryOp::Nand => {
                     return invalid_input("Nand should only be used by atomic RMW")
@@ -806,6 +815,9 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                 AsmBinaryOp::Sal => "sal",
                 AsmBinaryOp::Sar => "sar",
                 AsmBinaryOp::Shr => "shr",
+                AsmBinaryOp::Cmp => "cmp",
+                AsmBinaryOp::Test => "test",
+                AsmBinaryOp::SetCC => "setcc",
             };
             match op {
                 AsmBinaryOp::Sal | AsmBinaryOp::Sar | AsmBinaryOp::Shr => {
@@ -1251,6 +1263,102 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
             "x86-64 backend cannot emit AArch64 instruction: {:?}",
             instr
         )),
+        AsmInstr::And(_, _, _)
+        | AsmInstr::Or(_, _, _)
+        | AsmInstr::Xor(_, _, _)
+        | AsmInstr::Test(_, _, _)
+        | AsmInstr::Shl(_, _, _)
+        | AsmInstr::Shr(_, _, _)
+        | AsmInstr::Sar(_, _, _)
+        | AsmInstr::Ror(_, _, _)
+        | AsmInstr::Rol(_, _, _)
+        | AsmInstr::Fld(_, _)
+        | AsmInstr::Fstp(_, _)
+        | AsmInstr::Fisttp(_, _)
+        | AsmInstr::Fxch
+        | AsmInstr::FstpQ
+        | AsmInstr::FldQ(_)
+        | AsmInstr::X87Push(_, _)
+        | AsmInstr::X87Pop(_, _) => invalid_input(format!(
+            "x86-64 backend cannot emit instruction: {:?}",
+            instr
+        )),
+    }
+}
+
+/// Instructions that READ the condition-code flags. Used to decide whether the
+/// `mov $0, reg` -> `xor reg, reg` size optimization is safe: `xor` clobbers the
+/// flags, so it must not be substituted while a flag reader is still pending
+/// (e.g. the `cmp; mov $0, dst; setcc dst` comparison-lowering sequence).
+fn x86_reads_flags(instr: &AsmInstr) -> bool {
+    matches!(
+        instr,
+        AsmInstr::SetCC(..)
+            | AsmInstr::JmpCC(..)
+            | AsmInstr::Binary(
+                _,
+                AsmBinaryOp::Adc | AsmBinaryOp::Sbb | AsmBinaryOp::SetCC,
+                _,
+                _
+            )
+    )
+}
+
+/// Instructions that DEFINITELY overwrite the flags. Once one of these is
+/// reached (before any flag reader) the earlier flag state is dead, so zeroing
+/// with `xor` is safe. Kept to a subset of true flag writers so we never treat
+/// a flag-preserving instruction (e.g. `not`) as a writer.
+fn x86_writes_flags(instr: &AsmInstr) -> bool {
+    match instr {
+        AsmInstr::Cmp(..) | AsmInstr::Test(..) => true,
+        AsmInstr::Idiv(..) | AsmInstr::Div(..) | AsmInstr::MulFull(..) => true,
+        AsmInstr::Unary(_, AsmUnaryOp::Neg, _) => true,
+        // Integer ALU binaries set flags; `not` (a Unary) and float division do not.
+        AsmInstr::Binary(_, op, _, _) => !matches!(op, AsmBinaryOp::DivDouble),
+        _ => false,
+    }
+}
+
+/// Decide whether `mov $0, reg` at index `i` may be emitted as `xor reg, reg`.
+/// Scans forward until the flag state is proven dead (a flag writer, a `ret`, or
+/// a call — which clobbers flags per the SysV ABI) or proven live (a flag
+/// reader). Any other control-flow transfer (jump/label/setjmp) is treated
+/// conservatively as "flags may be live" so the flags-clobbering `xor` is not
+/// used across a boundary whose downstream flag usage we cannot see here.
+fn zeroing_can_use_xor(instrs: &[AsmInstr], i: usize) -> bool {
+    for instr in &instrs[i + 1..] {
+        if x86_reads_flags(instr) {
+            return false;
+        }
+        if x86_writes_flags(instr) {
+            return true;
+        }
+        match instr {
+            AsmInstr::Ret | AsmInstr::Call(..) => return true,
+            AsmInstr::Jmp(_)
+            | AsmInstr::NonlocalJmp(_)
+            | AsmInstr::JmpIndirect(_)
+            | AsmInstr::Label(_)
+            | AsmInstr::BuiltinSetjmp { .. }
+            | AsmInstr::BuiltinLongjmp { .. }
+            | AsmInstr::Unreachable => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+fn emit_zeroing_mov(
+    w: &mut dyn Write,
+    t: AsmType,
+    reg: &Reg,
+    use_xor: bool,
+) -> std::io::Result<()> {
+    let name = reg_name(reg, t)?;
+    if use_xor {
+        writeln!(w, "\txor{} {}, {}", suffix(t), name, name)
+    } else {
+        writeln!(w, "\tmov{} $0, {}", suffix(t), name)
     }
 }
 
@@ -1261,12 +1369,22 @@ fn emit_function(w: &mut dyn Write, func: &AsmFunction, platform: &Target) -> st
         writeln!(w, "\t.globl {}", label)?;
     }
     writeln!(w, "{}:", label)?;
-    let mut iter = func.instructions.iter();
-    if let Some(AsmInstr::Push(AsmOperand::Reg(Reg::AX))) = iter.next() {
+    let instrs = &func.instructions;
+    let mut start = 0;
+    if let Some(AsmInstr::Push(AsmOperand::Reg(Reg::AX))) = instrs.first() {
         writeln!(w, "\tpushq %rbp")?;
         writeln!(w, "\tmovq %rsp, %rbp")?;
+        start = 1;
     }
-    for instr in iter {
+    for (idx, instr) in instrs.iter().enumerate().skip(start) {
+        // `mov $0, reg` can shrink to `xor reg, reg`, but only where the flags
+        // it would clobber are dead (see `zeroing_can_use_xor`).
+        if let AsmInstr::Mov(t, AsmOperand::Imm(0), AsmOperand::Reg(reg)) = instr {
+            if !matches!(*t, AsmType::Float | AsmType::Double | AsmType::LongDouble) {
+                emit_zeroing_mov(w, *t, reg, zeroing_can_use_xor(instrs, idx))?;
+                continue;
+            }
+        }
         emit_instruction(w, instr, platform)?;
     }
     Ok(())
@@ -1398,12 +1516,14 @@ fn emit_string_init(w: &mut dyn Write, s: &str, null_terminated: bool) -> std::i
             bytes.push(0);
         }
         for chunk in bytes.chunks(16) {
-            let values = chunk
-                .iter()
-                .map(u8::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            writeln!(w, "\t.byte {}", values)?;
+            write!(w, "\t.byte ")?;
+            for (idx, byte) in chunk.iter().enumerate() {
+                if idx > 0 {
+                    write!(w, ", ")?;
+                }
+                write!(w, "{byte}")?;
+            }
+            writeln!(w)?;
         }
         Ok(())
     } else {
@@ -1575,4 +1695,103 @@ pub fn emit(assembly_file: &str, program: &AsmProgram, platform: &Target) -> std
     }
     emit_stack_note(&mut w, platform)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn emit_one(instr: AsmInstr) -> String {
+        let mut out = Vec::new();
+        emit_instruction(&mut out, &instr, &Target::x86_64_linux()).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    fn emit_func_body(instrs: Vec<AsmInstr>) -> String {
+        let func = AsmFunction {
+            name: "f".to_string(),
+            global: false,
+            instructions: instrs,
+        };
+        let mut out = Vec::new();
+        emit_function(&mut out, &func, &Target::x86_64_linux()).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn x86_64_emitter_skips_non_widening_self_moves() {
+        let asm = emit_one(AsmInstr::Mov(
+            AsmType::Quadword,
+            AsmOperand::Reg(Reg::AX),
+            AsmOperand::Reg(Reg::AX),
+        ));
+
+        assert!(asm.is_empty(), "{asm}");
+    }
+
+    #[test]
+    fn x86_64_emitter_keeps_longword_self_moves_for_zero_extension() {
+        let asm = emit_one(AsmInstr::Mov(
+            AsmType::Longword,
+            AsmOperand::Reg(Reg::AX),
+            AsmOperand::Reg(Reg::AX),
+        ));
+
+        assert_eq!(asm, "\tmovl %eax, %eax\n");
+    }
+
+    #[test]
+    fn x86_64_emitter_zeroing_defaults_to_mov_without_flag_context() {
+        // A bare zeroing move, with no following instruction to prove the flags
+        // are dead, must use the flag-preserving `mov $0` form.
+        let asm = emit_one(AsmInstr::Mov(
+            AsmType::Quadword,
+            AsmOperand::Imm(0),
+            AsmOperand::Reg(Reg::AX),
+        ));
+
+        assert_eq!(asm, "\tmovq $0, %rax\n");
+    }
+
+    #[test]
+    fn x86_64_emitter_zeros_with_xor_when_flags_are_dead() {
+        // `mov $0, %eax` followed by `ret` (flags dead at exit) -> `xor`.
+        let asm = emit_func_body(vec![
+            AsmInstr::Mov(
+                AsmType::Longword,
+                AsmOperand::Imm(0),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            AsmInstr::Ret,
+        ]);
+
+        assert!(asm.contains("\txorl %eax, %eax\n"), "{asm}");
+    }
+
+    #[test]
+    fn x86_64_emitter_keeps_mov_when_setcc_reads_flags() {
+        // The comparison-lowering sequence: the zeroing sits between `cmp` and
+        // `setcc`, which reads the flags. `xor` here would corrupt the result,
+        // so the flag-preserving `mov $0` must be kept.
+        let asm = emit_func_body(vec![
+            AsmInstr::Cmp(
+                AsmType::Longword,
+                AsmOperand::Imm(2),
+                AsmOperand::Reg(Reg::R11),
+            ),
+            AsmInstr::Mov(
+                AsmType::Longword,
+                AsmOperand::Imm(0),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            AsmInstr::SetCC(CondCode::E, AsmOperand::Reg(Reg::AX)),
+            AsmInstr::Ret,
+        ]);
+
+        assert!(asm.contains("\tmovl $0, %eax\n"), "{asm}");
+        assert!(
+            !asm.contains("xor"),
+            "must not clobber flags before setcc: {asm}"
+        );
+    }
 }

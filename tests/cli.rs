@@ -5044,12 +5044,45 @@ fn aarch64_linux_long_double_uses_binary128_helpers() {
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    let id_label = "\nid:\n";
+    let id_start = asm
+        .find(id_label)
+        .unwrap_or_else(|| panic!("missing function id"));
+    let id_after_label = id_start + id_label.len();
+    let id_rest = &asm[id_after_label..];
+    let id_body = &id_rest[..id_rest.find("\nadd:\n").unwrap_or(id_rest.len())];
+    assert!(!id_body.contains("\tstr q9,"), "{id_body}");
+    assert!(!id_body.contains("\tldr q9, [sp"), "{id_body}");
+    assert!(!id_body.contains("\tmov v0.16b"), "{id_body}");
     assert!(asm.contains("str q0, [sp"), "{asm}");
     assert!(asm.contains("str q1, [sp"), "{asm}");
     assert!(asm.contains("bl __addtf3"), "{asm}");
     assert!(asm.contains("bl __subtf3"), "{asm}");
     assert!(asm.contains("bl __multf3"), "{asm}");
     assert!(asm.contains("bl __divtf3"), "{asm}");
+    let body = |name: &str| {
+        let label = format!("\n{name}:\n");
+        let start = asm
+            .find(&label)
+            .unwrap_or_else(|| panic!("missing function {name}"));
+        let after_label = start + label.len();
+        let rest = &asm[after_label..];
+        let end = rest.find("\n\t.text").unwrap_or(rest.len());
+        &rest[..end]
+    };
+    for (name, call) in [
+        ("add", "\tbl __addtf3"),
+        ("sub", "\tbl __subtf3"),
+        ("mul", "\tbl __multf3"),
+        ("divv", "\tbl __divtf3"),
+    ] {
+        let body = body(name);
+        assert!(body.contains(call), "{body}");
+        let after_call = &body[body.find(call).expect("missing call") + call.len()..];
+        assert!(!after_call.contains("\tstr q0,"), "{body}");
+        assert!(!after_call.contains("\tldr q0, [sp"), "{body}");
+        assert!(!after_call.contains("\tmov v0.16b"), "{body}");
+    }
     assert!(asm.contains("str x30"), "{asm}");
 
     let _ = std::fs::remove_file(src);
@@ -5088,6 +5121,32 @@ fn aarch64_linux_long_double_supports_comparisons_and_negation() {
     assert!(asm.contains("bl __gttf2"), "{asm}");
     assert!(asm.contains("bl __getf2"), "{asm}");
     assert!(asm.contains("cmp w0, w10"), "{asm}");
+    let body = |name: &str| {
+        let label = format!("\n{name}:\n");
+        let start = asm
+            .find(&label)
+            .unwrap_or_else(|| panic!("missing function {name}"));
+        let after_label = start + label.len();
+        let rest = &asm[after_label..];
+        let end = rest.find("\n\t.text").unwrap_or(rest.len());
+        &rest[..end]
+    };
+    for (name, call) in [
+        ("eq", "\tbl __eqtf2"),
+        ("ne", "\tbl __netf2"),
+        ("lt", "\tbl __lttf2"),
+        ("le", "\tbl __letf2"),
+        ("gt", "\tbl __gttf2"),
+        ("ge", "\tbl __getf2"),
+    ] {
+        let body = body(name);
+        assert!(body.contains(call), "{body}");
+        let after_call = &body[body.find(call).expect("missing call") + call.len()..];
+        assert!(after_call.contains("\tcset w0,"), "{body}");
+        assert!(!after_call.contains("\tcset w9,"), "{body}");
+        assert!(!after_call.contains("\tstr w9,"), "{body}");
+        assert!(!after_call.contains("\tldr w0, [sp"), "{body}");
+    }
     assert!(asm.contains("eor w9, w9, w10"), "{asm}");
     assert!(asm.contains("str x30"), "{asm}");
 
@@ -6596,7 +6655,7 @@ fn aarch64_runtime_smoke_or_cross_assembly() {
 
         assert!(output.status.success(), "{}", stderr(output));
         let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
-        assert!(asm.contains("add w9, w9, w10"));
+        assert!(asm.contains("add w0, w0, w10"));
     }
 
     let _ = std::fs::remove_file(src);
@@ -6881,7 +6940,7 @@ fn emits_aarch64_assembly_for_locals_and_arithmetic() {
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains("sub sp, sp, #16"));
     assert!(asm.contains("str w9, [sp"));
-    assert!(asm.contains("add w9, w9, w10"));
+    assert!(asm.contains("add w0, w0, w10"));
     assert!(asm.contains("add sp, sp, #16"));
 
     let _ = std::fs::remove_file(out);
@@ -6924,7 +6983,7 @@ fn emits_aarch64_assembly_for_logical_not() {
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains("cmp w9, w10"));
-    assert!(asm.contains("cset w9, eq"));
+    assert!(asm.contains("cset w0, eq"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -6974,9 +7033,9 @@ fn emits_aarch64_assembly_for_double_return_constant() {
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
-    assert!(asm.contains("fmov d9, x9"));
-    assert!(asm.contains("str d9, [sp"));
-    assert!(asm.contains("ldr d0, [sp"));
+    assert!(asm.contains("fmov d0, x9"));
+    assert!(!asm.contains("str d9, [sp"));
+    assert!(!asm.contains("ldr d0, [sp"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -7000,8 +7059,7 @@ fn emits_aarch64_assembly_for_double_arithmetic() {
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains("str d0, [sp]"));
     assert!(asm.contains("str d1, [sp, #8]"));
-    assert!(asm.contains("fadd d9, d9, d10"));
-    assert!(asm.contains("ldr d0, [sp"));
+    assert!(asm.contains("fadd d0, d0, d10"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -7024,7 +7082,7 @@ fn emits_aarch64_assembly_for_double_comparison() {
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains("fcmp d9, d10"));
-    assert!(asm.contains("cset w9, lt"));
+    assert!(asm.contains("cset w0, lt"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -7102,8 +7160,8 @@ fn emits_aarch64_assembly_for_signed_int_to_double() {
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
-    assert!(asm.contains("scvtf d9, w9"));
-    assert!(asm.contains("ldr d0, [sp"));
+    assert!(asm.contains("scvtf d0,"));
+    assert!(!asm.contains("ldr d0, [sp"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -7124,8 +7182,8 @@ fn emits_aarch64_assembly_for_unsigned_int_to_double() {
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
-    assert!(asm.contains("ucvtf d9, w9"));
-    assert!(asm.contains("ldr d0, [sp"));
+    assert!(asm.contains("ucvtf d0,"));
+    assert!(!asm.contains("ldr d0, [sp"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -7150,8 +7208,8 @@ fn emits_aarch64_assembly_for_double_to_integer_conversions() {
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
-    assert!(asm.contains("fcvtzs w9, d9"));
-    assert!(asm.contains("fcvtzu w9, d9"));
+    assert!(asm.contains("fcvtzs w0,"));
+    assert!(asm.contains("fcvtzu w0,"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -7176,10 +7234,9 @@ fn emits_aarch64_assembly_for_double_negation_and_logical_not() {
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
-    assert!(asm.contains("fneg d9, d9"));
-    assert!(asm.contains("fmov d10, x10"));
-    assert!(asm.contains("fcmp d9, d10"));
-    assert!(asm.contains("cset w9, eq"));
+    assert!(asm.contains("fneg d0, d0"));
+    assert!(asm.contains("fcmp d9, #0.0"));
+    assert!(asm.contains("cset w0, eq"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -7208,7 +7265,7 @@ fn emits_aarch64_assembly_for_mixed_integer_and_double_arguments() {
     assert!(asm.contains("str d0, [sp, #8]"));
     assert!(asm.contains("str w1, [sp, #16]"));
     assert!(asm.contains("str d1, [sp, #24]"));
-    assert!(asm.contains("fadd d9, d9, d10"));
+    assert!(asm.contains("fadd d0, d0, d10"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -7242,7 +7299,7 @@ double f(void) {
     assert!(asm.contains("\tmovz x9, #65535"), "{asm}");
     assert!(asm.contains("\tmovk x9, #65535, lsl #48"), "{asm}");
     assert!(asm.contains("\tldr x0, [sp]"), "{asm}");
-    assert!(asm.contains("\tucvtf d9, x9"), "{asm}");
+    assert!(asm.contains("\tucvtf d0, x9"), "{asm}");
     assert!(!asm.contains("\tmovz w0, #65535"), "{asm}");
 
     let _ = std::fs::remove_file(src);
@@ -7383,7 +7440,7 @@ fn emits_aarch64_assembly_for_pointer_stack_argument() -> Result<(), String> {
     assert!(asm.contains("str x9, [sp]"));
     assert!(asm.contains("bl load9"));
     assert!(asm.contains("ldr x9, [sp, #48]"));
-    assert!(asm.contains("ldr w9, [x10]"));
+    assert!(asm.contains("ldr w0, [x10]"));
     assert_contains_in_order(&asm, &["ldr x9, [sp, #24]", "str x9, [sp]", "bl load9"])?;
 
     let _ = std::fs::remove_file(src);
@@ -8550,8 +8607,8 @@ fn emits_aarch64_movz_movk_for_large_immediates() {
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
-    assert!(asm.contains("movz x9, #42"));
-    assert!(asm.contains("movk x9, #1, lsl #32"));
+    assert!(asm.contains("movz x0, #42"));
+    assert!(asm.contains("movk x0, #1, lsl #32"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -8747,7 +8804,7 @@ fn emits_aarch64_assembly_for_global_read() {
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains("adrp x16, g"));
-    assert!(asm.contains("ldr w9, [x16, :lo12:g]"));
+    assert!(asm.contains("ldr w0, [x16, :lo12:g]"));
     assert!(asm.contains("g:\n\t.long 41"));
 
     let _ = std::fs::remove_file(src);
@@ -8800,7 +8857,7 @@ fn emits_aarch64_macos_assembly_for_global_address() {
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains("adrp x9, _g@GOTPAGE"));
     assert!(asm.contains("ldr x9, [x9, _g@GOTPAGEOFF]"));
-    assert!(asm.contains("ldr w9, [x10]"));
+    assert!(asm.contains("ldr w0, [x10]"));
     assert!(asm.contains("_g:\n\t.long 42"));
 
     let _ = std::fs::remove_file(src);
@@ -8829,8 +8886,9 @@ fn emits_aarch64_assembly_for_global_array_read() {
     assert!(asm.contains("a:\n\t.long 1\n\t.long 2\n\t.long 3"));
     assert!(asm.contains("adrp x9, a"));
     assert!(asm.contains("add x9, x9, :lo12:a"));
-    assert!(asm.contains("mul x10, x10, x11"));
-    assert!(asm.contains("ldr w9, [x10]"));
+    assert!(asm.contains(", lsl #2"));
+    assert!(!asm.contains("\tmul "));
+    assert!(asm.contains("ldr w0, [x10]"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -8858,7 +8916,7 @@ fn emits_aarch64_assembly_for_global_array_write() {
     assert!(asm.contains("a:\n\t.zero 12"));
     assert!(asm.contains("adrp x9, a"));
     assert!(asm.contains("str w9, [x10]"));
-    assert!(asm.contains("ldr w9, [x10]"));
+    assert!(asm.contains("ldr w0, [x10]"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -8886,7 +8944,7 @@ fn emits_aarch64_assembly_for_address_of_and_load() {
     assert!(asm.contains("add x9, sp, #") || asm.contains("mov x9, sp"));
     assert!(asm.contains("str x9, [sp"));
     assert!(asm.contains("ldr x10, [sp"));
-    assert!(asm.contains("ldr w9, [x10]"));
+    assert!(asm.contains("ldr w0, [x10]"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -8938,9 +8996,9 @@ fn emits_aarch64_assembly_for_local_array_index() {
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains("str w9, [sp"));
-    assert!(asm.contains("mul x10, x10, x11"));
-    assert!(asm.contains("add x9, x9, x10"));
-    assert!(asm.contains("ldr w9, [x10]"));
+    assert!(asm.contains(", lsl #2"));
+    assert!(!asm.contains("\tmul "));
+    assert!(asm.contains("ldr w0, [x10]"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -9040,7 +9098,7 @@ fn emits_aarch64_assembly_for_unsigned_comparison() {
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
-    assert!(asm.contains("cset w9, lo"));
+    assert!(asm.contains("cset w0, lo"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -9098,7 +9156,7 @@ fn emits_aarch64_assembly_for_global_struct_copy() {
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains("adrp x16, g"));
     assert!(asm.contains("str x9, [x16, :lo12:g]"));
-    assert!(asm.contains("ldr w9, [x16, :lo12:g+4]"));
+    assert!(asm.contains("ldr w0, [x16, :lo12:g+4]"));
     assert!(asm.contains(".bss"));
 
     let _ = std::fs::remove_file(src);
@@ -9571,6 +9629,9 @@ int main(void) {
         ),
         ("propagate-copies", &["--propagate-copies"]),
         ("eliminate-dead-stores", &["--eliminate-dead-stores"]),
+        ("cse", &["--cse"]),
+        ("inline-functions", &["--inline-functions"]),
+        ("ipcp", &["--ipcp"]),
         (
             "fold-and-unreachable",
             &["--fold-constants", "--eliminate-unreachable-code"],
@@ -9578,6 +9639,15 @@ int main(void) {
         (
             "copy-and-dead-store",
             &["--propagate-copies", "--eliminate-dead-stores"],
+        ),
+        (
+            "interprocedural",
+            &[
+                "--inline-functions",
+                "--ipcp",
+                "--fold-constants",
+                "--eliminate-unreachable-code",
+            ],
         ),
         ("all", &["--optimize"]),
     ];
@@ -9614,6 +9684,81 @@ int main(void) {
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(unopt);
+    Ok(())
+}
+
+#[test]
+fn ipcp_respects_local_function_pointer_escape() -> Result<(), String> {
+    let src = TempPath::new("ipcp-local-fnptr-escape", "c");
+    let exe = TempPath::new("ipcp-local-fnptr-escape", "bin");
+    std::fs::write(
+        src.path(),
+        r#"
+static int f(int x) {
+    return x + 1;
+}
+
+int main(void) {
+    int (*fp)(int) = f;
+    int direct = f(10);
+    return direct + fp(30);
+}
+"#,
+    )
+    .expect("failed to write test input");
+
+    let output = Command::new(rnqcc())
+        .arg("--ipcp")
+        .arg("-o")
+        .arg(exe.path())
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let run = Command::new(exe.path())
+        .status()
+        .map_err(|err| format!("failed to run optimized output: {err}"))?;
+    assert_eq!(run.code(), Some(42));
+
+    Ok(())
+}
+
+#[test]
+fn optimize_respects_static_function_pointer_initializer_escape() -> Result<(), String> {
+    let src = TempPath::new("ipcp-static-fnptr-escape", "c");
+    let exe = TempPath::new("ipcp-static-fnptr-escape", "bin");
+    std::fs::write(
+        src.path(),
+        r#"
+static int f(int x) {
+    return x + 1;
+}
+
+static int (*fp)(int) = f;
+
+int main(void) {
+    int direct = f(10);
+    return direct + fp(30);
+}
+"#,
+    )
+    .expect("failed to write test input");
+
+    let output = Command::new(rnqcc())
+        .arg("--optimize")
+        .arg("-o")
+        .arg(exe.path())
+        .arg(src.path())
+        .output()
+        .expect("failed to run rnqcc");
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let run = Command::new(exe.path())
+        .status()
+        .map_err(|err| format!("failed to run optimized output: {err}"))?;
+    assert_eq!(run.code(), Some(42));
+
     Ok(())
 }
 
@@ -25145,6 +25290,986 @@ double d(void) { return 7; }
 }
 
 #[test]
+fn aarch64_optimized_float_zero_return_uses_zero_register() {
+    let src = temp_file("aarch64-float-zero-return", "c");
+    let out = temp_file("aarch64-float-zero-return", "s");
+    std::fs::write(
+        &src,
+        r#"
+float f(void) { return 0.0f; }
+double d(void) { return 0.0; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\tfmov s0, wzr"), "{asm}");
+    assert!(asm.contains("\tfmov d0, xzr"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_optimized_float_zero_conversions_use_zero_register() {
+    let src = temp_file("aarch64-float-zero-conversions", "c");
+    let out = temp_file("aarch64-float-zero-conversions", "s");
+    std::fs::write(
+        &src,
+        r#"
+float f(void) { return (float)0.0; }
+double d(void) { return (double)0.0f; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\tfmov s0, wzr"), "{asm}");
+    assert!(asm.contains("\tfmov d0, xzr"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_optimized_int_zero_conversions_use_zero_register() {
+    let src = temp_file("aarch64-int-zero-conversions", "c");
+    let out = temp_file("aarch64-int-zero-conversions", "s");
+    std::fs::write(
+        &src,
+        r#"
+float f(void) { return (float)0; }
+double d(void) { return (double)0u; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\tfmov s0, wzr"), "{asm}");
+    assert!(asm.contains("\tfmov d0, xzr"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_optimized_float_to_int_zero_conversions_use_zero_register() {
+    let src = temp_file("aarch64-float-to-int-zero-conversions", "c");
+    let out = temp_file("aarch64-float-to-int-zero-conversions", "s");
+    std::fs::write(
+        &src,
+        r#"
+int i(void) { return (int)0.0; }
+unsigned long u(void) { return (unsigned long)0.0f; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\tmov w0, wzr"), "{asm}");
+    assert!(asm.contains("\tmov x0, xzr"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_optimized_constant_pointer_offsets_use_immediate_add() {
+    let src = temp_file("aarch64-constant-pointer-offsets", "c");
+    let out = temp_file("aarch64-constant-pointer-offsets", "s");
+    std::fs::write(
+        &src,
+        r#"
+int get(int *p) { return p[3]; }
+int getneg(int *p) { return p[-2]; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\tadd x9, x9, #12"), "{asm}");
+    assert!(asm.contains("\tsub x9, x9, #8"), "{asm}");
+    assert!(!asm.contains("\tmul "), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_dynamic_scaled_pointer_offsets_use_shifted_add() {
+    let src = temp_file("aarch64-dynamic-scaled-pointer-offsets", "c");
+    let out = temp_file("aarch64-dynamic-scaled-pointer-offsets", "s");
+    std::fs::write(
+        &src,
+        r#"
+int geti(int *p, long i) { return p[i]; }
+long getl(long *p, long i) { return p[i]; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains(", lsl #2"), "{asm}");
+    assert!(asm.contains(", lsl #3"), "{asm}");
+    assert!(!asm.contains("\tmul "), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_returned_pointer_offsets_use_return_registers() {
+    let src = temp_file("aarch64-returned-pointer-offsets", "c");
+    let out = temp_file("aarch64-returned-pointer-offsets", "s");
+    std::fs::write(
+        &src,
+        r#"
+int *advance_const(int *p) { return p + 3; }
+int *advance_index(int *p, long i) { return p + i; }
+char *advance_byte(char *p, long i) { return p + i; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\tadd x0, x0, #12"), "{asm}");
+    assert!(asm.contains("\tadd x0, x0, x10"), "{asm}");
+    assert!(!asm.contains("\tadd x9, x9, #12"), "{asm}");
+    assert!(!asm.contains("\tldr x0, [sp, #16]"), "{asm}");
+    assert!(!asm.contains("\tmov x0, x9"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_returned_addresses_use_return_registers() {
+    let src = temp_file("aarch64-returned-addresses", "c");
+    let out = temp_file("aarch64-returned-addresses", "s");
+    std::fs::write(
+        &src,
+        r#"
+int global_value;
+
+int *global_addr(void) { return &global_value; }
+
+int *local_addr(void) {
+    int value;
+    return &value;
+}
+
+void *frame_addr(void) { return __builtin_frame_address(0); }
+
+void *label_addr(void) {
+target:
+    return &&target;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\tadrp x0, global_value"), "{asm}");
+    assert!(asm.contains("\tadd x0, x0, :lo12:global_value"), "{asm}");
+    assert!(asm.contains("\tadd x0, sp,"), "{asm}");
+    assert!(asm.contains("\tadrp x0, .L"), "{asm}");
+    assert!(asm.contains("\tadd x0, x0, .L"), "{asm}");
+    assert!(!asm.contains("\tmov x0, x9"), "{asm}");
+    assert!(!asm.contains("\tstr x9,"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_returned_pointer_loads_use_return_registers() {
+    let src = temp_file("aarch64-returned-pointer-loads", "c");
+    let out = temp_file("aarch64-returned-pointer-loads", "s");
+    std::fs::write(
+        &src,
+        r#"
+int load(int *p) { return *p; }
+long loadl(long *p) { return *p; }
+double loadd(double *p) { return *p; }
+__int128 loads(__int128 *p) { return *p; }
+unsigned __int128 loadu(unsigned __int128 *p) { return *p; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\tldr w0, [x10]"), "{asm}");
+    assert!(asm.contains("\tldr x0, [x10]"), "{asm}");
+    assert!(asm.contains("\tldr d0, [x10]"), "{asm}");
+    let body = |name: &str| {
+        let label = format!("\n{name}:\n");
+        let start = asm
+            .find(&label)
+            .unwrap_or_else(|| panic!("missing function {name}"));
+        let after_label = start + label.len();
+        let rest = &asm[after_label..];
+        let end = rest.find("\n\t.text").unwrap_or(rest.len());
+        &rest[..end]
+    };
+    for name in ["loads", "loadu"] {
+        let body = body(name);
+        assert!(body.contains("\tldr x0, [x"), "{body}");
+        assert!(body.contains("\tldr x1, [x"), "{body}");
+        assert!(body.contains(", #8]"), "{body}");
+        let high_load = body.find("\tldr x1, [x").expect("missing high-half load");
+        let after_load = &body[high_load..];
+        assert!(!after_load.contains("\tmov x0, x9"), "{body}");
+        assert!(!after_load.contains("\tmov x1, x11"), "{body}");
+        assert!(!after_load.contains("\tstr x0,"), "{body}");
+        assert!(!after_load.contains("\tstr x1,"), "{body}");
+        assert!(!after_load.contains("\tstr x9,"), "{body}");
+        assert!(!after_load.contains("\tstr x11,"), "{body}");
+        assert!(!after_load.contains("\tldr x0, [sp"), "{body}");
+        assert!(!after_load.contains("\tldr x1, [sp"), "{body}");
+    }
+    assert!(!asm.contains("\tstr w9, [sp, #8]"), "{asm}");
+    assert!(!asm.contains("\tstr x9, [sp, #8]"), "{asm}");
+    assert!(!asm.contains("\tstr d9, [sp, #8]"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_returned_struct_fields_use_return_registers() {
+    let src = temp_file("aarch64-returned-struct-fields", "c");
+    let out = temp_file("aarch64-returned-struct-fields", "s");
+    std::fs::write(
+        &src,
+        r#"
+struct S { int x; int y; double d; };
+int field_int(void) {
+    struct S s = { 1, 42, 3.0 };
+    return s.y;
+}
+double field_double(struct S s) {
+    return s.d;
+}
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\tldr w0, [sp"), "{asm}");
+    assert!(asm.contains("\tldr d0, [sp"), "{asm}");
+    assert!(!asm.contains("\tldr w9, [sp, #12]\n\tstr w9"), "{asm}");
+    assert!(!asm.contains("\tldr d9, [sp, #24]\n\tstr d9"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_returned_unary_ops_use_return_registers() {
+    let src = temp_file("aarch64-returned-unary-ops", "c");
+    let out = temp_file("aarch64-returned-unary-ops", "s");
+    std::fs::write(
+        &src,
+        r#"
+int neg(int x) { return -x; }
+int comp(int x) { return ~x; }
+int noti(int x) { return !x; }
+float negf(float x) { return -x; }
+__int128 neg128(__int128 x) { return -x; }
+unsigned __int128 comp128(unsigned __int128 x) { return ~x; }
+int not128(__int128 x) { return !x; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\tneg w0, w0"), "{asm}");
+    assert!(asm.contains("\tmvn w0, w0"), "{asm}");
+    assert!(asm.contains("\tcset w0, eq"), "{asm}");
+    assert!(asm.contains("\tfneg s0, s0"), "{asm}");
+    let body = |name: &str| {
+        let label = format!("\n{name}:\n");
+        let start = asm
+            .find(&label)
+            .unwrap_or_else(|| panic!("missing function {name}"));
+        let after_label = start + label.len();
+        let rest = &asm[after_label..];
+        let end = rest.find("\n\t.text").unwrap_or(rest.len());
+        &rest[..end]
+    };
+    let neg128 = body("neg128");
+    assert!(neg128.contains("\tmvn x0, x0"), "{neg128}");
+    assert!(neg128.contains("\tmvn x1, x1"), "{neg128}");
+    assert!(neg128.contains("\tadds x0, x0"), "{neg128}");
+    assert!(neg128.contains("\tadcs x1, x1"), "{neg128}");
+    let comp128 = body("comp128");
+    assert!(comp128.contains("\tmvn x0, x0"), "{comp128}");
+    assert!(comp128.contains("\tmvn x1, x1"), "{comp128}");
+    let not128 = body("not128");
+    assert!(not128.contains("\torr "), "{not128}");
+    assert!(not128.contains("\tcset w0, eq"), "{not128}");
+    assert!(!not128.contains("\tcset w9,"), "{not128}");
+    assert!(!not128.contains("\tstr w9,"), "{not128}");
+    assert!(!not128.contains("\tldr w0, [sp"), "{not128}");
+    for body in [neg128, comp128] {
+        assert!(!body.contains("\tstr x9,"), "{body}");
+        assert!(!body.contains("\tstr x10,"), "{body}");
+        assert!(!body.contains("\tstr x11,"), "{body}");
+        assert!(!body.contains("\tmov x0, x9"), "{body}");
+        assert!(!body.contains("\tmov x1, x11"), "{body}");
+    }
+    assert!(!asm.contains("\tmov w0, w0"), "{asm}");
+    assert!(!asm.contains("\tfmov s0, s0"), "{asm}");
+    assert!(!asm.contains("\tstr w9, [sp, #4]"), "{asm}");
+    assert!(!asm.contains("\tstr s9, [sp, #4]"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_returned_binary_ops_use_return_registers() {
+    let src = temp_file("aarch64-returned-binary-ops", "c");
+    let out = temp_file("aarch64-returned-binary-ops", "s");
+    std::fs::write(
+        &src,
+        r#"
+int add(int a, int b) { return a + b; }
+int band(int a, int b) { return a & b; }
+long mull(long a, long b) { return a * b; }
+double addd(double a, double b) { return a + b; }
+int lt(int a, int b) { return a < b; }
+int eq128(__int128 a, __int128 b) { return a == b; }
+int ne128(unsigned __int128 a, unsigned __int128 b) { return a != b; }
+int lt128(__int128 a, __int128 b) { return a < b; }
+int ge128(__int128 a, __int128 b) { return a >= b; }
+int ugt128(unsigned __int128 a, unsigned __int128 b) { return a > b; }
+int ule128(unsigned __int128 a, unsigned __int128 b) { return a <= b; }
+__int128 add128(__int128 a, __int128 b) { return a + b; }
+__int128 sub128(__int128 a, __int128 b) { return a - b; }
+unsigned __int128 and128(unsigned __int128 a, unsigned __int128 b) { return a & b; }
+unsigned __int128 or128(unsigned __int128 a, unsigned __int128 b) { return a | b; }
+unsigned __int128 xor128(unsigned __int128 a, unsigned __int128 b) { return a ^ b; }
+__int128 mul128(__int128 a, __int128 b) { return a * b; }
+__int128 div128(__int128 a, __int128 b) { return a / b; }
+__int128 mod128(__int128 a, __int128 b) { return a % b; }
+unsigned __int128 udiv128(unsigned __int128 a, unsigned __int128 b) { return a / b; }
+unsigned __int128 umod128(unsigned __int128 a, unsigned __int128 b) { return a % b; }
+unsigned __int128 shl128(unsigned __int128 a) { return a << 13; }
+unsigned __int128 shl64(unsigned __int128 a) { return a << 64; }
+unsigned __int128 shr128(unsigned __int128 a) { return a >> 11; }
+__int128 sar128(__int128 a) { return a >> 9; }
+unsigned __int128 vshl128(unsigned __int128 a, int n) { return a << n; }
+__int128 vsar128(__int128 a, int n) { return a >> n; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\tadd w0, w0, w10"), "{asm}");
+    assert!(asm.contains("\tand w0, w0, w10"), "{asm}");
+    assert!(asm.contains("\tmul x0, x0, x10"), "{asm}");
+    assert!(asm.contains("\tfadd d0, d0, d10"), "{asm}");
+    assert!(asm.contains("\tcset w0, lt"), "{asm}");
+    let body = |name: &str| {
+        let label = format!("\n{name}:\n");
+        let start = asm
+            .find(&label)
+            .unwrap_or_else(|| panic!("missing function {name}"));
+        let after_label = start + label.len();
+        let rest = &asm[after_label..];
+        let end = rest.find("\n\t.text").unwrap_or(rest.len());
+        &rest[..end]
+    };
+    for (name, condition) in [("eq128", "eq"), ("ne128", "ne")] {
+        let body = body(name);
+        assert!(body.contains("\teor "), "{body}");
+        assert!(body.contains("\torr "), "{body}");
+        assert!(body.contains("\tcset w0,"), "{body}");
+        assert!(body.contains(&format!("\tcset w0, {condition}")), "{body}");
+        assert!(!body.contains("\tcset w9,"), "{body}");
+        assert!(!body.contains("\tstr w9,"), "{body}");
+        assert!(!body.contains("\tldr w0, [sp"), "{body}");
+    }
+    for name in ["lt128", "ge128"] {
+        let body = body(name);
+        assert!(body.contains("i128_cmp_true"), "{body}");
+        assert!(body.contains("i128_cmp_end"), "{body}");
+        assert!(body.contains("\tmov w0, wzr"), "{body}");
+        assert!(body.contains("\tmovz w0, #1"), "{body}");
+        assert!(!body.contains("\tmov w9, #0"), "{body}");
+        assert!(!body.contains("\tmovz w9, #1"), "{body}");
+        assert!(!body.contains("\tstr w9,"), "{body}");
+        assert!(!body.contains("\tldr w0, [sp"), "{body}");
+    }
+    for name in ["ugt128", "ule128"] {
+        let body = body(name);
+        assert!(body.contains("u128_cmp_true"), "{body}");
+        assert!(body.contains("u128_cmp_end"), "{body}");
+        assert!(
+            body.contains("\tb.hi ")
+                || body.contains("\tb.ls ")
+                || body.contains("\tb.lo ")
+                || body.contains("\tb.hs "),
+            "{body}"
+        );
+        assert!(body.contains("\tmov w0, wzr"), "{body}");
+        assert!(body.contains("\tmovz w0, #1"), "{body}");
+        assert!(!body.contains("i128_cmp_true"), "{body}");
+        assert!(!body.contains("\tb.gt "), "{body}");
+        assert!(!body.contains("\tb.lt "), "{body}");
+        assert!(!body.contains("\tmov w9, #0"), "{body}");
+        assert!(!body.contains("\tmovz w9, #1"), "{body}");
+        assert!(!body.contains("\tstr w9,"), "{body}");
+        assert!(!body.contains("\tldr w0, [sp"), "{body}");
+    }
+    for (name, low_op, high_op) in [
+        ("add128", "\tadds x0,", "\tadcs x1,"),
+        ("sub128", "\tsubs x0,", "\tsbcs x1,"),
+        ("and128", "\tand x0,", "\tand x1,"),
+        ("or128", "\torr x0,", "\torr x1,"),
+        ("xor128", "\teor x0,", "\teor x1,"),
+    ] {
+        let body = body(name);
+        assert!(body.contains(low_op), "{body}");
+        assert!(body.contains(high_op), "{body}");
+        assert!(!body.contains("\tstr x9,"), "{body}");
+        assert!(!body.contains("\tstr x10,"), "{body}");
+    }
+    for (name, call) in [
+        ("mul128", "\tbl __multi3"),
+        ("div128", "\tbl __divti3"),
+        ("mod128", "\tbl __modti3"),
+        ("udiv128", "\tbl __udivti3"),
+        ("umod128", "\tbl __umodti3"),
+    ] {
+        let body = body(name);
+        assert!(body.contains(call), "{body}");
+        let after_call = &body[body.find(call).expect("missing helper call") + call.len()..];
+        assert!(!after_call.contains("\tstr x0,"), "{body}");
+        assert!(!after_call.contains("\tstr x1,"), "{body}");
+        assert!(!after_call.contains("\tldr x0, [sp"), "{body}");
+        assert!(!after_call.contains("\tldr x1, [sp"), "{body}");
+    }
+    for (name, low_op, high_op) in [
+        ("shl128", "\tlsl x0,", "\tlsl x1,"),
+        ("shl64", "\tmov x1, x0", "\tmov x0, xzr"),
+        ("shr128", "\tlsr x0,", "\tlsr x1,"),
+        ("sar128", "\tlsr x0,", "\tasr x1,"),
+    ] {
+        let body = body(name);
+        assert!(body.contains(low_op), "{body}");
+        assert!(body.contains(high_op), "{body}");
+        assert!(!body.contains("\tstr x9,"), "{body}");
+        assert!(!body.contains("\tstr x10,"), "{body}");
+    }
+    for name in ["vshl128", "vsar128"] {
+        let body = body(name);
+        assert!(body.contains("i128_shift_loop"), "{body}");
+        assert!(body.contains("i128_shift_end"), "{body}");
+        assert!(body.contains("\tmov x0,"), "{body}");
+        assert!(body.contains("\tmov x1,"), "{body}");
+        assert!(!body.contains("\tstr x9,"), "{body}");
+        assert!(!body.contains("\tstr x10,"), "{body}");
+    }
+    assert!(!asm.contains("\tmov w0, w0"), "{asm}");
+    assert!(!asm.contains("\tmov x0, x0"), "{asm}");
+    assert!(!asm.contains("\tfmov d0, d0"), "{asm}");
+    assert!(!asm.contains("\tstr w9, [sp, #8]"), "{asm}");
+    assert!(!asm.contains("\tstr x9, [sp, #16]"), "{asm}");
+    assert!(!asm.contains("\tstr d9, [sp, #16]"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_returned_conversions_use_return_registers() {
+    let src = temp_file("aarch64-returned-conversions", "c");
+    let out = temp_file("aarch64-returned-conversions", "s");
+    std::fs::write(
+        &src,
+        r#"
+double i2d(int x) { return (double)x; }
+float u2f(unsigned x) { return (float)x; }
+int d2i(double x) { return (int)x; }
+unsigned f2u(float x) { return (unsigned)x; }
+double f2d(float x) { return (double)x; }
+float d2f(double x) { return (float)x; }
+long sext(int x) { return (long)x; }
+unsigned long zext(unsigned x) { return (unsigned long)x; }
+unsigned char trunc_to_uchar(long x) { return (unsigned char)x; }
+int copy_int(int x) { return x; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\tscvtf d0,"), "{asm}");
+    assert!(asm.contains("\tucvtf s0,"), "{asm}");
+    assert!(asm.contains("\tfcvtzs w0,"), "{asm}");
+    assert!(asm.contains("\tfcvtzu w0,"), "{asm}");
+    assert!(asm.contains("\tfcvt d0,"), "{asm}");
+    assert!(asm.contains("\tfcvt s0,"), "{asm}");
+    assert!(!asm.contains("\tmov w0, w0"), "{asm}");
+    assert!(!asm.contains("\tstr d10,"), "{asm}");
+    assert!(!asm.contains("\tstr s10,"), "{asm}");
+    assert!(!asm.contains("\tstr w10,"), "{asm}");
+    assert!(!asm.contains("\tstr x10,"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_returned_call_results_use_return_registers() {
+    let src = temp_file("aarch64-returned-call-results", "c");
+    let out = temp_file("aarch64-returned-call-results", "s");
+    std::fs::write(
+        &src,
+        r#"
+__attribute__((noinline)) int id(int x) { return x + 1; }
+__attribute__((noinline)) double idd(double x) { return x + 0.5; }
+__attribute__((noinline)) int *idp(int *p) { return p; }
+__attribute__((noinline)) int ninth(int a, int b, int c, int d, int e, int f, int g, int h, int i) { return i; }
+
+int call_i(int x) { return id(x); }
+double call_d(double x) { return idd(x); }
+int *call_p(int *p) { return idp(p); }
+int call_stack(void) { return ninth(1, 2, 3, 4, 5, 6, 7, 8, 9); }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    let body = |name: &str| {
+        let label = format!("\n{name}:\n");
+        let start = asm
+            .find(&label)
+            .unwrap_or_else(|| panic!("missing function {name}"));
+        let after_label = start + label.len();
+        let rest = &asm[after_label..];
+        let end = rest.find("\n\t.text").unwrap_or(rest.len());
+        &rest[..end]
+    };
+
+    for (name, call) in [
+        ("call_i", "\tbl id"),
+        ("call_d", "\tbl idd"),
+        ("call_p", "\tbl idp"),
+        ("call_stack", "\tbl ninth"),
+    ] {
+        let body = body(name);
+        assert!(body.contains(call), "{body}");
+        let after_call = &body[body.find(call).expect("missing call") + call.len()..];
+        assert!(!after_call.contains("\tstr w0,"), "{body}");
+        assert!(!after_call.contains("\tstr x0,"), "{body}");
+        assert!(!after_call.contains("\tstr d0,"), "{body}");
+        assert!(!after_call.contains("\tldr w0, [sp"), "{body}");
+        assert!(!after_call.contains("\tldr x0, [sp"), "{body}");
+        assert!(!after_call.contains("\tldr d0, [sp"), "{body}");
+    }
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_returned_int128_call_results_use_return_registers() {
+    let src = temp_file("aarch64-returned-int128-call-results", "c");
+    let out = temp_file("aarch64-returned-int128-call-results", "s");
+    std::fs::write(
+        &src,
+        r#"
+__attribute__((noinline)) __int128 ids(__int128 x) { return x; }
+__attribute__((noinline)) unsigned __int128 idu(unsigned __int128 x) { return x; }
+
+__int128 call_s(__int128 x) { return ids(x); }
+unsigned __int128 call_u(unsigned __int128 x) { return idu(x); }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    let body = |name: &str| {
+        let label = format!("\n{name}:\n");
+        let start = asm
+            .find(&label)
+            .unwrap_or_else(|| panic!("missing function {name}"));
+        let after_label = start + label.len();
+        let rest = &asm[after_label..];
+        let end = rest.find("\n\t.text").unwrap_or(rest.len());
+        &rest[..end]
+    };
+
+    for (name, call) in [("call_s", "\tbl ids"), ("call_u", "\tbl idu")] {
+        let body = body(name);
+        assert!(body.contains(call), "{body}");
+        let after_call = &body[body.find(call).expect("missing call") + call.len()..];
+        assert!(!after_call.contains("\tstr x0,"), "{body}");
+        assert!(!after_call.contains("\tstr x1,"), "{body}");
+        assert!(!after_call.contains("\tldr x0, [sp"), "{body}");
+        assert!(!after_call.contains("\tldr x1, [sp"), "{body}");
+    }
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_returned_int128_struct_fields_use_return_registers() {
+    let src = temp_file("aarch64-returned-int128-struct-fields", "c");
+    let out = temp_file("aarch64-returned-int128-struct-fields", "s");
+    std::fs::write(
+        &src,
+        r#"
+struct Wide {
+    char tag;
+    __int128 s;
+    unsigned __int128 u;
+};
+
+struct Wide global_wide;
+
+__int128 get_s(void) { return global_wide.s; }
+unsigned __int128 get_u(void) { return global_wide.u; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    let body = |name: &str| {
+        let label = format!("\n{name}:\n");
+        let start = asm
+            .find(&label)
+            .unwrap_or_else(|| panic!("missing function {name}"));
+        let after_label = start + label.len();
+        let rest = &asm[after_label..];
+        let end = rest.find("\n\t.text").unwrap_or(rest.len());
+        &rest[..end]
+    };
+
+    for name in ["get_s", "get_u"] {
+        let body = body(name);
+        assert!(body.contains("\tldr x0,"), "{body}");
+        assert!(body.contains("\tldr x1,"), "{body}");
+        assert!(!body.contains("\tstr x0,"), "{body}");
+        assert!(!body.contains("\tstr x1,"), "{body}");
+        assert!(!body.contains("\tstr x9,"), "{body}");
+        assert!(!body.contains("\tstr x10,"), "{body}");
+        assert!(!body.contains("\tldr x0, [sp"), "{body}");
+        assert!(!body.contains("\tldr x1, [sp"), "{body}");
+    }
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_returned_long_double_call_results_use_return_registers() {
+    let src = temp_file("aarch64-returned-long-double-call-results", "c");
+    let out = temp_file("aarch64-returned-long-double-call-results", "s");
+    std::fs::write(
+        &src,
+        r#"
+__attribute__((noinline)) long double idld(long double x) { return x; }
+
+long double call_ld(long double x) { return idld(x); }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    let label = "\ncall_ld:\n";
+    let start = asm
+        .find(label)
+        .unwrap_or_else(|| panic!("missing function call_ld"));
+    let after_label = start + label.len();
+    let rest = &asm[after_label..];
+    let body = &rest[..rest.find("\n\t.text").unwrap_or(rest.len())];
+
+    let call = "\tbl idld";
+    assert!(body.contains(call), "{body}");
+    let after_call = &body[body.find(call).expect("missing call") + call.len()..];
+    assert!(!after_call.contains("\tstr q0,"), "{body}");
+    assert!(!after_call.contains("\tldr q0, [sp"), "{body}");
+    assert!(!after_call.contains("\tmov v0.16b"), "{body}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_returned_small_struct_call_results_use_return_registers() {
+    let src = temp_file("aarch64-returned-small-struct-call-results", "c");
+    let out = temp_file("aarch64-returned-small-struct-call-results", "s");
+    std::fs::write(
+        &src,
+        r#"
+struct Pair { long a; long b; };
+struct Box { double x; };
+struct Mixed { long a; double b; };
+
+__attribute__((noinline)) struct Pair make_pair(long a, long b) {
+    return (struct Pair){ a, b };
+}
+__attribute__((noinline)) struct Box make_box(double x) {
+    return (struct Box){ x };
+}
+__attribute__((noinline)) struct Mixed make_mixed(long a, double b) {
+    return (struct Mixed){ a, b };
+}
+
+struct Pair call_pair(long a, long b) { return make_pair(a, b); }
+struct Box call_box(double x) { return make_box(x); }
+struct Mixed call_mixed(long a, double b) { return make_mixed(a, b); }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    let body = |name: &str| {
+        let label = format!("\n{name}:\n");
+        let start = asm
+            .find(&label)
+            .unwrap_or_else(|| panic!("missing function {name}"));
+        let after_label = start + label.len();
+        let rest = &asm[after_label..];
+        let end = rest.find("\n\t.text").unwrap_or(rest.len());
+        &rest[..end]
+    };
+
+    for (name, call) in [
+        ("call_pair", "\tbl make_pair"),
+        ("call_box", "\tbl make_box"),
+        ("call_mixed", "\tbl make_mixed"),
+    ] {
+        let body = body(name);
+        assert!(body.contains(call), "{body}");
+        let after_call = &body[body.find(call).expect("missing call") + call.len()..];
+        assert!(!after_call.contains("\tstr x0,"), "{body}");
+        assert!(!after_call.contains("\tstr x1,"), "{body}");
+        assert!(!after_call.contains("\tstr d0,"), "{body}");
+        assert!(!after_call.contains("\tldr x0, [sp"), "{body}");
+        assert!(!after_call.contains("\tldr x1, [sp"), "{body}");
+        assert!(!after_call.contains("\tldr d0, [sp"), "{body}");
+    }
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_optimized_integer_add_sub_constants_use_immediates() {
+    let src = temp_file("aarch64-integer-immediate-arithmetic", "c");
+    let out = temp_file("aarch64-integer-immediate-arithmetic", "s");
+    std::fs::write(
+        &src,
+        r#"
+int add5(int x) { return x + 5; }
+int sub7(int x) { return x - 7; }
+long addl(long x) { return x + 4097; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\tadd w0, w0, #5"), "{asm}");
+    assert!(asm.contains("\tsub w0, w0, #7"), "{asm}");
+    assert!(asm.contains("\tadd x0, x0, #4095"), "{asm}");
+    assert!(asm.contains("\tadd x0, x0, #2"), "{asm}");
+    assert!(!asm.contains("\tmovz w10, #5"), "{asm}");
+    assert!(!asm.contains("\tmovz x9, #4097"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn x86_64_optimized_constant_pointer_offsets_use_immediate_add() {
+    let src = temp_file("x86-constant-pointer-offsets", "c");
+    let out = temp_file("x86-constant-pointer-offsets", "s");
+    std::fs::write(
+        &src,
+        r#"
+int get(int *p) { return p[3]; }
+int getneg(int *p) { return p[-2]; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\taddq $12,"), "{asm}");
+    assert!(asm.contains("\tsubq $8,"), "{asm}");
+    assert!(!asm.contains("\taddq $-8,"), "{asm}");
+    assert!(!asm.contains("\tleaq ("), "{asm}");
+    assert!(!asm.contains("\tmovq $12, %rdx"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn aarch64_optimized_float_negative_zero_return_preserves_sign_bit() {
     let src = temp_file("aarch64-float-negative-zero-return", "c");
     let out = temp_file("aarch64-float-negative-zero-return", "s");
@@ -25165,10 +26290,9 @@ float f(void) { return -0.0f; }
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
-    assert!(asm.contains("\tmovk x9, #32768, lsl #48"), "{asm}");
-    assert!(asm.contains("\tfmov d9, x9"), "{asm}");
-    assert!(asm.contains("\tfcvt s10, d9"), "{asm}");
-    assert!(asm.contains("\tldr s0, [sp]"), "{asm}");
+    assert!(asm.contains("\tmovz w9, #0"), "{asm}");
+    assert!(asm.contains("\tmovk w9, #32768, lsl #16"), "{asm}");
+    assert!(asm.contains("\tfmov s0, w9"), "{asm}");
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);

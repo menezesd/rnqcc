@@ -3,6 +3,6 @@
 main:
 	movz w0, #42
 	ret
-	mov w0, #0
+	mov w0, wzr
 	ret
 	.section .note.GNU-stack,"",@progbits

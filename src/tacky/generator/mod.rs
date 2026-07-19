@@ -4379,10 +4379,9 @@ impl TackyGen {
             (BitBuiltinKind::Clrsb, suffix)
         } else if let Some(suffix) = name.strip_prefix("__builtin_popcount") {
             (BitBuiltinKind::Popcount, suffix)
-        } else if let Some(suffix) = name.strip_prefix("__builtin_parity") {
-            (BitBuiltinKind::Parity, suffix)
         } else {
-            return None;
+            let suffix = name.strip_prefix("__builtin_parity")?;
+            (BitBuiltinKind::Parity, suffix)
         };
 
         match suffix {

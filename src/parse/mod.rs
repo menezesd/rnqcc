@@ -1432,12 +1432,15 @@ impl Parser {
         };
         let typedef_full_type = self.last_typedef_full_type.take();
         let typedef_vla_size = self.last_typedef_vla_size.take();
+        let type_attrs = self.consume_type_name_attributes()?;
         let tree = self.parse_abstract_decl_tree()?;
-        let full_type = if let Some(base_full_type) = typedef_full_type {
-            Self::process_abstract_tree(&tree, base_full_type)
+        let base_full_type = if let Some(base_full_type) = typedef_full_type {
+            base_full_type
         } else {
-            Self::process_abstract_tree(&tree, FullType::Scalar(base_type))
+            FullType::Scalar(base_type)
         };
+        let base_full_type = self.apply_vector_size_attr(base_full_type, type_attrs.vector_size);
+        let full_type = Self::process_abstract_tree(&tree, base_full_type);
         if matches!(tree, AbstractDecl::Base) {
             self.last_type_name_vla_size = typedef_vla_size;
         }
@@ -1816,6 +1819,19 @@ impl Parser {
             }
         }
         Ok(attrs)
+    }
+
+    fn consume_type_name_attributes(&mut self) -> ParseResult<DeclarationAttributes> {
+        // Type names accept the same adjacent GNU attributes as declarations, but
+        // declaration-only effects must not leak into the next real declaration.
+        let pending_no_instrument_function = self.pending_no_instrument_function;
+        let pending_transparent_union = self.pending_transparent_union;
+        let pending_alias = self.pending_alias.clone();
+        let attrs = self.consume_declaration_attributes();
+        self.pending_no_instrument_function = pending_no_instrument_function;
+        self.pending_transparent_union = pending_transparent_union;
+        self.pending_alias = pending_alias;
+        attrs
     }
 
     fn apply_vector_size_attr(&self, full_type: FullType, vector_size: Option<usize>) -> FullType {

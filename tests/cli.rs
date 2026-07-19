@@ -26339,6 +26339,45 @@ int main(void) {
 }
 
 #[test]
+fn supports_post_type_vector_attribute_in_compound_literal() {
+    let src = temp_file("post-type-vector-attribute-compound-literal", "c");
+    let exe = temp_file("post-type-vector-attribute-compound-literal", "bin");
+    std::fs::write(
+        &src,
+        r#"
+#define VEC(type, lanes) type __attribute__((vector_size(lanes * sizeof(type))))
+typedef long long I64;
+
+int main(void) {
+    VEC(I64, 16) value = { 1, 2, 3 };
+    value = (VEC(I64, 16)){};
+    if (sizeof(VEC(I64, 16)) != 128 || sizeof(value) != 128)
+        return 1;
+    for (int i = 0; i < 16; i++)
+        if (value[i] != 0)
+            return 2;
+    return 42;
+}
+"#,
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(42));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn supports_aligned_nested_struct_array_member_stride() {
     let src = temp_file("aligned-nested-struct-array-member", "c");
     let exe = temp_file("aligned-nested-struct-array-member", "bin");

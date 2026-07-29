@@ -26337,6 +26337,10 @@ fn aarch64_optimized_wide_power_of_two_shifts_use_direct_limb_lowering() {
     assert!(asm.contains("\tlsl x1, x1, #32"), "{asm}");
     assert!(asm.contains("\tlsr x0, x0, #32"), "{asm}");
     assert!(asm.contains("\tasr x0, x0, #32"), "{asm}");
+    assert!(asm.contains("\tand w0, w0, #31"), "{asm}");
+    assert!(asm.contains("\tand x0, x0, #127"), "{asm}");
+    assert!(!asm.contains("\tmovz w10, #31"), "{asm}");
+    assert!(!asm.contains("\tmovz x10, #127"), "{asm}");
     assert!(!asm.contains("i128_shift_loop.mul128"), "{asm}");
     assert!(!asm.contains("i128_shift_loop.div128"), "{asm}");
     assert!(!asm.contains("i128_shift_loop.signed_shift128"), "{asm}");

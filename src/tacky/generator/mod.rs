@@ -1097,6 +1097,23 @@ impl TackyGen {
         }
     }
 
+    /// SysV passes vectors larger than two eightbytes in memory, and returns
+    /// them through the same hidden-result pointer used for large aggregates.
+    fn vector_requires_memory_abi(&self, ft: &FullType) -> bool {
+        ft.is_vector() && !ft.is_complex() && ft.byte_size_with(&self.struct_defs) > 16
+    }
+
+    fn return_requires_hidden_pointer(&self, ft: &FullType) -> bool {
+        match ft {
+            FullType::Struct(tag) => self
+                .struct_defs
+                .get(tag)
+                .map(|def| def.size > 16)
+                .unwrap_or(false),
+            _ => ft.is_complex() || self.vector_requires_memory_abi(ft),
+        }
+    }
+
     fn fresh_tmp_full(&mut self, ft: &FullType) -> TackyVal {
         let name = self.next_tmp_name();
         let ct = self.storage_ctype_for_full(ft);

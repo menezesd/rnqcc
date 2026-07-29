@@ -4082,19 +4082,10 @@ impl TackyGen {
         );
 
         // Check if return type requires hidden pointer
-        let ret_needs_hidden_ptr = if let Some(ref ret_ft) = func.return_full_type {
-            let needs_large_struct_ptr = if let FullType::Struct(tag) = ret_ft {
-                self.struct_defs
-                    .get(tag)
-                    .map(|d| d.size > 16)
-                    .unwrap_or(false)
-            } else {
-                false
-            };
-            needs_large_struct_ptr || ret_ft.is_complex()
-        } else {
-            false
-        };
+        let ret_needs_hidden_ptr = func
+            .return_full_type
+            .as_ref()
+            .is_some_and(|ret_ft| self.return_requires_hidden_pointer(ret_ft));
         self.hidden_ret_ptr = if ret_needs_hidden_ptr {
             let name = format!("__ret_ptr_{}", func.name);
             self.var_types.insert(name.clone(), CType::Pointer);
@@ -4180,6 +4171,21 @@ impl TackyGen {
                     self.array_sizes.insert(name.clone(), alloc_size);
                     continue;
                 }
+            }
+            if self.vector_requires_memory_abi(&ft) {
+                let param_name = format!("{}_mem", name);
+                let param_idx = tacky_params.len();
+                self.var_types.insert(param_name.clone(), CType::Pointer);
+                self.symbol_types.insert(param_name.clone(), CType::Pointer);
+                tacky_params.push(param_name.clone());
+                stack_params.insert(param_name);
+                memory_param_blocks.push((
+                    param_idx,
+                    name.clone(),
+                    ft.byte_size_with(&self.struct_defs),
+                ));
+                self.register_var(name, ft);
+                continue;
             }
             if ft.is_complex() {
                 let FullType::Vector { elem, .. } = &ft else {

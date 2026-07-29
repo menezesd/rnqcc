@@ -5147,7 +5147,7 @@ fn aarch64_linux_long_double_supports_comparisons_and_negation() {
         assert!(!after_call.contains("\tstr w9,"), "{body}");
         assert!(!after_call.contains("\tldr w0, [sp"), "{body}");
     }
-    assert!(asm.contains("eor w9, w9, w10"), "{asm}");
+    assert!(asm.contains("eor w9, w9, #128"), "{asm}");
     assert!(asm.contains("str x30"), "{asm}");
 
     let _ = std::fs::remove_file(src);
@@ -8350,8 +8350,8 @@ fn emits_aarch64_assembly_for_integer_division_and_shifts() {
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains("sdiv w9, w9, w10"));
-    assert!(asm.contains("lsl w9, w9, w10"));
-    assert!(asm.contains("asr w9, w9, w10"));
+    assert!(asm.contains("lsl w9, w9, #3"));
+    assert!(asm.contains("asr w9, w9, #2"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -8377,7 +8377,7 @@ fn emits_aarch64_assembly_for_unsigned_division_and_shift() {
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains("udiv w9, w9, w10"));
-    assert!(asm.contains("lsr w9, w9, w10"));
+    assert!(asm.contains("lsr w9, w9, #2"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -8486,8 +8486,8 @@ fn emits_aarch64_assembly_for_variable_int128_shifts() {
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains(".Li128_shift_loop."));
-    assert!(asm.contains("lsl x9, x9, x10"));
-    assert!(asm.contains("asr x11, x11, x10"));
+    assert!(asm.contains("lsl x9, x9, #1"));
+    assert!(asm.contains("asr x11, x11, #1"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -13065,6 +13065,7 @@ fn compiles_and_runs_representative_host_fixtures() {
         ("tests/fibonacci.c", 55),
         ("tests/static_globals.c", 0),
         ("tests/double_simple.c", 5),
+        ("tests/large_vector_abi.c", 0),
     ] {
         let exe = temp_file(
             &format!(
@@ -26266,6 +26267,108 @@ int getneg(int *p) { return p[-2]; }
     assert!(!asm.contains("\tmovq $12, %rdx"), "{asm}");
 
     let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn optimized_unsigned_power_of_two_arithmetic_uses_shifts_and_masks() {
+    let out = temp_file("x86-unsigned-power-of-two", "s");
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg("tests/unsigned_power_of_two.c")
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\tsall $3,"), "{asm}");
+    assert!(asm.contains("\tshrl $4,"), "{asm}");
+    assert!(asm.contains("\tandl $31,"), "{asm}");
+    assert!(asm.contains("\tsalq $5,"), "{asm}");
+    assert!(asm.contains("\tshrq $6,"), "{asm}");
+    assert!(asm.contains("\tandq $127,"), "{asm}");
+    assert!(!asm.contains("\tsall %cl,"), "{asm}");
+    assert!(!asm.contains("\tshrl %cl,"), "{asm}");
+    assert!(!asm.contains("\tsalq %cl,"), "{asm}");
+    assert!(!asm.contains("\tshrq %cl,"), "{asm}");
+    assert!(!asm.contains("\tdivl"), "{asm}");
+    assert!(!asm.contains("\tdivq"), "{asm}");
+    assert!(
+        !asm.contains("i128_shift_loop.typed_shift_count128"),
+        "{asm}"
+    );
+    assert!(!asm.contains("i128_shift_loop.bitint_shift128"), "{asm}");
+
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn optimized_unsigned_power_of_two_arithmetic_preserves_wide_runtime_results() {
+    let exe = temp_file("optimized-unsigned-power-of-two", "bin");
+    let output = Command::new(rnqcc())
+        .arg("--optimize")
+        .arg("-o")
+        .arg(&exe)
+        .arg("tests/unsigned_power_of_two.c")
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe)
+        .status()
+        .expect("failed to run optimized output");
+    assert_eq!(run.code(), Some(0));
+
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn aarch64_optimized_wide_power_of_two_shifts_use_direct_limb_lowering() {
+    let out = temp_file("aarch64-unsigned-power-of-two", "s");
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg("tests/unsigned_power_of_two.c")
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\tlsl x1, x1, #32"), "{asm}");
+    assert!(asm.contains("\tlsr x0, x0, #32"), "{asm}");
+    assert!(asm.contains("\tasr x0, x0, #32"), "{asm}");
+    assert!(asm.contains("\tand w0, w0, #31"), "{asm}");
+    assert!(asm.contains("\tand x0, x0, #127"), "{asm}");
+    assert!(asm.contains("\torr w0, w0, #32"), "{asm}");
+    assert!(asm.contains("\teor x0, x0, #1099511627776"), "{asm}");
+    assert!(!asm.contains("\tmovz w10, #31"), "{asm}");
+    assert!(!asm.contains("\tmovz x10, #127"), "{asm}");
+    assert!(!asm.contains("i128_shift_loop.mul128"), "{asm}");
+    assert!(!asm.contains("i128_shift_loop.div128"), "{asm}");
+    assert!(!asm.contains("i128_shift_loop.signed_shift128"), "{asm}");
+    assert!(
+        !asm.contains("i128_shift_loop.typed_shift_count128"),
+        "{asm}"
+    );
+    assert!(!asm.contains("i128_shift_loop.bitint_shift128"), "{asm}");
+
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn aarch64_passes_uint128_constants_in_stack_arguments() {
+    let out = temp_file("aarch64-uint128-stack-constant", "s");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg("tests/uint128_stack_argument.c")
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
     let _ = std::fs::remove_file(out);
 }
 

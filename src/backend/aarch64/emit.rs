@@ -1357,7 +1357,10 @@ fn emit_binary(
         emit_add_immediate(w, dst_reg, offset)?;
         return store_operand(w, target, ty, dst_reg, dst);
     }
-    let src_reg = load_operand(w, target, ty, src, Reg::R11)?;
+    if let Some(mask) = binary_and_low_mask_immediate(ty, op, src) {
+        writeln!(w, "\tand {}, {}, #{}", dst_reg, dst_reg, mask)?;
+        return store_operand(w, target, ty, dst_reg, dst);
+    }
     let mnemonic = match op {
         AsmBinaryOp::Add => "add",
         AsmBinaryOp::AddSetFlags => "adds",
@@ -1381,6 +1384,15 @@ fn emit_binary(
             ))
         }
     };
+    if let Some(amount) = binary_shift_immediate_amount(ty, op, src) {
+        writeln!(w, "\t{} {}, {}, #{}", mnemonic, dst_reg, dst_reg, amount)?;
+        return store_operand(w, target, ty, dst_reg, dst);
+    }
+    if let Some(bit) = binary_logical_single_bit_immediate(ty, op, src) {
+        writeln!(w, "\t{} {}, {}, #{}", mnemonic, dst_reg, dst_reg, bit)?;
+        return store_operand(w, target, ty, dst_reg, dst);
+    }
+    let src_reg = load_operand(w, target, ty, src, Reg::R11)?;
     writeln!(w, "\t{} {}, {}, {}", mnemonic, dst_reg, dst_reg, src_reg)?;
     store_operand(w, target, ty, dst_reg, dst)
 }
@@ -1396,6 +1408,60 @@ fn binary_add_sub_immediate_offset(op: &AsmBinaryOp, src: &AsmOperand) -> Option
     };
     let offset = i32::try_from(offset).ok()?;
     (offset != i32::MIN).then_some(offset)
+}
+
+fn binary_shift_immediate_amount(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> Option<i64> {
+    if !matches!(op, AsmBinaryOp::Sal | AsmBinaryOp::Sar | AsmBinaryOp::Shr) {
+        return None;
+    }
+    let AsmOperand::Imm(amount) = src else {
+        return None;
+    };
+    let width = match ty {
+        AsmType::Quadword => 64,
+        AsmType::Byte | AsmType::Word | AsmType::Longword => 32,
+        _ => return None,
+    };
+    (0..width).contains(amount).then_some(*amount)
+}
+
+fn binary_and_low_mask_immediate(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> Option<u64> {
+    if !matches!(op, AsmBinaryOp::And) {
+        return None;
+    }
+    let AsmOperand::Imm(value) = src else {
+        return None;
+    };
+    let (mask, width) = match ty {
+        AsmType::Quadword => (*value as u64, 64),
+        AsmType::Byte | AsmType::Word | AsmType::Longword => (*value as u32 as u64, 32),
+        _ => return None,
+    };
+    let all_ones = if width == 64 {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
+    };
+    (mask != 0 && mask != all_ones && (mask + 1).is_power_of_two()).then_some(mask)
+}
+
+fn binary_logical_single_bit_immediate(
+    ty: AsmType,
+    op: &AsmBinaryOp,
+    src: &AsmOperand,
+) -> Option<u64> {
+    if !matches!(op, AsmBinaryOp::And | AsmBinaryOp::Or | AsmBinaryOp::Xor) {
+        return None;
+    }
+    let AsmOperand::Imm(value) = src else {
+        return None;
+    };
+    let bit = match ty {
+        AsmType::Quadword => *value as u64,
+        AsmType::Byte | AsmType::Word | AsmType::Longword => *value as u32 as u64,
+        _ => return None,
+    };
+    bit.is_power_of_two().then_some(bit)
 }
 
 fn emit_cmp(
@@ -2307,6 +2373,66 @@ pub fn emit(assembly_file: &str, program: &AsmProgram, target: &Target) -> std::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scalar_shift_immediate_uses_immediate_encoding() -> Result<(), String> {
+        let mut out = Vec::new();
+        emit_instruction(
+            &mut out,
+            &AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Shr,
+                AsmOperand::Imm(12),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            &Target::aarch64_linux(),
+        )
+        .map_err(|err| err.to_string())?;
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(asm, "\tlsr x0, x0, #12\n");
+        Ok(())
+    }
+
+    #[test]
+    fn low_bit_mask_uses_logical_immediate_encoding() -> Result<(), String> {
+        let mut out = Vec::new();
+        emit_instruction(
+            &mut out,
+            &AsmInstr::Binary(
+                AsmType::Longword,
+                AsmBinaryOp::And,
+                AsmOperand::Imm(31),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            &Target::aarch64_linux(),
+        )
+        .map_err(|err| err.to_string())?;
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(asm, "\tand w0, w0, #31\n");
+        Ok(())
+    }
+
+    #[test]
+    fn single_bit_logical_ops_use_immediate_encoding() -> Result<(), String> {
+        let mut out = Vec::new();
+        emit_instruction(
+            &mut out,
+            &AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Xor,
+                AsmOperand::Imm(1 << 40),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            &Target::aarch64_linux(),
+        )
+        .map_err(|err| err.to_string())?;
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(asm, "\teor x0, x0, #1099511627776\n");
+        Ok(())
+    }
 
     #[test]
     fn large_stack_offsets_use_materialized_address() -> Result<(), String> {

@@ -1106,6 +1106,27 @@ impl TackyGen {
             }
 
             let source_ft = self.typeof_exp(&arg_for_type);
+            let memory_vector_ft = param_full_types
+                .get(i)
+                .filter(|ft| self.vector_requires_memory_abi(ft))
+                .or_else(|| self.vector_requires_memory_abi(&val_ft).then_some(&val_ft))
+                .or_else(|| {
+                    self.vector_requires_memory_abi(&source_ft)
+                        .then_some(&source_ft)
+                });
+            if let Some(vector_ft) = memory_vector_ft {
+                let arg_idx = tacky_args.len();
+                tacky_args.push(self.get_struct_addr(val));
+                memory_arg_blocks.push((
+                    arg_idx,
+                    vector_ft.byte_size_with(&self.struct_defs),
+                    vector_ft.alignment_with(&self.struct_defs).max(16),
+                ));
+                if i + 1 == param_types.len() {
+                    fixed_flat_arg_count = tacky_args.len();
+                }
+                continue;
+            }
             let expected_ft_is_complex = param_full_types.get(i).is_some_and(FullType::is_complex);
             let is_complex_arg =
                 expected_ft_is_complex || val_ft.is_complex() || source_ft.is_complex();
@@ -1313,15 +1334,9 @@ impl TackyGen {
                 };
         }
 
-        let uses_hidden_ptr = match ret_ft.as_ref() {
-            Some(FullType::Struct(tag)) => self
-                .struct_defs
-                .get(tag)
-                .map(|d| d.size > 16)
-                .unwrap_or(false),
-            Some(ft) => ft.is_complex(),
-            None => false,
-        };
+        let uses_hidden_ptr = ret_ft
+            .as_ref()
+            .is_some_and(|ft| self.return_requires_hidden_pointer(ft));
         let is_indirect = builtin_info.is_none()
             && !self.func_types.contains_key(&name)
             && !self.function_symbols.contains(&name)
@@ -1506,6 +1521,27 @@ impl TackyGen {
             }
 
             let source_ft = self.typeof_exp(&arg_for_type);
+            let memory_vector_ft = param_full_types
+                .get(i)
+                .filter(|ft| self.vector_requires_memory_abi(ft))
+                .or_else(|| self.vector_requires_memory_abi(&val_ft).then_some(&val_ft))
+                .or_else(|| {
+                    self.vector_requires_memory_abi(&source_ft)
+                        .then_some(&source_ft)
+                });
+            if let Some(vector_ft) = memory_vector_ft {
+                let arg_idx = tacky_args.len();
+                tacky_args.push(self.get_struct_addr(val));
+                memory_arg_blocks.push((
+                    arg_idx,
+                    vector_ft.byte_size_with(&self.struct_defs),
+                    vector_ft.alignment_with(&self.struct_defs).max(16),
+                ));
+                if i + 1 == param_types.len() {
+                    fixed_flat_arg_count = tacky_args.len();
+                }
+                continue;
+            }
             let expected_ft_is_complex = param_full_types.get(i).is_some_and(FullType::is_complex);
             let is_complex_arg =
                 expected_ft_is_complex || val_ft.is_complex() || source_ft.is_complex();
@@ -1704,14 +1740,7 @@ impl TackyGen {
             fixed_flat_arg_count = 0;
         }
         let ret_type = ret_ft.to_ctype();
-        let uses_hidden_ptr = match ret_ft {
-            FullType::Struct(ref tag) => self
-                .struct_defs
-                .get(tag)
-                .map(|def| def.size > 16)
-                .unwrap_or(false),
-            _ => ret_ft.is_complex(),
-        };
+        let uses_hidden_ptr = self.return_requires_hidden_pointer(&ret_ft);
         if uses_hidden_ptr {
             let dst = self.fresh_tmp_full(&ret_ft);
             if let FullType::Struct(ref tag) = ret_ft {

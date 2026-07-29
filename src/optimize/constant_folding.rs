@@ -1128,6 +1128,50 @@ fn simplify_binary_identity(
         }
     }
 
+    // Unsigned arithmetic is defined modulo 2^N, so these reductions preserve
+    // both the value and the operation's width. Do not apply them to signed
+    // operands: a left shift of a negative value has different C semantics
+    // from multiplication.
+    if let Some(shift) = unsigned_power_of_two_shift_count(right, op_type) {
+        match op {
+            TackyBinaryOp::Mul => {
+                return Some(TackyInstr::Binary {
+                    op: TackyBinaryOp::ShiftLeft,
+                    left: left.clone(),
+                    right: TackyVal::Constant(shift),
+                    dst: dst.clone(),
+                });
+            }
+            TackyBinaryOp::Div => {
+                return Some(TackyInstr::Binary {
+                    op: TackyBinaryOp::ShiftRight,
+                    left: left.clone(),
+                    right: TackyVal::Constant(shift),
+                    dst: dst.clone(),
+                });
+            }
+            TackyBinaryOp::Mod => {
+                return Some(TackyInstr::Binary {
+                    op: TackyBinaryOp::BitwiseAnd,
+                    left: left.clone(),
+                    right: unsigned_power_of_two_mask(shift, op_type),
+                    dst: dst.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+    if matches!(op, TackyBinaryOp::Mul) {
+        if let Some(shift) = unsigned_power_of_two_shift_count(left, op_type) {
+            return Some(TackyInstr::Binary {
+                op: TackyBinaryOp::ShiftLeft,
+                left: right.clone(),
+                right: TackyVal::Constant(shift),
+                dst: dst.clone(),
+            });
+        }
+    }
+
     match op {
         TackyBinaryOp::Add | TackyBinaryOp::BitwiseOr | TackyBinaryOp::BitwiseXor => {
             if integer_zero_val(right) {
@@ -1278,6 +1322,26 @@ fn simplify_binary_identity(
         }
         _ => None,
     }
+}
+
+fn unsigned_power_of_two_shift_count(val: &TackyVal, ty: CType) -> Option<i64> {
+    let value = match (ty, val) {
+        (CType::UInt, TackyVal::Constant(value)) => *value as u32 as u128,
+        (CType::ULong, TackyVal::Constant(value)) => *value as u64 as u128,
+        (CType::UInt128, TackyVal::UInt128Constant(value)) => *value,
+        _ => return None,
+    };
+    if value > 1 && value.is_power_of_two() {
+        Some(value.trailing_zeros() as i64)
+    } else {
+        None
+    }
+}
+
+fn unsigned_power_of_two_mask(shift: i64, ty: CType) -> TackyVal {
+    debug_assert!(shift > 0);
+    let mask = (1_u128 << shift) - 1;
+    integer_tacky_constant(mask as i128, ty)
 }
 
 fn copy_identity_val(

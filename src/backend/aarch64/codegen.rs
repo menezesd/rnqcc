@@ -4201,6 +4201,11 @@ fn convert_function(
                             AsmOperand::Reg(ARG_REGS[gp_arg_count + 1]),
                         ));
                         gp_arg_count += 2;
+                    } else if ty == AsmType::Octword {
+                        // A wide integer needs two consecutive argument
+                        // registers. If only one remains, pass both limbs on
+                        // the stack instead of treating it as a scalar.
+                        stack_args.push(StackArg::Scalar(ty, arg));
                     } else if matches!(ty, AsmType::Float | AsmType::Double | AsmType::LongDouble) {
                         if fp_arg_count < FP_ARG_REGS.len() {
                             instructions.push(AsmInstr::Mov(
@@ -4238,15 +4243,28 @@ fn convert_function(
                             StackArg::Scalar(AsmType::Octword, val) => {
                                 let (src_low, src_high) =
                                     i128_part_operands(val, &stack_slots, global_vars)?;
-                                instructions.push(AsmInstr::AArch64StoreOutgoingArg(
+                                // AArch64StoreOutgoingArg rebases stack operands at
+                                // emission time. Materialize both limbs first so
+                                // wide constants do not need an addressable source.
+                                instructions.push(AsmInstr::Mov(
                                     AsmType::Quadword,
                                     src_low,
+                                    AsmOperand::Reg(Reg::R10),
+                                ));
+                                instructions.push(AsmInstr::Mov(
+                                    AsmType::Quadword,
+                                    src_high,
+                                    AsmOperand::Reg(Reg::R13),
+                                ));
+                                instructions.push(AsmInstr::AArch64StoreOutgoingArg(
+                                    AsmType::Quadword,
+                                    AsmOperand::Reg(Reg::R10),
                                     stack_arg_offset(0, stack_index),
                                     outgoing_bytes,
                                 ));
                                 instructions.push(AsmInstr::AArch64StoreOutgoingArg(
                                     AsmType::Quadword,
-                                    src_high,
+                                    AsmOperand::Reg(Reg::R13),
                                     stack_arg_offset(0, stack_index + 1),
                                     outgoing_bytes,
                                 ));

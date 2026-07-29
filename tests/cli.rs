@@ -26335,6 +26335,22 @@ fn aarch64_optimized_wide_power_of_two_shifts_use_direct_limb_lowering() {
 }
 
 #[test]
+fn aarch64_passes_uint128_constants_in_stack_arguments() {
+    let out = temp_file("aarch64-uint128-stack-constant", "s");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg("tests/uint128_stack_argument.c")
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn aarch64_optimized_float_negative_zero_return_preserves_sign_bit() {
     let src = temp_file("aarch64-float-negative-zero-return", "c");
     let out = temp_file("aarch64-float-negative-zero-return", "s");

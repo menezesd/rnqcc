@@ -22,6 +22,14 @@ unsigned long rem64(unsigned long value) {
     return value % 128ul;
 }
 
+unsigned set_bit32(unsigned value) {
+    return value | 32u;
+}
+
+unsigned long toggle_bit64(unsigned long value) {
+    return value ^ (1ul << 40);
+}
+
 unsigned __int128 mul128(unsigned __int128 value) {
     return value * ((unsigned __int128)1 << 96);
 }
@@ -58,6 +66,9 @@ int main(void) {
         || div64(value64) != 0x03fffffffffffffeul
         || rem64(value64) != 10ul) {
         return 2;
+    }
+    if (set_bit32(1u) != 33u || toggle_bit64(0ul) != (1ul << 40)) {
+        return 7;
     }
     if (mul128(value128) != ((unsigned __int128)0x1234 << 96)
         || div128(value128) != 16

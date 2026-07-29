@@ -5147,7 +5147,7 @@ fn aarch64_linux_long_double_supports_comparisons_and_negation() {
         assert!(!after_call.contains("\tstr w9,"), "{body}");
         assert!(!after_call.contains("\tldr w0, [sp"), "{body}");
     }
-    assert!(asm.contains("eor w9, w9, w10"), "{asm}");
+    assert!(asm.contains("eor w9, w9, #128"), "{asm}");
     assert!(asm.contains("str x30"), "{asm}");
 
     let _ = std::fs::remove_file(src);
@@ -26340,6 +26340,8 @@ fn aarch64_optimized_wide_power_of_two_shifts_use_direct_limb_lowering() {
     assert!(asm.contains("\tasr x0, x0, #32"), "{asm}");
     assert!(asm.contains("\tand w0, w0, #31"), "{asm}");
     assert!(asm.contains("\tand x0, x0, #127"), "{asm}");
+    assert!(asm.contains("\torr w0, w0, #32"), "{asm}");
+    assert!(asm.contains("\teor x0, x0, #1099511627776"), "{asm}");
     assert!(!asm.contains("\tmovz w10, #31"), "{asm}");
     assert!(!asm.contains("\tmovz x10, #127"), "{asm}");
     assert!(!asm.contains("i128_shift_loop.mul128"), "{asm}");

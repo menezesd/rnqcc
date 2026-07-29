@@ -1388,6 +1388,10 @@ fn emit_binary(
         writeln!(w, "\t{} {}, {}, #{}", mnemonic, dst_reg, dst_reg, amount)?;
         return store_operand(w, target, ty, dst_reg, dst);
     }
+    if let Some(bit) = binary_logical_single_bit_immediate(ty, op, src) {
+        writeln!(w, "\t{} {}, {}, #{}", mnemonic, dst_reg, dst_reg, bit)?;
+        return store_operand(w, target, ty, dst_reg, dst);
+    }
     let src_reg = load_operand(w, target, ty, src, Reg::R11)?;
     writeln!(w, "\t{} {}, {}, {}", mnemonic, dst_reg, dst_reg, src_reg)?;
     store_operand(w, target, ty, dst_reg, dst)
@@ -1439,6 +1443,25 @@ fn binary_and_low_mask_immediate(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand
         (1u64 << width) - 1
     };
     (mask != 0 && mask != all_ones && (mask + 1).is_power_of_two()).then_some(mask)
+}
+
+fn binary_logical_single_bit_immediate(
+    ty: AsmType,
+    op: &AsmBinaryOp,
+    src: &AsmOperand,
+) -> Option<u64> {
+    if !matches!(op, AsmBinaryOp::And | AsmBinaryOp::Or | AsmBinaryOp::Xor) {
+        return None;
+    }
+    let AsmOperand::Imm(value) = src else {
+        return None;
+    };
+    let bit = match ty {
+        AsmType::Quadword => *value as u64,
+        AsmType::Byte | AsmType::Word | AsmType::Longword => *value as u32 as u64,
+        _ => return None,
+    };
+    bit.is_power_of_two().then_some(bit)
 }
 
 fn emit_cmp(
@@ -2388,6 +2411,26 @@ mod tests {
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
         assert_eq!(asm, "\tand w0, w0, #31\n");
+        Ok(())
+    }
+
+    #[test]
+    fn single_bit_logical_ops_use_immediate_encoding() -> Result<(), String> {
+        let mut out = Vec::new();
+        emit_instruction(
+            &mut out,
+            &AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Xor,
+                AsmOperand::Imm(1 << 40),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            &Target::aarch64_linux(),
+        )
+        .map_err(|err| err.to_string())?;
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(asm, "\teor x0, x0, #1099511627776\n");
         Ok(())
     }
 

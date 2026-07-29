@@ -38,6 +38,10 @@ __int128 signed_shift128(__int128 value) {
     return value >> 96;
 }
 
+unsigned __int128 typed_shift_count128(unsigned __int128 value) {
+    return value >> (unsigned __int128)96;
+}
+
 int main(void) {
     unsigned value32 = 0xf0000003u;
     unsigned long value64 = 0xffffffffffffff8aul;
@@ -58,6 +62,9 @@ int main(void) {
     }
     if (signed_shift128(-((__int128)1 << 100)) != -16) {
         return 4;
+    }
+    if (typed_shift_count128(value128) != 16) {
+        return 5;
     }
     return 0;
 }

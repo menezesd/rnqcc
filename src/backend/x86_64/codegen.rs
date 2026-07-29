@@ -599,6 +599,15 @@ fn emit_i128_variable_shift(
     Ok(())
 }
 
+fn i128_constant_shift_amount(val: &TackyVal) -> Option<i64> {
+    match val {
+        TackyVal::Constant(value) => Some(*value),
+        TackyVal::Int128Constant(value) => i64::try_from(*value).ok(),
+        TackyVal::UInt128Constant(value) => i64::try_from(*value).ok(),
+        TackyVal::DoubleConstant(_) | TackyVal::Var(_) => None,
+    }
+}
+
 fn emit_i128_load(
     out: &mut Vec<AsmInstr>,
     src_ptr: &TackyVal,
@@ -2895,7 +2904,7 @@ fn convert_binary(
                 | TackyBinaryOp::ShiftRight => {
                     let dst_op = convert_val(dst);
                     if matches!(op, TackyBinaryOp::ShiftLeft) {
-                        let TackyVal::Constant(amount) = right else {
+                        let Some(amount) = i128_constant_shift_amount(right) else {
                             let mut labels = LabelContext {
                                 function_name: ctx.function_name,
                                 counter: ctx.label_counter,
@@ -2911,7 +2920,7 @@ fn convert_binary(
                             )?;
                             return Ok(());
                         };
-                        if !(0..128).contains(amount) {
+                        if !(0..128).contains(&amount) {
                             let mut labels = LabelContext {
                                 function_name: ctx.function_name,
                                 counter: ctx.label_counter,
@@ -2928,10 +2937,10 @@ fn convert_binary(
                             return Ok(());
                         }
                         emit_i128_copy(out, left, dst)?;
-                        if *amount == 0 {
+                        if amount == 0 {
                             return Ok(());
                         }
-                        if *amount == 64 {
+                        if amount == 64 {
                             out.push(AsmInstr::Mov(
                                 AsmType::Quadword,
                                 low64_operand(dst_op.clone())?,
@@ -2944,7 +2953,7 @@ fn convert_binary(
                             ));
                             return Ok(());
                         }
-                        if (65..128).contains(amount) {
+                        if (65..128).contains(&amount) {
                             out.push(AsmInstr::Mov(
                                 AsmType::Quadword,
                                 low64_operand(dst_op.clone())?,
@@ -2953,7 +2962,7 @@ fn convert_binary(
                             out.push(AsmInstr::Binary(
                                 AsmType::Quadword,
                                 AsmBinaryOp::Sal,
-                                AsmOperand::Imm(*amount - 64),
+                                AsmOperand::Imm(amount - 64),
                                 high64_operand(dst_op.clone())?,
                             ));
                             out.push(AsmInstr::Mov(
@@ -2963,7 +2972,7 @@ fn convert_binary(
                             ));
                             return Ok(());
                         }
-                        if (1..64).contains(amount) {
+                        if (1..64).contains(&amount) {
                             let dst_low = low64_operand(dst_op.clone())?;
                             let dst_high = high64_operand(dst_op.clone())?;
                             out.push(AsmInstr::Mov(
@@ -2974,13 +2983,13 @@ fn convert_binary(
                             out.push(AsmInstr::Binary(
                                 AsmType::Quadword,
                                 AsmBinaryOp::Sal,
-                                AsmOperand::Imm(*amount),
+                                AsmOperand::Imm(amount),
                                 dst_high.clone(),
                             ));
                             out.push(AsmInstr::Binary(
                                 AsmType::Quadword,
                                 AsmBinaryOp::Shr,
-                                AsmOperand::Imm(64 - *amount),
+                                AsmOperand::Imm(64 - amount),
                                 AsmOperand::Reg(Reg::R10),
                             ));
                             out.push(AsmInstr::Binary(
@@ -2992,7 +3001,7 @@ fn convert_binary(
                             out.push(AsmInstr::Binary(
                                 AsmType::Quadword,
                                 AsmBinaryOp::Sal,
-                                AsmOperand::Imm(*amount),
+                                AsmOperand::Imm(amount),
                                 dst_low,
                             ));
                             return Ok(());
@@ -3003,7 +3012,7 @@ fn convert_binary(
                         ));
                     }
                     if matches!(op, TackyBinaryOp::ShiftRight) {
-                        let TackyVal::Constant(amount) = right else {
+                        let Some(amount) = i128_constant_shift_amount(right) else {
                             let mut labels = LabelContext {
                                 function_name: ctx.function_name,
                                 counter: ctx.label_counter,
@@ -3019,7 +3028,7 @@ fn convert_binary(
                             )?;
                             return Ok(());
                         };
-                        if !(0..128).contains(amount) {
+                        if !(0..128).contains(&amount) {
                             let mut labels = LabelContext {
                                 function_name: ctx.function_name,
                                 counter: ctx.label_counter,
@@ -3043,10 +3052,10 @@ fn convert_binary(
                         } else {
                             AsmBinaryOp::Sar
                         };
-                        if *amount == 0 {
+                        if amount == 0 {
                             return Ok(());
                         }
-                        if *amount == 64 {
+                        if amount == 64 {
                             out.push(AsmInstr::Mov(AsmType::Quadword, dst_high.clone(), dst_low));
                             let fill = if is_unsigned {
                                 AsmOperand::Imm(0)
@@ -3067,7 +3076,7 @@ fn convert_binary(
                             out.push(AsmInstr::Mov(AsmType::Quadword, fill, dst_high));
                             return Ok(());
                         }
-                        if (65..128).contains(amount) {
+                        if (65..128).contains(&amount) {
                             out.push(AsmInstr::Mov(
                                 AsmType::Quadword,
                                 dst_high.clone(),
@@ -3076,7 +3085,7 @@ fn convert_binary(
                             out.push(AsmInstr::Binary(
                                 AsmType::Quadword,
                                 high_shift.clone(),
-                                AsmOperand::Imm(*amount - 64),
+                                AsmOperand::Imm(amount - 64),
                                 dst_low,
                             ));
                             if is_unsigned {
@@ -3095,7 +3104,7 @@ fn convert_binary(
                             }
                             return Ok(());
                         }
-                        if (1..64).contains(amount) {
+                        if (1..64).contains(&amount) {
                             out.push(AsmInstr::Mov(
                                 AsmType::Quadword,
                                 dst_high.clone(),
@@ -3104,13 +3113,13 @@ fn convert_binary(
                             out.push(AsmInstr::Binary(
                                 AsmType::Quadword,
                                 AsmBinaryOp::Shr,
-                                AsmOperand::Imm(*amount),
+                                AsmOperand::Imm(amount),
                                 dst_low.clone(),
                             ));
                             out.push(AsmInstr::Binary(
                                 AsmType::Quadword,
                                 AsmBinaryOp::Sal,
-                                AsmOperand::Imm(64 - *amount),
+                                AsmOperand::Imm(64 - amount),
                                 AsmOperand::Reg(Reg::R10),
                             ));
                             out.push(AsmInstr::Binary(
@@ -3122,7 +3131,7 @@ fn convert_binary(
                             out.push(AsmInstr::Binary(
                                 AsmType::Quadword,
                                 high_shift,
-                                AsmOperand::Imm(*amount),
+                                AsmOperand::Imm(amount),
                                 dst_high,
                             ));
                             return Ok(());

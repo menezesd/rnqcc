@@ -26294,6 +26294,10 @@ fn optimized_unsigned_power_of_two_arithmetic_uses_shifts_and_masks() {
     assert!(!asm.contains("\tshrq %cl,"), "{asm}");
     assert!(!asm.contains("\tdivl"), "{asm}");
     assert!(!asm.contains("\tdivq"), "{asm}");
+    assert!(
+        !asm.contains("i128_shift_loop.typed_shift_count128"),
+        "{asm}"
+    );
 
     let _ = std::fs::remove_file(out);
 }
@@ -26336,6 +26340,10 @@ fn aarch64_optimized_wide_power_of_two_shifts_use_direct_limb_lowering() {
     assert!(!asm.contains("i128_shift_loop.mul128"), "{asm}");
     assert!(!asm.contains("i128_shift_loop.div128"), "{asm}");
     assert!(!asm.contains("i128_shift_loop.signed_shift128"), "{asm}");
+    assert!(
+        !asm.contains("i128_shift_loop.typed_shift_count128"),
+        "{asm}"
+    );
 
     let _ = std::fs::remove_file(out);
 }

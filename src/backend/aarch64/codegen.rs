@@ -834,11 +834,11 @@ fn emit_i128_shift(
         return Ok(false);
     }
 
-    let TackyVal::Constant(amount) = right else {
+    let Some(amount) = i128_constant_shift_amount(right) else {
         emit_i128_variable_shift(instructions, op, left, right, dst, ctx)?;
         return Ok(true);
     };
-    if !(0..128).contains(amount) {
+    if !(0..128).contains(&amount) {
         emit_i128_variable_shift(instructions, op, left, right, dst, ctx)?;
         return Ok(true);
     }
@@ -850,7 +850,7 @@ fn emit_i128_shift(
         ctx.stack_slots,
         ctx.global_vars,
     )?;
-    if *amount == 0 {
+    if amount == 0 {
         return Ok(true);
     }
 
@@ -858,14 +858,14 @@ fn emit_i128_shift(
     let dst_high = high64_operand(&dst)?;
     match op {
         TackyBinaryOp::ShiftLeft => {
-            if *amount == 64 {
+            if amount == 64 {
                 instructions.push(AsmInstr::Mov(AsmType::Quadword, dst_low.clone(), dst_high));
                 instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     AsmOperand::Imm(0),
                     dst_low,
                 ));
-            } else if (65..128).contains(amount) {
+            } else if (65..128).contains(&amount) {
                 instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     dst_low.clone(),
@@ -874,7 +874,7 @@ fn emit_i128_shift(
                 instructions.push(AsmInstr::Binary(
                     AsmType::Quadword,
                     AsmBinaryOp::Sal,
-                    AsmOperand::Imm(*amount - 64),
+                    AsmOperand::Imm(amount - 64),
                     dst_high,
                 ));
                 instructions.push(AsmInstr::Mov(
@@ -891,13 +891,13 @@ fn emit_i128_shift(
                 instructions.push(AsmInstr::Binary(
                     AsmType::Quadword,
                     AsmBinaryOp::Sal,
-                    AsmOperand::Imm(*amount),
+                    AsmOperand::Imm(amount),
                     dst_high.clone(),
                 ));
                 instructions.push(AsmInstr::Binary(
                     AsmType::Quadword,
                     AsmBinaryOp::Shr,
-                    AsmOperand::Imm(64 - *amount),
+                    AsmOperand::Imm(64 - amount),
                     AsmOperand::Reg(Reg::R13),
                 ));
                 instructions.push(AsmInstr::Binary(
@@ -909,7 +909,7 @@ fn emit_i128_shift(
                 instructions.push(AsmInstr::Binary(
                     AsmType::Quadword,
                     AsmBinaryOp::Sal,
-                    AsmOperand::Imm(*amount),
+                    AsmOperand::Imm(amount),
                     dst_low,
                 ));
             }
@@ -920,7 +920,7 @@ fn emit_i128_shift(
             } else {
                 AsmBinaryOp::Sar
             };
-            if *amount == 64 {
+            if amount == 64 {
                 instructions.push(AsmInstr::Mov(AsmType::Quadword, dst_high.clone(), dst_low));
                 if is_unsigned_val(left, ctx.types) {
                     instructions.push(AsmInstr::Mov(
@@ -936,7 +936,7 @@ fn emit_i128_shift(
                         dst_high,
                     ));
                 }
-            } else if (65..128).contains(amount) {
+            } else if (65..128).contains(&amount) {
                 instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     dst_high.clone(),
@@ -945,7 +945,7 @@ fn emit_i128_shift(
                 instructions.push(AsmInstr::Binary(
                     AsmType::Quadword,
                     high_shift.clone(),
-                    AsmOperand::Imm(*amount - 64),
+                    AsmOperand::Imm(amount - 64),
                     dst_low,
                 ));
                 if is_unsigned_val(left, ctx.types) {
@@ -971,13 +971,13 @@ fn emit_i128_shift(
                 instructions.push(AsmInstr::Binary(
                     AsmType::Quadword,
                     AsmBinaryOp::Shr,
-                    AsmOperand::Imm(*amount),
+                    AsmOperand::Imm(amount),
                     dst_low.clone(),
                 ));
                 instructions.push(AsmInstr::Binary(
                     AsmType::Quadword,
                     AsmBinaryOp::Sal,
-                    AsmOperand::Imm(64 - *amount),
+                    AsmOperand::Imm(64 - amount),
                     AsmOperand::Reg(Reg::R13),
                 ));
                 instructions.push(AsmInstr::Binary(
@@ -989,7 +989,7 @@ fn emit_i128_shift(
                 instructions.push(AsmInstr::Binary(
                     AsmType::Quadword,
                     high_shift,
-                    AsmOperand::Imm(*amount),
+                    AsmOperand::Imm(amount),
                     dst_high,
                 ));
             }
@@ -997,6 +997,15 @@ fn emit_i128_shift(
         _ => return Err("internal error: expected i128 shift op".to_string()),
     }
     Ok(true)
+}
+
+fn i128_constant_shift_amount(val: &TackyVal) -> Option<i64> {
+    match val {
+        TackyVal::Constant(value) => Some(*value),
+        TackyVal::Int128Constant(value) => i64::try_from(*value).ok(),
+        TackyVal::UInt128Constant(value) => i64::try_from(*value).ok(),
+        TackyVal::DoubleConstant(_) | TackyVal::Var(_) => None,
+    }
 }
 
 fn asm_type_for_val(val: &TackyVal, types: &IndexMap<String, CType>) -> Result<AsmType, String> {

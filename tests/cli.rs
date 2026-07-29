@@ -26271,6 +26271,70 @@ int getneg(int *p) { return p[-2]; }
 }
 
 #[test]
+fn optimized_unsigned_power_of_two_arithmetic_uses_shifts_and_masks() {
+    let out = temp_file("x86-unsigned-power-of-two", "s");
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg("tests/unsigned_power_of_two.c")
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\tsall %cl,"), "{asm}");
+    assert!(asm.contains("\tshrl %cl,"), "{asm}");
+    assert!(asm.contains("\tandl $31,"), "{asm}");
+    assert!(asm.contains("\tsalq %cl,"), "{asm}");
+    assert!(asm.contains("\tshrq %cl,"), "{asm}");
+    assert!(asm.contains("\tandq $127,"), "{asm}");
+    assert!(!asm.contains("\tdivl"), "{asm}");
+    assert!(!asm.contains("\tdivq"), "{asm}");
+
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn optimized_unsigned_power_of_two_arithmetic_preserves_wide_runtime_results() {
+    let exe = temp_file("optimized-unsigned-power-of-two", "bin");
+    let output = Command::new(rnqcc())
+        .arg("--optimize")
+        .arg("-o")
+        .arg(&exe)
+        .arg("tests/unsigned_power_of_two.c")
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe)
+        .status()
+        .expect("failed to run optimized output");
+    assert_eq!(run.code(), Some(0));
+
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
+fn aarch64_optimized_wide_power_of_two_shifts_use_direct_limb_lowering() {
+    let out = temp_file("aarch64-unsigned-power-of-two", "s");
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg("tests/unsigned_power_of_two.c")
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\tlsl x1, x1, x10"), "{asm}");
+    assert!(asm.contains("\tlsr x0, x0, x10"), "{asm}");
+    assert!(!asm.contains("i128_shift_loop.mul128"), "{asm}");
+    assert!(!asm.contains("i128_shift_loop.div128"), "{asm}");
+
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn aarch64_optimized_float_negative_zero_return_preserves_sign_bit() {
     let src = temp_file("aarch64-float-negative-zero-return", "c");
     let out = temp_file("aarch64-float-negative-zero-return", "s");

@@ -254,6 +254,153 @@ fn constant_folding_simplifies_integer_identity_ops() {
 }
 
 #[test]
+fn constant_folding_strength_reduces_unsigned_power_of_two_arithmetic() {
+    let mut func = empty_function(vec![
+        TackyInstr::Binary {
+            op: TackyBinaryOp::Mul,
+            left: v("x"),
+            right: TackyVal::Constant(8),
+            dst: v("mul"),
+        },
+        TackyInstr::Binary {
+            op: TackyBinaryOp::Div,
+            left: v("mul"),
+            right: TackyVal::Constant(16),
+            dst: v("div"),
+        },
+        TackyInstr::Binary {
+            op: TackyBinaryOp::Mod,
+            left: v("div"),
+            right: TackyVal::Constant(32),
+            dst: v("rem"),
+        },
+        TackyInstr::Return(v("rem")),
+    ]);
+    let types = typed_vars(&[
+        ("x", CType::UInt),
+        ("mul", CType::UInt),
+        ("div", CType::UInt),
+        ("rem", CType::UInt),
+    ]);
+
+    optimize_function(
+        &mut func,
+        &flags_with_constant_folding(),
+        &types,
+        &HashSet::new(),
+    );
+
+    assert_eq!(
+        func.body,
+        vec![
+            TackyInstr::Binary {
+                op: TackyBinaryOp::ShiftLeft,
+                left: v("x"),
+                right: TackyVal::Constant(3),
+                dst: v("mul"),
+            },
+            TackyInstr::Binary {
+                op: TackyBinaryOp::ShiftRight,
+                left: v("mul"),
+                right: TackyVal::Constant(4),
+                dst: v("div"),
+            },
+            TackyInstr::Binary {
+                op: TackyBinaryOp::BitwiseAnd,
+                left: v("div"),
+                right: TackyVal::Constant(31),
+                dst: v("rem"),
+            },
+            TackyInstr::Return(v("rem")),
+        ]
+    );
+}
+
+#[test]
+fn constant_folding_keeps_signed_power_of_two_multiplication() {
+    let original = TackyInstr::Binary {
+        op: TackyBinaryOp::Mul,
+        left: v("x"),
+        right: TackyVal::Constant(8),
+        dst: v("result"),
+    };
+    let mut func = empty_function(vec![original.clone(), TackyInstr::Return(v("result"))]);
+    let types = int_types(&["x", "result"]);
+
+    optimize_function(
+        &mut func,
+        &flags_with_constant_folding(),
+        &types,
+        &HashSet::new(),
+    );
+
+    assert!(func.body.contains(&original));
+}
+
+#[test]
+fn constant_folding_strength_reduces_uint128_power_of_two_arithmetic() {
+    let mut func = empty_function(vec![
+        TackyInstr::Binary {
+            op: TackyBinaryOp::Mul,
+            left: v("x"),
+            right: TackyVal::UInt128Constant(1_u128 << 96),
+            dst: v("mul"),
+        },
+        TackyInstr::Binary {
+            op: TackyBinaryOp::Div,
+            left: v("mul"),
+            right: TackyVal::UInt128Constant(1_u128 << 96),
+            dst: v("div"),
+        },
+        TackyInstr::Binary {
+            op: TackyBinaryOp::Mod,
+            left: v("div"),
+            right: TackyVal::UInt128Constant(1_u128 << 96),
+            dst: v("rem"),
+        },
+        TackyInstr::Return(v("rem")),
+    ]);
+    let types = typed_vars(&[
+        ("x", CType::UInt128),
+        ("mul", CType::UInt128),
+        ("div", CType::UInt128),
+        ("rem", CType::UInt128),
+    ]);
+
+    optimize_function(
+        &mut func,
+        &flags_with_constant_folding(),
+        &types,
+        &HashSet::new(),
+    );
+
+    assert_eq!(
+        func.body,
+        vec![
+            TackyInstr::Binary {
+                op: TackyBinaryOp::ShiftLeft,
+                left: v("x"),
+                right: TackyVal::Constant(96),
+                dst: v("mul"),
+            },
+            TackyInstr::Binary {
+                op: TackyBinaryOp::ShiftRight,
+                left: v("mul"),
+                right: TackyVal::Constant(96),
+                dst: v("div"),
+            },
+            TackyInstr::Binary {
+                op: TackyBinaryOp::BitwiseAnd,
+                left: v("div"),
+                right: TackyVal::UInt128Constant((1_u128 << 96) - 1),
+                dst: v("rem"),
+            },
+            TackyInstr::Return(v("rem")),
+        ]
+    );
+}
+
+#[test]
 fn constant_folding_simplifies_integer_all_ones_bitwise_ops() {
     let mut func = empty_function(vec![
         TackyInstr::Binary {

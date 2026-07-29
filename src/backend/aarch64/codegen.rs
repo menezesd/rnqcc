@@ -838,7 +838,7 @@ fn emit_i128_shift(
         emit_i128_variable_shift(instructions, op, left, right, dst, ctx)?;
         return Ok(true);
     };
-    if !(0..=64).contains(amount) {
+    if !(0..128).contains(amount) {
         emit_i128_variable_shift(instructions, op, left, right, dst, ctx)?;
         return Ok(true);
     }
@@ -860,6 +860,23 @@ fn emit_i128_shift(
         TackyBinaryOp::ShiftLeft => {
             if *amount == 64 {
                 instructions.push(AsmInstr::Mov(AsmType::Quadword, dst_low.clone(), dst_high));
+                instructions.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    AsmOperand::Imm(0),
+                    dst_low,
+                ));
+            } else if (65..128).contains(amount) {
+                instructions.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    dst_low.clone(),
+                    dst_high.clone(),
+                ));
+                instructions.push(AsmInstr::Binary(
+                    AsmType::Quadword,
+                    AsmBinaryOp::Sal,
+                    AsmOperand::Imm(*amount - 64),
+                    dst_high,
+                ));
                 instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     AsmOperand::Imm(0),
@@ -905,6 +922,32 @@ fn emit_i128_shift(
             };
             if *amount == 64 {
                 instructions.push(AsmInstr::Mov(AsmType::Quadword, dst_high.clone(), dst_low));
+                if is_unsigned_val(left, ctx.types) {
+                    instructions.push(AsmInstr::Mov(
+                        AsmType::Quadword,
+                        AsmOperand::Imm(0),
+                        dst_high,
+                    ));
+                } else {
+                    instructions.push(AsmInstr::Binary(
+                        AsmType::Quadword,
+                        AsmBinaryOp::Sar,
+                        AsmOperand::Imm(63),
+                        dst_high,
+                    ));
+                }
+            } else if (65..128).contains(amount) {
+                instructions.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    dst_high.clone(),
+                    dst_low.clone(),
+                ));
+                instructions.push(AsmInstr::Binary(
+                    AsmType::Quadword,
+                    high_shift.clone(),
+                    AsmOperand::Imm(*amount - 64),
+                    dst_low,
+                ));
                 if is_unsigned_val(left, ctx.types) {
                     instructions.push(AsmInstr::Mov(
                         AsmType::Quadword,
@@ -4145,15 +4188,16 @@ fn convert_function(
                     if stack_arg_indices.contains(&arg_index) || force_stack_for_darwin_vararg {
                         stack_args.push(StackArg::Scalar(ty, arg));
                     } else if ty == AsmType::Octword && gp_arg_count + 1 < ARG_REGS.len() {
-                        let src = val_operand(arg, &stack_slots, global_vars)?;
+                        let (src_low, src_high) =
+                            i128_part_operands(arg, &stack_slots, global_vars)?;
                         instructions.push(AsmInstr::Mov(
                             AsmType::Quadword,
-                            low64_operand(&src)?,
+                            src_low,
                             AsmOperand::Reg(ARG_REGS[gp_arg_count]),
                         ));
                         instructions.push(AsmInstr::Mov(
                             AsmType::Quadword,
-                            high64_operand(&src)?,
+                            src_high,
                             AsmOperand::Reg(ARG_REGS[gp_arg_count + 1]),
                         ));
                         gp_arg_count += 2;
@@ -4192,16 +4236,17 @@ fn convert_function(
                         stack_index = stack_index.next_multiple_of(arg.slot_alignment());
                         match arg {
                             StackArg::Scalar(AsmType::Octword, val) => {
-                                let src = val_operand(val, &stack_slots, global_vars)?;
+                                let (src_low, src_high) =
+                                    i128_part_operands(val, &stack_slots, global_vars)?;
                                 instructions.push(AsmInstr::AArch64StoreOutgoingArg(
                                     AsmType::Quadword,
-                                    low64_operand(&src)?,
+                                    src_low,
                                     stack_arg_offset(0, stack_index),
                                     outgoing_bytes,
                                 ));
                                 instructions.push(AsmInstr::AArch64StoreOutgoingArg(
                                     AsmType::Quadword,
-                                    high64_operand(&src)?,
+                                    src_high,
                                     stack_arg_offset(0, stack_index + 1),
                                     outgoing_bytes,
                                 ));

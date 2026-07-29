@@ -26330,9 +26330,9 @@ fn aarch64_optimized_wide_power_of_two_shifts_use_direct_limb_lowering() {
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
-    assert!(asm.contains("\tlsl x1, x1, x10"), "{asm}");
-    assert!(asm.contains("\tlsr x0, x0, x10"), "{asm}");
-    assert!(asm.contains("\tasr x0, x0, x10"), "{asm}");
+    assert!(asm.contains("\tlsl x1, x1, #32"), "{asm}");
+    assert!(asm.contains("\tlsr x0, x0, #32"), "{asm}");
+    assert!(asm.contains("\tasr x0, x0, #32"), "{asm}");
     assert!(!asm.contains("i128_shift_loop.mul128"), "{asm}");
     assert!(!asm.contains("i128_shift_loop.div128"), "{asm}");
     assert!(!asm.contains("i128_shift_loop.signed_shift128"), "{asm}");

@@ -13065,6 +13065,7 @@ fn compiles_and_runs_representative_host_fixtures() {
         ("tests/fibonacci.c", 55),
         ("tests/static_globals.c", 0),
         ("tests/double_simple.c", 5),
+        ("tests/large_vector_abi.c", 0),
     ] {
         let exe = temp_file(
             &format!(

@@ -3381,9 +3381,15 @@ fn convert_function(
 
     for (i, param) in func.params.iter().enumerate() {
         if let Some((dst_name, size)) = memory_param_blocks.get(&i).copied() {
-            let align = get_struct_def(dst_name, ctx.var_struct_tags, ctx.struct_defs)
-                .map(|def| def.alignment.clamp(1, 16))
-                .unwrap_or(8);
+            let align = if ctx.types.get(dst_name) == Some(&CType::UInt128) {
+                // Oversized vectors are MEMORY-class values but retain their
+                // mandatory 16-byte ABI stack alignment.
+                16
+            } else {
+                get_struct_def(dst_name, ctx.var_struct_tags, ctx.struct_defs)
+                    .map(|def| def.alignment.clamp(1, 16))
+                    .unwrap_or(8)
+            };
             let layout = StackArgLayout::for_memory_block(size, align);
             stack_arg_offset = layout.place_at(stack_arg_offset);
             let offset = 16 + stack_arg_offset as i32;

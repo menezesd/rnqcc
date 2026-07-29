@@ -26282,12 +26282,16 @@ fn optimized_unsigned_power_of_two_arithmetic_uses_shifts_and_masks() {
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
-    assert!(asm.contains("\tsall %cl,"), "{asm}");
-    assert!(asm.contains("\tshrl %cl,"), "{asm}");
+    assert!(asm.contains("\tsall $3,"), "{asm}");
+    assert!(asm.contains("\tshrl $4,"), "{asm}");
     assert!(asm.contains("\tandl $31,"), "{asm}");
-    assert!(asm.contains("\tsalq %cl,"), "{asm}");
-    assert!(asm.contains("\tshrq %cl,"), "{asm}");
+    assert!(asm.contains("\tsalq $5,"), "{asm}");
+    assert!(asm.contains("\tshrq $6,"), "{asm}");
     assert!(asm.contains("\tandq $127,"), "{asm}");
+    assert!(!asm.contains("\tsall %cl,"), "{asm}");
+    assert!(!asm.contains("\tshrl %cl,"), "{asm}");
+    assert!(!asm.contains("\tsalq %cl,"), "{asm}");
+    assert!(!asm.contains("\tshrq %cl,"), "{asm}");
     assert!(!asm.contains("\tdivl"), "{asm}");
     assert!(!asm.contains("\tdivq"), "{asm}");
 

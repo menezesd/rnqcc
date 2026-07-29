@@ -1438,17 +1438,27 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                 _ => return Err(format!("unsupported x86-64 shift op: {:?}", op)),
             };
             out.push(AsmInstr::Mov(t, convert_val(left), convert_val(dst)));
-            out.push(AsmInstr::Mov(
-                AsmType::Longword,
-                convert_val(right),
-                AsmOperand::Reg(Reg::CX),
-            ));
-            out.push(AsmInstr::Binary(
-                t,
-                asm_op,
-                AsmOperand::Reg(Reg::CX),
-                convert_val(dst),
-            ));
+            let shift_amount = match right {
+                TackyVal::Constant(_)
+                | TackyVal::Int128Constant(_)
+                | TackyVal::UInt128Constant(_) => {
+                    // x86-64 has an immediate-count encoding for shifts.  Avoid
+                    // tying up %rcx when the count is known at compile time.
+                    convert_val(right)
+                }
+                TackyVal::Var(_) => {
+                    out.push(AsmInstr::Mov(
+                        AsmType::Longword,
+                        convert_val(right),
+                        AsmOperand::Reg(Reg::CX),
+                    ));
+                    AsmOperand::Reg(Reg::CX)
+                }
+                TackyVal::DoubleConstant(_) => {
+                    return Err("internal error: floating-point shift count".to_string())
+                }
+            };
+            out.push(AsmInstr::Binary(t, asm_op, shift_amount, convert_val(dst)));
         }
         TackyInstr::Binary {
             op,

@@ -8350,8 +8350,8 @@ fn emits_aarch64_assembly_for_integer_division_and_shifts() {
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains("sdiv w9, w9, w10"));
-    assert!(asm.contains("lsl w9, w9, w10"));
-    assert!(asm.contains("asr w9, w9, w10"));
+    assert!(asm.contains("lsl w9, w9, #3"));
+    assert!(asm.contains("asr w9, w9, #2"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -8377,7 +8377,7 @@ fn emits_aarch64_assembly_for_unsigned_division_and_shift() {
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains("udiv w9, w9, w10"));
-    assert!(asm.contains("lsr w9, w9, w10"));
+    assert!(asm.contains("lsr w9, w9, #2"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -8486,8 +8486,8 @@ fn emits_aarch64_assembly_for_variable_int128_shifts() {
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains(".Li128_shift_loop."));
-    assert!(asm.contains("lsl x9, x9, x10"));
-    assert!(asm.contains("asr x11, x11, x10"));
+    assert!(asm.contains("lsl x9, x9, #1"));
+    assert!(asm.contains("asr x11, x11, #1"));
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -26298,6 +26298,7 @@ fn optimized_unsigned_power_of_two_arithmetic_uses_shifts_and_masks() {
         !asm.contains("i128_shift_loop.typed_shift_count128"),
         "{asm}"
     );
+    assert!(!asm.contains("i128_shift_loop.bitint_shift128"), "{asm}");
 
     let _ = std::fs::remove_file(out);
 }
@@ -26348,6 +26349,7 @@ fn aarch64_optimized_wide_power_of_two_shifts_use_direct_limb_lowering() {
         !asm.contains("i128_shift_loop.typed_shift_count128"),
         "{asm}"
     );
+    assert!(!asm.contains("i128_shift_loop.bitint_shift128"), "{asm}");
 
     let _ = std::fs::remove_file(out);
 }

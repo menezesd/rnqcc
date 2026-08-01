@@ -4252,18 +4252,23 @@ fn convert_function(
                             StackArg::Scalar(AsmType::Octword, val) => {
                                 let (src_low, src_high) =
                                     i128_part_operands(val, &stack_slots, global_vars)?;
-                                // AArch64StoreOutgoingArg rebases stack operands at
-                                // emission time. Materialize both limbs first so
-                                // wide constants do not need an addressable source.
-                                instructions.push(AsmInstr::Mov(
+                                // The outgoing argument area moves SP, so load
+                                // both source limbs through the rebasing-aware
+                                // instruction before storing them.  Ordinary
+                                // stack arguments do this in
+                                // AArch64StoreOutgoingArg; the split wide value
+                                // needs it for each limb as well.
+                                instructions.push(AsmInstr::AArch64LoadAdjusted(
                                     AsmType::Quadword,
                                     src_low,
-                                    AsmOperand::Reg(Reg::R10),
+                                    Reg::R10,
+                                    outgoing_bytes,
                                 ));
-                                instructions.push(AsmInstr::Mov(
+                                instructions.push(AsmInstr::AArch64LoadAdjusted(
                                     AsmType::Quadword,
                                     src_high,
-                                    AsmOperand::Reg(Reg::R13),
+                                    Reg::R13,
+                                    outgoing_bytes,
                                 ));
                                 instructions.push(AsmInstr::AArch64StoreOutgoingArg(
                                     AsmType::Quadword,
@@ -4901,6 +4906,32 @@ mod tests {
                     | AsmInstr::Mov(_, AsmOperand::Reg(Reg::R12), _)
             )
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn wide_stack_arguments_rebase_both_source_limbs() -> Result<(), String> {
+        let program = codegen_source(
+            "unsigned __int128 take(long a, long b, long c, long d, long e, long f, long g, unsigned __int128 value) { return value; }\n\
+             int main(void) { unsigned __int128 value = ((unsigned __int128)1 << 100) | 7; return take(1, 2, 3, 4, 5, 6, 7, value) != value; }\n",
+        )?;
+        let main = function(&program, "main")?;
+        let adjusted_loads: Vec<_> = main
+            .instructions
+            .iter()
+            .filter_map(|instr| match instr {
+                AsmInstr::AArch64LoadAdjusted(
+                    AsmType::Quadword,
+                    AsmOperand::Stack(_),
+                    reg,
+                    rebase,
+                ) => Some((*reg, *rebase)),
+                _ => None,
+            })
+            .collect();
+
+        assert!(adjusted_loads.contains(&(Reg::R10, 16)), "{main:#?}");
+        assert!(adjusted_loads.contains(&(Reg::R13, 16)), "{main:#?}");
         Ok(())
     }
 

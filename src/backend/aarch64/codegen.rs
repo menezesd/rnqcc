@@ -632,7 +632,6 @@ fn emit_i128_helper_binary(
         return Ok(true);
     }
     let helper = match (op, is_unsigned_val(left, ctx.types)) {
-        (TackyBinaryOp::Mul, _) => "__multi3",
         (TackyBinaryOp::Div, true) => "__udivti3",
         (TackyBinaryOp::Div, false) => "__divti3",
         (TackyBinaryOp::Mod, true) => "__umodti3",
@@ -672,17 +671,9 @@ fn i128_div_or_mod_requires_helper(
     right: &TackyVal,
     types: &IndexMap<String, CType>,
 ) -> bool {
-    match op {
-        TackyBinaryOp::Div => {
-            !i128_constant_is_one(right)
-                && (is_unsigned_val(left, types) || !i128_constant_is_negative_one(right))
-        }
-        TackyBinaryOp::Mod => {
-            !i128_constant_is_one(right)
-                && (is_unsigned_val(left, types) || !i128_constant_is_negative_one(right))
-        }
-        _ => false,
-    }
+    matches!(op, TackyBinaryOp::Div | TackyBinaryOp::Mod)
+        && !i128_constant_is_one(right)
+        && (is_unsigned_val(left, types) || !i128_constant_is_negative_one(right))
 }
 
 struct Aarch64I128Context<'a> {

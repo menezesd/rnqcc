@@ -921,6 +921,101 @@ fn emit_i128_signed_power_of_two_division(
     Ok(())
 }
 
+fn emit_i128_signed_power_of_two_remainder(
+    instructions: &mut Vec<AsmInstr>,
+    left: &TackyVal,
+    dst: AsmOperand,
+    amount: i64,
+    ctx: &Aarch64I128Context<'_>,
+) -> Result<(), String> {
+    debug_assert!((1..127).contains(&amount));
+
+    emit_i128_signed_power_of_two_division(instructions, left, dst.clone(), amount, ctx)?;
+    let dst_low = low64_operand(&dst)?;
+    let dst_high = high64_operand(&dst)?;
+
+    // Turn the quotient back into a multiple of 2^amount, then subtract it
+    // from the original value. This preserves C's negative remainder rule.
+    match amount {
+        1..=63 => {
+            instructions.push(AsmInstr::AArch64Extr(
+                dst_high.clone(),
+                dst_low.clone(),
+                (64 - amount) as u8,
+                dst_high.clone(),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Sal,
+                AsmOperand::Imm(amount),
+                dst_low.clone(),
+            ));
+        }
+        64 => {
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                dst_low.clone(),
+                dst_high.clone(),
+            ));
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Imm(0),
+                dst_low.clone(),
+            ));
+        }
+        65..=126 => {
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                dst_low.clone(),
+                dst_high.clone(),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Sal,
+                AsmOperand::Imm(amount - 64),
+                dst_high.clone(),
+            ));
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Imm(0),
+                dst_low.clone(),
+            ));
+        }
+        _ => unreachable!("signed 128-bit power-of-two remainder shift is in range"),
+    }
+
+    instructions.push(AsmInstr::Mov(
+        AsmType::Quadword,
+        dst_low.clone(),
+        AsmOperand::Reg(Reg::R10),
+    ));
+    instructions.push(AsmInstr::Mov(
+        AsmType::Quadword,
+        dst_high.clone(),
+        AsmOperand::Reg(Reg::R11),
+    ));
+    let (left_low, left_high) = i128_part_operands(left, ctx.stack_slots, ctx.global_vars)?;
+    instructions.push(AsmInstr::Mov(AsmType::Quadword, left_low, dst_low.clone()));
+    instructions.push(AsmInstr::Mov(
+        AsmType::Quadword,
+        left_high,
+        dst_high.clone(),
+    ));
+    instructions.push(AsmInstr::Binary(
+        AsmType::Quadword,
+        AsmBinaryOp::SubSetFlags,
+        AsmOperand::Reg(Reg::R10),
+        dst_low,
+    ));
+    instructions.push(AsmInstr::Binary(
+        AsmType::Quadword,
+        AsmBinaryOp::Sbb,
+        AsmOperand::Reg(Reg::R11),
+        dst_high,
+    ));
+    Ok(())
+}
+
 fn emit_i128_helper_binary(
     instructions: &mut Vec<AsmInstr>,
     op: &TackyBinaryOp,
@@ -952,6 +1047,14 @@ fn emit_i128_helper_binary(
         if let Some(amount) = i128_constant_power_of_two_shift(right) {
             if (1..127).contains(&amount) {
                 emit_i128_signed_power_of_two_division(instructions, left, dst, amount, ctx)?;
+                return Ok(true);
+            }
+        }
+    }
+    if matches!(op, TackyBinaryOp::Mod) && !is_unsigned {
+        if let Some(amount) = i128_constant_power_of_two_shift(right) {
+            if (1..127).contains(&amount) {
+                emit_i128_signed_power_of_two_remainder(instructions, left, dst, amount, ctx)?;
                 return Ok(true);
             }
         }
@@ -1066,6 +1169,10 @@ fn i128_div_or_mod_requires_helper(
             && is_unsigned_val(left, types)
             && i128_constant_power_of_two_shift(right).is_some())
         && !(matches!(op, TackyBinaryOp::Div)
+            && !is_unsigned_val(left, types)
+            && i128_constant_power_of_two_shift(right)
+                .is_some_and(|amount| (1..127).contains(&amount)))
+        && !(matches!(op, TackyBinaryOp::Mod)
             && !is_unsigned_val(left, types)
             && i128_constant_power_of_two_shift(right)
                 .is_some_and(|amount| (1..127).contains(&amount)))

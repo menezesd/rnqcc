@@ -25996,6 +25996,8 @@ __int128 divwide128(__int128 a) { return a / ((__int128)1 << 96); }
 __int128 mod128(__int128 a, __int128 b) { return a % b; }
 __int128 modone128(__int128 a) { return a % 1; }
 __int128 modneg128(__int128 a) { return a % -1; }
+__int128 modshift128(__int128 a) { return a % 8; }
+__int128 modwide128(__int128 a) { return a % ((__int128)1 << 96); }
 unsigned __int128 udiv128(unsigned __int128 a, unsigned __int128 b) { return a / b; }
 unsigned __int128 udivshift128(unsigned __int128 a) { return a / 8; }
 unsigned __int128 umodshift128(unsigned __int128 a) { return a % 8; }
@@ -26230,6 +26232,16 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
     assert!(divwide128.contains("\tasr x0, x0, #32"), "{divwide128}");
     assert!(divwide128.contains("\tasr x1, x1, #63"), "{divwide128}");
     assert!(!divwide128.contains("\tbl __divti3"), "{divwide128}");
+    let modshift128 = body("modshift128");
+    assert!(modshift128.contains("\tlsl x0, x0, #3"), "{modshift128}");
+    assert!(modshift128.contains("\tsubs x0, x0, x9"), "{modshift128}");
+    assert!(modshift128.contains("\tsbcs x1, x1, x10"), "{modshift128}");
+    assert!(!modshift128.contains("\tbl __modti3"), "{modshift128}");
+    let modwide128 = body("modwide128");
+    assert!(modwide128.contains("\tlsl x1, x1, #32"), "{modwide128}");
+    assert!(modwide128.contains("\tsubs x0, x0, x9"), "{modwide128}");
+    assert!(modwide128.contains("\tsbcs x1, x1, x10"), "{modwide128}");
+    assert!(!modwide128.contains("\tbl __modti3"), "{modwide128}");
     for name in ["modone128", "modneg128"] {
         let body = body(name);
         assert!(body.contains("\tmov x0, xzr"), "{body}");
@@ -27078,6 +27090,9 @@ long mod64(long value) { return value % 8; }
 __int128 div128_3(__int128 value) { return value / 8; }
 __int128 div128_64(__int128 value) { return value / ((__int128)1 << 64); }
 __int128 div128_96(__int128 value) { return value / ((__int128)1 << 96); }
+__int128 mod128_3(__int128 value) { return value % 8; }
+__int128 mod128_64(__int128 value) { return value % ((__int128)1 << 64); }
+__int128 mod128_96(__int128 value) { return value % ((__int128)1 << 96); }
 long div_pressure(long a, long b, long c, long d, long e, long f, long g, long h) {
     return a / 8 + b + c + d + e + f + g + h;
 }
@@ -27098,6 +27113,9 @@ int main(void) {
     if (div128_3(-7) != 0 || div128_3(-8) != -1 || div128_3(-9) != -1) return 11;
     if (div128_64(-((__int128)1 << 100) + 7) != -68719476735L) return 12;
     if (div128_96(-((__int128)1 << 100) + 7) != -15) return 13;
+    if (mod128_3(-7) != -7 || mod128_3(-8) != 0 || mod128_3(-9) != -1) return 14;
+    if (mod128_64(-((__int128)1 << 100) + 7) != -((__int128)1 << 64) + 7) return 15;
+    if (mod128_96(-((__int128)1 << 100) + 7) != -((__int128)1 << 96) + 7) return 16;
     return 0;
 }
 "#,

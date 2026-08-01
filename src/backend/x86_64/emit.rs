@@ -1381,6 +1381,49 @@ fn emit_zeroing_mov(
     }
 }
 
+/// A 32-bit x86 write already clears the corresponding register's upper half.
+/// Consequently a following `movl %reg, %reg` cannot add useful
+/// zero-extension when the immediately preceding instruction is a known
+/// 32-bit ALU write to that same register.
+fn longword_self_move_is_redundant(instrs: &[AsmInstr], index: usize) -> bool {
+    let Some(AsmInstr::Mov(AsmType::Longword, AsmOperand::Reg(reg), AsmOperand::Reg(dst_reg))) =
+        instrs.get(index)
+    else {
+        return false;
+    };
+    if reg != dst_reg || index == 0 {
+        return false;
+    }
+
+    match &instrs[index - 1] {
+        AsmInstr::Mov(AsmType::Longword, _, AsmOperand::Reg(written_reg)) => written_reg == reg,
+        AsmInstr::Binary(AsmType::Longword, op, _, AsmOperand::Reg(written_reg)) => {
+            written_reg == reg
+                && matches!(
+                    op,
+                    AsmBinaryOp::Add
+                        | AsmBinaryOp::AddSetFlags
+                        | AsmBinaryOp::Adc
+                        | AsmBinaryOp::Sub
+                        | AsmBinaryOp::SubSetFlags
+                        | AsmBinaryOp::Sbb
+                        | AsmBinaryOp::Mul
+                        | AsmBinaryOp::Imul
+                        | AsmBinaryOp::And
+                        | AsmBinaryOp::Or
+                        | AsmBinaryOp::Xor
+                        | AsmBinaryOp::Sal
+                        | AsmBinaryOp::Sar
+                        | AsmBinaryOp::Shr
+                )
+        }
+        AsmInstr::LoadIndirect(AsmType::Longword, _, AsmOperand::Reg(written_reg)) => {
+            written_reg == reg
+        }
+        _ => false,
+    }
+}
+
 fn emit_function(w: &mut dyn Write, func: &AsmFunction, platform: &Target) -> std::io::Result<()> {
     let label = platform.show_symbol(&func.name);
     writeln!(w, "\t.text")?;
@@ -1396,6 +1439,9 @@ fn emit_function(w: &mut dyn Write, func: &AsmFunction, platform: &Target) -> st
         start = 1;
     }
     for (idx, instr) in instrs.iter().enumerate().skip(start) {
+        if longword_self_move_is_redundant(instrs, idx) {
+            continue;
+        }
         // `mov $0, reg` can shrink to `xor reg, reg`, but only where the flags
         // it would clobber are dead (see `zeroing_can_use_xor`).
         if let AsmInstr::Mov(t, AsmOperand::Imm(0), AsmOperand::Reg(reg)) = instr {
@@ -1757,6 +1803,27 @@ mod tests {
         ));
 
         assert_eq!(asm, "\tmovl %eax, %eax\n");
+    }
+
+    #[test]
+    fn x86_64_emitter_drops_self_move_after_known_longword_write() {
+        let asm = emit_func_body(vec![
+            AsmInstr::Binary(
+                AsmType::Longword,
+                AsmBinaryOp::Sub,
+                AsmOperand::Imm(1),
+                AsmOperand::Reg(Reg::DI),
+            ),
+            AsmInstr::Mov(
+                AsmType::Longword,
+                AsmOperand::Reg(Reg::DI),
+                AsmOperand::Reg(Reg::DI),
+            ),
+            AsmInstr::Ret,
+        ]);
+
+        assert!(asm.contains("\tsubl $1, %edi\n"), "{asm}");
+        assert!(!asm.contains("\tmovl %edi, %edi\n"), "{asm}");
     }
 
     #[test]

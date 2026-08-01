@@ -2246,24 +2246,29 @@ fn emit_function(
     let mut index = 0;
     while index < instructions.len() {
         if let (
-            AsmInstr::Cmp(
-                ty @ (AsmType::Longword | AsmType::Quadword),
-                AsmOperand::Imm(0),
-                AsmOperand::Reg(reg),
-            ),
+            AsmInstr::Cmp(ty @ (AsmType::Longword | AsmType::Quadword), AsmOperand::Imm(0), value),
             Some(AsmInstr::JmpCC(cc @ (CondCode::E | CondCode::NE), label)),
         ) = (&instructions[index], instructions.get(index + 1))
         {
-            let mnemonic = if matches!(cc, CondCode::E) {
-                "cbnz"
-            } else {
-                "cbz"
-            };
-            writeln!(w, "\t{} {}, 1f", mnemonic, reg_name(*reg, *ty)?)?;
-            writeln!(w, "\tb .L{}", label)?;
-            writeln!(w, "1:")?;
-            index += 2;
-            continue;
+            if matches!(
+                value,
+                AsmOperand::Reg(_)
+                    | AsmOperand::Stack(_)
+                    | AsmOperand::Data(_)
+                    | AsmOperand::TlsData(_, _)
+            ) {
+                let mnemonic = if matches!(cc, CondCode::E) {
+                    "cbnz"
+                } else {
+                    "cbz"
+                };
+                let value_reg = load_operand(w, target, *ty, value, Reg::R10)?;
+                writeln!(w, "\t{} {}, 1f", mnemonic, value_reg)?;
+                writeln!(w, "\tb .L{}", label)?;
+                writeln!(w, "1:")?;
+                index += 2;
+                continue;
+            }
         }
         emit_instruction(w, &instructions[index], target)?;
         index += 1;
@@ -2796,6 +2801,8 @@ mod tests {
                     AsmOperand::Reg(Reg::DI),
                 ),
                 AsmInstr::JmpCC(CondCode::NE, "nonzero".to_string()),
+                AsmInstr::Cmp(AsmType::Longword, AsmOperand::Imm(0), AsmOperand::Stack(16)),
+                AsmInstr::JmpCC(CondCode::E, "stack_zero".to_string()),
                 AsmInstr::Ret,
             ],
         };
@@ -2806,8 +2813,13 @@ mod tests {
 
         assert!(asm.contains("\tcbnz w0, 1f\n\tb .Lzero\n"), "{asm}");
         assert!(asm.contains("\tcbz x1, 1f\n\tb .Lnonzero\n"), "{asm}");
+        assert!(
+            asm.contains("\tldr w9, [sp, #16]\n\tcbnz w9, 1f\n\tb .Lstack_zero\n"),
+            "{asm}"
+        );
         assert!(!asm.contains("cmp w0, #0"), "{asm}");
         assert!(!asm.contains("cmp x1, #0"), "{asm}");
+        assert!(!asm.contains("cmp w9, #0"), "{asm}");
         Ok(())
     }
 

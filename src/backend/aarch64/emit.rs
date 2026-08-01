@@ -1496,6 +1496,15 @@ fn emit_binary(
         writeln!(w, "\tneg {}, {}", dst_reg, dst_reg)?;
         return store_operand(w, target, ty, dst_reg, dst);
     }
+    if let Some((amount, width)) = binary_signed_div_power_of_two_amount(ty, op, src) {
+        let scratch = reg_name(Reg::R13, ty)?;
+        let mask = (1u64 << amount) - 1;
+        writeln!(w, "\tasr {}, {}, #{}", scratch, dst_reg, width - 1)?;
+        writeln!(w, "\tand {}, {}, #{}", scratch, scratch, mask)?;
+        writeln!(w, "\tadd {}, {}, {}", dst_reg, dst_reg, scratch)?;
+        writeln!(w, "\tasr {}, {}, #{}", dst_reg, dst_reg, amount)?;
+        return store_operand(w, target, ty, dst_reg, dst);
+    }
     if binary_xor_negative_one(ty, op, src) {
         writeln!(w, "\tmvn {}, {}", dst_reg, dst_reg)?;
         return store_operand(w, target, ty, dst_reg, dst);
@@ -1682,6 +1691,26 @@ fn binary_signed_divide_by_negative_one(ty: AsmType, op: &AsmBinaryOp, src: &Asm
         } else {
             u32::MAX as u64
         }
+}
+
+fn binary_signed_div_power_of_two_amount(
+    ty: AsmType,
+    op: &AsmBinaryOp,
+    src: &AsmOperand,
+) -> Option<(u32, u32)> {
+    if !matches!(op, AsmBinaryOp::SDiv) {
+        return None;
+    }
+    let AsmOperand::Imm(value) = src else {
+        return None;
+    };
+    if *value <= 1 {
+        return None;
+    }
+    let (_, width) = integer_immediate_value(ty, *value)?;
+    let value = *value as u64;
+    let amount = value.trailing_zeros();
+    (value.is_power_of_two() && amount < width - 1).then_some((amount, width))
 }
 
 fn binary_logical_noop(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> bool {
@@ -3152,6 +3181,29 @@ mod tests {
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
         assert_eq!(asm, "\tlsr w0, w0, #3\n");
+        Ok(())
+    }
+
+    #[test]
+    fn signed_divide_by_power_of_two_uses_bias_and_shift() -> Result<(), String> {
+        let mut out = Vec::new();
+        emit_instruction(
+            &mut out,
+            &AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::SDiv,
+                AsmOperand::Imm(8),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            &Target::aarch64_linux(),
+        )
+        .map_err(|err| err.to_string())?;
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(
+            asm,
+            "\tasr x11, x0, #63\n\tand x11, x11, #7\n\tadd x0, x0, x11\n\tasr x0, x0, #3\n"
+        );
         Ok(())
     }
 

@@ -8348,7 +8348,10 @@ fn emits_aarch64_assembly_for_integer_division_and_shifts() {
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
-    assert!(asm.contains("sdiv w9, w9, w10"));
+    assert!(asm.contains("asr w11, w9, #31"));
+    assert!(asm.contains("and w11, w11, #1"));
+    assert!(asm.contains("add w9, w9, w11"));
+    assert!(asm.contains("asr w9, w9, #1"));
     assert!(asm.contains("lsl w9, w9, #3"));
     assert!(asm.contains("asr w9, w9, #2"));
 
@@ -25875,6 +25878,7 @@ int add(int a, int b) { return a + b; }
 int band(int a, int b) { return a & b; }
 long mull(long a, long b) { return a * b; }
 long mulnegshiftl(long a) { return a * -8; }
+long divshiftl(long a) { return a / 8; }
 double addd(double a, double b) { return a + b; }
 int lt(int a, int b) { return a < b; }
 int eq128(__int128 a, __int128 b) { return a == b; }
@@ -25960,6 +25964,12 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
     assert!(mulnegshiftl.contains("\tlsl x0, x0, #3"), "{mulnegshiftl}");
     assert!(mulnegshiftl.contains("\tneg x0, x0"), "{mulnegshiftl}");
     assert!(!mulnegshiftl.contains("\tmul "), "{mulnegshiftl}");
+    let divshiftl = body("divshiftl");
+    assert!(divshiftl.contains("\tasr x11, x0, #63"), "{divshiftl}");
+    assert!(divshiftl.contains("\tand x11, x11, #7"), "{divshiftl}");
+    assert!(divshiftl.contains("\tadd x0, x0, x11"), "{divshiftl}");
+    assert!(divshiftl.contains("\tasr x0, x0, #3"), "{divshiftl}");
+    assert!(!divshiftl.contains("\tsdiv "), "{divshiftl}");
     for (name, condition) in [("eq128", "eq"), ("ne128", "ne")] {
         let body = body(name);
         assert!(body.contains("\teor "), "{body}");

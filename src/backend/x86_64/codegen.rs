@@ -501,6 +501,18 @@ fn i128_constant_is_all_ones(value: &TackyVal) -> bool {
     )
 }
 
+fn i128_constant_power_of_two_shift(value: &TackyVal) -> Option<i64> {
+    let value = match value {
+        TackyVal::Constant(value) if *value > 1 => *value as u128,
+        TackyVal::Int128Constant(value) if *value > 1 => *value as u128,
+        TackyVal::UInt128Constant(value) if *value > 1 => *value,
+        _ => return None,
+    };
+    value
+        .is_power_of_two()
+        .then_some(i64::from(value.trailing_zeros()))
+}
+
 fn emit_i128_parts_to_operands(
     out: &mut Vec<AsmInstr>,
     low: AsmOperand,
@@ -1383,6 +1395,27 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                 .unwrap_or(CType::Int);
             let is_unsigned = !dst_ctype.is_signed();
             if t == AsmType::Octword {
+                if matches!(op, TackyBinaryOp::Div) && is_unsigned {
+                    if let Some(amount) = i128_constant_power_of_two_shift(right) {
+                        let count = TackyVal::Constant(amount);
+                        let mut binary_ctx = BinaryContext {
+                            types,
+                            out,
+                            static_doubles,
+                            static_floats,
+                            label_counter,
+                            function_name,
+                        };
+                        convert_binary(
+                            &TackyBinaryOp::ShiftRight,
+                            left,
+                            &count,
+                            dst,
+                            &mut binary_ctx,
+                        )?;
+                        return Ok(());
+                    }
+                }
                 if matches!(op, TackyBinaryOp::Div) && i128_constant_is_one(right) {
                     emit_i128_copy(out, left, dst)?;
                     return Ok(());

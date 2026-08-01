@@ -26195,6 +26195,7 @@ __int128 divone(__int128 a) { return a / 1; }
 __int128 divneg(__int128 a) { return a / -1; }
 __int128 modone(__int128 a) { return a % 1; }
 __int128 modneg(__int128 a) { return a % -1; }
+unsigned __int128 udivshift(unsigned __int128 a) { return a / 8; }
 unsigned __int128 andzero(unsigned __int128 a) { return a & 0; }
 unsigned __int128 andones(unsigned __int128 a) { return a & ~(unsigned __int128)0; }
 unsigned __int128 orzero(unsigned __int128 a) { return a | 0; }
@@ -26274,6 +26275,9 @@ int ulezero(unsigned __int128 a) { return a <= 0; }
         );
         assert!(!body.contains("\tcall __modti3"), "{body}");
     }
+    let udivshift = body("udivshift");
+    assert!(udivshift.contains("\tshrq $3,"), "{udivshift}");
+    assert!(!udivshift.contains("\tcall __udivti3"), "{udivshift}");
     let orones = body("orones");
     assert!(orones.contains("\tmovq $-1,"), "{orones}");
     assert!(!orones.contains("\torq "), "{orones}");

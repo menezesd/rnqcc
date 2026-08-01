@@ -25280,10 +25280,10 @@ double d(void) { return 7; }
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
-    assert!(asm.contains("\tmovz w9, #16608, lsl #16"), "{asm}");
-    assert!(asm.contains("\tfmov s0, w9"), "{asm}");
-    assert!(asm.contains("\tmovz x9, #16412, lsl #48"), "{asm}");
-    assert!(asm.contains("\tfmov d0, x9"), "{asm}");
+    assert!(asm.contains("\tfmov s0, #7.0"), "{asm}");
+    assert!(asm.contains("\tfmov d0, #7.0"), "{asm}");
+    assert!(!asm.contains("\tmovz w9, #16608, lsl #16"), "{asm}");
+    assert!(!asm.contains("\tmovz x9, #16412, lsl #48"), "{asm}");
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);

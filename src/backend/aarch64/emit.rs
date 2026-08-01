@@ -947,13 +947,33 @@ fn zero_register_for_type(ty: AsmType) -> std::io::Result<&'static str> {
 fn aarch64_fmov_immediate(ty: AsmType, value: i64) -> Option<&'static str> {
     match ty {
         AsmType::Float => match value as u32 {
+            0x3f00_0000 => Some("0.5"),
             0x3f80_0000 => Some("1.0"),
+            0x4000_0000 => Some("2.0"),
+            0x4040_0000 => Some("3.0"),
+            0x4080_0000 => Some("4.0"),
+            0x40e0_0000 => Some("7.0"),
+            0xbf00_0000 => Some("-0.5"),
             0xbf80_0000 => Some("-1.0"),
+            0xc000_0000 => Some("-2.0"),
+            0xc040_0000 => Some("-3.0"),
+            0xc080_0000 => Some("-4.0"),
+            0xc0e0_0000 => Some("-7.0"),
             _ => None,
         },
         AsmType::Double => match value as u64 {
+            0x3fe0_0000_0000_0000 => Some("0.5"),
             0x3ff0_0000_0000_0000 => Some("1.0"),
+            0x4000_0000_0000_0000 => Some("2.0"),
+            0x4008_0000_0000_0000 => Some("3.0"),
+            0x4010_0000_0000_0000 => Some("4.0"),
+            0x401c_0000_0000_0000 => Some("7.0"),
+            0xbfe0_0000_0000_0000 => Some("-0.5"),
             0xbff0_0000_0000_0000 => Some("-1.0"),
+            0xc000_0000_0000_0000 => Some("-2.0"),
+            0xc008_0000_0000_0000 => Some("-3.0"),
+            0xc010_0000_0000_0000 => Some("-4.0"),
+            0xc01c_0000_0000_0000 => Some("-7.0"),
             _ => None,
         },
         _ => None,
@@ -2796,9 +2816,19 @@ mod tests {
                 AsmOperand::Xmm(XmmReg::XMM0),
             ),
             AsmInstr::Mov(
+                AsmType::Float,
+                AsmOperand::Imm(0xbf00_0000),
+                AsmOperand::Xmm(XmmReg::XMM1),
+            ),
+            AsmInstr::Mov(
                 AsmType::Double,
                 AsmOperand::Imm(0xbff0_0000_0000_0000_u64 as i64),
-                AsmOperand::Xmm(XmmReg::XMM1),
+                AsmOperand::Xmm(XmmReg::XMM2),
+            ),
+            AsmInstr::Mov(
+                AsmType::Double,
+                AsmOperand::Imm(0x401c_0000_0000_0000),
+                AsmOperand::Xmm(XmmReg::XMM3),
             ),
         ] {
             emit_instruction(&mut out, &instr, &Target::aarch64_linux())
@@ -2806,7 +2836,13 @@ mod tests {
         }
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
-        assert_eq!(asm, "\tfmov s0, #1.0\n\tfmov d1, #-1.0\n");
+        assert_eq!(
+            asm,
+            "\tfmov s0, #1.0\n\
+             \tfmov s1, #-0.5\n\
+             \tfmov d2, #-1.0\n\
+             \tfmov d3, #7.0\n"
+        );
         Ok(())
     }
 

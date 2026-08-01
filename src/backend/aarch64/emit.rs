@@ -1440,6 +1440,9 @@ fn emit_binary(
     if binary_logical_zero_result(ty, op, src) {
         return store_operand(w, target, ty, zero_register_for_type(ty)?, dst);
     }
+    if binary_logical_all_ones_result(ty, op, src) {
+        return emit_mov(w, target, ty, &AsmOperand::Imm(-1), dst);
+    }
     let dst_reg = load_operand(w, target, ty, dst, Reg::R10)?;
     if let Some(offset) = binary_add_sub_immediate_offset(op, src) {
         emit_add_immediate(w, dst_reg, offset)?;
@@ -1634,6 +1637,24 @@ fn binary_logical_noop(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> bool 
 fn binary_logical_zero_result(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> bool {
     matches!(op, AsmBinaryOp::And)
         && matches!(src, AsmOperand::Imm(value) if integer_immediate_value(ty, *value).is_some_and(|(value, _)| value == 0))
+}
+
+fn binary_logical_all_ones_result(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> bool {
+    if !matches!(op, AsmBinaryOp::Or) {
+        return false;
+    }
+    let AsmOperand::Imm(value) = src else {
+        return false;
+    };
+    let Some((value, width)) = integer_immediate_value(ty, *value) else {
+        return false;
+    };
+    value
+        == if width == 64 {
+            u64::MAX
+        } else {
+            u32::MAX as u64
+        }
 }
 
 fn binary_xor_negative_one(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> bool {
@@ -2985,6 +3006,7 @@ mod tests {
             (AsmBinaryOp::And, AsmOperand::Imm(0)),
             (AsmBinaryOp::And, AsmOperand::Imm(-1)),
             (AsmBinaryOp::Or, AsmOperand::Imm(0)),
+            (AsmBinaryOp::Or, AsmOperand::Imm(-1)),
             (AsmBinaryOp::Xor, AsmOperand::Imm(0)),
             (AsmBinaryOp::Xor, AsmOperand::Imm(-1)),
         ] {
@@ -2997,7 +3019,7 @@ mod tests {
         }
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
-        assert_eq!(asm, "\tmov x0, xzr\n\tmvn x0, x0\n");
+        assert_eq!(asm, "\tmov x0, xzr\n\tmovn x0, #0\n\tmvn x0, x0\n");
         Ok(())
     }
 

@@ -8392,6 +8392,7 @@ fn emits_aarch64_trivial_logical_immediates_without_constant_loads() {
         &src,
         "long clear(long x) { return x & 0; }\n\
          long identity(long x) { return x | 0; }\n\
+         long ones(long x) { return x | -1; }\n\
          long complement(long x) { return x ^ -1; }\n",
     )
     .expect("failed to write input");
@@ -8406,6 +8407,7 @@ fn emits_aarch64_trivial_logical_immediates_without_constant_loads() {
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains("\tmov x0, xzr"), "{asm}");
+    assert!(asm.contains("\tmovn x0, #0"), "{asm}");
     assert!(asm.contains("\tmvn x0, x0"), "{asm}");
     assert!(!asm.contains("\torr x0, x0,"), "{asm}");
 

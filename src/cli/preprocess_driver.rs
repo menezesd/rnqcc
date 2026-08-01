@@ -3835,6 +3835,34 @@ impl<'a> IfExprParser<'a> {
         }
     }
 
+    fn integer_digits(&mut self, valid_digit: impl Fn(char) -> bool) -> Result<String, String> {
+        let mut digits = String::new();
+        let mut previous_was_digit = false;
+        while self.pos < self.chars.len() {
+            let ch = self.chars[self.pos];
+            if valid_digit(ch) {
+                digits.push(ch);
+                self.pos += 1;
+                previous_was_digit = true;
+            } else if ch == '\'' {
+                if !previous_was_digit
+                    || self.pos + 1 >= self.chars.len()
+                    || !valid_digit(self.chars[self.pos + 1])
+                {
+                    return Err(format!(
+                        "invalid digit separator in #if expression near '{}'",
+                        self.chars[self.pos..].iter().collect::<String>()
+                    ));
+                }
+                self.pos += 1;
+                previous_was_digit = false;
+            } else {
+                break;
+            }
+        }
+        Ok(digits)
+    }
+
     fn number(&mut self) -> Result<Option<IfValue>, String> {
         self.skip_ws();
         let start = self.pos;
@@ -3843,18 +3871,15 @@ impl<'a> IfExprParser<'a> {
         }
 
         let mut base = 10;
-        let digits_start;
+        let digits;
         if self.chars[self.pos] == '0'
             && self.pos + 1 < self.chars.len()
             && matches!(self.chars[self.pos + 1], 'x' | 'X')
         {
             base = 16;
             self.pos += 2;
-            digits_start = self.pos;
-            while self.pos < self.chars.len() && self.chars[self.pos].is_ascii_hexdigit() {
-                self.pos += 1;
-            }
-            if self.pos == digits_start {
+            digits = self.integer_digits(|ch| ch.is_ascii_hexdigit())?;
+            if digits.is_empty() {
                 return Err("expected hexadecimal digits in #if expression".to_string());
             }
         } else if self.chars[self.pos] == '0'
@@ -3863,30 +3888,23 @@ impl<'a> IfExprParser<'a> {
         {
             base = 2;
             self.pos += 2;
-            digits_start = self.pos;
-            while self.pos < self.chars.len() && matches!(self.chars[self.pos], '0' | '1') {
-                self.pos += 1;
-            }
-            if self.pos == digits_start {
+            digits = self.integer_digits(|ch| matches!(ch, '0' | '1'))?;
+            if digits.is_empty() {
                 return Err("expected binary digits in #if expression".to_string());
+            }
+            if self.pos < self.chars.len() && self.chars[self.pos].is_ascii_digit() {
+                return Err("invalid binary digit in #if expression".to_string());
             }
         } else if self.chars[self.pos] == '0' {
             base = 8;
-            digits_start = self.pos;
-            while self.pos < self.chars.len() && self.chars[self.pos].is_ascii_digit() {
-                if !matches!(self.chars[self.pos], '0'..='7') {
-                    return Err("invalid octal digit in #if expression".to_string());
-                }
-                self.pos += 1;
+            digits = self.integer_digits(|ch| matches!(ch, '0'..='7'))?;
+            if self.pos < self.chars.len() && self.chars[self.pos].is_ascii_digit() {
+                return Err("invalid octal digit in #if expression".to_string());
             }
         } else {
-            digits_start = self.pos;
-            while self.pos < self.chars.len() && self.chars[self.pos].is_ascii_digit() {
-                self.pos += 1;
-            }
+            digits = self.integer_digits(|ch| ch.is_ascii_digit())?;
         }
 
-        let digits_end = self.pos;
         let suffix_start = self.pos;
         while self.pos < self.chars.len() && self.chars[self.pos].is_ascii_alphabetic() {
             self.pos += 1;
@@ -3904,9 +3922,6 @@ impl<'a> IfExprParser<'a> {
             ));
         }
 
-        let digits = self.chars[digits_start..digits_end]
-            .iter()
-            .collect::<String>();
         let value = u128::from_str_radix(&digits, base)
             .map_err(|_| format!("invalid integer literal in #if expression: {}", digits))?;
         let literal = self.chars[start..self.pos].iter().collect::<String>();
@@ -5831,6 +5846,24 @@ pub fn preprocess(invocation: PreprocessInvocation<'_>) -> Result<PreprocessedSo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn if_expressions_accept_c23_digit_separators() -> Result<(), String> {
+        let macros = HashMap::new();
+        assert!(
+            IfExprParser::new("1'024 == 0x4'00 && 0b10'10 == 0'12", &macros)
+                .parse()?
+                .truth()
+        );
+        for expression in ["1'", "1''0", "0x'1", "0b1'2", "0'8"] {
+            let err = match IfExprParser::new(expression, &macros).parse() {
+                Ok(_) => return Err(format!("{expression} unexpectedly parsed")),
+                Err(err) => err,
+            };
+            assert!(err.contains("digit separator"), "{err}");
+        }
+        Ok(())
+    }
 
     #[test]
     fn processes_pragma_macro_push_and_pop() -> Result<(), String> {

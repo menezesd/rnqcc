@@ -324,7 +324,7 @@ impl Lexer {
         let mut text = String::new();
         while let Some(ch) = self.peek() {
             if ch.is_ascii_alphanumeric()
-                || matches!(ch, '_' | '.')
+                || matches!(ch, '_' | '.' | '\'')
                 || matches!(ch, '+' | '-')
                     && matches!(text.chars().last(), Some('e' | 'E' | 'p' | 'P'))
             {
@@ -408,6 +408,23 @@ mod tests {
                 PpTokenKind::Punct("<%".to_string()),
                 PpTokenKind::Whitespace(" ".to_string()),
                 PpTokenKind::Punct("%>".to_string()),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn keeps_c23_digit_separators_in_preprocessing_numbers() -> Result<(), String> {
+        assert_eq!(
+            kinds("1'024 0xca'fe 0b10'10 1'2.5'0e1'0")?,
+            vec![
+                PpTokenKind::Number("1'024".to_string()),
+                PpTokenKind::Whitespace(" ".to_string()),
+                PpTokenKind::Number("0xca'fe".to_string()),
+                PpTokenKind::Whitespace(" ".to_string()),
+                PpTokenKind::Number("0b10'10".to_string()),
+                PpTokenKind::Whitespace(" ".to_string()),
+                PpTokenKind::Number("1'2.5'0e1'0".to_string()),
             ]
         );
         Ok(())

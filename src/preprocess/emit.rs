@@ -70,7 +70,7 @@ fn can_continue_identifier(left: &str) -> bool {
 fn can_continue_pp_number(left: &str) -> bool {
     left.chars()
         .last()
-        .is_some_and(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.'))
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '\''))
 }
 
 fn ends_pp_exponent(text: &str) -> bool {

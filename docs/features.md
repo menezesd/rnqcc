@@ -71,7 +71,7 @@ The internal preprocessor supports:
   compatibility switches such as `-Wextra` and `-Wpedantic`
 - integer `#if` expressions using unary, arithmetic, shift, comparison,
   equality, bitwise, logical, conditional, and parenthesized operators, including
-  decimal, octal, hexadecimal, binary, character constants, and common integer
+  decimal, octal, hexadecimal, binary, C23 digit separators, character constants, and common integer
   suffixes
 - escaped newline splicing
 - `#line` and GCC-style line marker directives

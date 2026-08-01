@@ -520,7 +520,7 @@ fn is_pp_number(text: &str) -> bool {
 }
 
 fn is_pp_number_continue(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.')
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '\'')
 }
 
 fn comma_va_args_paste(

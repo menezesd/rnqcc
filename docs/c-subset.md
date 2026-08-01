@@ -8,7 +8,8 @@ single target.
 
 - integer scalars and decimal/hex/octal/GNU binary integer literals: `char`, `short`,
   `int`, `long`, signed and unsigned variants; `long long` suffixes are
-  accepted as aliases for the 64-bit `long` model
+  accepted as aliases for the 64-bit `long` model; C23 digit separators are
+  accepted between digits in integer and floating constants
 - decimal and hexadecimal floating literals for `float`/`double` expressions
 - `_Bool`, pointers, arrays, inferred first dimensions for initialized arrays,
   string literals with common C byte escapes, and pointer arithmetic

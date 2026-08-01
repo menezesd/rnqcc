@@ -525,6 +525,22 @@ impl Lexer {
         }
     }
 
+    fn consume_digit_separator(
+        &mut self,
+        previous_was_digit: bool,
+        valid_next_digit: impl Fn(char) -> bool,
+    ) -> Result<(), String> {
+        debug_assert_eq!(self.peek(), Some('\''));
+        if !previous_was_digit || !self.peek_ahead(1).is_some_and(valid_next_digit) {
+            return Err(format!(
+                "invalid digit separator in numeric literal at position {}",
+                self.pos
+            ));
+        }
+        self.advance();
+        Ok(())
+    }
+
     fn read_number(&mut self) -> Result<Token, String> {
         let start = self.pos;
 
@@ -532,9 +548,14 @@ impl Lexer {
         let mut is_float = false;
         if self.peek() == Some('.') {
             self.advance();
+            let mut previous_was_digit = false;
             while let Some(c) = self.peek() {
                 if c.is_ascii_digit() {
                     self.advance();
+                    previous_was_digit = true;
+                } else if c == '\'' {
+                    self.consume_digit_separator(previous_was_digit, |next| next.is_ascii_digit())?;
+                    previous_was_digit = false;
                 } else {
                     break;
                 }
@@ -544,15 +565,25 @@ impl Lexer {
                 if matches!(self.peek(), Some('+' | '-')) {
                     self.advance();
                 }
+                let mut previous_was_digit = false;
                 while let Some(c) = self.peek() {
                     if c.is_ascii_digit() {
                         self.advance();
+                        previous_was_digit = true;
+                    } else if c == '\'' {
+                        self.consume_digit_separator(previous_was_digit, |next| {
+                            next.is_ascii_digit()
+                        })?;
+                        previous_was_digit = false;
                     } else {
                         break;
                     }
                 }
             }
-            let num_str: String = self.chars[start..self.pos].iter().collect();
+            let num_str: String = self.chars[start..self.pos]
+                .iter()
+                .filter(|ch| **ch != '\'')
+                .collect();
             let value = num_str
                 .parse::<f64>()
                 .map_err(|_| format!("invalid float literal: {}", num_str))?;
@@ -582,10 +613,17 @@ impl Lexer {
             radix = 16;
             let mut value = 0.0f64;
             let digit_start = self.pos;
+            let mut previous_was_digit = false;
             while let Some(c) = self.peek() {
                 if let Some(digit) = c.to_digit(16) {
                     self.advance();
                     value = value * 16.0 + f64::from(digit);
+                    previous_was_digit = true;
+                } else if c == '\'' {
+                    self.consume_digit_separator(previous_was_digit, |next| {
+                        next.is_ascii_hexdigit()
+                    })?;
+                    previous_was_digit = false;
                 } else {
                     break;
                 }
@@ -596,12 +634,19 @@ impl Lexer {
                 is_hex_float = true;
                 self.advance();
                 let mut scale = 1.0f64;
+                let mut previous_was_digit = false;
                 while let Some(c) = self.peek() {
                     if let Some(digit) = c.to_digit(16) {
                         self.advance();
                         scale *= 16.0;
                         value += f64::from(digit) / scale;
                         saw_digit = true;
+                        previous_was_digit = true;
+                    } else if c == '\'' {
+                        self.consume_digit_separator(previous_was_digit, |next| {
+                            next.is_ascii_hexdigit()
+                        })?;
+                        previous_was_digit = false;
                     } else {
                         break;
                     }
@@ -624,10 +669,17 @@ impl Lexer {
                 };
                 let exponent_start = self.pos;
                 let mut exponent = 0i32;
+                let mut previous_was_digit = false;
                 while let Some(c) = self.peek() {
                     if let Some(digit) = c.to_digit(10) {
                         self.advance();
                         exponent = exponent.saturating_mul(10).saturating_add(digit as i32);
+                        previous_was_digit = true;
+                    } else if c == '\'' {
+                        self.consume_digit_separator(previous_was_digit, |next| {
+                            next.is_ascii_digit()
+                        })?;
+                        previous_was_digit = false;
                     } else {
                         break;
                     }
@@ -668,9 +720,16 @@ impl Lexer {
             self.advance();
             radix = 2;
             let digit_start = self.pos;
+            let mut previous_was_digit = false;
             while let Some(c) = self.peek() {
                 if matches!(c, '0' | '1') {
                     self.advance();
+                    previous_was_digit = true;
+                } else if c == '\'' {
+                    self.consume_digit_separator(previous_was_digit, |next| {
+                        matches!(next, '0' | '1')
+                    })?;
+                    previous_was_digit = false;
                 } else if c.is_ascii_digit() {
                     return Err(format!(
                         "invalid binary integer literal at position {}",
@@ -689,20 +748,32 @@ impl Lexer {
         } else if self.peek() == Some('0') {
             self.advance();
             radix = 8;
+            let mut previous_was_digit = true;
             while let Some(c) = self.peek() {
                 if c.is_ascii_digit() {
                     if !('0'..='7').contains(&c) {
                         invalid_octal_digit = true;
                     }
                     self.advance();
+                    previous_was_digit = true;
+                } else if c == '\'' {
+                    self.consume_digit_separator(previous_was_digit, |next| {
+                        matches!(next, '0'..='7')
+                    })?;
+                    previous_was_digit = false;
                 } else {
                     break;
                 }
             }
         } else {
+            let mut previous_was_digit = false;
             while let Some(c) = self.peek() {
                 if c.is_ascii_digit() {
                     self.advance();
+                    previous_was_digit = true;
+                } else if c == '\'' {
+                    self.consume_digit_separator(previous_was_digit, |next| next.is_ascii_digit())?;
+                    previous_was_digit = false;
                 } else {
                     break;
                 }
@@ -717,9 +788,14 @@ impl Lexer {
         if radix == 10 && self.peek() == Some('.') {
             is_float = true;
             self.advance(); // consume '.'
+            let mut previous_was_digit = false;
             while let Some(c) = self.peek() {
                 if c.is_ascii_digit() {
                     self.advance();
+                    previous_was_digit = true;
+                } else if c == '\'' {
+                    self.consume_digit_separator(previous_was_digit, |next| next.is_ascii_digit())?;
+                    previous_was_digit = false;
                 } else {
                     break;
                 }
@@ -731,9 +807,14 @@ impl Lexer {
             if matches!(self.peek(), Some('+' | '-')) {
                 self.advance(); // consume sign
             }
+            let mut previous_was_digit = false;
             while let Some(c) = self.peek() {
                 if c.is_ascii_digit() {
                     self.advance();
+                    previous_was_digit = true;
+                } else if c == '\'' {
+                    self.consume_digit_separator(previous_was_digit, |next| next.is_ascii_digit())?;
+                    previous_was_digit = false;
                 } else {
                     break;
                 }
@@ -741,7 +822,10 @@ impl Lexer {
         }
 
         if is_float {
-            let num_str: String = self.chars[start..self.pos].iter().collect();
+            let num_str: String = self.chars[start..self.pos]
+                .iter()
+                .filter(|ch| **ch != '\'')
+                .collect();
             let value = num_str
                 .parse::<f64>()
                 .map_err(|_| format!("invalid float literal: {}", num_str))?;
@@ -808,7 +892,10 @@ impl Lexer {
                 ));
             }
         }
-        let num_str: String = self.chars[start..num_end].iter().collect();
+        let num_str: String = self.chars[start..num_end]
+            .iter()
+            .filter(|ch| **ch != '\'')
+            .collect();
         // Parse as u128 first so GNU __int128-sized constants survive lexing.
         let digits = if radix == 16 || radix == 2 {
             &num_str[2..]
@@ -1848,6 +1935,28 @@ mod tests {
         assert!(tokens.contains(&Token::UIntLiteral(42)));
         assert!(tokens.contains(&Token::LongLiteral(42)));
         assert!(tokens.contains(&Token::IntLiteral(42)));
+        Ok(())
+    }
+
+    #[test]
+    fn lexes_c23_digit_separators() -> Result<(), String> {
+        let tokens = lex("long decimal = 1'000'000; unsigned long hex = 0xca'feUL; \
+             int binary = 0b10'1010; int octal = 0'52; \
+             double decimal_float = 1'2.5'0e1'0; \
+             double hex_float = 0x1'0.8p+1'0;")?;
+        assert!(tokens.contains(&Token::IntLiteral(1_000_000)));
+        assert!(tokens.contains(&Token::ULongLiteral(0xcafe)));
+        assert!(tokens.contains(&Token::IntLiteral(42)));
+        assert!(tokens.contains(&Token::DoubleLiteral(125_000_000_000.0)));
+        assert!(tokens.contains(&Token::DoubleLiteral(16_896.0)));
+
+        for literal in ["1'", "1''0", "0x'1", "0b1'2", "1e'2", "1.'2"] {
+            let err = require_err(
+                lex(&format!("int value = {literal};")),
+                "lexing should fail",
+            )?;
+            assert!(err.contains("invalid digit separator"), "{err}");
+        }
         Ok(())
     }
 

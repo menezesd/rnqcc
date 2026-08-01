@@ -14777,6 +14777,39 @@ fn internal_cpp_accepts_c23_integer_suffixes_in_if_expressions() {
 }
 
 #[test]
+fn internal_cpp_accepts_c23_digit_separators() {
+    let src = temp_file("internal-cpp-c23-digit-separators", "c");
+    let out = temp_file("internal-cpp-c23-digit-separators", "s");
+    std::fs::write(
+        &src,
+        "#if 1'024 == 0x4'00 && 0b10'10 == 0'12\n\
+         int preprocessor_digit_separator_check;\n\
+         #else\n\
+         #error C23 digit separators did not evaluate\n\
+         #endif\n\
+         long decimal = 1'000'000;\n\
+         unsigned long hexadecimal = 0xca'feUL;\n\
+         int binary = 0b10'1010;\n\
+         int octal = 0'52;\n\
+         double decimal_float = 1'2.5'0e1'0;\n\
+         double hex_float = 0x1'0.8p+1'0;\n",
+    )
+    .expect("failed to write source");
+
+    let output = Command::new(rnqcc())
+        .args(["--internal-cpp", "-nostdinc", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn internal_cpp_rejects_malformed_integer_suffixes_in_if_expressions() {
     for (name, expr) in [
         ("internal-cpp-bad-if-suffix-repeat-z", "1zz"),

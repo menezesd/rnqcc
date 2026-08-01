@@ -1357,10 +1357,6 @@ fn emit_binary(
         emit_add_immediate(w, dst_reg, offset)?;
         return store_operand(w, target, ty, dst_reg, dst);
     }
-    if let Some(mask) = binary_and_low_mask_immediate(ty, op, src) {
-        writeln!(w, "\tand {}, {}, #{}", dst_reg, dst_reg, mask)?;
-        return store_operand(w, target, ty, dst_reg, dst);
-    }
     let mnemonic = match op {
         AsmBinaryOp::Add => "add",
         AsmBinaryOp::AddSetFlags => "adds",
@@ -1388,8 +1384,8 @@ fn emit_binary(
         writeln!(w, "\t{} {}, {}, #{}", mnemonic, dst_reg, dst_reg, amount)?;
         return store_operand(w, target, ty, dst_reg, dst);
     }
-    if let Some(bit) = binary_logical_single_bit_immediate(ty, op, src) {
-        writeln!(w, "\t{} {}, {}, #{}", mnemonic, dst_reg, dst_reg, bit)?;
+    if let Some(mask) = binary_logical_immediate(ty, op, src) {
+        writeln!(w, "\t{} {}, {}, #{}", mnemonic, dst_reg, dst_reg, mask)?;
         return store_operand(w, target, ty, dst_reg, dst);
     }
     let src_reg = load_operand(w, target, ty, src, Reg::R11)?;
@@ -1425,8 +1421,8 @@ fn binary_shift_immediate_amount(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand
     (0..width).contains(amount).then_some(*amount)
 }
 
-fn binary_and_low_mask_immediate(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> Option<u64> {
-    if !matches!(op, AsmBinaryOp::And) {
+fn binary_logical_immediate(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> Option<u64> {
+    if !matches!(op, AsmBinaryOp::And | AsmBinaryOp::Or | AsmBinaryOp::Xor) {
         return None;
     }
     let AsmOperand::Imm(value) = src else {
@@ -1437,31 +1433,71 @@ fn binary_and_low_mask_immediate(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand
         AsmType::Byte | AsmType::Word | AsmType::Longword => (*value as u32 as u64, 32),
         _ => return None,
     };
-    let all_ones = if width == 64 {
+    is_aarch64_logical_immediate(mask, width).then_some(mask)
+}
+
+/// Whether `value` is representable by AArch64's logical-immediate encoding.
+///
+/// Such masks are a repeated bitfield whose element is a rotation of one
+/// contiguous run of one bits.  Keeping this test here lets all AND/OR/XOR
+/// lowering share the ISA's full immediate space instead of special-casing a
+/// few common masks.
+fn is_aarch64_logical_immediate(value: u64, width: u32) -> bool {
+    debug_assert!(matches!(width, 32 | 64));
+    let full_mask = if width == 64 {
         u64::MAX
     } else {
         (1u64 << width) - 1
     };
-    (mask != 0 && mask != all_ones && (mask + 1).is_power_of_two()).then_some(mask)
+    if value == 0 || value == full_mask {
+        return false;
+    }
+
+    for element_width in [2, 4, 8, 16, 32, 64] {
+        if element_width > width {
+            break;
+        }
+        let element_mask = if element_width == 64 {
+            u64::MAX
+        } else {
+            (1u64 << element_width) - 1
+        };
+        let element = value & element_mask;
+        if repeat_logical_immediate_element(element, element_width, width) != value {
+            continue;
+        }
+        for one_count in 1..element_width {
+            let run = (1u64 << one_count) - 1;
+            for rotation in 0..element_width {
+                if rotate_logical_immediate_element(run, rotation, element_width) == element {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
-fn binary_logical_single_bit_immediate(
-    ty: AsmType,
-    op: &AsmBinaryOp,
-    src: &AsmOperand,
-) -> Option<u64> {
-    if !matches!(op, AsmBinaryOp::And | AsmBinaryOp::Or | AsmBinaryOp::Xor) {
-        return None;
+fn repeat_logical_immediate_element(element: u64, element_width: u32, width: u32) -> u64 {
+    let mut repeated = 0;
+    let mut offset = 0;
+    while offset < width {
+        repeated |= element << offset;
+        offset += element_width;
     }
-    let AsmOperand::Imm(value) = src else {
-        return None;
+    repeated
+}
+
+fn rotate_logical_immediate_element(value: u64, rotation: u32, width: u32) -> u64 {
+    if rotation == 0 {
+        return value;
+    }
+    let mask = if width == 64 {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
     };
-    let bit = match ty {
-        AsmType::Quadword => *value as u64,
-        AsmType::Byte | AsmType::Word | AsmType::Longword => *value as u32 as u64,
-        _ => return None,
-    };
-    bit.is_power_of_two().then_some(bit)
+    ((value >> rotation) | (value << (width - rotation))) & mask
 }
 
 fn emit_cmp(
@@ -2432,6 +2468,53 @@ mod tests {
 
         assert_eq!(asm, "\teor x0, x0, #1099511627776\n");
         Ok(())
+    }
+
+    #[test]
+    fn repeated_rotated_logical_masks_use_immediate_encoding() -> Result<(), String> {
+        let mut out = Vec::new();
+        for instr in [
+            AsmInstr::Binary(
+                AsmType::Longword,
+                AsmBinaryOp::And,
+                AsmOperand::Imm(0x00ff_00ff),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Or,
+                AsmOperand::Imm(0x00ff_00ff_00ff_00ff),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            AsmInstr::Binary(
+                AsmType::Longword,
+                AsmBinaryOp::Xor,
+                AsmOperand::Imm(-16_711_936),
+                AsmOperand::Reg(Reg::AX),
+            ),
+        ] {
+            emit_instruction(&mut out, &instr, &Target::aarch64_linux())
+                .map_err(|err| err.to_string())?;
+        }
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(
+            asm,
+            "\tand w0, w0, #16711935\n\
+             \torr x0, x0, #71777214294589695\n\
+             \teor w0, w0, #4278255360\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn logical_immediate_recognizer_accepts_only_encodable_masks() {
+        assert!(is_aarch64_logical_immediate(0x00ff_00ff, 32));
+        assert!(is_aarch64_logical_immediate(0xff00_ff00_ff00_ff00, 64));
+        assert!(is_aarch64_logical_immediate(u64::MAX - 1, 64));
+        assert!(!is_aarch64_logical_immediate(0, 64));
+        assert!(!is_aarch64_logical_immediate(u64::MAX, 64));
+        assert!(!is_aarch64_logical_immediate(0x0123_4567, 32));
     }
 
     #[test]

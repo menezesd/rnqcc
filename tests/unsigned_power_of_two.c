@@ -30,6 +30,18 @@ unsigned long toggle_bit64(unsigned long value) {
     return value ^ (1ul << 40);
 }
 
+unsigned mask_pattern32(unsigned value) {
+    return value & 0x00ff00ffu;
+}
+
+unsigned long set_pattern64(unsigned long value) {
+    return value | 0x00ff00ff00ff00fful;
+}
+
+unsigned toggle_pattern32(unsigned value) {
+    return value ^ 0xff00ff00u;
+}
+
 unsigned __int128 mul128(unsigned __int128 value) {
     return value * ((unsigned __int128)1 << 96);
 }
@@ -69,6 +81,11 @@ int main(void) {
     }
     if (set_bit32(1u) != 33u || toggle_bit64(0ul) != (1ul << 40)) {
         return 7;
+    }
+    if (mask_pattern32(0xdeadbeefu) != 0x00ad00efu
+        || set_pattern64(0ul) != 0x00ff00ff00ff00fful
+        || toggle_pattern32(0u) != 0xff00ff00u) {
+        return 8;
     }
     if (mul128(value128) != ((unsigned __int128)0x1234 << 96)
         || div128(value128) != 16

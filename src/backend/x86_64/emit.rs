@@ -929,7 +929,7 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                 // `test operand, operand` sets the same flags as `cmp $0,
                 // operand` for every condition code used by the backend, but
                 // avoids materializing an immediate zero.
-                if matches!(src, AsmOperand::Imm(0)) && !matches!(dst, AsmOperand::Imm(_)) {
+                if matches!(src, AsmOperand::Imm(0)) && matches!(dst, AsmOperand::Reg(_)) {
                     let operand = show_operand(dst, *t, platform)?;
                     return writeln!(w, "\ttest{} {}, {}", suffix(*t), operand, operand);
                 }
@@ -1915,5 +1915,12 @@ mod tests {
             AsmOperand::Reg(Reg::R11),
         ));
         assert_eq!(quadword, "\ttestq %r11, %r11\n");
+
+        let memory = emit_one(AsmInstr::Cmp(
+            AsmType::Longword,
+            AsmOperand::Imm(0),
+            AsmOperand::Stack(-4),
+        ));
+        assert_eq!(memory, "\tcmpl $0, -4(%rbp)\n");
     }
 }

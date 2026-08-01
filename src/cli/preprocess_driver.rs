@@ -4616,9 +4616,9 @@ pub fn seed_internal_predefined_macros(macros: &mut HashMap<String, MacroDef>, t
     define_builtin_macro(macros, "__STDC_NO_COMPLEX__", "1");
     define_builtin_macro(macros, "__STDC_NO_THREADS__", "1");
     define_builtin_macro(macros, "__STDC_NO_VLA__", "1");
-    define_builtin_macro(macros, "__STDC_EMBED_NOT_FOUND", "0");
-    define_builtin_macro(macros, "__STDC_EMBED_FOUND", "1");
-    define_builtin_macro(macros, "__STDC_EMBED_EMPTY", "2");
+    define_builtin_macro(macros, "__STDC_EMBED_NOT_FOUND__", "0");
+    define_builtin_macro(macros, "__STDC_EMBED_FOUND__", "1");
+    define_builtin_macro(macros, "__STDC_EMBED_EMPTY__", "2");
     define_empty_function_macro(macros, "__has_embed", true);
     define_builtin_macro(macros, "__GNUC_STDC_INLINE__", "1");
     define_builtin_macro(macros, "__REGISTER_PREFIX__", "");

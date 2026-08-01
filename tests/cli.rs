@@ -5751,16 +5751,16 @@ fn internal_cpp_embeds_binary_file_bytes() {
 unsigned char bytes[] = {{
 #define EMBED_ASSET "{asset_name}"
 #define EMPTY_EMBED_ASSET "{empty_asset_name}"
-#if __has_embed(EMBED_ASSET) != __STDC_EMBED_FOUND
+#if __has_embed(EMBED_ASSET) != __STDC_EMBED_FOUND__
 #error expected populated embedded asset
 #endif
-#if __has_embed(EMPTY_EMBED_ASSET) != __STDC_EMBED_EMPTY
+#if __has_embed(EMPTY_EMBED_ASSET) != __STDC_EMBED_EMPTY__
 #error expected empty embedded asset
 #endif
-#if __has_embed(EMBED_ASSET limit(1 - 1)) != __STDC_EMBED_EMPTY
+#if __has_embed(EMBED_ASSET limit(1 - 1)) != __STDC_EMBED_EMPTY__
 #error expected zero-limit embedded asset
 #endif
-#if __has_embed("rnqcc-missing-embed.bin") != __STDC_EMBED_NOT_FOUND
+#if __has_embed("rnqcc-missing-embed.bin") != __STDC_EMBED_NOT_FOUND__
 #error expected missing embedded asset
 #endif
 #embed EMBED_ASSET

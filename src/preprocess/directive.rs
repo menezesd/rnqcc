@@ -36,6 +36,9 @@ pub enum Directive {
         operand: IncludeOperand,
         include_next: bool,
     },
+    Embed {
+        operand: IncludeOperand,
+    },
     Define {
         name: String,
         def: MacroDef,
@@ -106,6 +109,9 @@ pub fn parse_directive_tokens(tokens: &[PpToken]) -> Result<Option<Directive>, S
         "include_next" => Directive::Include {
             operand: parse_include_operand(rest)?,
             include_next: true,
+        },
+        "embed" => Directive::Embed {
+            operand: parse_include_operand(rest)?,
         },
         "define" => parse_define(rest)?,
         "undef" => Directive::Undef {
@@ -463,6 +469,17 @@ mod tests {
             Directive::Include {
                 operand: IncludeOperand::Literal(HeaderName::Quoted("local.h".to_string())),
                 include_next: false,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parses_embed_operand() -> Result<(), String> {
+        assert_eq!(
+            directive(r#"#embed "asset.bin""#)?,
+            Directive::Embed {
+                operand: IncludeOperand::Literal(HeaderName::Quoted("asset.bin".to_string())),
             }
         );
         Ok(())

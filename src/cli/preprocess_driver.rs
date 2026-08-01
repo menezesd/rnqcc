@@ -5083,6 +5083,49 @@ pub fn internal_preprocess_source(
                         }
                         continue;
                     }
+                    Directive::Embed { operand } => {
+                        let spec = parse_token_include_operand(
+                            &operand,
+                            macros,
+                            &logical_file,
+                            current_line_number,
+                            include_level,
+                            state,
+                        )
+                        .map_err(pp_error_at(&logical_file, current_line_number))?;
+                        let Some(embed_path) =
+                            resolve_include_path(&spec, base_dir, context.include_paths, false)
+                        else {
+                            return Err(pp_location(
+                                &logical_file,
+                                current_line_number,
+                                format!("embed file not found: {}", include_not_found(&spec)),
+                            ));
+                        };
+                        record_dependency(&embed_path, context);
+                        let bytes = std::fs::read(&embed_path).map_err(|err| {
+                            pp_location(
+                                &logical_file,
+                                current_line_number,
+                                format!(
+                                    "failed to read embed file {}: {}",
+                                    embed_path.display(),
+                                    err
+                                ),
+                            )
+                        })?;
+                        for (index, byte) in bytes.iter().enumerate() {
+                            if index > 0 {
+                                out.push_str(", ");
+                            }
+                            out.push_str(&byte.to_string());
+                        }
+                        out.push('\n');
+                        if context.line_markers && !context.suppress_preprocessed_output {
+                            push_line_marker(&mut out, next_logical_line, &logical_file);
+                        }
+                        continue;
+                    }
                     Directive::Define { name, def } => {
                         if let Some(stats) = context.stats_mut() {
                             stats.macro_defines += 1;

@@ -5729,6 +5729,49 @@ fn compiles_c23_fixed_underlying_enum_type() {
 }
 
 #[test]
+fn internal_cpp_embeds_binary_file_bytes() {
+    let src = temp_file("c23-embed", "c");
+    let asset = src.with_extension("bin");
+    let exe = temp_file("c23-embed", "bin");
+    let asset_name = asset
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("embedded asset name must be UTF-8");
+    std::fs::write(&asset, [0u8, 17, 255]).expect("failed to write embedded bytes");
+    std::fs::write(
+        &src,
+        format!(
+            r#"
+unsigned char bytes[] = {{
+#define EMBED_ASSET "{asset_name}"
+#embed EMBED_ASSET
+}};
+int main(void) {{
+    return bytes[0] != 0 || bytes[1] != 17 || bytes[2] != 255;
+}}
+"#
+        ),
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .arg("--internal-cpp")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let run = Command::new(&exe).status().expect("failed to run output");
+    assert_eq!(run.code(), Some(0));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(asset);
+    let _ = std::fs::remove_file(exe);
+}
+
+#[test]
 fn compiles_gnu89_extern_inline_redefinition_once() {
     let src = temp_file("gnu89-extern-inline-redefinition-once", "c");
     let out = temp_file("gnu89-extern-inline-redefinition-once", "o");
@@ -22779,7 +22822,7 @@ fn internal_cpp_rejects_unsupported_directives() {
 }
 
 #[test]
-fn internal_cpp_rejects_c23_embed_directive() {
+fn internal_cpp_reports_missing_c23_embed_file() {
     let src = temp_file("internal-cpp-c23-embed-directive", "c");
     std::fs::write(&src, "#embed <rnqcc_missing_resource.bin>\n").expect("failed to write source");
 
@@ -22793,7 +22836,7 @@ fn internal_cpp_rejects_c23_embed_directive() {
     assert!(!output.status.success());
     let stderr = stderr(output);
     assert!(
-        stderr.contains("unsupported preprocessor directive: #embed"),
+        stderr.contains("embed file not found: include not found: <rnqcc_missing_resource.bin>"),
         "{stderr}"
     );
 

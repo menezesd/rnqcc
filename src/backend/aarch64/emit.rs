@@ -2187,6 +2187,9 @@ fn emit_remainder(
     right: &AsmOperand,
     dst: &AsmOperand,
 ) -> std::io::Result<()> {
+    if remainder_is_trivially_zero(ty, is_unsigned, right) {
+        return store_operand(w, target, ty, zero_register_for_type(ty)?, dst);
+    }
     let left_reg = load_operand(w, target, ty, left, Reg::R10)?;
     if is_unsigned {
         if let Some(mask) = unsigned_remainder_power_of_two_mask(ty, right) {
@@ -2213,6 +2216,23 @@ fn emit_remainder(
         left_reg, quotient_reg, right_reg, left_reg
     )?;
     store_operand(w, target, ty, left_reg, dst)
+}
+
+fn remainder_is_trivially_zero(ty: AsmType, is_unsigned: bool, right: &AsmOperand) -> bool {
+    let AsmOperand::Imm(value) = right else {
+        return false;
+    };
+    let Some((value, width)) = integer_immediate_value(ty, *value) else {
+        return false;
+    };
+    value == 1
+        || (!is_unsigned
+            && value
+                == if width == 64 {
+                    u64::MAX
+                } else {
+                    u32::MAX as u64
+                })
 }
 
 fn unsigned_remainder_power_of_two_mask(ty: AsmType, right: &AsmOperand) -> Option<u64> {
@@ -3008,6 +3028,29 @@ mod tests {
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
         assert_eq!(asm, "\tand w0, w0, #7\n");
+        Ok(())
+    }
+
+    #[test]
+    fn trivial_integer_remainders_use_zero() -> Result<(), String> {
+        let mut out = Vec::new();
+        for (is_unsigned, divisor) in [(true, 1), (false, 1), (false, -1)] {
+            emit_instruction(
+                &mut out,
+                &AsmInstr::AArch64Rem(
+                    AsmType::Quadword,
+                    is_unsigned,
+                    AsmOperand::Reg(Reg::AX),
+                    AsmOperand::Imm(divisor),
+                    AsmOperand::Reg(Reg::AX),
+                ),
+                &Target::aarch64_linux(),
+            )
+            .map_err(|err| err.to_string())?;
+        }
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(asm, "\tmov x0, xzr\n\tmov x0, xzr\n\tmov x0, xzr\n");
         Ok(())
     }
 

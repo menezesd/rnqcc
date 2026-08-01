@@ -8444,8 +8444,13 @@ fn emits_aarch64_negate_for_signed_divide_by_negative_one() {
 fn emits_aarch64_mask_for_power_of_two_unsigned_remainder() {
     let src = temp_file("aarch64-urem-immediate", "i");
     let out = temp_file("aarch64-urem-immediate", "s");
-    std::fs::write(&src, "unsigned remainder(unsigned x) { return x % 8u; }\n")
-        .expect("failed to write input");
+    std::fs::write(
+        &src,
+        "unsigned remainder(unsigned x) { return x % 8u; }\n\
+         unsigned remainder_one(unsigned x) { return x % 1u; }\n\
+         long signed_remainder_one(long x) { return x % -1; }\n",
+    )
+    .expect("failed to write input");
 
     let output = Command::new(rnqcc())
         .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
@@ -8457,6 +8462,8 @@ fn emits_aarch64_mask_for_power_of_two_unsigned_remainder() {
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains("\tand w0, w0, #7"), "{asm}");
+    assert!(asm.contains("\tmov w0, wzr"), "{asm}");
+    assert!(asm.contains("\tmov x0, xzr"), "{asm}");
     assert!(!asm.contains("\tudiv "), "{asm}");
     assert!(!asm.contains("\tmsub "), "{asm}");
 

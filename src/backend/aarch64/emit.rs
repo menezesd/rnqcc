@@ -2114,6 +2114,17 @@ fn emit_remainder(
     dst: &AsmOperand,
 ) -> std::io::Result<()> {
     let left_reg = load_operand(w, target, ty, left, Reg::R10)?;
+    if is_unsigned {
+        if let Some(mask) = unsigned_remainder_power_of_two_mask(ty, right) {
+            if mask == 0 {
+                let zero = zero_register_for_type(ty)?;
+                writeln!(w, "\tmov {}, {}", left_reg, zero)?;
+            } else {
+                writeln!(w, "\tand {}, {}, #{}", left_reg, left_reg, mask)?;
+            }
+            return store_operand(w, target, ty, left_reg, dst);
+        }
+    }
     let right_reg = load_operand(w, target, ty, right, Reg::R11)?;
     let quotient_reg = reg_name(Reg::R13, ty)?;
     let div_mnemonic = if is_unsigned { "udiv" } else { "sdiv" };
@@ -2128,6 +2139,18 @@ fn emit_remainder(
         left_reg, quotient_reg, right_reg, left_reg
     )?;
     store_operand(w, target, ty, left_reg, dst)
+}
+
+fn unsigned_remainder_power_of_two_mask(ty: AsmType, right: &AsmOperand) -> Option<u64> {
+    let AsmOperand::Imm(value) = right else {
+        return None;
+    };
+    let (value, width) = integer_immediate_value(ty, *value)?;
+    let amount = value.trailing_zeros();
+    if !value.is_power_of_two() || amount >= width {
+        return None;
+    }
+    Some(value - 1)
 }
 
 fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, target: &Target) -> std::io::Result<()> {
@@ -2824,6 +2847,27 @@ mod tests {
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
         assert_eq!(asm, "\tlsr w0, w0, #3\n");
+        Ok(())
+    }
+
+    #[test]
+    fn unsigned_remainder_by_power_of_two_uses_mask() -> Result<(), String> {
+        let mut out = Vec::new();
+        emit_instruction(
+            &mut out,
+            &AsmInstr::AArch64Rem(
+                AsmType::Longword,
+                true,
+                AsmOperand::Reg(Reg::AX),
+                AsmOperand::Imm(8),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            &Target::aarch64_linux(),
+        )
+        .map_err(|err| err.to_string())?;
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(asm, "\tand w0, w0, #7\n");
         Ok(())
     }
 

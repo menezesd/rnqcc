@@ -8402,6 +8402,30 @@ fn emits_aarch64_shift_for_power_of_two_unsigned_divide() {
 }
 
 #[test]
+fn emits_aarch64_mask_for_power_of_two_unsigned_remainder() {
+    let src = temp_file("aarch64-urem-immediate", "i");
+    let out = temp_file("aarch64-urem-immediate", "s");
+    std::fs::write(&src, "unsigned remainder(unsigned x) { return x % 8u; }\n")
+        .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
+    assert!(asm.contains("\tand w0, w0, #7"), "{asm}");
+    assert!(!asm.contains("\tudiv "), "{asm}");
+    assert!(!asm.contains("\tmsub "), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn emits_aarch64_assembly_for_unsigned_division_and_shift() {
     let src = temp_file("aarch64-unsigned-div-shift", "i");
     let out = temp_file("aarch64-unsigned-div-shift", "s");

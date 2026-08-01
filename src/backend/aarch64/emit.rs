@@ -1479,13 +1479,11 @@ fn emit_binary(
         writeln!(w, "\t{} {}, {}, #{}", mnemonic, dst_reg, dst_reg, amount)?;
         return store_operand(w, target, ty, dst_reg, dst);
     }
-    if let Some(amount) = binary_mul_power_of_two_amount(ty, op, src) {
+    if let Some((amount, negate)) = binary_mul_power_of_two_amount(ty, op, src) {
         writeln!(w, "\tlsl {}, {}, #{}", dst_reg, dst_reg, amount)?;
-        return store_operand(w, target, ty, dst_reg, dst);
-    }
-    if let Some(amount) = binary_mul_negative_power_of_two_amount(ty, op, src) {
-        writeln!(w, "\tlsl {}, {}, #{}", dst_reg, dst_reg, amount)?;
-        writeln!(w, "\tneg {}, {}", dst_reg, dst_reg)?;
+        if negate {
+            writeln!(w, "\tneg {}, {}", dst_reg, dst_reg)?;
+        }
         return store_operand(w, target, ty, dst_reg, dst);
     }
     if binary_mul_negative_one(ty, op, src) {
@@ -1602,16 +1600,30 @@ fn binary_mul_trivial_value(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> 
         .filter(|value| matches!(value, 0 | 1))
 }
 
-fn binary_mul_power_of_two_amount(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> Option<u32> {
+fn binary_mul_power_of_two_amount(
+    ty: AsmType,
+    op: &AsmBinaryOp,
+    src: &AsmOperand,
+) -> Option<(u32, bool)> {
     if !matches!(op, AsmBinaryOp::Mul) {
         return None;
     }
     let AsmOperand::Imm(value) = src else {
         return None;
     };
-    let (value, width) = integer_immediate_value(ty, *value)?;
-    let amount = value.trailing_zeros();
-    (value.is_power_of_two() && amount < width).then_some(amount)
+    let (encoded, width) = integer_immediate_value(ty, *value)?;
+    let signed_value = if width == 64 {
+        *value
+    } else {
+        *value as i32 as i64
+    };
+    let (magnitude, negate) = if signed_value < -1 {
+        (signed_value.unsigned_abs(), true)
+    } else {
+        (encoded, false)
+    };
+    let amount = magnitude.trailing_zeros();
+    (magnitude.is_power_of_two() && amount < width).then_some((amount, negate))
 }
 
 fn binary_mul_negative_one(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> bool {
@@ -1630,26 +1642,6 @@ fn binary_mul_negative_one(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> b
         } else {
             u32::MAX as u64
         }
-}
-
-fn binary_mul_negative_power_of_two_amount(
-    ty: AsmType,
-    op: &AsmBinaryOp,
-    src: &AsmOperand,
-) -> Option<u32> {
-    if !matches!(op, AsmBinaryOp::Mul) {
-        return None;
-    }
-    let AsmOperand::Imm(value) = src else {
-        return None;
-    };
-    if *value >= -1 {
-        return None;
-    }
-    let (_, width) = integer_immediate_value(ty, *value)?;
-    let magnitude = value.unsigned_abs();
-    let amount = magnitude.trailing_zeros();
-    (magnitude.is_power_of_two() && amount < width).then_some(amount)
 }
 
 fn binary_unsigned_div_power_of_two_amount(

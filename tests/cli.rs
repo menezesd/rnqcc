@@ -25991,6 +25991,8 @@ __int128 mulnegshift128(__int128 a) { return a * -8; }
 __int128 div128(__int128 a, __int128 b) { return a / b; }
 __int128 divone128(__int128 a) { return a / 1; }
 __int128 divneg128(__int128 a) { return a / -1; }
+__int128 divshift128(__int128 a) { return a / 8; }
+__int128 divwide128(__int128 a) { return a / ((__int128)1 << 96); }
 __int128 mod128(__int128 a, __int128 b) { return a % b; }
 __int128 modone128(__int128 a) { return a % 1; }
 __int128 modneg128(__int128 a) { return a % -1; }
@@ -26204,6 +26206,30 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
     assert!(divneg128.contains("\tmvn x0, x0"), "{divneg128}");
     assert!(!divneg128.contains("\tbl __divti3"), "{divneg128}");
     assert!(!divneg128.contains("\tstr x30,"), "{divneg128}");
+    let divshift128 = body("divshift128");
+    assert!(divshift128.contains("\tasr x9, x9, #63"), "{divshift128}");
+    assert!(divshift128.contains("\tand x9, x9, #7"), "{divshift128}");
+    assert!(divshift128.contains("\tadds x0, x0, x9"), "{divshift128}");
+    assert!(divshift128.contains("\tadcs x1, x1, xzr"), "{divshift128}");
+    assert!(
+        divshift128.contains("\textr x11, x1, x0, #3"),
+        "{divshift128}"
+    );
+    assert!(divshift128.contains("\tmov x0, x11"), "{divshift128}");
+    assert!(divshift128.contains("\tasr x1, x1, #3"), "{divshift128}");
+    assert!(!divshift128.contains("\tbl __divti3"), "{divshift128}");
+    let divwide128 = body("divwide128");
+    assert!(divwide128.contains("\tmov x10, x9"), "{divwide128}");
+    assert!(
+        divwide128.contains("\tand x10, x10, #4294967295"),
+        "{divwide128}"
+    );
+    assert!(divwide128.contains("\tadds x0, x0, x9"), "{divwide128}");
+    assert!(divwide128.contains("\tadcs x1, x1, x10"), "{divwide128}");
+    assert!(divwide128.contains("\tmov x0, x1"), "{divwide128}");
+    assert!(divwide128.contains("\tasr x0, x0, #32"), "{divwide128}");
+    assert!(divwide128.contains("\tasr x1, x1, #63"), "{divwide128}");
+    assert!(!divwide128.contains("\tbl __divti3"), "{divwide128}");
     for name in ["modone128", "modneg128"] {
         let body = body(name);
         assert!(body.contains("\tmov x0, xzr"), "{body}");
@@ -27049,6 +27075,9 @@ int div32(int value) { return value / 8; }
 long div64(long value) { return value / 8; }
 int mod32(int value) { return value % 8; }
 long mod64(long value) { return value % 8; }
+__int128 div128_3(__int128 value) { return value / 8; }
+__int128 div128_64(__int128 value) { return value / ((__int128)1 << 64); }
+__int128 div128_96(__int128 value) { return value / ((__int128)1 << 96); }
 long div_pressure(long a, long b, long c, long d, long e, long f, long g, long h) {
     return a / 8 + b + c + d + e + f + g + h;
 }
@@ -27066,6 +27095,9 @@ int main(void) {
     if (mod64(-9223372036854775807L - 1) != 0) return 8;
     if (div_pressure(-9, 2, 3, 5, 7, 11, 13, 17) != 57) return 9;
     if (mod_pressure(-9, 2, 3, 5, 7, 11, 13, 17) != 57) return 10;
+    if (div128_3(-7) != 0 || div128_3(-8) != -1 || div128_3(-9) != -1) return 11;
+    if (div128_64(-((__int128)1 << 100) + 7) != -68719476735L) return 12;
+    if (div128_96(-((__int128)1 << 100) + 7) != -15) return 13;
     return 0;
 }
 "#,

@@ -779,6 +779,148 @@ fn emit_i128_return_regs_to_operand(
     Ok(())
 }
 
+fn emit_i128_signed_power_of_two_division(
+    instructions: &mut Vec<AsmInstr>,
+    left: &TackyVal,
+    dst: AsmOperand,
+    amount: i64,
+    ctx: &Aarch64I128Context<'_>,
+) -> Result<(), String> {
+    debug_assert!((1..127).contains(&amount));
+
+    // C signed division truncates toward zero, while an arithmetic shift rounds
+    // negative values down. Add 2^amount - 1 to negative values before shifting.
+    emit_i128_copy_to_operand(
+        instructions,
+        left,
+        dst.clone(),
+        ctx.stack_slots,
+        ctx.global_vars,
+    )?;
+    let dst_low = low64_operand(&dst)?;
+    let dst_high = high64_operand(&dst)?;
+    instructions.push(AsmInstr::Mov(
+        AsmType::Quadword,
+        dst_high.clone(),
+        AsmOperand::Reg(Reg::R10),
+    ));
+    instructions.push(AsmInstr::Binary(
+        AsmType::Quadword,
+        AsmBinaryOp::Sar,
+        AsmOperand::Imm(63),
+        AsmOperand::Reg(Reg::R10),
+    ));
+    match amount {
+        1..=63 => {
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::And,
+                AsmOperand::Imm(((1u64 << amount) - 1) as i64),
+                AsmOperand::Reg(Reg::R10),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::AddSetFlags,
+                AsmOperand::Reg(Reg::R10),
+                dst_low.clone(),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Adc,
+                AsmOperand::Imm(0),
+                dst_high.clone(),
+            ));
+        }
+        64 => {
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::AddSetFlags,
+                AsmOperand::Reg(Reg::R10),
+                dst_low.clone(),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Adc,
+                AsmOperand::Imm(0),
+                dst_high.clone(),
+            ));
+        }
+        65..=126 => {
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Reg(Reg::R10),
+                AsmOperand::Reg(Reg::R11),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::And,
+                AsmOperand::Imm(((1u64 << (amount - 64)) - 1) as i64),
+                AsmOperand::Reg(Reg::R11),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::AddSetFlags,
+                AsmOperand::Reg(Reg::R10),
+                dst_low.clone(),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Adc,
+                AsmOperand::Reg(Reg::R11),
+                dst_high.clone(),
+            ));
+        }
+        _ => unreachable!("signed 128-bit power-of-two division shift is in range"),
+    }
+
+    match amount {
+        1..=63 => {
+            instructions.push(AsmInstr::AArch64Extr(
+                dst_high.clone(),
+                dst_low.clone(),
+                amount as u8,
+                dst_low,
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Sar,
+                AsmOperand::Imm(amount),
+                dst_high,
+            ));
+        }
+        64 => {
+            instructions.push(AsmInstr::Mov(AsmType::Quadword, dst_high.clone(), dst_low));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Sar,
+                AsmOperand::Imm(63),
+                dst_high,
+            ));
+        }
+        65..=126 => {
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                dst_high.clone(),
+                dst_low.clone(),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Sar,
+                AsmOperand::Imm(amount - 64),
+                dst_low,
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Sar,
+                AsmOperand::Imm(63),
+                dst_high,
+            ));
+        }
+        _ => unreachable!("signed 128-bit power-of-two division shift is in range"),
+    }
+    Ok(())
+}
+
 fn emit_i128_helper_binary(
     instructions: &mut Vec<AsmInstr>,
     op: &TackyBinaryOp,
@@ -804,6 +946,14 @@ fn emit_i128_helper_binary(
                 ctx,
             )?;
             return Ok(true);
+        }
+    }
+    if matches!(op, TackyBinaryOp::Div) && !is_unsigned {
+        if let Some(amount) = i128_constant_power_of_two_shift(right) {
+            if (1..127).contains(&amount) {
+                emit_i128_signed_power_of_two_division(instructions, left, dst, amount, ctx)?;
+                return Ok(true);
+            }
         }
     }
     if matches!(op, TackyBinaryOp::Mod) && is_unsigned {
@@ -915,6 +1065,10 @@ fn i128_div_or_mod_requires_helper(
         && !(matches!(op, TackyBinaryOp::Div | TackyBinaryOp::Mod)
             && is_unsigned_val(left, types)
             && i128_constant_power_of_two_shift(right).is_some())
+        && !(matches!(op, TackyBinaryOp::Div)
+            && !is_unsigned_val(left, types)
+            && i128_constant_power_of_two_shift(right)
+                .is_some_and(|amount| (1..127).contains(&amount)))
         && (is_unsigned_val(left, types) || !i128_constant_is_negative_one(right))
 }
 

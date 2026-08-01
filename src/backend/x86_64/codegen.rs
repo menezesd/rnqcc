@@ -1397,6 +1397,24 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                     }
                 }
             }
+            if matches!(op, TackyBinaryOp::Mod)
+                && is_unsigned
+                && matches!(t, AsmType::Longword | AsmType::Quadword)
+            {
+                if let TackyVal::Constant(value) = right {
+                    if *value > 1 && (*value as u64).is_power_of_two() {
+                        let amount = (*value as u64).trailing_zeros();
+                        out.push(AsmInstr::Mov(t, convert_val(left), convert_val(dst)));
+                        out.push(AsmInstr::Binary(
+                            t,
+                            AsmBinaryOp::And,
+                            AsmOperand::Imm(((1u64 << amount) - 1) as i64),
+                            convert_val(dst),
+                        ));
+                        return Ok(());
+                    }
+                }
+            }
             if !is_unsigned && matches!(right, TackyVal::Constant(-1)) {
                 if matches!(op, TackyBinaryOp::Div) {
                     out.push(AsmInstr::Mov(t, convert_val(left), convert_val(dst)));

@@ -26191,6 +26191,10 @@ __int128 zerosub(__int128 a) { return 0 - a; }
 __int128 mulzero(__int128 a) { return a * 0; }
 __int128 mulone(__int128 a) { return a * 1; }
 __int128 mulneg(__int128 a) { return a * -1; }
+__int128 divone(__int128 a) { return a / 1; }
+__int128 divneg(__int128 a) { return a / -1; }
+__int128 modone(__int128 a) { return a % 1; }
+__int128 modneg(__int128 a) { return a % -1; }
 unsigned __int128 andzero(unsigned __int128 a) { return a & 0; }
 unsigned __int128 andones(unsigned __int128 a) { return a & ~(unsigned __int128)0; }
 unsigned __int128 orzero(unsigned __int128 a) { return a | 0; }
@@ -26229,7 +26233,7 @@ int ulezero(unsigned __int128 a) { return a <= 0; }
         &rest[..end]
     };
     for name in [
-        "addzero", "subzero", "mulone", "andones", "orzero", "xorzero",
+        "addzero", "subzero", "mulone", "andones", "orzero", "xorzero", "divone",
     ] {
         let body = body(name);
         assert!(!body.contains("\taddq "), "{body}");
@@ -26258,6 +26262,17 @@ int ulezero(unsigned __int128 a) { return a <= 0; }
         assert!(body.contains("\tadcq $0,"), "{body}");
         assert!(!body.contains("\timulq "), "{body}");
         assert!(!body.contains("\tmulq "), "{body}");
+    }
+    let divneg = body("divneg");
+    assert!(divneg.contains("\tnotq "), "{divneg}");
+    assert!(!divneg.contains("\tcall __divti3"), "{divneg}");
+    for name in ["modone", "modneg"] {
+        let body = body(name);
+        assert!(
+            body.contains("\tmovq $0,") || body.contains("\txorq %r"),
+            "{body}"
+        );
+        assert!(!body.contains("\tcall __modti3"), "{body}");
     }
     let orones = body("orones");
     assert!(orones.contains("\tmovq $-1,"), "{orones}");

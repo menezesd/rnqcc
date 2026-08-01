@@ -1383,6 +1383,25 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                 .unwrap_or(CType::Int);
             let is_unsigned = !dst_ctype.is_signed();
             if t == AsmType::Octword {
+                if matches!(op, TackyBinaryOp::Div) && i128_constant_is_one(right) {
+                    emit_i128_copy(out, left, dst)?;
+                    return Ok(());
+                }
+                if matches!(op, TackyBinaryOp::Div)
+                    && !is_unsigned
+                    && i128_constant_is_all_ones(right)
+                {
+                    emit_i128_copy(out, left, dst)?;
+                    emit_i128_negate(out, dst)?;
+                    return Ok(());
+                }
+                if matches!(op, TackyBinaryOp::Mod)
+                    && (i128_constant_is_one(right)
+                        || (!is_unsigned && i128_constant_is_all_ones(right)))
+                {
+                    emit_i128_zero(out, dst)?;
+                    return Ok(());
+                }
                 let helper = match (op, is_unsigned) {
                     (TackyBinaryOp::Div, true) => "__udivti3",
                     (TackyBinaryOp::Div, false) => "__divti3",

@@ -5751,6 +5751,18 @@ fn internal_cpp_embeds_binary_file_bytes() {
 unsigned char bytes[] = {{
 #define EMBED_ASSET "{asset_name}"
 #define EMPTY_EMBED_ASSET "{empty_asset_name}"
+#if __has_embed(EMBED_ASSET) != __STDC_EMBED_FOUND
+#error expected populated embedded asset
+#endif
+#if __has_embed(EMPTY_EMBED_ASSET) != __STDC_EMBED_EMPTY
+#error expected empty embedded asset
+#endif
+#if __has_embed(EMBED_ASSET limit(1 - 1)) != __STDC_EMBED_EMPTY
+#error expected zero-limit embedded asset
+#endif
+#if __has_embed("rnqcc-missing-embed.bin") != __STDC_EMBED_NOT_FOUND
+#error expected missing embedded asset
+#endif
 #embed EMBED_ASSET
 }};
 unsigned char limited[] = {{
@@ -15826,7 +15838,7 @@ fn internal_cpp_predicate_matrix_keeps_unknown_probes_false() {
 }
 
 #[test]
-fn internal_cpp_keeps_c23_embed_unsupported() {
+fn internal_cpp_advertises_c23_embed_support() {
     let src = temp_file("internal-cpp-c23-embed-unsupported", "c");
     std::fs::write(
         &src,
@@ -15852,8 +15864,8 @@ fn internal_cpp_keeps_c23_embed_unsupported() {
 
     assert!(output.status.success(), "{}", stderr(output));
     let stdout = stdout(output);
-    assert!(stdout.contains("int has_embed_operator = 0;"), "{stdout}");
-    assert!(stdout.contains("int has_embed_feature = 0;"), "{stdout}");
+    assert!(stdout.contains("int has_embed_operator = 1;"), "{stdout}");
+    assert!(stdout.contains("int has_embed_feature = 1;"), "{stdout}");
 
     let _ = std::fs::remove_file(src);
 }

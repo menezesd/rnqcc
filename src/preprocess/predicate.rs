@@ -10,6 +10,9 @@ pub enum PredicateOperand {
         operand: IncludeOperand,
         include_next: bool,
     },
+    HasEmbed {
+        tokens: Vec<PpToken>,
+    },
     HasBuiltin {
         name: String,
     },
@@ -50,6 +53,7 @@ pub fn parse_predicate_operand(
         Some("defined") => parse_defined_operand(tokens, start),
         Some("__has_include") => parse_has_include_operand(tokens, start, false),
         Some("__has_include_next") => parse_has_include_operand(tokens, start, true),
+        Some("__has_embed") => parse_has_embed_operand(tokens, start),
         Some("__has_builtin") => parse_named_call_predicate_operand(
             tokens,
             start,
@@ -263,6 +267,25 @@ fn parse_has_include_operand(
         operand: PredicateOperand::HasInclude {
             operand: parse_include_operand(&tokens[open + 1..close])?,
             include_next,
+        },
+        next_index: close + 1,
+    }))
+}
+
+fn parse_has_embed_operand(
+    tokens: &[PpToken],
+    ident_index: usize,
+) -> Result<Option<ParsedPredicateOperand>, String> {
+    let open = skip_ws(tokens, ident_index + 1);
+    if !is_punct(tokens.get(open), "(") {
+        return Ok(None);
+    }
+    let Some(close) = find_matching_paren(tokens, open) else {
+        return Err("missing ')' in __has_embed expression".to_string());
+    };
+    Ok(Some(ParsedPredicateOperand {
+        operand: PredicateOperand::HasEmbed {
+            tokens: tokens[open + 1..close].to_vec(),
         },
         next_index: close + 1,
     }))

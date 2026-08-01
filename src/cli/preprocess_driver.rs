@@ -4448,6 +4448,50 @@ pub fn replace_preprocessor_predicates(
                     out.push(predicate_number_token(&tokens[index], found));
                     index = parsed.next_index;
                 }
+                preprocess::predicate::PredicateOperand::HasEmbed { tokens: operand } => {
+                    let expanded = expand_preprocessor_tokens(
+                        &operand,
+                        macros,
+                        context.file,
+                        context.line_number,
+                        context.include_level,
+                        state,
+                    )?;
+                    let (operand, parameters) =
+                        preprocess::directive::parse_embed_tokens(&expanded)?;
+                    let parameters = parse_embed_parameters(&parameters, macros)?;
+                    let spec = parse_token_include_operand(
+                        &operand,
+                        macros,
+                        context.file,
+                        context.line_number,
+                        context.include_level,
+                        state,
+                    )?;
+                    let result = match resolve_include_path(
+                        &spec,
+                        context.base_dir,
+                        context.include_paths,
+                        false,
+                    ) {
+                        None => 0,
+                        Some(path) => {
+                            let mut bytes = std::fs::read(&path).map_err(|err| {
+                                format!("failed to read embed file {}: {}", path.display(), err)
+                            })?;
+                            if let Some(limit) = parameters.limit {
+                                bytes.truncate(limit);
+                            }
+                            if bytes.is_empty() {
+                                2
+                            } else {
+                                1
+                            }
+                        }
+                    };
+                    out.push(predicate_integer_token(&tokens[index], result));
+                    index = parsed.next_index;
+                }
                 preprocess::predicate::PredicateOperand::HasBuiltin { name } => {
                     out.push(predicate_number_token(
                         &tokens[index],
@@ -4522,6 +4566,13 @@ pub fn predicate_number_token(
     ))
 }
 
+pub fn predicate_integer_token(
+    token: &preprocess::token::PpToken,
+    value: u8,
+) -> preprocess::token::PpToken {
+    token.clone_with_text(preprocess::token::PpTokenKind::Number(value.to_string()))
+}
+
 pub fn define_builtin_macro(macros: &mut HashMap<String, MacroDef>, name: &str, value: &str) {
     macros.insert(name.to_string(), MacroDef::Object(value.to_string()));
 }
@@ -4565,6 +4616,10 @@ pub fn seed_internal_predefined_macros(macros: &mut HashMap<String, MacroDef>, t
     define_builtin_macro(macros, "__STDC_NO_COMPLEX__", "1");
     define_builtin_macro(macros, "__STDC_NO_THREADS__", "1");
     define_builtin_macro(macros, "__STDC_NO_VLA__", "1");
+    define_builtin_macro(macros, "__STDC_EMBED_NOT_FOUND", "0");
+    define_builtin_macro(macros, "__STDC_EMBED_FOUND", "1");
+    define_builtin_macro(macros, "__STDC_EMBED_EMPTY", "2");
+    define_empty_function_macro(macros, "__has_embed", true);
     define_builtin_macro(macros, "__GNUC_STDC_INLINE__", "1");
     define_builtin_macro(macros, "__REGISTER_PREFIX__", "");
     define_builtin_macro(macros, "__CHAR_BIT__", "8");

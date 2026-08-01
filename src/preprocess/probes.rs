@@ -270,6 +270,7 @@ const C_LANGUAGE_FEATURE_PROBES: &[&str] = &[
     "c_alignof",
     "c_atomic",
     "c_bitint",
+    "c_embed",
     "c_generic_selection_with_controlling_type",
     "c_generic_selections",
     "c_static_assert",

@@ -88,7 +88,6 @@ Known internal preprocessor gaps:
 
 - exact host compiler predefined macro parity
 - compiler-specific system header extensions beyond `#include_next`
-- C23 `#embed` / `__has_embed`
 - macro expansion corner cases around disabled/re-enabled macro identifiers
 - full source-map propagation from preprocessing tokens into later diagnostics
 

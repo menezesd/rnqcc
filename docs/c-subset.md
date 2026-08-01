@@ -35,7 +35,9 @@ single target.
   direct calls to variadic prototypes
 - `double` arithmetic, comparisons, conversions, arrays, arguments, and returns
 - preprocessing through either the configured external C driver or the
-  self-contained `--internal-cpp` preprocessor for local fixtures
+  self-contained `--internal-cpp` preprocessor for local fixtures, including
+  C23 `#embed` and `__has_embed` with `limit`, `prefix`, `suffix`, and
+  `if_empty` parameters
 - assembly and linking through the configured external C driver, including
   mixed source/object/static-library/shared-library link lines
 
@@ -208,8 +210,7 @@ assembly/linking.
 - Full source spans are not carried through every diagnostic yet.
 - The internal preprocessor intentionally does not exactly mirror every hosted
   compiler predefined macro, compiler-specific header directive, or macro
-  expansion corner case yet. C23 `#embed` / `__has_embed` is currently
-  unsupported and intentionally not advertised through feature probes.
+  expansion corner case yet.
 - Full arbitrary-width `_BitInt(N)` needs a real bit-precise integer type in the
   rich type representation, usual arithmetic conversions that preserve precision
   and signedness, constant folding with unsigned modulo behavior at result

@@ -1571,6 +1571,131 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                         return Ok(());
                     }
                 }
+                if matches!(op, TackyBinaryOp::Div) && !is_unsigned {
+                    if let Some(amount) = i128_constant_power_of_two_shift(right) {
+                        if (1..127).contains(&amount) {
+                            // C signed division truncates toward zero, whereas a
+                            // 128-bit arithmetic shift rounds negative values down.
+                            // Add 2^amount - 1 to negative values before shifting.
+                            emit_i128_copy(out, left, dst)?;
+                            let dst_op = convert_val(dst);
+                            let dst_low = low64_operand(dst_op.clone())?;
+                            let dst_high = high64_operand(dst_op)?;
+                            out.push(AsmInstr::Mov(
+                                AsmType::Quadword,
+                                dst_high.clone(),
+                                AsmOperand::Reg(Reg::R10),
+                            ));
+                            out.push(AsmInstr::Binary(
+                                AsmType::Quadword,
+                                AsmBinaryOp::Sar,
+                                AsmOperand::Imm(63),
+                                AsmOperand::Reg(Reg::R10),
+                            ));
+                            if amount < 32 {
+                                out.push(AsmInstr::Binary(
+                                    AsmType::Quadword,
+                                    AsmBinaryOp::And,
+                                    AsmOperand::Imm(((1u64 << amount) - 1) as i64),
+                                    AsmOperand::Reg(Reg::R10),
+                                ));
+                                out.push(AsmInstr::Binary(
+                                    AsmType::Quadword,
+                                    AsmBinaryOp::AddSetFlags,
+                                    AsmOperand::Reg(Reg::R10),
+                                    dst_low,
+                                ));
+                                out.push(AsmInstr::Binary(
+                                    AsmType::Quadword,
+                                    AsmBinaryOp::Adc,
+                                    AsmOperand::Imm(0),
+                                    dst_high,
+                                ));
+                            } else if amount < 64 {
+                                // Materialize the mask separately: a wide
+                                // immediate in an `and` is legalized through
+                                // R10, which holds the sign mask here.
+                                out.push(AsmInstr::Mov(
+                                    AsmType::Quadword,
+                                    AsmOperand::Imm(((1u64 << amount) - 1) as i64),
+                                    AsmOperand::Reg(Reg::R11),
+                                ));
+                                out.push(AsmInstr::Binary(
+                                    AsmType::Quadword,
+                                    AsmBinaryOp::And,
+                                    AsmOperand::Reg(Reg::R10),
+                                    AsmOperand::Reg(Reg::R11),
+                                ));
+                                out.push(AsmInstr::Binary(
+                                    AsmType::Quadword,
+                                    AsmBinaryOp::AddSetFlags,
+                                    AsmOperand::Reg(Reg::R11),
+                                    dst_low,
+                                ));
+                                out.push(AsmInstr::Binary(
+                                    AsmType::Quadword,
+                                    AsmBinaryOp::Adc,
+                                    AsmOperand::Imm(0),
+                                    dst_high,
+                                ));
+                            } else if amount == 64 {
+                                out.push(AsmInstr::Binary(
+                                    AsmType::Quadword,
+                                    AsmBinaryOp::AddSetFlags,
+                                    AsmOperand::Reg(Reg::R10),
+                                    dst_low,
+                                ));
+                                out.push(AsmInstr::Binary(
+                                    AsmType::Quadword,
+                                    AsmBinaryOp::Adc,
+                                    AsmOperand::Imm(0),
+                                    dst_high,
+                                ));
+                            } else {
+                                out.push(AsmInstr::Mov(
+                                    AsmType::Quadword,
+                                    AsmOperand::Imm(((1u64 << (amount - 64)) - 1) as i64),
+                                    AsmOperand::Reg(Reg::R11),
+                                ));
+                                out.push(AsmInstr::Binary(
+                                    AsmType::Quadword,
+                                    AsmBinaryOp::And,
+                                    AsmOperand::Reg(Reg::R10),
+                                    AsmOperand::Reg(Reg::R11),
+                                ));
+                                out.push(AsmInstr::Binary(
+                                    AsmType::Quadword,
+                                    AsmBinaryOp::AddSetFlags,
+                                    AsmOperand::Reg(Reg::R10),
+                                    dst_low,
+                                ));
+                                out.push(AsmInstr::Binary(
+                                    AsmType::Quadword,
+                                    AsmBinaryOp::Adc,
+                                    AsmOperand::Reg(Reg::R11),
+                                    dst_high,
+                                ));
+                            }
+                            let count = TackyVal::Constant(amount);
+                            let mut binary_ctx = BinaryContext {
+                                types,
+                                out,
+                                static_doubles,
+                                static_floats,
+                                label_counter,
+                                function_name,
+                            };
+                            convert_binary(
+                                &TackyBinaryOp::ShiftRight,
+                                dst,
+                                &count,
+                                dst,
+                                &mut binary_ctx,
+                            )?;
+                            return Ok(());
+                        }
+                    }
+                }
                 if matches!(op, TackyBinaryOp::Mod) && is_unsigned {
                     if let Some(amount) = i128_constant_power_of_two_shift(right) {
                         emit_i128_copy(out, left, dst)?;

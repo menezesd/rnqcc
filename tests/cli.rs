@@ -26325,6 +26325,24 @@ fn aarch64_unoptimized_wide_shift_counts_emit_successfully() {
 }
 
 #[test]
+fn x86_64_large_constant_shift_counts_use_encodable_immediates() {
+    let out = temp_file("x86-large-constant-shift-count", "s");
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg("tests/gcc_torture_dic.c")
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(asm.contains("\tsalq $7, %rax"), "{asm}");
+    assert!(!asm.contains("$671111"), "{asm}");
+
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn optimized_unsigned_power_of_two_arithmetic_preserves_wide_runtime_results() {
     let exe = temp_file("optimized-unsigned-power-of-two", "bin");
     let output = Command::new(rnqcc())

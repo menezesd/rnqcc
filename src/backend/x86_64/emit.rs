@@ -823,7 +823,15 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                 AsmBinaryOp::Sal | AsmBinaryOp::Sar | AsmBinaryOp::Shr => {
                     let shift_src = match src {
                         AsmOperand::Reg(Reg::CX) => "%cl".to_string(),
-                        AsmOperand::Imm(val) => format!("${}", val),
+                        // The x86 immediate shift encoding holds only an
+                        // 8-bit count, and the processor masks that count by
+                        // the operand width. Normalize here so out-of-range
+                        // C shift counts still produce assemblable code with
+                        // the same behavior as a register count.
+                        AsmOperand::Imm(val) => {
+                            let mask = if *t == AsmType::Quadword { 63 } else { 31 };
+                            format!("${}", val & mask)
+                        }
                         _ => return invalid_input("Shift amount must be %cl or immediate"),
                     };
                     writeln!(
@@ -1793,5 +1801,24 @@ mod tests {
             !asm.contains("xor"),
             "must not clobber flags before setcc: {asm}"
         );
+    }
+
+    #[test]
+    fn x86_64_emitter_masks_large_shift_immediates() {
+        let quadword = emit_one(AsmInstr::Binary(
+            AsmType::Quadword,
+            AsmBinaryOp::Sal,
+            AsmOperand::Imm(671111),
+            AsmOperand::Reg(Reg::AX),
+        ));
+        assert_eq!(quadword, "\tsalq $7, %rax\n");
+
+        let longword = emit_one(AsmInstr::Binary(
+            AsmType::Longword,
+            AsmBinaryOp::Shr,
+            AsmOperand::Imm(65),
+            AsmOperand::Reg(Reg::AX),
+        ));
+        assert_eq!(longword, "\tshrl $1, %eax\n");
     }
 }

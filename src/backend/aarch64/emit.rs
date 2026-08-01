@@ -1813,6 +1813,10 @@ fn is_aarch64_logical_immediate(value: u64, width: u32) -> bool {
     if value == 0 || value == full_mask {
         return false;
     }
+    // The common `(1 << n) - 1` masks need no rotation/repetition search.
+    if value & value.wrapping_add(1) == 0 {
+        return true;
+    }
 
     for element_width in [2, 4, 8, 16, 32, 64] {
         if element_width > width {

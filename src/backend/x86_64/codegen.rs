@@ -643,6 +643,22 @@ fn i128_signed_power_of_two_divisor(value: &TackyVal) -> Option<(i64, bool)> {
         .or_else(|| i128_constant_negative_power_of_two_shift(value).map(|amount| (amount, true)))
 }
 
+fn scalar_signed_power_of_two_divisor(value: i64, width: u32) -> Option<(u32, bool)> {
+    let negate_result = value < -1;
+    let magnitude = if negate_result {
+        value.unsigned_abs()
+    } else {
+        value as u64
+    };
+    if magnitude > 1 && magnitude.is_power_of_two() {
+        let amount = magnitude.trailing_zeros();
+        if amount < width - 1 {
+            return Some((amount, negate_result));
+        }
+    }
+    None
+}
+
 fn emit_i128_parts_to_operands(
     out: &mut Vec<AsmInstr>,
     low: AsmOperand,
@@ -1538,53 +1554,46 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                     } else {
                         *value as i32 as i64
                     };
-                    let negate_result = value < -1;
-                    let magnitude = if negate_result {
-                        value.unsigned_abs()
-                    } else {
-                        value as u64
-                    };
-                    if magnitude > 1 && magnitude.is_power_of_two() {
-                        let amount = magnitude.trailing_zeros();
-                        if amount < width - 1 {
-                            // C signed division truncates toward zero, whereas an
-                            // arithmetic shift rounds negative values down. Add a
-                            // sign-dependent bias before shifting to bridge that gap.
-                            out.push(AsmInstr::Mov(t, convert_val(left), convert_val(dst)));
-                            out.push(AsmInstr::Mov(
-                                t,
-                                convert_val(dst),
-                                AsmOperand::Reg(Reg::R10),
-                            ));
-                            out.push(AsmInstr::Binary(
-                                t,
-                                AsmBinaryOp::Sar,
-                                AsmOperand::Imm(i64::from(width - 1)),
-                                AsmOperand::Reg(Reg::R10),
-                            ));
-                            out.push(AsmInstr::Binary(
-                                t,
-                                AsmBinaryOp::And,
-                                AsmOperand::Imm(((1u64 << amount) - 1) as i64),
-                                AsmOperand::Reg(Reg::R10),
-                            ));
-                            out.push(AsmInstr::Binary(
-                                t,
-                                AsmBinaryOp::Add,
-                                AsmOperand::Reg(Reg::R10),
-                                convert_val(dst),
-                            ));
-                            out.push(AsmInstr::Binary(
-                                t,
-                                AsmBinaryOp::Sar,
-                                AsmOperand::Imm(i64::from(amount)),
-                                convert_val(dst),
-                            ));
-                            if negate_result {
-                                out.push(AsmInstr::Unary(t, AsmUnaryOp::Neg, convert_val(dst)));
-                            }
-                            return Ok(());
+                    if let Some((amount, negate_result)) =
+                        scalar_signed_power_of_two_divisor(value, width)
+                    {
+                        // C signed division truncates toward zero, whereas an
+                        // arithmetic shift rounds negative values down. Add a
+                        // sign-dependent bias before shifting to bridge that gap.
+                        out.push(AsmInstr::Mov(t, convert_val(left), convert_val(dst)));
+                        out.push(AsmInstr::Mov(
+                            t,
+                            convert_val(dst),
+                            AsmOperand::Reg(Reg::R10),
+                        ));
+                        out.push(AsmInstr::Binary(
+                            t,
+                            AsmBinaryOp::Sar,
+                            AsmOperand::Imm(i64::from(width - 1)),
+                            AsmOperand::Reg(Reg::R10),
+                        ));
+                        out.push(AsmInstr::Binary(
+                            t,
+                            AsmBinaryOp::And,
+                            AsmOperand::Imm(((1u64 << amount) - 1) as i64),
+                            AsmOperand::Reg(Reg::R10),
+                        ));
+                        out.push(AsmInstr::Binary(
+                            t,
+                            AsmBinaryOp::Add,
+                            AsmOperand::Reg(Reg::R10),
+                            convert_val(dst),
+                        ));
+                        out.push(AsmInstr::Binary(
+                            t,
+                            AsmBinaryOp::Sar,
+                            AsmOperand::Imm(i64::from(amount)),
+                            convert_val(dst),
+                        ));
+                        if negate_result {
+                            out.push(AsmInstr::Unary(t, AsmUnaryOp::Neg, convert_val(dst)));
                         }
+                        return Ok(());
                     }
                 }
             }
@@ -1617,70 +1626,62 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                     } else {
                         *value as i32 as i64
                     };
-                    let magnitude = if value < -1 {
-                        value.unsigned_abs()
-                    } else {
-                        value as u64
-                    };
-                    if magnitude > 1 && magnitude.is_power_of_two() {
-                        let amount = magnitude.trailing_zeros();
-                        if amount < width - 1 {
-                            // Compute n - trunc(n / 2^k) * 2^k. The quotient
-                            // uses the same sign-dependent bias as division.
-                            out.push(AsmInstr::Mov(t, convert_val(left), convert_val(dst)));
-                            out.push(AsmInstr::Mov(
-                                t,
-                                convert_val(dst),
-                                AsmOperand::Reg(Reg::R11),
-                            ));
-                            out.push(AsmInstr::Mov(
-                                t,
-                                convert_val(dst),
-                                AsmOperand::Reg(Reg::R10),
-                            ));
-                            out.push(AsmInstr::Binary(
-                                t,
-                                AsmBinaryOp::Sar,
-                                AsmOperand::Imm(i64::from(width - 1)),
-                                AsmOperand::Reg(Reg::R10),
-                            ));
-                            out.push(AsmInstr::Binary(
-                                t,
-                                AsmBinaryOp::And,
-                                AsmOperand::Imm(((1u64 << amount) - 1) as i64),
-                                AsmOperand::Reg(Reg::R10),
-                            ));
-                            out.push(AsmInstr::Binary(
-                                t,
-                                AsmBinaryOp::Add,
-                                AsmOperand::Reg(Reg::R10),
-                                convert_val(dst),
-                            ));
-                            out.push(AsmInstr::Binary(
-                                t,
-                                AsmBinaryOp::Sar,
-                                AsmOperand::Imm(i64::from(amount)),
-                                convert_val(dst),
-                            ));
-                            out.push(AsmInstr::Binary(
-                                t,
-                                AsmBinaryOp::Sal,
-                                AsmOperand::Imm(i64::from(amount)),
-                                convert_val(dst),
-                            ));
-                            out.push(AsmInstr::Binary(
-                                t,
-                                AsmBinaryOp::Sub,
-                                convert_val(dst),
-                                AsmOperand::Reg(Reg::R11),
-                            ));
-                            out.push(AsmInstr::Mov(
-                                t,
-                                AsmOperand::Reg(Reg::R11),
-                                convert_val(dst),
-                            ));
-                            return Ok(());
-                        }
+                    if let Some((amount, _)) = scalar_signed_power_of_two_divisor(value, width) {
+                        // Compute n - trunc(n / 2^k) * 2^k. The quotient
+                        // uses the same sign-dependent bias as division.
+                        out.push(AsmInstr::Mov(t, convert_val(left), convert_val(dst)));
+                        out.push(AsmInstr::Mov(
+                            t,
+                            convert_val(dst),
+                            AsmOperand::Reg(Reg::R11),
+                        ));
+                        out.push(AsmInstr::Mov(
+                            t,
+                            convert_val(dst),
+                            AsmOperand::Reg(Reg::R10),
+                        ));
+                        out.push(AsmInstr::Binary(
+                            t,
+                            AsmBinaryOp::Sar,
+                            AsmOperand::Imm(i64::from(width - 1)),
+                            AsmOperand::Reg(Reg::R10),
+                        ));
+                        out.push(AsmInstr::Binary(
+                            t,
+                            AsmBinaryOp::And,
+                            AsmOperand::Imm(((1u64 << amount) - 1) as i64),
+                            AsmOperand::Reg(Reg::R10),
+                        ));
+                        out.push(AsmInstr::Binary(
+                            t,
+                            AsmBinaryOp::Add,
+                            AsmOperand::Reg(Reg::R10),
+                            convert_val(dst),
+                        ));
+                        out.push(AsmInstr::Binary(
+                            t,
+                            AsmBinaryOp::Sar,
+                            AsmOperand::Imm(i64::from(amount)),
+                            convert_val(dst),
+                        ));
+                        out.push(AsmInstr::Binary(
+                            t,
+                            AsmBinaryOp::Sal,
+                            AsmOperand::Imm(i64::from(amount)),
+                            convert_val(dst),
+                        ));
+                        out.push(AsmInstr::Binary(
+                            t,
+                            AsmBinaryOp::Sub,
+                            convert_val(dst),
+                            AsmOperand::Reg(Reg::R11),
+                        ));
+                        out.push(AsmInstr::Mov(
+                            t,
+                            AsmOperand::Reg(Reg::R11),
+                            convert_val(dst),
+                        ));
+                        return Ok(());
                     }
                 }
             }

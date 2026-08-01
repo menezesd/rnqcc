@@ -26408,6 +26408,8 @@ long scalar_divneg(long a) { return a / -1; }
 long scalar_modneg(long a) { return a % -1; }
 long scalar_divshift(long a) { return a / 8; }
 long scalar_modshift(long a) { return a % 8; }
+long scalar_divnegshift(long a) { return a / -8; }
+long scalar_modnegshift(long a) { return a % -8; }
 unsigned long scalar_udivshift(unsigned long a) { return a / 8; }
 unsigned long scalar_umodshift(unsigned long a) { return a % 8; }
 unsigned __int128 andzero(unsigned __int128 a) { return a & 0; }
@@ -26608,6 +26610,32 @@ int ulezero(unsigned __int128 a) { return a <= 0; }
     );
     assert!(scalar_divshift.contains("\tsarq $3,"), "{scalar_divshift}");
     assert!(!scalar_divshift.contains("\tidivq "), "{scalar_divshift}");
+    let scalar_divnegshift = body("scalar_divnegshift");
+    assert!(
+        scalar_divnegshift.contains("\tsarq $3,"),
+        "{scalar_divnegshift}"
+    );
+    assert!(
+        scalar_divnegshift.contains("\tnegq "),
+        "{scalar_divnegshift}"
+    );
+    assert!(
+        !scalar_divnegshift.contains("\tidivq "),
+        "{scalar_divnegshift}"
+    );
+    let scalar_modnegshift = body("scalar_modnegshift");
+    assert!(
+        scalar_modnegshift.contains("\tsarq $3,"),
+        "{scalar_modnegshift}"
+    );
+    assert!(
+        scalar_modnegshift.contains("\tsalq $3,"),
+        "{scalar_modnegshift}"
+    );
+    assert!(
+        !scalar_modnegshift.contains("\tidivq "),
+        "{scalar_modnegshift}"
+    );
     let scalar_modshift = body("scalar_modshift");
     assert!(
         scalar_modshift.contains("\tsarq $63, %r10"),
@@ -27168,6 +27196,8 @@ int div32(int value) { return value / 8; }
 long div64(long value) { return value / 8; }
 int mod32(int value) { return value % 8; }
 long mod64(long value) { return value % 8; }
+long div64_negshift(long value) { return value / -8; }
+long mod64_negshift(long value) { return value % -8; }
 __int128 div128_3(__int128 value) { return value / 8; }
 __int128 div128_64(__int128 value) { return value / ((__int128)1 << 64); }
 __int128 div128_96(__int128 value) { return value / ((__int128)1 << 96); }
@@ -27203,6 +27233,8 @@ int main(void) {
     if (mod128_96(-((__int128)1 << 100) + 7) != -((__int128)1 << 96) + 7) return 17;
     if (mod128_neg3(-7) != -7 || mod128_neg3(-8) != 0 || mod128_neg3(-9) != -1) return 18;
     if (mul128_neg3(-7) != 56 || mul128_neg3(7) != -56) return 19;
+    if (div64_negshift(-7) != 0 || div64_negshift(-8) != 1 || div64_negshift(-9) != 1) return 20;
+    if (mod64_negshift(-7) != -7 || mod64_negshift(-8) != 0 || mod64_negshift(-9) != -1) return 21;
     return 0;
 }
 "#,

@@ -1538,8 +1538,14 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                     } else {
                         *value as i32 as i64
                     };
-                    if value > 1 && (value as u64).is_power_of_two() {
-                        let amount = (value as u64).trailing_zeros();
+                    let negate_result = value < -1;
+                    let magnitude = if negate_result {
+                        value.unsigned_abs()
+                    } else {
+                        value as u64
+                    };
+                    if magnitude > 1 && magnitude.is_power_of_two() {
+                        let amount = magnitude.trailing_zeros();
                         if amount < width - 1 {
                             // C signed division truncates toward zero, whereas an
                             // arithmetic shift rounds negative values down. Add a
@@ -1574,6 +1580,9 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                                 AsmOperand::Imm(i64::from(amount)),
                                 convert_val(dst),
                             ));
+                            if negate_result {
+                                out.push(AsmInstr::Unary(t, AsmUnaryOp::Neg, convert_val(dst)));
+                            }
                             return Ok(());
                         }
                     }
@@ -1608,8 +1617,13 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                     } else {
                         *value as i32 as i64
                     };
-                    if value > 1 && (value as u64).is_power_of_two() {
-                        let amount = (value as u64).trailing_zeros();
+                    let magnitude = if value < -1 {
+                        value.unsigned_abs()
+                    } else {
+                        value as u64
+                    };
+                    if magnitude > 1 && magnitude.is_power_of_two() {
+                        let amount = magnitude.trailing_zeros();
                         if amount < width - 1 {
                             // Compute n - trunc(n / 2^k) * 2^k. The quotient
                             // uses the same sign-dependent bias as division.

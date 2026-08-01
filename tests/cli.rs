@@ -26187,12 +26187,16 @@ fn x86_64_i128_identity_operations_avoid_general_arithmetic() {
         r#"
 __int128 addzero(__int128 a) { return a + 0; }
 __int128 subzero(__int128 a) { return a - 0; }
+__int128 zerosub(__int128 a) { return 0 - a; }
 __int128 mulzero(__int128 a) { return a * 0; }
 __int128 mulone(__int128 a) { return a * 1; }
+__int128 mulneg(__int128 a) { return a * -1; }
 unsigned __int128 andzero(unsigned __int128 a) { return a & 0; }
 unsigned __int128 andones(unsigned __int128 a) { return a & ~(unsigned __int128)0; }
 unsigned __int128 orzero(unsigned __int128 a) { return a | 0; }
+unsigned __int128 orones(unsigned __int128 a) { return a | ~(unsigned __int128)0; }
 unsigned __int128 xorzero(unsigned __int128 a) { return a ^ 0; }
+unsigned __int128 xorones(unsigned __int128 a) { return a ^ ~(unsigned __int128)0; }
 "#,
     )
     .expect("failed to write input");
@@ -26239,6 +26243,20 @@ unsigned __int128 xorzero(unsigned __int128 a) { return a ^ 0; }
         assert!(!body.contains("\tmulq "), "{body}");
         assert!(!body.contains("\tandq "), "{body}");
     }
+    for name in ["zerosub", "mulneg"] {
+        let body = body(name);
+        assert!(body.contains("\tnotq "), "{body}");
+        assert!(body.contains("\taddq $1,"), "{body}");
+        assert!(body.contains("\tadcq $0,"), "{body}");
+        assert!(!body.contains("\timulq "), "{body}");
+        assert!(!body.contains("\tmulq "), "{body}");
+    }
+    let orones = body("orones");
+    assert!(orones.contains("\tmovq $-1,"), "{orones}");
+    assert!(!orones.contains("\torq "), "{orones}");
+    let xorones = body("xorones");
+    assert!(xorones.contains("\tnotq "), "{xorones}");
+    assert!(!xorones.contains("\txorq "), "{xorones}");
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);

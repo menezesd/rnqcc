@@ -413,6 +413,50 @@ fn emit_i128_zero(out: &mut Vec<AsmInstr>, dst: &TackyVal) -> Result<(), String>
     Ok(())
 }
 
+fn emit_i128_negate(out: &mut Vec<AsmInstr>, dst: &TackyVal) -> Result<(), String> {
+    let dst_op = convert_val(dst);
+    let dst_low = low64_operand(dst_op.clone())?;
+    let dst_high = high64_operand(dst_op)?;
+    out.push(AsmInstr::Unary(
+        AsmType::Quadword,
+        AsmUnaryOp::Not,
+        dst_low.clone(),
+    ));
+    out.push(AsmInstr::Unary(
+        AsmType::Quadword,
+        AsmUnaryOp::Not,
+        dst_high.clone(),
+    ));
+    out.push(AsmInstr::Binary(
+        AsmType::Quadword,
+        AsmBinaryOp::AddSetFlags,
+        AsmOperand::Imm(1),
+        dst_low,
+    ));
+    out.push(AsmInstr::Binary(
+        AsmType::Quadword,
+        AsmBinaryOp::Adc,
+        AsmOperand::Imm(0),
+        dst_high,
+    ));
+    Ok(())
+}
+
+fn emit_i128_not(out: &mut Vec<AsmInstr>, dst: &TackyVal) -> Result<(), String> {
+    let dst_op = convert_val(dst);
+    out.push(AsmInstr::Unary(
+        AsmType::Quadword,
+        AsmUnaryOp::Not,
+        low64_operand(dst_op.clone())?,
+    ));
+    out.push(AsmInstr::Unary(
+        AsmType::Quadword,
+        AsmUnaryOp::Not,
+        high64_operand(dst_op)?,
+    ));
+    Ok(())
+}
+
 fn i128_constant_is_zero(value: &TackyVal) -> bool {
     matches!(
         value,
@@ -3186,9 +3230,16 @@ fn convert_binary(
                             return Ok(());
                         }
                     }
-                    if matches!(op, TackyBinaryOp::Sub) && i128_constant_is_zero(right) {
-                        emit_i128_copy(out, left, dst)?;
-                        return Ok(());
+                    if matches!(op, TackyBinaryOp::Sub) {
+                        if i128_constant_is_zero(right) {
+                            emit_i128_copy(out, left, dst)?;
+                            return Ok(());
+                        }
+                        if i128_constant_is_zero(left) {
+                            emit_i128_copy(out, right, dst)?;
+                            emit_i128_negate(out, dst)?;
+                            return Ok(());
+                        }
                     }
                     if matches!(op, TackyBinaryOp::Mul) {
                         if i128_constant_is_zero(left) || i128_constant_is_zero(right) {
@@ -3201,6 +3252,16 @@ fn convert_binary(
                         }
                         if i128_constant_is_one(right) {
                             emit_i128_copy(out, left, dst)?;
+                            return Ok(());
+                        }
+                        if i128_constant_is_all_ones(left) {
+                            emit_i128_copy(out, right, dst)?;
+                            emit_i128_negate(out, dst)?;
+                            return Ok(());
+                        }
+                        if i128_constant_is_all_ones(right) {
+                            emit_i128_copy(out, left, dst)?;
+                            emit_i128_negate(out, dst)?;
                             return Ok(());
                         }
                     }
@@ -3225,6 +3286,31 @@ fn convert_binary(
                         }
                         if i128_constant_is_zero(right) {
                             emit_i128_copy(out, left, dst)?;
+                            return Ok(());
+                        }
+                    }
+
+                    if matches!(op, TackyBinaryOp::BitwiseOr)
+                        && (i128_constant_is_all_ones(left) || i128_constant_is_all_ones(right))
+                    {
+                        emit_i128_parts_to_operands(
+                            out,
+                            AsmOperand::Imm(-1),
+                            AsmOperand::Imm(-1),
+                            low64_operand(dst_op.clone())?,
+                            high64_operand(dst_op.clone())?,
+                        );
+                        return Ok(());
+                    }
+                    if matches!(op, TackyBinaryOp::BitwiseXor) {
+                        if i128_constant_is_all_ones(left) {
+                            emit_i128_copy(out, right, dst)?;
+                            emit_i128_not(out, dst)?;
+                            return Ok(());
+                        }
+                        if i128_constant_is_all_ones(right) {
+                            emit_i128_copy(out, left, dst)?;
+                            emit_i128_not(out, dst)?;
                             return Ok(());
                         }
                     }

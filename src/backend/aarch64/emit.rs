@@ -2230,8 +2230,31 @@ fn emit_function(
         writeln!(w, "\t.globl {}", name)?;
     }
     writeln!(w, "{}:", name)?;
-    for instr in &function.instructions {
-        emit_instruction(w, instr, target)?;
+    let instructions = &function.instructions;
+    let mut index = 0;
+    while index < instructions.len() {
+        if let (
+            AsmInstr::Cmp(
+                ty @ (AsmType::Longword | AsmType::Quadword),
+                AsmOperand::Imm(0),
+                AsmOperand::Reg(reg),
+            ),
+            Some(AsmInstr::JmpCC(cc @ (CondCode::E | CondCode::NE), label)),
+        ) = (&instructions[index], instructions.get(index + 1))
+        {
+            let mnemonic = if matches!(cc, CondCode::E) {
+                "cbnz"
+            } else {
+                "cbz"
+            };
+            writeln!(w, "\t{} {}, 1f", mnemonic, reg_name(*reg, *ty)?)?;
+            writeln!(w, "\tb .L{}", label)?;
+            writeln!(w, "1:")?;
+            index += 2;
+            continue;
+        }
+        emit_instruction(w, &instructions[index], target)?;
+        index += 1;
     }
     Ok(())
 }
@@ -2740,6 +2763,39 @@ mod tests {
         assert!(asm.contains("ldr x30, [x16]"));
         assert!(asm.contains("add sp, sp, #24, lsl #12"));
         assert!(asm.contains("add sp, sp, #1744"));
+        Ok(())
+    }
+
+    #[test]
+    fn zero_compare_branch_uses_cbz_or_cbnz() -> Result<(), String> {
+        let function = AsmFunction {
+            name: "f".to_string(),
+            global: false,
+            instructions: vec![
+                AsmInstr::Cmp(
+                    AsmType::Longword,
+                    AsmOperand::Imm(0),
+                    AsmOperand::Reg(Reg::AX),
+                ),
+                AsmInstr::JmpCC(CondCode::E, "zero".to_string()),
+                AsmInstr::Cmp(
+                    AsmType::Quadword,
+                    AsmOperand::Imm(0),
+                    AsmOperand::Reg(Reg::DI),
+                ),
+                AsmInstr::JmpCC(CondCode::NE, "nonzero".to_string()),
+                AsmInstr::Ret,
+            ],
+        };
+        let mut out = Vec::new();
+        emit_function(&mut out, &function, &Target::aarch64_linux())
+            .map_err(|err| err.to_string())?;
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert!(asm.contains("\tcbnz w0, 1f\n\tb .Lzero\n"), "{asm}");
+        assert!(asm.contains("\tcbz x1, 1f\n\tb .Lnonzero\n"), "{asm}");
+        assert!(!asm.contains("cmp w0, #0"), "{asm}");
+        assert!(!asm.contains("cmp x1, #0"), "{asm}");
         Ok(())
     }
 

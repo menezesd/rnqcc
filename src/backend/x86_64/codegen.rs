@@ -1416,6 +1416,46 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                         return Ok(());
                     }
                 }
+                if matches!(op, TackyBinaryOp::Mod) && is_unsigned {
+                    if let Some(amount) = i128_constant_power_of_two_shift(right) {
+                        emit_i128_copy(out, left, dst)?;
+                        let dst_op = convert_val(dst);
+                        let dst_low = low64_operand(dst_op.clone())?;
+                        let dst_high = high64_operand(dst_op)?;
+                        match amount {
+                            1..=63 => {
+                                out.push(AsmInstr::Binary(
+                                    AsmType::Quadword,
+                                    AsmBinaryOp::And,
+                                    AsmOperand::Imm(((1u64 << amount) - 1) as i64),
+                                    dst_low,
+                                ));
+                                out.push(AsmInstr::Mov(
+                                    AsmType::Quadword,
+                                    AsmOperand::Imm(0),
+                                    dst_high,
+                                ));
+                            }
+                            64 => {
+                                out.push(AsmInstr::Mov(
+                                    AsmType::Quadword,
+                                    AsmOperand::Imm(0),
+                                    dst_high,
+                                ));
+                            }
+                            65..=127 => {
+                                out.push(AsmInstr::Binary(
+                                    AsmType::Quadword,
+                                    AsmBinaryOp::And,
+                                    AsmOperand::Imm(((1u64 << (amount - 64)) - 1) as i64),
+                                    dst_high,
+                                ));
+                            }
+                            _ => unreachable!("128-bit power-of-two remainder shift is in range"),
+                        }
+                        return Ok(());
+                    }
+                }
                 if matches!(op, TackyBinaryOp::Div) && i128_constant_is_one(right) {
                     emit_i128_copy(out, left, dst)?;
                     return Ok(());

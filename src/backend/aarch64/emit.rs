@@ -1634,9 +1634,9 @@ fn emit_operand_address_into(
 /// destination address in `x12`.
 ///
 /// Small argument copies are common and do not need a loop counter or branch.
-/// For larger aggregates, copy full eight-byte units in a compact loop and
-/// finish with exact-width tail moves, avoiding both byte-at-a-time traffic and
-/// reads past the end of the object.
+/// For larger aggregates, copy full sixteen-byte units in a compact pair-load
+/// loop and finish with exact-width tail moves, avoiding both byte-at-a-time
+/// traffic and reads past the end of the object.
 fn emit_byte_copy_loop(w: &mut dyn Write, size: usize) -> std::io::Result<()> {
     const INLINE_COPY_LIMIT: usize = 32;
 
@@ -1644,17 +1644,21 @@ fn emit_byte_copy_loop(w: &mut dyn Write, size: usize) -> std::io::Result<()> {
         return emit_copy_tail(w, size);
     }
 
-    let qwords = size / 8;
-    debug_assert!(qwords > 0);
-    emit_load_immediate(w, AsmType::Quadword, "x13", qwords as i64)?;
+    let pairs = size / 16;
+    debug_assert!(pairs > 0);
+    emit_load_immediate(w, AsmType::Quadword, "x13", pairs as i64)?;
     writeln!(w, "1:")?;
-    emit_copy_chunk(w, "x10", "ldr", "str", 8)?;
+    emit_copy_pair(w)?;
     writeln!(w, "\tsubs x13, x13, #1")?;
     writeln!(w, "\tb.ne 1b")?;
-    emit_copy_tail(w, size % 8)
+    emit_copy_tail(w, size % 16)
 }
 
 fn emit_copy_tail(w: &mut dyn Write, mut size: usize) -> std::io::Result<()> {
+    while size >= 16 {
+        emit_copy_pair(w)?;
+        size -= 16;
+    }
     for (reg, load, store, width) in [
         ("x10", "ldr", "str", 8),
         ("w10", "ldr", "str", 4),
@@ -1668,6 +1672,11 @@ fn emit_copy_tail(w: &mut dyn Write, mut size: usize) -> std::io::Result<()> {
     }
     debug_assert_eq!(size, 0);
     Ok(())
+}
+
+fn emit_copy_pair(w: &mut dyn Write) -> std::io::Result<()> {
+    writeln!(w, "\tldp x10, x14, [x11], #16")?;
+    writeln!(w, "\tstp x10, x14, [x12], #16")
 }
 
 fn emit_copy_chunk(
@@ -2518,17 +2527,15 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_copy_repeats_widths_until_complete() -> Result<(), String> {
+    fn aggregate_copy_uses_pair_moves_before_tail() -> Result<(), String> {
         let mut out = Vec::new();
         emit_byte_copy_loop(&mut out, 24).map_err(|err| err.to_string())?;
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
         assert_eq!(
             asm,
-            "\tldr x10, [x11], #8\n\
-             \tstr x10, [x12], #8\n\
-             \tldr x10, [x11], #8\n\
-             \tstr x10, [x12], #8\n\
+            "\tldp x10, x14, [x11], #16\n\
+             \tstp x10, x14, [x12], #16\n\
              \tldr x10, [x11], #8\n\
              \tstr x10, [x12], #8\n"
         );
@@ -2543,10 +2550,10 @@ mod tests {
 
         assert_eq!(
             asm,
-            "\tmovz x13, #4\n\
+            "\tmovz x13, #2\n\
              1:\n\
-             \tldr x10, [x11], #8\n\
-             \tstr x10, [x12], #8\n\
+             \tldp x10, x14, [x11], #16\n\
+             \tstp x10, x14, [x12], #16\n\
              \tsubs x13, x13, #1\n\
              \tb.ne 1b\n\
              \tldr w10, [x11], #4\n\

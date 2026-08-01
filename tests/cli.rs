@@ -26210,6 +26210,7 @@ long scalar_divone(long a) { return a / 1; }
 long scalar_modone(long a) { return a % 1; }
 long scalar_divneg(long a) { return a / -1; }
 long scalar_modneg(long a) { return a % -1; }
+unsigned long scalar_udivshift(unsigned long a) { return a / 8; }
 unsigned __int128 andzero(unsigned __int128 a) { return a & 0; }
 unsigned __int128 andones(unsigned __int128 a) { return a & ~(unsigned __int128)0; }
 unsigned __int128 orzero(unsigned __int128 a) { return a | 0; }
@@ -26341,6 +26342,12 @@ int ulezero(unsigned __int128 a) { return a <= 0; }
         "{scalar_modneg}"
     );
     assert!(!scalar_modneg.contains("\tidivq "), "{scalar_modneg}");
+    let scalar_udivshift = body("scalar_udivshift");
+    assert!(
+        scalar_udivshift.contains("\tshrq $3,"),
+        "{scalar_udivshift}"
+    );
+    assert!(!scalar_udivshift.contains("\tdivq "), "{scalar_udivshift}");
     let orones = body("orones");
     assert!(orones.contains("\tmovq $-1,"), "{orones}");
     assert!(!orones.contains("\torq "), "{orones}");

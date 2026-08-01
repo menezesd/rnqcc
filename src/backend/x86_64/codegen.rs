@@ -1380,6 +1380,23 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                 .copied()
                 .unwrap_or(CType::Int);
             let is_unsigned = !dst_ctype.is_signed();
+            if matches!(op, TackyBinaryOp::Div)
+                && is_unsigned
+                && matches!(t, AsmType::Longword | AsmType::Quadword)
+            {
+                if let TackyVal::Constant(value) = right {
+                    if *value > 1 && (*value as u64).is_power_of_two() {
+                        out.push(AsmInstr::Mov(t, convert_val(left), convert_val(dst)));
+                        out.push(AsmInstr::Binary(
+                            t,
+                            AsmBinaryOp::Shr,
+                            AsmOperand::Imm(i64::from((*value as u64).trailing_zeros())),
+                            convert_val(dst),
+                        ));
+                        return Ok(());
+                    }
+                }
+            }
             if !is_unsigned && matches!(right, TackyVal::Constant(-1)) {
                 if matches!(op, TackyBinaryOp::Div) {
                     out.push(AsmInstr::Mov(t, convert_val(left), convert_val(dst)));

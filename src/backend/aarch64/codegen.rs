@@ -1051,8 +1051,25 @@ fn emit_i128_helper_binary(
             }
         }
     }
+    if matches!(op, TackyBinaryOp::Div) && !is_unsigned {
+        if let Some(amount) = i128_constant_negative_power_of_two_shift(right) {
+            if (1..127).contains(&amount) {
+                emit_i128_signed_power_of_two_division(
+                    instructions,
+                    left,
+                    dst.clone(),
+                    amount,
+                    ctx,
+                )?;
+                emit_i128_negate_operand(instructions, &dst)?;
+                return Ok(true);
+            }
+        }
+    }
     if matches!(op, TackyBinaryOp::Mod) && !is_unsigned {
-        if let Some(amount) = i128_constant_power_of_two_shift(right) {
+        if let Some(amount) = i128_constant_power_of_two_shift(right)
+            .or_else(|| i128_constant_negative_power_of_two_shift(right))
+        {
             if (1..127).contains(&amount) {
                 emit_i128_signed_power_of_two_remainder(instructions, left, dst, amount, ctx)?;
                 return Ok(true);
@@ -1171,10 +1188,12 @@ fn i128_div_or_mod_requires_helper(
         && !(matches!(op, TackyBinaryOp::Div)
             && !is_unsigned_val(left, types)
             && i128_constant_power_of_two_shift(right)
+                .or_else(|| i128_constant_negative_power_of_two_shift(right))
                 .is_some_and(|amount| (1..127).contains(&amount)))
         && !(matches!(op, TackyBinaryOp::Mod)
             && !is_unsigned_val(left, types)
             && i128_constant_power_of_two_shift(right)
+                .or_else(|| i128_constant_negative_power_of_two_shift(right))
                 .is_some_and(|amount| (1..127).contains(&amount)))
         && (is_unsigned_val(left, types) || !i128_constant_is_negative_one(right))
 }

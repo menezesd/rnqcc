@@ -25996,11 +25996,13 @@ __int128 divone128(__int128 a) { return a / 1; }
 __int128 divneg128(__int128 a) { return a / -1; }
 __int128 divshift128(__int128 a) { return a / 8; }
 __int128 divwide128(__int128 a) { return a / ((__int128)1 << 96); }
+__int128 divnegshift128(__int128 a) { return a / -8; }
 __int128 mod128(__int128 a, __int128 b) { return a % b; }
 __int128 modone128(__int128 a) { return a % 1; }
 __int128 modneg128(__int128 a) { return a % -1; }
 __int128 modshift128(__int128 a) { return a % 8; }
 __int128 modwide128(__int128 a) { return a % ((__int128)1 << 96); }
+__int128 modnegshift128(__int128 a) { return a % -8; }
 unsigned __int128 udiv128(unsigned __int128 a, unsigned __int128 b) { return a / b; }
 unsigned __int128 udivshift128(unsigned __int128 a) { return a / 8; }
 unsigned __int128 umodshift128(unsigned __int128 a) { return a % 8; }
@@ -26235,6 +26237,13 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
     assert!(divwide128.contains("\tasr x0, x0, #32"), "{divwide128}");
     assert!(divwide128.contains("\tasr x1, x1, #63"), "{divwide128}");
     assert!(!divwide128.contains("\tbl __divti3"), "{divwide128}");
+    let divnegshift128 = body("divnegshift128");
+    assert!(divnegshift128.contains("\tmvn x0, x0"), "{divnegshift128}");
+    assert!(divnegshift128.contains("\tmvn x1, x1"), "{divnegshift128}");
+    assert!(
+        !divnegshift128.contains("\tbl __divti3"),
+        "{divnegshift128}"
+    );
     let modshift128 = body("modshift128");
     assert!(modshift128.contains("\tlsl x0, x0, #3"), "{modshift128}");
     assert!(modshift128.contains("\tsubs x0, x0, x9"), "{modshift128}");
@@ -26245,6 +26254,15 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
     assert!(modwide128.contains("\tsubs x0, x0, x9"), "{modwide128}");
     assert!(modwide128.contains("\tsbcs x1, x1, x10"), "{modwide128}");
     assert!(!modwide128.contains("\tbl __modti3"), "{modwide128}");
+    let modnegshift128 = body("modnegshift128");
+    assert!(
+        modnegshift128.contains("\tsubs x0, x0, x9"),
+        "{modnegshift128}"
+    );
+    assert!(
+        !modnegshift128.contains("\tbl __modti3"),
+        "{modnegshift128}"
+    );
     for name in ["modone128", "modneg128"] {
         let body = body(name);
         assert!(body.contains("\tmov x0, xzr"), "{body}");
@@ -26333,10 +26351,12 @@ __int128 divneg(__int128 a) { return a / -1; }
 __int128 divshift(__int128 a) { return a / 8; }
 __int128 divword(__int128 a) { return a / ((__int128)1 << 64); }
 __int128 divwide(__int128 a) { return a / ((__int128)1 << 96); }
+__int128 divnegshift(__int128 a) { return a / -8; }
 __int128 modone(__int128 a) { return a % 1; }
 __int128 modneg(__int128 a) { return a % -1; }
 __int128 modshift(__int128 a) { return a % 8; }
 __int128 modwide(__int128 a) { return a % ((__int128)1 << 96); }
+__int128 modnegshift(__int128 a) { return a % -8; }
 unsigned __int128 udivshift(unsigned __int128 a) { return a / 8; }
 unsigned __int128 umodshift(unsigned __int128 a) { return a % 8; }
 unsigned __int128 umodwide(unsigned __int128 a) { return a % ((unsigned __int128)1 << 65); }
@@ -26447,6 +26467,10 @@ int ulezero(unsigned __int128 a) { return a <= 0; }
     assert!(divwide.contains("\tadcq %r11,"), "{divwide}");
     assert!(divwide.contains("\tsarq $32,"), "{divwide}");
     assert!(!divwide.contains("\tcall __divti3"), "{divwide}");
+    let divnegshift = body("divnegshift");
+    assert!(divnegshift.contains("\tnotq "), "{divnegshift}");
+    assert!(divnegshift.contains("\tadcq $0,"), "{divnegshift}");
+    assert!(!divnegshift.contains("\tcall __divti3"), "{divnegshift}");
     let modshift = body("modshift");
     assert!(modshift.contains("\tsarq $63, %r10"), "{modshift}");
     assert!(modshift.contains("\tsalq $3,"), "{modshift}");
@@ -26458,6 +26482,9 @@ int ulezero(unsigned __int128 a) { return a <= 0; }
     assert!(modwide.contains("\tsalq $32,"), "{modwide}");
     assert!(modwide.contains("\tsbbq %r11,"), "{modwide}");
     assert!(!modwide.contains("\tcall __modti3"), "{modwide}");
+    let modnegshift = body("modnegshift");
+    assert!(modnegshift.contains("\tsbbq %r11,"), "{modnegshift}");
+    assert!(!modnegshift.contains("\tcall __modti3"), "{modnegshift}");
     for name in ["modone", "modneg"] {
         let body = body(name);
         assert!(
@@ -27106,9 +27133,11 @@ long mod64(long value) { return value % 8; }
 __int128 div128_3(__int128 value) { return value / 8; }
 __int128 div128_64(__int128 value) { return value / ((__int128)1 << 64); }
 __int128 div128_96(__int128 value) { return value / ((__int128)1 << 96); }
+__int128 div128_neg3(__int128 value) { return value / -8; }
 __int128 mod128_3(__int128 value) { return value % 8; }
 __int128 mod128_64(__int128 value) { return value % ((__int128)1 << 64); }
 __int128 mod128_96(__int128 value) { return value % ((__int128)1 << 96); }
+__int128 mod128_neg3(__int128 value) { return value % -8; }
 long div_pressure(long a, long b, long c, long d, long e, long f, long g, long h) {
     return a / 8 + b + c + d + e + f + g + h;
 }
@@ -27129,9 +27158,11 @@ int main(void) {
     if (div128_3(-7) != 0 || div128_3(-8) != -1 || div128_3(-9) != -1) return 11;
     if (div128_64(-((__int128)1 << 100) + 7) != -68719476735L) return 12;
     if (div128_96(-((__int128)1 << 100) + 7) != -15) return 13;
-    if (mod128_3(-7) != -7 || mod128_3(-8) != 0 || mod128_3(-9) != -1) return 14;
-    if (mod128_64(-((__int128)1 << 100) + 7) != -((__int128)1 << 64) + 7) return 15;
-    if (mod128_96(-((__int128)1 << 100) + 7) != -((__int128)1 << 96) + 7) return 16;
+    if (div128_neg3(-7) != 0 || div128_neg3(-8) != 1 || div128_neg3(-9) != 1) return 14;
+    if (mod128_3(-7) != -7 || mod128_3(-8) != 0 || mod128_3(-9) != -1) return 15;
+    if (mod128_64(-((__int128)1 << 100) + 7) != -((__int128)1 << 64) + 7) return 16;
+    if (mod128_96(-((__int128)1 << 100) + 7) != -((__int128)1 << 96) + 7) return 17;
+    if (mod128_neg3(-7) != -7 || mod128_neg3(-8) != 0 || mod128_neg3(-9) != -1) return 18;
     return 0;
 }
 "#,

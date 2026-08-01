@@ -626,6 +626,23 @@ fn i128_constant_power_of_two_shift(value: &TackyVal) -> Option<i64> {
         .then_some(i64::from(value.trailing_zeros()))
 }
 
+fn i128_constant_negative_power_of_two_shift(value: &TackyVal) -> Option<i64> {
+    let value = match value {
+        TackyVal::Constant(value) if *value < -1 => value.unsigned_abs() as u128,
+        TackyVal::Int128Constant(value) if *value < -1 => value.unsigned_abs(),
+        _ => return None,
+    };
+    value
+        .is_power_of_two()
+        .then_some(i64::from(value.trailing_zeros()))
+}
+
+fn i128_signed_power_of_two_divisor(value: &TackyVal) -> Option<(i64, bool)> {
+    i128_constant_power_of_two_shift(value)
+        .map(|amount| (amount, false))
+        .or_else(|| i128_constant_negative_power_of_two_shift(value).map(|amount| (amount, true)))
+}
+
 fn emit_i128_parts_to_operands(
     out: &mut Vec<AsmInstr>,
     low: AsmOperand,
@@ -1685,7 +1702,7 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                     }
                 }
                 if matches!(op, TackyBinaryOp::Div) && !is_unsigned {
-                    if let Some(amount) = i128_constant_power_of_two_shift(right) {
+                    if let Some((amount, negate_result)) = i128_signed_power_of_two_divisor(right) {
                         if (1..127).contains(&amount) {
                             // C signed division truncates toward zero, whereas a
                             // 128-bit arithmetic shift rounds negative values down.
@@ -1708,12 +1725,15 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                                 dst,
                                 &mut binary_ctx,
                             )?;
+                            if negate_result {
+                                emit_i128_negate(out, dst)?;
+                            }
                             return Ok(());
                         }
                     }
                 }
                 if matches!(op, TackyBinaryOp::Mod) && !is_unsigned {
-                    if let Some(amount) = i128_constant_power_of_two_shift(right) {
+                    if let Some((amount, _)) = i128_signed_power_of_two_divisor(right) {
                         if (1..127).contains(&amount) {
                             // n % 2^k is n - trunc(n / 2^k) * 2^k. Reuse the
                             // direct signed quotient lowering instead of __modti3.

@@ -1467,6 +1467,10 @@ fn emit_binary(
         writeln!(w, "\tlsl {}, {}, #{}", dst_reg, dst_reg, amount)?;
         return store_operand(w, target, ty, dst_reg, dst);
     }
+    if binary_mul_negative_one(ty, op, src) {
+        writeln!(w, "\tneg {}, {}", dst_reg, dst_reg)?;
+        return store_operand(w, target, ty, dst_reg, dst);
+    }
     if let Some(amount) = binary_unsigned_div_power_of_two_amount(ty, op, src) {
         writeln!(w, "\tlsr {}, {}, #{}", dst_reg, dst_reg, amount)?;
         return store_operand(w, target, ty, dst_reg, dst);
@@ -1530,6 +1534,24 @@ fn binary_mul_power_of_two_amount(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperan
     let (value, width) = integer_immediate_value(ty, *value)?;
     let amount = value.trailing_zeros();
     (value.is_power_of_two() && amount < width).then_some(amount)
+}
+
+fn binary_mul_negative_one(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> bool {
+    if !matches!(op, AsmBinaryOp::Mul) {
+        return false;
+    }
+    let AsmOperand::Imm(value) = src else {
+        return false;
+    };
+    let Some((value, width)) = integer_immediate_value(ty, *value) else {
+        return false;
+    };
+    value
+        == if width == 64 {
+            u64::MAX
+        } else {
+            u32::MAX as u64
+        }
 }
 
 fn binary_unsigned_div_power_of_two_amount(
@@ -2828,7 +2850,12 @@ mod tests {
     #[test]
     fn integer_multiply_immediates_use_shift_or_trivial_forms() -> Result<(), String> {
         let mut out = Vec::new();
-        for source in [AsmOperand::Imm(8), AsmOperand::Imm(0), AsmOperand::Imm(1)] {
+        for source in [
+            AsmOperand::Imm(8),
+            AsmOperand::Imm(0),
+            AsmOperand::Imm(1),
+            AsmOperand::Imm(-1),
+        ] {
             emit_instruction(
                 &mut out,
                 &AsmInstr::Binary(
@@ -2843,7 +2870,7 @@ mod tests {
         }
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
-        assert_eq!(asm, "\tlsl x0, x0, #3\n\tmov x0, xzr\n");
+        assert_eq!(asm, "\tlsl x0, x0, #3\n\tmov x0, xzr\n\tneg x0, x0\n");
         Ok(())
     }
 

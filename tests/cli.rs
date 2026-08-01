@@ -8360,7 +8360,12 @@ fn emits_aarch64_assembly_for_integer_division_and_shifts() {
 fn emits_aarch64_shift_for_power_of_two_multiply_immediate() {
     let src = temp_file("aarch64-mul-immediate", "i");
     let out = temp_file("aarch64-mul-immediate", "s");
-    std::fs::write(&src, "long scale(long x) { return x * 8; }\n").expect("failed to write input");
+    std::fs::write(
+        &src,
+        "long scale(long x) { return x * 8; }\n\
+         long negate(long x) { return x * -1; }\n",
+    )
+    .expect("failed to write input");
 
     let output = Command::new(rnqcc())
         .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
@@ -8373,6 +8378,7 @@ fn emits_aarch64_shift_for_power_of_two_multiply_immediate() {
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains("\tlsl x0, x0, #3"), "{asm}");
     assert!(!asm.contains("\tmul x0, x0,"), "{asm}");
+    assert!(asm.contains("\tneg x0, x0"), "{asm}");
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);

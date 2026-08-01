@@ -882,10 +882,11 @@ fn emit_load_immediate(
         value as u64
     };
 
-    let chunks: Vec<_> = (0..width)
-        .step_by(16)
-        .map(|shift| ((bits >> shift) & 0xffff) as u16)
-        .collect();
+    let mut chunk_storage = [0u16; 4];
+    for (index, shift) in (0..width).step_by(16).enumerate() {
+        chunk_storage[index] = ((bits >> shift) & 0xffff) as u16;
+    }
+    let chunks = &chunk_storage[..(width / 16) as usize];
     let zero_cost = chunks.iter().filter(|&&chunk| chunk != 0).count();
     let ones_cost = chunks.iter().filter(|&&chunk| chunk != u16::MAX).count();
     let use_movn = ones_cost < zero_cost;

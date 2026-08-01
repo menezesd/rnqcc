@@ -26227,6 +26227,7 @@ long scalar_modone(long a) { return a % 1; }
 long scalar_divneg(long a) { return a / -1; }
 long scalar_modneg(long a) { return a % -1; }
 long scalar_divshift(long a) { return a / 8; }
+long scalar_modshift(long a) { return a % 8; }
 unsigned long scalar_udivshift(unsigned long a) { return a / 8; }
 unsigned long scalar_umodshift(unsigned long a) { return a % 8; }
 unsigned __int128 andzero(unsigned __int128 a) { return a & 0; }
@@ -26388,6 +26389,18 @@ int ulezero(unsigned __int128 a) { return a <= 0; }
     );
     assert!(scalar_divshift.contains("\tsarq $3,"), "{scalar_divshift}");
     assert!(!scalar_divshift.contains("\tidivq "), "{scalar_divshift}");
+    let scalar_modshift = body("scalar_modshift");
+    assert!(
+        scalar_modshift.contains("\tsarq $63, %r10"),
+        "{scalar_modshift}"
+    );
+    assert!(
+        scalar_modshift.contains("\tandq $7, %r10"),
+        "{scalar_modshift}"
+    );
+    assert!(scalar_modshift.contains("\tsalq $3,"), "{scalar_modshift}");
+    assert!(scalar_modshift.contains("\tsubq "), "{scalar_modshift}");
+    assert!(!scalar_modshift.contains("\tidivq "), "{scalar_modshift}");
     let scalar_udivshift = body("scalar_udivshift");
     assert!(
         scalar_udivshift.contains("\tshrq $3,"),
@@ -26934,11 +26947,17 @@ fn signed_power_of_two_division_preserves_negative_runtime_results() {
         r#"
 int div32(int value) { return value / 8; }
 long div64(long value) { return value / 8; }
+int mod32(int value) { return value % 8; }
+long mod64(long value) { return value % 8; }
 int main(void) {
     if (div32(-7) != 0 || div32(-8) != -1 || div32(-9) != -1) return 1;
     if (div32(-2147483647 - 1) != -268435456) return 2;
     if (div64(-7) != 0 || div64(-8) != -1 || div64(-9) != -1) return 3;
     if (div64(-9223372036854775807L - 1) != -1152921504606846976L) return 4;
+    if (mod32(-7) != -7 || mod32(-8) != 0 || mod32(-9) != -1) return 5;
+    if (mod32(-2147483647 - 1) != 0) return 6;
+    if (mod64(-7) != -7 || mod64(-8) != 0 || mod64(-9) != -1) return 7;
+    if (mod64(-9223372036854775807L - 1) != 0) return 8;
     return 0;
 }
 "#,

@@ -1467,6 +1467,79 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                     }
                 }
             }
+            if matches!(op, TackyBinaryOp::Mod)
+                && !is_unsigned
+                && matches!(t, AsmType::Longword | AsmType::Quadword)
+            {
+                if let TackyVal::Constant(value) = right {
+                    let width = if t == AsmType::Quadword { 64 } else { 32 };
+                    let value = if t == AsmType::Quadword {
+                        *value
+                    } else {
+                        *value as i32 as i64
+                    };
+                    if value > 1 && (value as u64).is_power_of_two() {
+                        let amount = (value as u64).trailing_zeros();
+                        if amount < width - 1 {
+                            // Compute n - trunc(n / 2^k) * 2^k. The quotient
+                            // uses the same sign-dependent bias as division.
+                            out.push(AsmInstr::Mov(t, convert_val(left), convert_val(dst)));
+                            out.push(AsmInstr::Mov(
+                                t,
+                                convert_val(dst),
+                                AsmOperand::Reg(Reg::R11),
+                            ));
+                            out.push(AsmInstr::Mov(
+                                t,
+                                convert_val(dst),
+                                AsmOperand::Reg(Reg::R10),
+                            ));
+                            out.push(AsmInstr::Binary(
+                                t,
+                                AsmBinaryOp::Sar,
+                                AsmOperand::Imm(i64::from(width - 1)),
+                                AsmOperand::Reg(Reg::R10),
+                            ));
+                            out.push(AsmInstr::Binary(
+                                t,
+                                AsmBinaryOp::And,
+                                AsmOperand::Imm(((1u64 << amount) - 1) as i64),
+                                AsmOperand::Reg(Reg::R10),
+                            ));
+                            out.push(AsmInstr::Binary(
+                                t,
+                                AsmBinaryOp::Add,
+                                AsmOperand::Reg(Reg::R10),
+                                convert_val(dst),
+                            ));
+                            out.push(AsmInstr::Binary(
+                                t,
+                                AsmBinaryOp::Sar,
+                                AsmOperand::Imm(i64::from(amount)),
+                                convert_val(dst),
+                            ));
+                            out.push(AsmInstr::Binary(
+                                t,
+                                AsmBinaryOp::Sal,
+                                AsmOperand::Imm(i64::from(amount)),
+                                convert_val(dst),
+                            ));
+                            out.push(AsmInstr::Binary(
+                                t,
+                                AsmBinaryOp::Sub,
+                                convert_val(dst),
+                                AsmOperand::Reg(Reg::R11),
+                            ));
+                            out.push(AsmInstr::Mov(
+                                t,
+                                AsmOperand::Reg(Reg::R11),
+                                convert_val(dst),
+                            ));
+                            return Ok(());
+                        }
+                    }
+                }
+            }
             if !is_unsigned && matches!(right, TackyVal::Constant(-1)) {
                 if matches!(op, TackyBinaryOp::Div) {
                     out.push(AsmInstr::Mov(t, convert_val(left), convert_val(dst)));

@@ -5,6 +5,10 @@ fn invalid_input<T>(message: impl Into<String>) -> io::Result<T> {
     Err(io::Error::new(io::ErrorKind::InvalidInput, message.into()))
 }
 
+fn fits_sign_extended_i32(value: i64) -> bool {
+    i32::try_from(value).is_ok()
+}
+
 fn static_label_name(platform: &Target, label: &str) -> String {
     if label.starts_with("label.") {
         format!(".L{}", label)
@@ -521,7 +525,7 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                 // if dst is a register, emit movabsq directly; otherwise use r10
                 if *t == AsmType::Quadword {
                     if let AsmOperand::Imm(v) = src {
-                        if *v > i32::MAX as i64 || *v < i32::MIN as i64 {
+                        if !fits_sign_extended_i32(*v) {
                             if matches!(dst, AsmOperand::Reg(_)) {
                                 return writeln!(
                                     w,
@@ -847,7 +851,7 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                     // For imulq with large 64-bit immediates, load into r10 first
                     if *t == AsmType::Quadword && matches!(op, AsmBinaryOp::Mul) {
                         if let AsmOperand::Imm(v) = src {
-                            if *v > i32::MAX as i64 || *v < i32::MIN as i64 {
+                            if !fits_sign_extended_i32(*v) {
                                 writeln!(w, "\tmovq ${}, %r10", v)?;
                                 return writeln!(
                                     w,
@@ -860,7 +864,7 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                     // For other binary ops with large 64-bit immediates
                     if *t == AsmType::Quadword {
                         if let AsmOperand::Imm(v) = src {
-                            if *v > i32::MAX as i64 || *v < i32::MIN as i64 {
+                            if !fits_sign_extended_i32(*v) {
                                 writeln!(w, "\tmovq ${}, %r10", v)?;
                                 return writeln!(
                                     w,
@@ -925,7 +929,7 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                 // cmpq doesn't support 64-bit immediates
                 if *t == AsmType::Quadword {
                     if let AsmOperand::Imm(v) = src {
-                        if *v > i32::MAX as i64 || *v < i32::MIN as i64 {
+                        if !fits_sign_extended_i32(*v) {
                             writeln!(w, "\tmovq ${}, %r10", v)?;
                             return writeln!(
                                 w,
@@ -989,7 +993,7 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                 // Handle 64-bit immediates that don't fit in 32-bit sign-extended
                 if *t == AsmType::Quadword {
                     if let AsmOperand::Imm(v) = src {
-                        if *v > i32::MAX as i64 || *v < i32::MIN as i64 {
+                        if !fits_sign_extended_i32(*v) {
                             writeln!(w, "\tmovq ${}, %r10", v)?;
                             return writeln!(w, "\tmovq %r10, ({})", reg64);
                         }
@@ -1208,7 +1212,7 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
             }
             // pushq doesn't support 64-bit immediates
             if let AsmOperand::Imm(v) = operand {
-                if *v > i32::MAX as i64 || *v < i32::MIN as i64 {
+                if !fits_sign_extended_i32(*v) {
                     writeln!(w, "\tmovq ${}, %r10", v)?;
                     return writeln!(w, "\tpushq %r10");
                 }

@@ -2847,6 +2847,39 @@ fn convert_binary(
             x87_load_val(out, left, types, static_doubles);
             out.push(AsmInstr::X87Compare);
         } else if cmp_type == AsmType::Octword {
+            if matches!(op, TackyBinaryOp::Equal | TackyBinaryOp::NotEqual)
+                && (i128_constant_is_zero(left) || i128_constant_is_zero(right))
+            {
+                let value = if i128_constant_is_zero(left) {
+                    right
+                } else {
+                    left
+                };
+                let (low, high) = i128_part_operands(value)?;
+                out.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    low,
+                    AsmOperand::Reg(Reg::R10),
+                ));
+                out.push(AsmInstr::Binary(
+                    AsmType::Quadword,
+                    AsmBinaryOp::Or,
+                    high,
+                    AsmOperand::Reg(Reg::R10),
+                ));
+                out.push(AsmInstr::Cmp(
+                    AsmType::Quadword,
+                    AsmOperand::Imm(0),
+                    AsmOperand::Reg(Reg::R10),
+                ));
+                out.push(AsmInstr::Mov(
+                    AsmType::Longword,
+                    AsmOperand::Imm(0),
+                    convert_val(dst),
+                ));
+                out.push(AsmInstr::SetCC(cc, convert_val(dst)));
+                return Ok(());
+            }
             let (left_low, left_high) = i128_part_operands(left)?;
             let (right_low, right_high) = i128_part_operands(right)?;
             let dst_op = convert_val(dst);

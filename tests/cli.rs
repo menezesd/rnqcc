@@ -26197,6 +26197,8 @@ unsigned __int128 orzero(unsigned __int128 a) { return a | 0; }
 unsigned __int128 orones(unsigned __int128 a) { return a | ~(unsigned __int128)0; }
 unsigned __int128 xorzero(unsigned __int128 a) { return a ^ 0; }
 unsigned __int128 xorones(unsigned __int128 a) { return a ^ ~(unsigned __int128)0; }
+int eqzero(unsigned __int128 a) { return a == 0; }
+int nezero(unsigned __int128 a) { return a != 0; }
 "#,
     )
     .expect("failed to write input");
@@ -26257,6 +26259,13 @@ unsigned __int128 xorones(unsigned __int128 a) { return a ^ ~(unsigned __int128)
     let xorones = body("xorones");
     assert!(xorones.contains("\tnotq "), "{xorones}");
     assert!(!xorones.contains("\txorq "), "{xorones}");
+    for (name, setcc) in [("eqzero", "sete"), ("nezero", "setne")] {
+        let body = body(name);
+        assert!(body.contains("\torq "), "{body}");
+        assert!(body.contains(&format!("\t{setcc} ")), "{body}");
+        assert!(!body.contains("\tje "), "{body}");
+        assert!(!body.contains("\tjne "), "{body}");
+    }
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);

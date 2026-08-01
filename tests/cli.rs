@@ -25985,6 +25985,8 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
     assert!(mul128.contains("\tumulh "), "{mul128}");
     assert!(mul128.contains("\tmul "), "{mul128}");
     assert!(!mul128.contains("\tbl __multi3"), "{mul128}");
+    assert!(!mul128.contains("\tstr x30,"), "{mul128}");
+    assert!(!mul128.contains("\tldr x30,"), "{mul128}");
     assert!(!mul128.contains("\tstr x9,"), "{mul128}");
     assert!(!mul128.contains("\tstr x10,"), "{mul128}");
 

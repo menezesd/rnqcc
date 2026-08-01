@@ -2545,7 +2545,7 @@ fn convert_function(
                 || matches!(
                     (op, asm_type_for_val(dst, types)),
                     (
-                        TackyBinaryOp::Div | TackyBinaryOp::Mod | TackyBinaryOp::Mul,
+                        TackyBinaryOp::Div | TackyBinaryOp::Mod,
                         Ok(AsmType::Octword)
                     )
                 )
@@ -5320,6 +5320,10 @@ mod tests {
             .instructions
             .iter()
             .any(|instr| matches!(instr, AsmInstr::Call(name, ..) if name == "__multi3")));
+        assert!(!multiply
+            .instructions
+            .iter()
+            .any(|instr| matches!(instr, AsmInstr::AArch64SaveLink(_))));
         Ok(())
     }
 

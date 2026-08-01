@@ -501,6 +501,7 @@ struct EmbedParameters {
 
 fn parse_embed_parameters(
     tokens: &[preprocess::token::PpToken],
+    macros: &HashMap<String, MacroDef>,
 ) -> Result<EmbedParameters, String> {
     use preprocess::token::PpTokenKind;
 
@@ -537,11 +538,15 @@ fn parse_embed_parameters(
                     return Err("duplicate #embed limit parameter".to_string());
                 }
                 let value = preprocess::emit::emit_tokens(content);
+                let value = IfExprParser::new(value.trim(), macros)
+                    .parse()
+                    .map_err(|err| format!("invalid #embed limit: {}", err))?;
+                if !value.unsigned && value.signed_value() < 0 {
+                    return Err("#embed limit must be a non-negative integer".to_string());
+                }
                 result.limit = Some(
-                    value
-                        .trim()
-                        .parse()
-                        .map_err(|_| "#embed limit must be a non-negative integer".to_string())?,
+                    usize::try_from(value.value)
+                        .map_err(|_| "#embed limit is too large".to_string())?,
                 );
             }
             "prefix" => {
@@ -5174,7 +5179,7 @@ pub fn internal_preprocess_source(
                         let (operand, parameters) =
                             preprocess::directive::parse_embed_tokens(&expanded)
                                 .map_err(pp_error_at(&logical_file, current_line_number))?;
-                        let parameters = parse_embed_parameters(&parameters)
+                        let parameters = parse_embed_parameters(&parameters, macros)
                             .map_err(pp_error_at(&logical_file, current_line_number))?;
                         let spec = parse_token_include_operand(
                             &operand,
@@ -5996,16 +6001,18 @@ mod tests {
 
     #[test]
     fn parses_embed_parameters_and_rejects_duplicates() -> Result<(), String> {
-        let parameters = parse_embed_parameters(&preprocess::lexer::lex(
-            "limit(2) prefix(9,) suffix(, 42) if_empty(7)",
-        )?)?;
+        let macros = HashMap::new();
+        let parameters = parse_embed_parameters(
+            &preprocess::lexer::lex("limit(1 + 1) prefix(9,) suffix(, 42) if_empty(7)")?,
+            &macros,
+        )?;
         assert_eq!(parameters.limit, Some(2));
         assert_eq!(parameters.prefix.as_deref(), Some("9,"));
         assert_eq!(parameters.suffix.as_deref(), Some(", 42"));
         assert_eq!(parameters.if_empty.as_deref(), Some("7"));
 
-        let err =
-            parse_embed_parameters(&preprocess::lexer::lex("prefix() prefix()")?).unwrap_err();
+        let err = parse_embed_parameters(&preprocess::lexer::lex("prefix() prefix()")?, &macros)
+            .unwrap_err();
         assert!(err.contains("duplicate #embed prefix"), "{err}");
         Ok(())
     }

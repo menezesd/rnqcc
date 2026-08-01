@@ -5754,7 +5754,7 @@ unsigned char bytes[] = {{
 #embed EMBED_ASSET
 }};
 unsigned char limited[] = {{
-#embed EMBED_ASSET limit(2) prefix(9,) suffix(,42)
+#embed EMBED_ASSET limit(1 + 1) prefix(9,) suffix(,42)
 }};
 unsigned char empty[] = {{
 #embed EMPTY_EMBED_ASSET if_empty(7)

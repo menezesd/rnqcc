@@ -511,8 +511,27 @@ fn parse_embed_parameters(
         let PpTokenKind::Ident(name) = &tokens[index].kind else {
             return Err("expected #embed parameter name".to_string());
         };
-        let name = name.as_str();
+        let mut name = name.clone();
         index = skip_include_ws(tokens, index + 1);
+        while matches!(tokens.get(index).map(|token| &token.kind), Some(PpTokenKind::Punct(value)) if value == ":")
+        {
+            let second_colon = skip_include_ws(tokens, index + 1);
+            if !matches!(tokens.get(second_colon).map(|token| &token.kind), Some(PpTokenKind::Punct(value)) if value == ":")
+            {
+                return Err(format!("expected '::' after #embed parameter {}", name));
+            }
+            let ident = skip_include_ws(tokens, second_colon + 1);
+            let Some(PpTokenKind::Ident(segment)) = tokens.get(ident).map(|token| &token.kind)
+            else {
+                return Err(format!(
+                    "expected identifier after #embed parameter {}::",
+                    name
+                ));
+            };
+            name.push_str("::");
+            name.push_str(segment);
+            index = skip_include_ws(tokens, ident + 1);
+        }
         if !matches!(tokens.get(index).map(|token| &token.kind), Some(PpTokenKind::Punct(value)) if value == "(")
         {
             return Err(format!("expected '(' after #embed parameter {}", name));
@@ -532,7 +551,7 @@ fn parse_embed_parameters(
             return Err(format!("missing ')' after #embed parameter {}", name));
         }
         let content = &tokens[content_start..index - 1];
-        match name {
+        match name.as_str() {
             "limit" => {
                 if result.limit.is_some() {
                     return Err("duplicate #embed limit parameter".to_string());

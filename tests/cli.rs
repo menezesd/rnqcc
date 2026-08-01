@@ -26304,6 +26304,27 @@ fn optimized_unsigned_power_of_two_arithmetic_uses_shifts_and_masks() {
 }
 
 #[test]
+fn aarch64_unoptimized_wide_shift_counts_emit_successfully() {
+    let out = temp_file("aarch64-unoptimized-wide-shifts", "s");
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg("tests/unsigned_power_of_two.c")
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    assert!(
+        asm.contains("i128_shift_loop.typed_shift_count128"),
+        "{asm}"
+    );
+    assert!(asm.contains("i128_shift_loop.bitint_shift128"), "{asm}");
+
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn optimized_unsigned_power_of_two_arithmetic_preserves_wide_runtime_results() {
     let exe = temp_file("optimized-unsigned-power-of-two", "bin");
     let output = Command::new(rnqcc())

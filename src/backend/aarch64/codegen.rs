@@ -718,7 +718,9 @@ fn emit_i128_variable_shift(
         AsmOperand::Reg(Reg::R13),
     ));
     instructions.push(AsmInstr::Mov(
-        right_ty,
+        // A wide shift count contributes only its low 64 bits.  The loop
+        // counter is the scalar x7 register, not a 128-bit destination.
+        AsmType::Quadword,
         amount_src,
         AsmOperand::Reg(Reg::R12),
     ));

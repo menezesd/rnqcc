@@ -1545,7 +1545,11 @@ pub fn allocate_registers_with_profile(
                     CType::Float | CType::Double => {
                         xmm_candidates.insert(name.clone());
                     }
-                    CType::LongDouble | CType::Struct => {}
+                    // These values occupy more than one general-purpose
+                    // register.  Their target-specific lowering addresses
+                    // individual limbs from a stack or data operand, so a
+                    // scalar register allocation would lose the second limb.
+                    CType::Int128 | CType::UInt128 | CType::LongDouble | CType::Struct => {}
                     _ => {
                         gp_candidates.insert(name.clone());
                     }

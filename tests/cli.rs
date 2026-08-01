@@ -25892,7 +25892,11 @@ __int128 mulzero128(__int128 a) { return a * 0; }
 __int128 mulone128(__int128 a) { return a * 1; }
 __int128 mulneg128(__int128 a) { return a * -1; }
 __int128 div128(__int128 a, __int128 b) { return a / b; }
+__int128 divone128(__int128 a) { return a / 1; }
+__int128 divneg128(__int128 a) { return a / -1; }
 __int128 mod128(__int128 a, __int128 b) { return a % b; }
+__int128 modone128(__int128 a) { return a % 1; }
+__int128 modneg128(__int128 a) { return a % -1; }
 unsigned __int128 udiv128(unsigned __int128 a, unsigned __int128 b) { return a / b; }
 unsigned __int128 umod128(unsigned __int128 a, unsigned __int128 b) { return a % b; }
 unsigned __int128 shl128(unsigned __int128 a) { return a << 13; }
@@ -26006,6 +26010,21 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
     assert!(mulneg128.contains("\tadds x0, x0, #1"), "{mulneg128}");
     assert!(mulneg128.contains("\tadcs x1, x1, xzr"), "{mulneg128}");
     assert!(!mulneg128.contains("\tumulh "), "{mulneg128}");
+
+    let divone128 = body("divone128");
+    assert!(!divone128.contains("\tbl __divti3"), "{divone128}");
+    assert!(!divone128.contains("\tstr x30,"), "{divone128}");
+    let divneg128 = body("divneg128");
+    assert!(divneg128.contains("\tmvn x0, x0"), "{divneg128}");
+    assert!(!divneg128.contains("\tbl __divti3"), "{divneg128}");
+    assert!(!divneg128.contains("\tstr x30,"), "{divneg128}");
+    for name in ["modone128", "modneg128"] {
+        let body = body(name);
+        assert!(body.contains("\tmov x0, xzr"), "{body}");
+        assert!(body.contains("\tmov x1, xzr"), "{body}");
+        assert!(!body.contains("\tbl __modti3"), "{body}");
+        assert!(!body.contains("\tstr x30,"), "{body}");
+    }
 
     for (name, call) in [
         ("div128", "\tbl __divti3"),

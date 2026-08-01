@@ -598,6 +598,39 @@ fn emit_i128_helper_binary(
     dst: AsmOperand,
     ctx: &Aarch64I128Context<'_>,
 ) -> Result<bool, String> {
+    let is_unsigned = is_unsigned_val(left, ctx.types);
+    if matches!(op, TackyBinaryOp::Div) && i128_constant_is_one(right) {
+        emit_i128_copy_to_operand(instructions, left, dst, ctx.stack_slots, ctx.global_vars)?;
+        return Ok(true);
+    }
+    if matches!(op, TackyBinaryOp::Div) && !is_unsigned && i128_constant_is_negative_one(right) {
+        emit_i128_unary(
+            instructions,
+            left,
+            dst,
+            AsmUnaryOp::Neg,
+            ctx.stack_slots,
+            ctx.global_vars,
+        )?;
+        return Ok(true);
+    }
+    if matches!(op, TackyBinaryOp::Mod)
+        && (i128_constant_is_one(right) || (!is_unsigned && i128_constant_is_negative_one(right)))
+    {
+        let dst_low = low64_operand(&dst)?;
+        let dst_high = high64_operand(&dst)?;
+        instructions.push(AsmInstr::Mov(
+            AsmType::Quadword,
+            AsmOperand::Imm(0),
+            dst_low,
+        ));
+        instructions.push(AsmInstr::Mov(
+            AsmType::Quadword,
+            AsmOperand::Imm(0),
+            dst_high,
+        ));
+        return Ok(true);
+    }
     let helper = match (op, is_unsigned_val(left, ctx.types)) {
         (TackyBinaryOp::Mul, _) => "__multi3",
         (TackyBinaryOp::Div, true) => "__udivti3",
@@ -631,6 +664,25 @@ fn emit_i128_helper_binary(
     instructions.push(AsmInstr::Call(helper.to_string(), 4, 0, false, false));
     emit_i128_return_regs_to_operand(instructions, dst)?;
     Ok(true)
+}
+
+fn i128_div_or_mod_requires_helper(
+    op: &TackyBinaryOp,
+    left: &TackyVal,
+    right: &TackyVal,
+    types: &IndexMap<String, CType>,
+) -> bool {
+    match op {
+        TackyBinaryOp::Div => {
+            !i128_constant_is_one(right)
+                && (is_unsigned_val(left, types) || !i128_constant_is_negative_one(right))
+        }
+        TackyBinaryOp::Mod => {
+            !i128_constant_is_one(right)
+                && (is_unsigned_val(left, types) || !i128_constant_is_negative_one(right))
+        }
+        _ => false,
+    }
 }
 
 struct Aarch64I128Context<'a> {
@@ -2613,13 +2665,13 @@ fn convert_function(
                 || (long_double_comparison_helper(op).is_some()
                     && (matches!(asm_type_for_val(left, types), Ok(AsmType::LongDouble))
                         || matches!(asm_type_for_val(right, types), Ok(AsmType::LongDouble)))))
-                || matches!(
+                || (matches!(
                     (op, asm_type_for_val(dst, types)),
                     (
                         TackyBinaryOp::Div | TackyBinaryOp::Mod,
                         Ok(AsmType::Octword)
                     )
-                )
+                ) && i128_div_or_mod_requires_helper(op, left, right, types))
         }
         _ => false,
     });

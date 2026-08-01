@@ -1474,6 +1474,10 @@ fn emit_binary(
         writeln!(w, "\tneg {}, {}", dst_reg, dst_reg)?;
         return store_operand(w, target, ty, dst_reg, dst);
     }
+    if binary_signed_divide_by_negative_one(ty, op, src) {
+        writeln!(w, "\tneg {}, {}", dst_reg, dst_reg)?;
+        return store_operand(w, target, ty, dst_reg, dst);
+    }
     if let Some(amount) = binary_unsigned_div_power_of_two_amount(ty, op, src) {
         writeln!(w, "\tlsr {}, {}, #{}", dst_reg, dst_reg, amount)?;
         return store_operand(w, target, ty, dst_reg, dst);
@@ -1581,6 +1585,24 @@ fn binary_unsigned_divide_by_one(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand
         return false;
     };
     matches!(integer_immediate_value(ty, *value), Some((1, _)))
+}
+
+fn binary_signed_divide_by_negative_one(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> bool {
+    if !matches!(op, AsmBinaryOp::SDiv) {
+        return false;
+    }
+    let AsmOperand::Imm(value) = src else {
+        return false;
+    };
+    let Some((value, width)) = integer_immediate_value(ty, *value) else {
+        return false;
+    };
+    value
+        == if width == 64 {
+            u64::MAX
+        } else {
+            u32::MAX as u64
+        }
 }
 
 fn integer_immediate_value(ty: AsmType, value: i64) -> Option<(u64, u32)> {
@@ -2943,6 +2965,26 @@ mod tests {
         .map_err(|err| err.to_string())?;
 
         assert!(out.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn signed_divide_by_negative_one_uses_negate() -> Result<(), String> {
+        let mut out = Vec::new();
+        emit_instruction(
+            &mut out,
+            &AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::SDiv,
+                AsmOperand::Imm(-1),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            &Target::aarch64_linux(),
+        )
+        .map_err(|err| err.to_string())?;
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(asm, "\tneg x0, x0\n");
         Ok(())
     }
 

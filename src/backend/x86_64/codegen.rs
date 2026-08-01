@@ -1364,6 +1364,14 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
             dst,
         } => {
             let t = val_type(dst, types);
+            if matches!(right, TackyVal::Constant(1)) {
+                if matches!(op, TackyBinaryOp::Div) {
+                    out.push(AsmInstr::Mov(t, convert_val(left), convert_val(dst)));
+                } else {
+                    out.push(AsmInstr::Mov(t, AsmOperand::Imm(0), convert_val(dst)));
+                }
+                return Ok(());
+            }
             let dst_ctype = types
                 .get(match dst {
                     TackyVal::Var(n) => n.as_str(),

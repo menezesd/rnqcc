@@ -26206,6 +26206,8 @@ long scalar_orones(long a) { return a | -1; }
 long scalar_xorones(long a) { return a ^ -1; }
 long scalar_addzero(long a) { return a + 0; }
 long scalar_subzero(long a) { return a - 0; }
+long scalar_divone(long a) { return a / 1; }
+long scalar_modone(long a) { return a % 1; }
 unsigned __int128 andzero(unsigned __int128 a) { return a & 0; }
 unsigned __int128 andones(unsigned __int128 a) { return a & ~(unsigned __int128)0; }
 unsigned __int128 orzero(unsigned __int128 a) { return a | 0; }
@@ -26320,6 +26322,14 @@ int ulezero(unsigned __int128 a) { return a <= 0; }
         assert!(!body.contains("\taddq $0,"), "{body}");
         assert!(!body.contains("\tsubq $0,"), "{body}");
     }
+    let scalar_divone = body("scalar_divone");
+    assert!(!scalar_divone.contains("\tidivq "), "{scalar_divone}");
+    let scalar_modone = body("scalar_modone");
+    assert!(
+        scalar_modone.contains("\tmovq $0,") || scalar_modone.contains("\txorq %r"),
+        "{scalar_modone}"
+    );
+    assert!(!scalar_modone.contains("\tidivq "), "{scalar_modone}");
     let orones = body("orones");
     assert!(orones.contains("\tmovq $-1,"), "{orones}");
     assert!(!orones.contains("\torq "), "{orones}");

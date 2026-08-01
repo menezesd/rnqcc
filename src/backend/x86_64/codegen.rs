@@ -1380,6 +1380,15 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                 .copied()
                 .unwrap_or(CType::Int);
             let is_unsigned = !dst_ctype.is_signed();
+            if !is_unsigned && matches!(right, TackyVal::Constant(-1)) {
+                if matches!(op, TackyBinaryOp::Div) {
+                    out.push(AsmInstr::Mov(t, convert_val(left), convert_val(dst)));
+                    out.push(AsmInstr::Unary(t, AsmUnaryOp::Neg, convert_val(dst)));
+                } else {
+                    out.push(AsmInstr::Mov(t, AsmOperand::Imm(0), convert_val(dst)));
+                }
+                return Ok(());
+            }
             if t == AsmType::Octword {
                 if matches!(op, TackyBinaryOp::Div) && is_unsigned {
                     if let Some(amount) = i128_constant_power_of_two_shift(right) {

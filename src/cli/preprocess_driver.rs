@@ -59,6 +59,14 @@ pub fn strip_comments(source: &str) -> Result<String, String> {
     let mut chars = source.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
+            '\'' if out
+                .chars()
+                .last()
+                .is_some_and(|previous| previous.is_ascii_hexdigit())
+                && chars.peek().is_some_and(|next| next.is_ascii_hexdigit()) =>
+            {
+                out.push(ch);
+            }
             '"' | '\'' => {
                 out.push(ch);
                 let quote = ch;

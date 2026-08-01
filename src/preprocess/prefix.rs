@@ -41,6 +41,14 @@ pub fn strip_comments(source: &str) -> Result<String, String> {
     let mut chars = source.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
+            '\'' if out
+                .chars()
+                .last()
+                .is_some_and(|previous| previous.is_ascii_hexdigit())
+                && chars.peek().is_some_and(|next| next.is_ascii_hexdigit()) =>
+            {
+                out.push(ch);
+            }
             '"' | '\'' => {
                 out.push(ch);
                 let quote = ch;
@@ -101,4 +109,18 @@ pub fn escape_c_string(value: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_comments_preserves_c23_digit_separators() -> Result<(), String> {
+        assert_eq!(
+            strip_comments("int value = 0xca'fe /* ignored */;\n")?,
+            "int value = 0xca'fe  ;\n"
+        );
+        Ok(())
+    }
 }

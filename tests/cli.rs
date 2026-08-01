@@ -14788,7 +14788,7 @@ fn internal_cpp_accepts_c23_digit_separators() {
          #error C23 digit separators did not evaluate\n\
          #endif\n\
          long decimal = 1'000'000;\n\
-         unsigned long hexadecimal = 0xca'feUL;\n\
+         unsigned long hexadecimal = 0xca'feUL /* ignored */;\n\
          int binary = 0b10'1010;\n\
          int octal = 0'52;\n\
          double decimal_float = 1'2.5'0e1'0;\n\

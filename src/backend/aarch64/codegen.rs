@@ -361,6 +361,7 @@ fn emit_i128_basic_binary(
         op,
         TackyBinaryOp::Add
             | TackyBinaryOp::Sub
+            | TackyBinaryOp::Mul
             | TackyBinaryOp::BitwiseAnd
             | TackyBinaryOp::BitwiseOr
             | TackyBinaryOp::BitwiseXor
@@ -412,6 +413,81 @@ fn emit_i128_basic_binary(
                     AsmBinaryOp::Sbb
                 },
                 right_high,
+                dst_high,
+            ));
+        }
+        TackyBinaryOp::Mul => {
+            // Keep every input limb live in a scratch register before writing
+            // either result limb: `left *= left` and other aliased operands
+            // must observe the original 128-bit values.
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                dst_low.clone(),
+                AsmOperand::Reg(Reg::R10),
+            ));
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                dst_high.clone(),
+                AsmOperand::Reg(Reg::R13),
+            ));
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                right_low,
+                AsmOperand::Reg(Reg::R14),
+            ));
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                right_high,
+                AsmOperand::Reg(Reg::R15),
+            ));
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Reg(Reg::R10),
+                AsmOperand::Reg(Reg::R11),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Mul,
+                AsmOperand::Reg(Reg::R14),
+                AsmOperand::Reg(Reg::R11),
+            ));
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Reg(Reg::R11),
+                dst_low,
+            ));
+            instructions.push(AsmInstr::AArch64Umulh(
+                AsmOperand::Reg(Reg::R10),
+                AsmOperand::Reg(Reg::R14),
+                AsmOperand::Reg(Reg::R11),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Mul,
+                AsmOperand::Reg(Reg::R15),
+                AsmOperand::Reg(Reg::R10),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Mul,
+                AsmOperand::Reg(Reg::R14),
+                AsmOperand::Reg(Reg::R13),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Add,
+                AsmOperand::Reg(Reg::R10),
+                AsmOperand::Reg(Reg::R13),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Add,
+                AsmOperand::Reg(Reg::R11),
+                AsmOperand::Reg(Reg::R13),
+            ));
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Reg(Reg::R13),
                 dst_high,
             ));
         }
@@ -1349,6 +1425,11 @@ fn rewrite_tls_operands(func: &mut AsmFunction, tls_vars: &HashSet<String>) {
             AsmInstr::AArch64Extr(high, low, _, dst) => {
                 rewrite_tls_operand(high, tls_vars);
                 rewrite_tls_operand(low, tls_vars);
+                rewrite_tls_operand(dst, tls_vars);
+            }
+            AsmInstr::AArch64Umulh(left, right, dst) => {
+                rewrite_tls_operand(left, tls_vars);
+                rewrite_tls_operand(right, tls_vars);
                 rewrite_tls_operand(dst, tls_vars);
             }
             AsmInstr::AArch64LoadAdjusted(_, src, _, _)
@@ -2349,6 +2430,11 @@ fn replace_spilled_pseudos(
             AsmInstr::AArch64Extr(high, low, _, dst) => {
                 replace_op(high, stack_slots)?;
                 replace_op(low, stack_slots)?;
+                replace_op(dst, stack_slots)?;
+            }
+            AsmInstr::AArch64Umulh(left, right, dst) => {
+                replace_op(left, stack_slots)?;
+                replace_op(right, stack_slots)?;
                 replace_op(dst, stack_slots)?;
             }
             AsmInstr::AArch64LoadAdjusted(_, src, _, _) => {
@@ -5215,6 +5301,25 @@ mod tests {
             .instructions
             .iter()
             .any(|instr| { matches!(instr, AsmInstr::AArch64Extr(_, _, 13, _)) }));
+        Ok(())
+    }
+
+    #[test]
+    fn i128_multiply_uses_inline_full_width_product() -> Result<(), String> {
+        let program = codegen_source(
+            "unsigned __int128 multiply(unsigned __int128 a, unsigned __int128 b) {\n\
+             return a * b;\n\
+             }\n",
+        )?;
+        let multiply = function(&program, "multiply")?;
+        assert!(multiply
+            .instructions
+            .iter()
+            .any(|instr| matches!(instr, AsmInstr::AArch64Umulh(_, _, _))));
+        assert!(!multiply
+            .instructions
+            .iter()
+            .any(|instr| matches!(instr, AsmInstr::Call(name, ..) if name == "__multi3")));
         Ok(())
     }
 

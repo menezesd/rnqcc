@@ -515,6 +515,14 @@ fn find_used_and_updated_with_profile(instr: &AsmInstr, profile: &RegAllocProfil
             push_operand_writes(&mut updated, dst);
             reg_effects(used, updated)
         }
+        AsmInstr::AArch64Umulh(left, right, dst) => {
+            let mut used = Vec::with_capacity(4);
+            push_operand_reads(&mut used, left);
+            push_operand_reads(&mut used, right);
+            let mut updated = Vec::with_capacity(2);
+            push_operand_writes(&mut updated, dst);
+            reg_effects(used, updated)
+        }
         AsmInstr::AArch64LoadAdjusted(_, src, dst, _) => {
             let mut used = Vec::with_capacity(2);
             push_operand_reads(&mut used, src);
@@ -1451,6 +1459,11 @@ fn apply_register_map(instrs: &mut Vec<AsmInstr>, map: &HashMap<String, RegId>) 
                 replace_op(low, map);
                 replace_op(dst, map);
             }
+            AsmInstr::AArch64Umulh(left, right, dst) => {
+                replace_op(left, map);
+                replace_op(right, map);
+                replace_op(dst, map);
+            }
             AsmInstr::AArch64LoadAdjusted(_, src, _, _) => {
                 replace_op(src, map);
             }
@@ -1773,6 +1786,11 @@ fn visit_operands<F: FnMut(&AsmOperand)>(instr: &AsmInstr, mut f: F) {
         AsmInstr::AArch64Extr(high, low, _, dst) => {
             f(high);
             f(low);
+            f(dst);
+        }
+        AsmInstr::AArch64Umulh(left, right, dst) => {
+            f(left);
+            f(right);
             f(dst);
         }
         AsmInstr::AArch64LoadAdjusted(_, src, _, _) => {

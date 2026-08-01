@@ -256,6 +256,7 @@ pub enum AsmInstr {
     },
     AArch64AddPtr(AsmOperand, AsmOperand, i64, AsmOperand),
     AArch64Extr(AsmOperand, AsmOperand, u8, AsmOperand),
+    AArch64Umulh(AsmOperand, AsmOperand, AsmOperand),
     AArch64LoadAdjusted(AsmType, AsmOperand, Reg, i32),
     AArch64StoreOutgoingArg(AsmType, AsmOperand, i32, i32),
     AArch64Rem(AsmType, bool, AsmOperand, AsmOperand, AsmOperand),

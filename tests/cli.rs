@@ -25904,8 +25904,14 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
         assert!(!body.contains("\tstr x9,"), "{body}");
         assert!(!body.contains("\tstr x10,"), "{body}");
     }
+    let mul128 = body("mul128");
+    assert!(mul128.contains("\tumulh "), "{mul128}");
+    assert!(mul128.contains("\tmul "), "{mul128}");
+    assert!(!mul128.contains("\tbl __multi3"), "{mul128}");
+    assert!(!mul128.contains("\tstr x9,"), "{mul128}");
+    assert!(!mul128.contains("\tstr x10,"), "{mul128}");
+
     for (name, call) in [
-        ("mul128", "\tbl __multi3"),
         ("div128", "\tbl __divti3"),
         ("mod128", "\tbl __modti3"),
         ("udiv128", "\tbl __udivti3"),

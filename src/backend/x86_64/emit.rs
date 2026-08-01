@@ -1279,6 +1279,7 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
         AsmInstr::AArch64AllocateLargeStack(_)
         | AsmInstr::AArch64DeallocateLargeStack(_)
         | AsmInstr::AArch64Extr(_, _, _, _)
+        | AsmInstr::AArch64Umulh(_, _, _)
         | AsmInstr::AArch64StoreLargeLocalBase { .. } => invalid_input(format!(
             "x86-64 backend cannot emit AArch64 instruction: {:?}",
             instr

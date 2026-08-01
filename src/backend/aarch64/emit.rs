@@ -1961,6 +1961,23 @@ fn emit_extract(
     store_operand(w, target, AsmType::Quadword, dst_reg, dst)
 }
 
+fn emit_umulh(
+    w: &mut dyn Write,
+    target: &Target,
+    left: &AsmOperand,
+    right: &AsmOperand,
+    dst: &AsmOperand,
+) -> std::io::Result<()> {
+    let left_reg = load_operand(w, target, AsmType::Quadword, left, Reg::R10)?;
+    let right_reg = load_operand(w, target, AsmType::Quadword, right, Reg::R11)?;
+    let dst_reg = match dst {
+        AsmOperand::Reg(reg) => reg_name(*reg, AsmType::Quadword)?,
+        _ => reg_name(Reg::R13, AsmType::Quadword)?,
+    };
+    writeln!(w, "\tumulh {}, {}, {}", dst_reg, left_reg, right_reg)?;
+    store_operand(w, target, AsmType::Quadword, dst_reg, dst)
+}
+
 fn scaled_add_shift(scale: i64) -> Option<u32> {
     let scale = u64::try_from(scale).ok()?;
     (scale > 1 && scale.is_power_of_two()).then_some(scale.trailing_zeros())
@@ -2291,6 +2308,7 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, target: &Target) -> std
             emit_add_ptr(w, target, ptr, index, *scale, dst)
         }
         AsmInstr::AArch64Extr(high, low, lsb, dst) => emit_extract(w, target, high, low, *lsb, dst),
+        AsmInstr::AArch64Umulh(left, right, dst) => emit_umulh(w, target, left, right, dst),
         AsmInstr::AArch64LoadAdjusted(ty, src, dst, stack_rebase) => {
             emit_load_adjusted(w, target, *ty, src, *dst, *stack_rebase)
         }
@@ -2785,6 +2803,25 @@ mod tests {
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
         assert_eq!(asm, "\textr x11, x1, x0, #13\n\tmov x0, x11\n");
+        Ok(())
+    }
+
+    #[test]
+    fn unsigned_multiply_high_uses_direct_register_destination() -> Result<(), String> {
+        let mut out = Vec::new();
+        emit_instruction(
+            &mut out,
+            &AsmInstr::AArch64Umulh(
+                AsmOperand::Reg(Reg::R10),
+                AsmOperand::Reg(Reg::R14),
+                AsmOperand::Reg(Reg::R11),
+            ),
+            &Target::aarch64_linux(),
+        )
+        .map_err(|err| err.to_string())?;
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(asm, "\tumulh x10, x9, x12\n");
         Ok(())
     }
 

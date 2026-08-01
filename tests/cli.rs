@@ -25899,6 +25899,7 @@ __int128 mod128(__int128 a, __int128 b) { return a % b; }
 __int128 modone128(__int128 a) { return a % 1; }
 __int128 modneg128(__int128 a) { return a % -1; }
 unsigned __int128 udiv128(unsigned __int128 a, unsigned __int128 b) { return a / b; }
+unsigned __int128 udivshift128(unsigned __int128 a) { return a / 8; }
 unsigned __int128 umod128(unsigned __int128 a, unsigned __int128 b) { return a % b; }
 unsigned __int128 shl128(unsigned __int128 a) { return a << 13; }
 unsigned __int128 shl64(unsigned __int128 a) { return a << 64; }
@@ -26030,6 +26031,11 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
         assert!(!body.contains("\tbl __modti3"), "{body}");
         assert!(!body.contains("\tstr x30,"), "{body}");
     }
+    let udivshift128 = body("udivshift128");
+    assert!(udivshift128.contains("\textr x11,"), "{udivshift128}");
+    assert!(udivshift128.contains("\tlsr x1, x1, #3"), "{udivshift128}");
+    assert!(!udivshift128.contains("\tbl __udivti3"), "{udivshift128}");
+    assert!(!udivshift128.contains("\tstr x30,"), "{udivshift128}");
 
     for (name, call) in [
         ("div128", "\tbl __divti3"),

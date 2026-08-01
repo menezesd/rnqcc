@@ -644,6 +644,20 @@ fn emit_i128_helper_binary(
         emit_i128_copy_to_operand(instructions, left, dst, ctx.stack_slots, ctx.global_vars)?;
         return Ok(true);
     }
+    if matches!(op, TackyBinaryOp::Div) && is_unsigned {
+        if let Some(amount) = i128_constant_power_of_two_shift(right) {
+            let count = TackyVal::Constant(amount);
+            emit_i128_shift(
+                instructions,
+                &TackyBinaryOp::ShiftRight,
+                left,
+                &count,
+                dst,
+                ctx,
+            )?;
+            return Ok(true);
+        }
+    }
     if matches!(op, TackyBinaryOp::Div) && !is_unsigned && i128_constant_is_negative_one(right) {
         emit_i128_unary(
             instructions,
@@ -714,6 +728,9 @@ fn i128_div_or_mod_requires_helper(
 ) -> bool {
     matches!(op, TackyBinaryOp::Div | TackyBinaryOp::Mod)
         && !i128_constant_is_one(right)
+        && !(matches!(op, TackyBinaryOp::Div)
+            && is_unsigned_val(left, types)
+            && i128_constant_power_of_two_shift(right).is_some())
         && (is_unsigned_val(left, types) || !i128_constant_is_negative_one(right))
 }
 

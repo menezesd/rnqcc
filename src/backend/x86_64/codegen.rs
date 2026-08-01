@@ -1397,6 +1397,58 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                     }
                 }
             }
+            if matches!(op, TackyBinaryOp::Div)
+                && !is_unsigned
+                && matches!(t, AsmType::Longword | AsmType::Quadword)
+            {
+                if let TackyVal::Constant(value) = right {
+                    let width = if t == AsmType::Quadword { 64 } else { 32 };
+                    let value = if t == AsmType::Quadword {
+                        *value
+                    } else {
+                        *value as i32 as i64
+                    };
+                    if value > 1 && (value as u64).is_power_of_two() {
+                        let amount = (value as u64).trailing_zeros();
+                        if amount < width - 1 {
+                            // C signed division truncates toward zero, whereas an
+                            // arithmetic shift rounds negative values down. Add a
+                            // sign-dependent bias before shifting to bridge that gap.
+                            out.push(AsmInstr::Mov(t, convert_val(left), convert_val(dst)));
+                            out.push(AsmInstr::Mov(
+                                t,
+                                convert_val(dst),
+                                AsmOperand::Reg(Reg::R10),
+                            ));
+                            out.push(AsmInstr::Binary(
+                                t,
+                                AsmBinaryOp::Sar,
+                                AsmOperand::Imm(i64::from(width - 1)),
+                                AsmOperand::Reg(Reg::R10),
+                            ));
+                            out.push(AsmInstr::Binary(
+                                t,
+                                AsmBinaryOp::And,
+                                AsmOperand::Imm(((1u64 << amount) - 1) as i64),
+                                AsmOperand::Reg(Reg::R10),
+                            ));
+                            out.push(AsmInstr::Binary(
+                                t,
+                                AsmBinaryOp::Add,
+                                AsmOperand::Reg(Reg::R10),
+                                convert_val(dst),
+                            ));
+                            out.push(AsmInstr::Binary(
+                                t,
+                                AsmBinaryOp::Sar,
+                                AsmOperand::Imm(i64::from(amount)),
+                                convert_val(dst),
+                            ));
+                            return Ok(());
+                        }
+                    }
+                }
+            }
             if matches!(op, TackyBinaryOp::Mod)
                 && is_unsigned
                 && matches!(t, AsmType::Longword | AsmType::Quadword)

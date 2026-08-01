@@ -717,10 +717,17 @@ fn emit_i128_variable_shift(
         left_high,
         AsmOperand::Reg(Reg::R13),
     ));
+    let counter_ty = if right_ty == AsmType::Octword {
+        // A wide shift count contributes only its low 64 bits. The counter is
+        // scalar, so load just that limb as a quadword.
+        AsmType::Quadword
+    } else {
+        // Preserve the normal scalar move width: writing w7 deliberately
+        // zero-extends 32-bit counts before the quadword loop uses x7.
+        right_ty
+    };
     instructions.push(AsmInstr::Mov(
-        // A wide shift count contributes only its low 64 bits.  The loop
-        // counter is the scalar x7 register, not a 128-bit destination.
-        AsmType::Quadword,
+        counter_ty,
         amount_src,
         AsmOperand::Reg(Reg::R12),
     ));
@@ -4934,6 +4941,31 @@ mod tests {
 
         assert!(adjusted_loads.contains(&(Reg::R10, 16)), "{main:#?}");
         assert!(adjusted_loads.contains(&(Reg::R13, 16)), "{main:#?}");
+        Ok(())
+    }
+
+    #[test]
+    fn i128_shift_counter_moves_preserve_scalar_and_wide_widths() -> Result<(), String> {
+        let program = codegen_source(
+            "unsigned __int128 scalar_count(unsigned __int128 value, unsigned count) { return value << count; }\n\
+             unsigned __int128 wide_count(unsigned __int128 value, unsigned __int128 count) { return value << count; }\n",
+        )?;
+
+        let scalar_count = function(&program, "scalar_count")?;
+        assert!(scalar_count.instructions.iter().any(|instr| {
+            matches!(
+                instr,
+                AsmInstr::Mov(AsmType::Longword, _, AsmOperand::Reg(Reg::R12))
+            )
+        }));
+
+        let wide_count = function(&program, "wide_count")?;
+        assert!(wide_count.instructions.iter().any(|instr| {
+            matches!(
+                instr,
+                AsmInstr::Mov(AsmType::Quadword, _, AsmOperand::Reg(Reg::R12))
+            )
+        }));
         Ok(())
     }
 

@@ -1483,6 +1483,11 @@ fn emit_binary(
         writeln!(w, "\tlsl {}, {}, #{}", dst_reg, dst_reg, amount)?;
         return store_operand(w, target, ty, dst_reg, dst);
     }
+    if let Some(amount) = binary_mul_negative_power_of_two_amount(ty, op, src) {
+        writeln!(w, "\tlsl {}, {}, #{}", dst_reg, dst_reg, amount)?;
+        writeln!(w, "\tneg {}, {}", dst_reg, dst_reg)?;
+        return store_operand(w, target, ty, dst_reg, dst);
+    }
     if binary_mul_negative_one(ty, op, src) {
         writeln!(w, "\tneg {}, {}", dst_reg, dst_reg)?;
         return store_operand(w, target, ty, dst_reg, dst);
@@ -1613,6 +1618,26 @@ fn binary_mul_negative_one(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> b
         } else {
             u32::MAX as u64
         }
+}
+
+fn binary_mul_negative_power_of_two_amount(
+    ty: AsmType,
+    op: &AsmBinaryOp,
+    src: &AsmOperand,
+) -> Option<u32> {
+    if !matches!(op, AsmBinaryOp::Mul) {
+        return None;
+    }
+    let AsmOperand::Imm(value) = src else {
+        return None;
+    };
+    if *value >= -1 {
+        return None;
+    }
+    let (_, width) = integer_immediate_value(ty, *value)?;
+    let magnitude = value.unsigned_abs();
+    let amount = magnitude.trailing_zeros();
+    (magnitude.is_power_of_two() && amount < width).then_some(amount)
 }
 
 fn binary_unsigned_div_power_of_two_amount(

@@ -25874,6 +25874,7 @@ fn aarch64_returned_binary_ops_use_return_registers() {
 int add(int a, int b) { return a + b; }
 int band(int a, int b) { return a & b; }
 long mull(long a, long b) { return a * b; }
+long mulnegshiftl(long a) { return a * -8; }
 double addd(double a, double b) { return a + b; }
 int lt(int a, int b) { return a < b; }
 int eq128(__int128 a, __int128 b) { return a == b; }
@@ -25955,6 +25956,10 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
         let end = rest.find("\n\t.text").unwrap_or(rest.len());
         &rest[..end]
     };
+    let mulnegshiftl = body("mulnegshiftl");
+    assert!(mulnegshiftl.contains("\tlsl x0, x0, #3"), "{mulnegshiftl}");
+    assert!(mulnegshiftl.contains("\tneg x0, x0"), "{mulnegshiftl}");
+    assert!(!mulnegshiftl.contains("\tmul "), "{mulnegshiftl}");
     for (name, condition) in [("eq128", "eq"), ("ne128", "ne")] {
         let body = body(name);
         assert!(body.contains("\teor "), "{body}");

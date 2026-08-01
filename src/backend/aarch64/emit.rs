@@ -1603,18 +1603,30 @@ fn emit_cmp(
         }
         return writeln!(w, "\tcmp {}, #{}, lsl #{}", dst_reg, immediate, shift);
     }
+    if let AsmOperand::Imm(value) = src {
+        if let Some((immediate, shift)) = value.checked_neg().and_then(cmp_immediate_value) {
+            if shift == 0 {
+                return writeln!(w, "\tcmn {}, #{}", dst_reg, immediate);
+            }
+            return writeln!(w, "\tcmn {}, #{}, lsl #{}", dst_reg, immediate, shift);
+        }
+    }
     let src_reg = load_operand(w, target, ty, src, Reg::R11)?;
     writeln!(w, "\tcmp {}, {}", dst_reg, src_reg)
 }
 
 fn cmp_immediate(src: &AsmOperand) -> Option<(i64, u8)> {
-    let AsmOperand::Imm(value) = src else {
-        return None;
-    };
-    if (0..=4095).contains(value) {
-        return Some((*value, 0));
+    match src {
+        AsmOperand::Imm(value) => cmp_immediate_value(*value),
+        _ => None,
     }
-    (*value > 0 && value % 4096 == 0 && value / 4096 <= 4095).then_some((value / 4096, 12))
+}
+
+fn cmp_immediate_value(value: i64) -> Option<(i64, u8)> {
+    if (0..=4095).contains(&value) {
+        return Some((value, 0));
+    }
+    (value > 0 && value % 4096 == 0 && value / 4096 <= 4095).then_some((value / 4096, 12))
 }
 
 fn emit_lea(
@@ -2935,13 +2947,29 @@ mod tests {
                 AsmOperand::Imm(0xabc000),
                 AsmOperand::Reg(Reg::AX),
             ),
+            AsmInstr::Cmp(
+                AsmType::Longword,
+                AsmOperand::Imm(-42),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            AsmInstr::Cmp(
+                AsmType::Quadword,
+                AsmOperand::Imm(-0xabc000),
+                AsmOperand::Reg(Reg::AX),
+            ),
         ] {
             emit_instruction(&mut out, &instr, &Target::aarch64_linux())
                 .map_err(|err| err.to_string())?;
         }
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
-        assert_eq!(asm, "\tcmp w0, #42\n\tcmp x0, #2748, lsl #12\n");
+        assert_eq!(
+            asm,
+            "\tcmp w0, #42\n\
+             \tcmp x0, #2748, lsl #12\n\
+             \tcmn w0, #42\n\
+             \tcmn x0, #2748, lsl #12\n"
+        );
         assert_eq!(cmp_immediate(&AsmOperand::Imm(-1)), None);
         Ok(())
     }

@@ -926,6 +926,13 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                     show_operand(dst, *t, platform)?
                 )
             } else {
+                // `test operand, operand` sets the same flags as `cmp $0,
+                // operand` for every condition code used by the backend, but
+                // avoids materializing an immediate zero.
+                if matches!(src, AsmOperand::Imm(0)) && !matches!(dst, AsmOperand::Imm(_)) {
+                    let operand = show_operand(dst, *t, platform)?;
+                    return writeln!(w, "\ttest{} {}, {}", suffix(*t), operand, operand);
+                }
                 // cmpq doesn't support 64-bit immediates
                 if *t == AsmType::Quadword {
                     if let AsmOperand::Imm(v) = src {
@@ -1824,5 +1831,22 @@ mod tests {
             AsmOperand::Reg(Reg::AX),
         ));
         assert_eq!(longword, "\tshrl $1, %eax\n");
+    }
+
+    #[test]
+    fn x86_64_emitter_uses_test_for_integer_compare_against_zero() {
+        let longword = emit_one(AsmInstr::Cmp(
+            AsmType::Longword,
+            AsmOperand::Imm(0),
+            AsmOperand::Reg(Reg::AX),
+        ));
+        assert_eq!(longword, "\ttestl %eax, %eax\n");
+
+        let quadword = emit_one(AsmInstr::Cmp(
+            AsmType::Quadword,
+            AsmOperand::Imm(0),
+            AsmOperand::Reg(Reg::R11),
+        ));
+        assert_eq!(quadword, "\ttestq %r11, %r11\n");
     }
 }

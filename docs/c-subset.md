@@ -215,8 +215,8 @@ assembly/linking.
   and signedness, constant folding with unsigned modulo behavior at result
   widths, cast/assignment truncation and sign extension, TACKY value metadata,
   static initializer handling, and backend lowering for non-native widths.
-- AArch64 code generation favors correctness over register allocation quality and
-  currently emits stack-heavy assembly.
+- AArch64 register allocation keeps non-aliased scalar temporaries in registers;
+  aggregates and address-taken values remain conservatively stack-backed.
 
 ## Real Project Compatibility Work
 

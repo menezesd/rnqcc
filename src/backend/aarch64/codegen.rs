@@ -1677,7 +1677,23 @@ fn collect_stack_slots(
         collect_name(name, &mut vars, &mut seen_vars, global_vars);
     }
 
-    for instr in &function.body {
+    let mut body_iter = function.body.iter().peekable();
+    while let Some(instr) = body_iter.next() {
+        let next_instr = body_iter.peek().copied();
+        if let TackyInstr::Binary {
+            op,
+            left,
+            right,
+            dst,
+        } = instr
+        {
+            if fused_comparison_branch(op, left, right, dst, next_instr, types).is_some() {
+                collect_var(left, &mut vars, &mut seen_vars, global_vars);
+                collect_var(right, &mut vars, &mut seen_vars, global_vars);
+                body_iter.next();
+                continue;
+            }
+        }
         match instr {
             TackyInstr::Return(val) => collect_var(val, &mut vars, &mut seen_vars, global_vars),
             TackyInstr::Unary { src, dst, .. } => {
@@ -2046,6 +2062,31 @@ fn convert_comparison_op(op: &TackyBinaryOp, is_unsigned: bool) -> Option<CondCo
         (TackyBinaryOp::LessEqual, true) => Some(CondCode::BE),
         (TackyBinaryOp::GreaterThan, true) => Some(CondCode::A),
         (TackyBinaryOp::GreaterEqual, true) => Some(CondCode::AE),
+        _ => None,
+    }
+}
+
+fn fused_comparison_branch(
+    op: &TackyBinaryOp,
+    left: &TackyVal,
+    right: &TackyVal,
+    dst: &TackyVal,
+    next: Option<&TackyInstr>,
+    types: &IndexMap<String, CType>,
+) -> Option<(CondCode, String)> {
+    let left_ty = asm_type_for_val(left, types).ok()?;
+    let right_ty = asm_type_for_val(right, types).ok()?;
+    if matches!(left_ty, AsmType::Octword | AsmType::LongDouble)
+        || matches!(right_ty, AsmType::Octword | AsmType::LongDouble)
+    {
+        return None;
+    }
+    let cc = convert_comparison_op(op, is_unsigned_comparison_val(left, types))?;
+    match next? {
+        TackyInstr::JumpIfZero(value, label) if value == dst => {
+            Some((invert_condition(&cc), label.clone()))
+        }
+        TackyInstr::JumpIfNotZero(value, label) if value == dst => Some((cc, label.clone())),
         _ => None,
     }
 }
@@ -4613,6 +4654,34 @@ fn convert_function(
                 dst,
             } => {
                 let ty = asm_type_for_val(dst, types)?;
+                if let Some((branch_cc, label)) =
+                    fused_comparison_branch(op, left, right, dst, next_instr, types)
+                {
+                    let left_cmp_ty = asm_type_for_val(left, types)?;
+                    let right_cmp_ty = asm_type_for_val(right, types)?;
+                    let cmp_ty = match (left_cmp_ty, right_cmp_ty) {
+                        (AsmType::Double, _) | (_, AsmType::Double) => AsmType::Double,
+                        (AsmType::Float, _) | (_, AsmType::Float) => AsmType::Float,
+                        (AsmType::Quadword, _) | (_, AsmType::Quadword) => AsmType::Quadword,
+                        (AsmType::Longword, _) | (_, AsmType::Longword) => AsmType::Longword,
+                        (AsmType::Word, _) | (_, AsmType::Word) => AsmType::Word,
+                        _ => AsmType::Byte,
+                    };
+                    let right_op = if matches!(cmp_ty, AsmType::Float | AsmType::Double) {
+                        floating_return_operand(cmp_ty, right, &stack_slots, global_vars)?
+                    } else {
+                        val_operand(right, &stack_slots, global_vars)?
+                    };
+                    let left_op = if matches!(cmp_ty, AsmType::Float | AsmType::Double) {
+                        floating_return_operand(cmp_ty, left, &stack_slots, global_vars)?
+                    } else {
+                        val_operand(left, &stack_slots, global_vars)?
+                    };
+                    instructions.push(AsmInstr::Cmp(cmp_ty, right_op, left_op));
+                    instructions.push(AsmInstr::JmpCC(branch_cc, label));
+                    body_iter.next();
+                    continue;
+                }
                 let dst_op = val_operand(dst, &stack_slots, global_vars)?;
                 if asm_type_for_val(left, types)? == AsmType::LongDouble
                     || asm_type_for_val(right, types)? == AsmType::LongDouble
@@ -4730,13 +4799,6 @@ fn convert_function(
                 }
                 if let Some(cc) = convert_comparison_op(op, is_unsigned_comparison_val(left, types))
                 {
-                    let branch_cc = match next_instr {
-                        Some(TackyInstr::JumpIfZero(value, _)) if value == dst => {
-                            Some(invert_condition(&cc))
-                        }
-                        Some(TackyInstr::JumpIfNotZero(value, _)) if value == dst => Some(cc),
-                        _ => None,
-                    };
                     let left_cmp_ty = asm_type_for_val(left, types)?;
                     let right_cmp_ty = asm_type_for_val(right, types)?;
                     let cmp_ty = match (left_cmp_ty, right_cmp_ty) {
@@ -4758,16 +4820,6 @@ fn convert_function(
                         val_operand(left, &stack_slots, global_vars)?
                     };
                     instructions.push(AsmInstr::Cmp(cmp_ty, right_op, left_op));
-                    if let Some(branch_cc) = branch_cc {
-                        let label = match next_instr {
-                            Some(TackyInstr::JumpIfZero(_, label))
-                            | Some(TackyInstr::JumpIfNotZero(_, label)) => label.clone(),
-                            _ => unreachable!("comparison branch must have a jump target"),
-                        };
-                        instructions.push(AsmInstr::JmpCC(branch_cc, label));
-                        body_iter.next();
-                        continue;
-                    }
                     instructions.push(AsmInstr::SetCC(cc, dst_op));
                     continue;
                 }
@@ -5208,14 +5260,16 @@ mod tests {
 
     #[test]
     fn comparison_branch_avoids_boolean_stack_temporary() -> Result<(), String> {
-        let program = codegen_source("int f(int x) { if (x <= 1) return 1; return 0; }")?;
+        let program = codegen_source(
+            "int f(int a, int b, int c, int d) { if (a <= b) return c; return d; }",
+        )?;
         let function = function(&program, "f")?;
 
         assert!(function.instructions.windows(2).any(|pair| {
             matches!(
                 pair,
                 [
-                    AsmInstr::Cmp(AsmType::Longword, AsmOperand::Imm(1), _),
+                    AsmInstr::Cmp(AsmType::Longword, _, _),
                     AsmInstr::JmpCC(CondCode::G, _)
                 ]
             )
@@ -5224,6 +5278,10 @@ mod tests {
             .instructions
             .iter()
             .any(|instr| matches!(instr, AsmInstr::SetCC(_, _))));
+        assert!(function
+            .instructions
+            .iter()
+            .any(|instr| matches!(instr, AsmInstr::AllocateStack(16))));
         Ok(())
     }
 

@@ -8385,6 +8385,35 @@ fn emits_aarch64_shift_for_power_of_two_multiply_immediate() {
 }
 
 #[test]
+fn emits_aarch64_trivial_logical_immediates_without_constant_loads() {
+    let src = temp_file("aarch64-trivial-logical-immediates", "i");
+    let out = temp_file("aarch64-trivial-logical-immediates", "s");
+    std::fs::write(
+        &src,
+        "long clear(long x) { return x & 0; }\n\
+         long identity(long x) { return x | 0; }\n\
+         long complement(long x) { return x ^ -1; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
+    assert!(asm.contains("\tmov x0, xzr"), "{asm}");
+    assert!(asm.contains("\tmvn x0, x0"), "{asm}");
+    assert!(!asm.contains("\torr x0, x0,"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn emits_aarch64_shift_for_power_of_two_unsigned_divide() {
     let src = temp_file("aarch64-udiv-immediate", "i");
     let out = temp_file("aarch64-udiv-immediate", "s");

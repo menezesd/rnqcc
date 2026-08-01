@@ -1434,6 +1434,12 @@ fn emit_binary(
     if binary_divide_by_one(ty, op, src) {
         return Ok(());
     }
+    if binary_logical_noop(ty, op, src) {
+        return Ok(());
+    }
+    if binary_logical_zero_result(ty, op, src) {
+        return store_operand(w, target, ty, zero_register_for_type(ty)?, dst);
+    }
     let dst_reg = load_operand(w, target, ty, dst, Reg::R10)?;
     if let Some(offset) = binary_add_sub_immediate_offset(op, src) {
         emit_add_immediate(w, dst_reg, offset)?;
@@ -1476,6 +1482,10 @@ fn emit_binary(
     }
     if binary_signed_divide_by_negative_one(ty, op, src) {
         writeln!(w, "\tneg {}, {}", dst_reg, dst_reg)?;
+        return store_operand(w, target, ty, dst_reg, dst);
+    }
+    if binary_xor_negative_one(ty, op, src) {
+        writeln!(w, "\tmvn {}, {}", dst_reg, dst_reg)?;
         return store_operand(w, target, ty, dst_reg, dst);
     }
     if let Some(amount) = binary_unsigned_div_power_of_two_amount(ty, op, src) {
@@ -1589,6 +1599,45 @@ fn binary_divide_by_one(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> bool
 
 fn binary_signed_divide_by_negative_one(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> bool {
     if !matches!(op, AsmBinaryOp::SDiv) {
+        return false;
+    }
+    let AsmOperand::Imm(value) = src else {
+        return false;
+    };
+    let Some((value, width)) = integer_immediate_value(ty, *value) else {
+        return false;
+    };
+    value
+        == if width == 64 {
+            u64::MAX
+        } else {
+            u32::MAX as u64
+        }
+}
+
+fn binary_logical_noop(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> bool {
+    let AsmOperand::Imm(value) = src else {
+        return false;
+    };
+    let Some((value, width)) = integer_immediate_value(ty, *value) else {
+        return false;
+    };
+    let all_ones = if width == 64 {
+        u64::MAX
+    } else {
+        u32::MAX as u64
+    };
+    matches!((op, value), (AsmBinaryOp::And, v) if v == all_ones)
+        || matches!((op, value), (AsmBinaryOp::Or | AsmBinaryOp::Xor, 0))
+}
+
+fn binary_logical_zero_result(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> bool {
+    matches!(op, AsmBinaryOp::And)
+        && matches!(src, AsmOperand::Imm(value) if integer_immediate_value(ty, *value).is_some_and(|(value, _)| value == 0))
+}
+
+fn binary_xor_negative_one(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> bool {
+    if !matches!(op, AsmBinaryOp::Xor) {
         return false;
     }
     let AsmOperand::Imm(value) = src else {
@@ -2926,6 +2975,29 @@ mod tests {
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
         assert_eq!(asm, "\tlsl x0, x0, #3\n\tmov x0, xzr\n\tneg x0, x0\n");
+        Ok(())
+    }
+
+    #[test]
+    fn trivial_logical_immediates_avoid_materializing_constants() -> Result<(), String> {
+        let mut out = Vec::new();
+        for (op, source) in [
+            (AsmBinaryOp::And, AsmOperand::Imm(0)),
+            (AsmBinaryOp::And, AsmOperand::Imm(-1)),
+            (AsmBinaryOp::Or, AsmOperand::Imm(0)),
+            (AsmBinaryOp::Xor, AsmOperand::Imm(0)),
+            (AsmBinaryOp::Xor, AsmOperand::Imm(-1)),
+        ] {
+            emit_instruction(
+                &mut out,
+                &AsmInstr::Binary(AsmType::Quadword, op, source, AsmOperand::Reg(Reg::AX)),
+                &Target::aarch64_linux(),
+            )
+            .map_err(|err| err.to_string())?;
+        }
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(asm, "\tmov x0, xzr\n\tmvn x0, x0\n");
         Ok(())
     }
 

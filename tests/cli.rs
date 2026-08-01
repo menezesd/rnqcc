@@ -8485,9 +8485,11 @@ fn emits_aarch64_assembly_for_variable_int128_shifts() {
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
-    assert!(asm.contains(".Li128_shift_loop."));
-    assert!(asm.contains("lsl x9, x9, #1"));
-    assert!(asm.contains("asr x11, x11, #1"));
+    assert!(asm.contains(".Li128_shift_upper."), "{asm}");
+    assert!(asm.contains(".Li128_shift_overflow."), "{asm}");
+    assert!(!asm.contains(".Li128_shift_loop."), "{asm}");
+    assert!(asm.contains("lsl x9, x9, x7"), "{asm}");
+    assert!(asm.contains("asr x11, x11, x7"), "{asm}");
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);
@@ -25862,7 +25864,9 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
     }
     for name in ["vshl128", "vsar128"] {
         let body = body(name);
-        assert!(body.contains("i128_shift_loop"), "{body}");
+        assert!(body.contains("i128_shift_upper"), "{body}");
+        assert!(body.contains("i128_shift_overflow"), "{body}");
+        assert!(!body.contains("i128_shift_loop"), "{body}");
         assert!(body.contains("i128_shift_end"), "{body}");
         assert!(body.contains("\tmov x0,"), "{body}");
         assert!(body.contains("\tmov x1,"), "{body}");

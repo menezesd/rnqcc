@@ -458,6 +458,34 @@ fn emit_i128_basic_binary(
         }
     }
 
+    if matches!(op, TackyBinaryOp::Add) {
+        if i128_constant_is_zero(left) {
+            emit_i128_copy_to_operand(instructions, right, dst, ctx.stack_slots, ctx.global_vars)?;
+            return Ok(true);
+        }
+        if i128_constant_is_zero(right) {
+            emit_i128_copy_to_operand(instructions, left, dst, ctx.stack_slots, ctx.global_vars)?;
+            return Ok(true);
+        }
+    }
+    if matches!(op, TackyBinaryOp::Sub) {
+        if i128_constant_is_zero(right) {
+            emit_i128_copy_to_operand(instructions, left, dst, ctx.stack_slots, ctx.global_vars)?;
+            return Ok(true);
+        }
+        if i128_constant_is_zero(left) {
+            emit_i128_unary(
+                instructions,
+                right,
+                dst,
+                AsmUnaryOp::Neg,
+                ctx.stack_slots,
+                ctx.global_vars,
+            )?;
+            return Ok(true);
+        }
+    }
+
     if matches!(op, TackyBinaryOp::Mul) {
         if i128_constant_is_zero(left) || i128_constant_is_zero(right) {
             emit_i128_zero_operand(instructions, &dst)?;

@@ -25892,6 +25892,9 @@ int ugtzero128(unsigned __int128 a) { return a > 0; }
 int ulezero128(unsigned __int128 a) { return a <= 0; }
 __int128 add128(__int128 a, __int128 b) { return a + b; }
 __int128 sub128(__int128 a, __int128 b) { return a - b; }
+__int128 addzero128(__int128 a) { return a + 0; }
+__int128 subzero128(__int128 a) { return a - 0; }
+__int128 zerosub128(__int128 a) { return 0 - a; }
 unsigned __int128 and128(unsigned __int128 a, unsigned __int128 b) { return a & b; }
 unsigned __int128 or128(unsigned __int128 a, unsigned __int128 b) { return a | b; }
 unsigned __int128 xor128(unsigned __int128 a, unsigned __int128 b) { return a ^ b; }
@@ -26035,6 +26038,18 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
         assert!(!body.contains("\tstr x9,"), "{body}");
         assert!(!body.contains("\tstr x10,"), "{body}");
     }
+    for name in ["addzero128", "subzero128"] {
+        let body = body(name);
+        assert!(!body.contains("\tadds "), "{body}");
+        assert!(!body.contains("\tadcs "), "{body}");
+        assert!(!body.contains("\tsubs "), "{body}");
+        assert!(!body.contains("\tsbcs "), "{body}");
+    }
+    let zerosub128 = body("zerosub128");
+    assert!(zerosub128.contains("\tmvn x0, x0"), "{zerosub128}");
+    assert!(zerosub128.contains("\tmvn x1, x1"), "{zerosub128}");
+    assert!(zerosub128.contains("\tadds x0, x0, #1"), "{zerosub128}");
+    assert!(zerosub128.contains("\tadcs x1, x1, xzr"), "{zerosub128}");
     let andzero128 = body("andzero128");
     assert!(andzero128.contains("\tmov x0, xzr"), "{andzero128}");
     assert!(andzero128.contains("\tmov x1, xzr"), "{andzero128}");

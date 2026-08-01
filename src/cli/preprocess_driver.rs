@@ -491,6 +491,84 @@ pub fn parse_token_include_operand(
     }
 }
 
+#[derive(Debug, Default)]
+struct EmbedParameters {
+    limit: Option<usize>,
+    prefix: Option<String>,
+    suffix: Option<String>,
+    if_empty: Option<String>,
+}
+
+fn parse_embed_parameters(
+    tokens: &[preprocess::token::PpToken],
+) -> Result<EmbedParameters, String> {
+    use preprocess::token::PpTokenKind;
+
+    let mut result = EmbedParameters::default();
+    let mut index = skip_include_ws(tokens, 0);
+    while index < tokens.len() {
+        let PpTokenKind::Ident(name) = &tokens[index].kind else {
+            return Err("expected #embed parameter name".to_string());
+        };
+        let name = name.as_str();
+        index = skip_include_ws(tokens, index + 1);
+        if !matches!(tokens.get(index).map(|token| &token.kind), Some(PpTokenKind::Punct(value)) if value == "(")
+        {
+            return Err(format!("expected '(' after #embed parameter {}", name));
+        }
+        let content_start = index + 1;
+        let mut depth = 1usize;
+        index += 1;
+        while index < tokens.len() && depth > 0 {
+            match &tokens[index].kind {
+                PpTokenKind::Punct(value) if value == "(" => depth += 1,
+                PpTokenKind::Punct(value) if value == ")" => depth -= 1,
+                _ => {}
+            }
+            index += 1;
+        }
+        if depth != 0 {
+            return Err(format!("missing ')' after #embed parameter {}", name));
+        }
+        let content = &tokens[content_start..index - 1];
+        match name {
+            "limit" => {
+                if result.limit.is_some() {
+                    return Err("duplicate #embed limit parameter".to_string());
+                }
+                let value = preprocess::emit::emit_tokens(content);
+                result.limit = Some(
+                    value
+                        .trim()
+                        .parse()
+                        .map_err(|_| "#embed limit must be a non-negative integer".to_string())?,
+                );
+            }
+            "prefix" => {
+                if result.prefix.is_some() {
+                    return Err("duplicate #embed prefix parameter".to_string());
+                }
+                result.prefix = Some(preprocess::emit::emit_tokens(content));
+            }
+            "suffix" => {
+                if result.suffix.is_some() {
+                    return Err("duplicate #embed suffix parameter".to_string());
+                }
+                result.suffix = Some(preprocess::emit::emit_tokens(content));
+            }
+            "if_empty" => {
+                if result.if_empty.is_some() {
+                    return Err("duplicate #embed if_empty parameter".to_string());
+                }
+                result.if_empty = Some(preprocess::emit::emit_tokens(content));
+            }
+            _ => return Err(format!("unsupported #embed parameter {}", name)),
+        }
+        index = skip_include_ws(tokens, index);
+    }
+    Ok(result)
+}
+
 pub fn expand_preprocessor_tokens(
     tokens: &[preprocess::token::PpToken],
     macros: &HashMap<String, MacroDef>,
@@ -5083,7 +5161,21 @@ pub fn internal_preprocess_source(
                         }
                         continue;
                     }
-                    Directive::Embed { operand } => {
+                    Directive::Embed { tokens } => {
+                        let expanded = expand_preprocessor_tokens(
+                            &tokens,
+                            macros,
+                            &logical_file,
+                            current_line_number,
+                            include_level,
+                            state,
+                        )
+                        .map_err(pp_error_at(&logical_file, current_line_number))?;
+                        let (operand, parameters) =
+                            preprocess::directive::parse_embed_tokens(&expanded)
+                                .map_err(pp_error_at(&logical_file, current_line_number))?;
+                        let parameters = parse_embed_parameters(&parameters)
+                            .map_err(pp_error_at(&logical_file, current_line_number))?;
                         let spec = parse_token_include_operand(
                             &operand,
                             macros,
@@ -5103,7 +5195,7 @@ pub fn internal_preprocess_source(
                             ));
                         };
                         record_dependency(&embed_path, context);
-                        let bytes = std::fs::read(&embed_path).map_err(|err| {
+                        let mut bytes = std::fs::read(&embed_path).map_err(|err| {
                             pp_location(
                                 &logical_file,
                                 current_line_number,
@@ -5114,12 +5206,25 @@ pub fn internal_preprocess_source(
                                 ),
                             )
                         })?;
+                        if let Some(limit) = parameters.limit {
+                            bytes.truncate(limit);
+                        }
+                        if bytes.is_empty() {
+                            out.push_str(parameters.if_empty.as_deref().unwrap_or(""));
+                            out.push('\n');
+                            if context.line_markers && !context.suppress_preprocessed_output {
+                                push_line_marker(&mut out, next_logical_line, &logical_file);
+                            }
+                            continue;
+                        }
+                        out.push_str(parameters.prefix.as_deref().unwrap_or(""));
                         for (index, byte) in bytes.iter().enumerate() {
                             if index > 0 {
                                 out.push_str(", ");
                             }
                             out.push_str(&byte.to_string());
                         }
+                        out.push_str(parameters.suffix.as_deref().unwrap_or(""));
                         out.push('\n');
                         if context.line_markers && !context.suppress_preprocessed_output {
                             push_line_marker(&mut out, next_logical_line, &logical_file);
@@ -5886,6 +5991,22 @@ mod tests {
         let err = parse_token_include_operand(&operand, &macros, "source.c", 1, 0, &mut state)
             .unwrap_err();
         assert!(err.contains("malformed include operand"), "{err}");
+        Ok(())
+    }
+
+    #[test]
+    fn parses_embed_parameters_and_rejects_duplicates() -> Result<(), String> {
+        let parameters = parse_embed_parameters(&preprocess::lexer::lex(
+            "limit(2) prefix(9,) suffix(, 42) if_empty(7)",
+        )?)?;
+        assert_eq!(parameters.limit, Some(2));
+        assert_eq!(parameters.prefix.as_deref(), Some("9,"));
+        assert_eq!(parameters.suffix.as_deref(), Some(", 42"));
+        assert_eq!(parameters.if_empty.as_deref(), Some("7"));
+
+        let err =
+            parse_embed_parameters(&preprocess::lexer::lex("prefix() prefix()")?).unwrap_err();
+        assert!(err.contains("duplicate #embed prefix"), "{err}");
         Ok(())
     }
 }

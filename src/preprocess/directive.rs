@@ -37,7 +37,7 @@ pub enum Directive {
         include_next: bool,
     },
     Embed {
-        operand: IncludeOperand,
+        tokens: Vec<PpToken>,
     },
     Define {
         name: String,
@@ -111,7 +111,7 @@ pub fn parse_directive_tokens(tokens: &[PpToken]) -> Result<Option<Directive>, S
             include_next: true,
         },
         "embed" => Directive::Embed {
-            operand: parse_include_operand(rest)?,
+            tokens: trim_tokens(rest),
         },
         "define" => parse_define(rest)?,
         "undef" => Directive::Undef {
@@ -308,6 +308,32 @@ pub fn parse_include_operand(tokens: &[PpToken]) -> Result<IncludeOperand, Strin
     }
 }
 
+pub fn parse_embed_tokens(tokens: &[PpToken]) -> Result<(IncludeOperand, Vec<PpToken>), String> {
+    let tokens = trim_tokens(tokens);
+    let Some(first) = tokens.first() else {
+        return Err("malformed embed operand".to_string());
+    };
+    if let PpTokenKind::StringLit(text) = &first.kind {
+        return Ok((
+            IncludeOperand::Literal(HeaderName::Quoted(quoted_header_name(text))),
+            trim_tokens(&tokens[1..]),
+        ));
+    }
+    if matches!(&first.kind, PpTokenKind::Punct(open) if open == "<") {
+        let mut name = String::new();
+        for (index, token) in tokens.iter().enumerate().skip(1) {
+            if matches!(&token.kind, PpTokenKind::Punct(value) if value == ">") {
+                return Ok((
+                    IncludeOperand::Literal(HeaderName::Angled(name)),
+                    trim_tokens(&tokens[index + 1..]),
+                ));
+            }
+            name.push_str(token.text());
+        }
+    }
+    Err("malformed embed operand".to_string())
+}
+
 pub fn parse_line_operand(tokens: &[PpToken]) -> LineOperand {
     let tokens = trim_tokens(tokens);
     let Some(first) = tokens.first() else {
@@ -476,12 +502,22 @@ mod tests {
 
     #[test]
     fn parses_embed_operand() -> Result<(), String> {
+        let Directive::Embed { tokens } = directive(r#"#embed "asset.bin""#)? else {
+            return Err("expected embed directive".to_string());
+        };
+        assert_eq!(super::super::emit::emit_tokens(&tokens), r#""asset.bin""#);
+        Ok(())
+    }
+
+    #[test]
+    fn splits_embed_header_and_parameter_tokens() -> Result<(), String> {
+        let tokens = lex(r#""asset.bin" limit(2)"#)?;
+        let (operand, params) = parse_embed_tokens(&tokens)?;
         assert_eq!(
-            directive(r#"#embed "asset.bin""#)?,
-            Directive::Embed {
-                operand: IncludeOperand::Literal(HeaderName::Quoted("asset.bin".to_string())),
-            }
+            operand,
+            IncludeOperand::Literal(HeaderName::Quoted("asset.bin".to_string()))
         );
+        assert_eq!(super::super::emit::emit_tokens(&params), "limit(2)");
         Ok(())
     }
 

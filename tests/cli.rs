@@ -5732,22 +5732,38 @@ fn compiles_c23_fixed_underlying_enum_type() {
 fn internal_cpp_embeds_binary_file_bytes() {
     let src = temp_file("c23-embed", "c");
     let asset = src.with_extension("bin");
+    let empty_asset = src.with_extension("empty");
     let exe = temp_file("c23-embed", "bin");
     let asset_name = asset
         .file_name()
         .and_then(|name| name.to_str())
         .expect("embedded asset name must be UTF-8");
+    let empty_asset_name = empty_asset
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("empty embedded asset name must be UTF-8");
     std::fs::write(&asset, [0u8, 17, 255]).expect("failed to write embedded bytes");
+    std::fs::write(&empty_asset, []).expect("failed to write empty embedded bytes");
     std::fs::write(
         &src,
         format!(
             r#"
 unsigned char bytes[] = {{
 #define EMBED_ASSET "{asset_name}"
+#define EMPTY_EMBED_ASSET "{empty_asset_name}"
 #embed EMBED_ASSET
 }};
+unsigned char limited[] = {{
+#embed EMBED_ASSET limit(2) prefix(9,) suffix(,42)
+}};
+unsigned char empty[] = {{
+#embed EMPTY_EMBED_ASSET if_empty(7)
+}};
 int main(void) {{
-    return bytes[0] != 0 || bytes[1] != 17 || bytes[2] != 255;
+    return bytes[0] != 0 || bytes[1] != 17 || bytes[2] != 255 ||
+           sizeof(limited) != 4 || limited[0] != 9 || limited[1] != 0 ||
+           limited[2] != 17 || limited[3] != 42 ||
+           sizeof(empty) != 1 || empty[0] != 7;
 }}
 "#
         ),
@@ -5768,6 +5784,7 @@ int main(void) {{
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(asset);
+    let _ = std::fs::remove_file(empty_asset);
     let _ = std::fs::remove_file(exe);
 }
 

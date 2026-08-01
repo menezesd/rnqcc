@@ -1630,16 +1630,55 @@ fn emit_operand_address_into(
     }
 }
 
+/// Copy a known-size aggregate between the source address in `x11` and the
+/// destination address in `x12`.
+///
+/// Small argument copies are common and do not need a loop counter or branch.
+/// For larger aggregates, copy full eight-byte units in a compact loop and
+/// finish with exact-width tail moves, avoiding both byte-at-a-time traffic and
+/// reads past the end of the object.
 fn emit_byte_copy_loop(w: &mut dyn Write, size: usize) -> std::io::Result<()> {
-    if size == 0 {
-        return Ok(());
+    const INLINE_COPY_LIMIT: usize = 32;
+
+    if size <= INLINE_COPY_LIMIT {
+        return emit_copy_tail(w, size);
     }
-    emit_load_immediate(w, AsmType::Quadword, "x13", size as i64)?;
+
+    let qwords = size / 8;
+    debug_assert!(qwords > 0);
+    emit_load_immediate(w, AsmType::Quadword, "x13", qwords as i64)?;
     writeln!(w, "1:")?;
-    writeln!(w, "\tldrb w10, [x11], #1")?;
-    writeln!(w, "\tstrb w10, [x12], #1")?;
+    emit_copy_chunk(w, "x10", "ldr", "str", 8)?;
     writeln!(w, "\tsubs x13, x13, #1")?;
-    writeln!(w, "\tb.ne 1b")
+    writeln!(w, "\tb.ne 1b")?;
+    emit_copy_tail(w, size % 8)
+}
+
+fn emit_copy_tail(w: &mut dyn Write, mut size: usize) -> std::io::Result<()> {
+    for (reg, load, store, width) in [
+        ("x10", "ldr", "str", 8),
+        ("w10", "ldr", "str", 4),
+        ("w10", "ldrh", "strh", 2),
+        ("w10", "ldrb", "strb", 1),
+    ] {
+        while size >= width {
+            emit_copy_chunk(w, reg, load, store, width)?;
+            size -= width;
+        }
+    }
+    debug_assert_eq!(size, 0);
+    Ok(())
+}
+
+fn emit_copy_chunk(
+    w: &mut dyn Write,
+    reg: &str,
+    load: &str,
+    store: &str,
+    width: usize,
+) -> std::io::Result<()> {
+    writeln!(w, "\t{} {}, [x11], #{}", load, reg, width)?;
+    writeln!(w, "\t{} {}, [x12], #{}", store, reg, width)
 }
 
 fn emit_copy_to_stack_arg(
@@ -2457,6 +2496,66 @@ pub fn emit(assembly_file: &str, program: &AsmProgram, target: &Target) -> std::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aggregate_copy_uses_exact_width_moves_for_small_sizes() -> Result<(), String> {
+        let mut out = Vec::new();
+        emit_byte_copy_loop(&mut out, 15).map_err(|err| err.to_string())?;
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(
+            asm,
+            "\tldr x10, [x11], #8\n\
+             \tstr x10, [x12], #8\n\
+             \tldr w10, [x11], #4\n\
+             \tstr w10, [x12], #4\n\
+             \tldrh w10, [x11], #2\n\
+             \tstrh w10, [x12], #2\n\
+             \tldrb w10, [x11], #1\n\
+             \tstrb w10, [x12], #1\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn aggregate_copy_repeats_widths_until_complete() -> Result<(), String> {
+        let mut out = Vec::new();
+        emit_byte_copy_loop(&mut out, 24).map_err(|err| err.to_string())?;
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(
+            asm,
+            "\tldr x10, [x11], #8\n\
+             \tstr x10, [x12], #8\n\
+             \tldr x10, [x11], #8\n\
+             \tstr x10, [x12], #8\n\
+             \tldr x10, [x11], #8\n\
+             \tstr x10, [x12], #8\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn aggregate_copy_uses_qword_loop_with_exact_tail() -> Result<(), String> {
+        let mut out = Vec::new();
+        emit_byte_copy_loop(&mut out, 37).map_err(|err| err.to_string())?;
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(
+            asm,
+            "\tmovz x13, #4\n\
+             1:\n\
+             \tldr x10, [x11], #8\n\
+             \tstr x10, [x12], #8\n\
+             \tsubs x13, x13, #1\n\
+             \tb.ne 1b\n\
+             \tldr w10, [x11], #4\n\
+             \tstr w10, [x12], #4\n\
+             \tldrb w10, [x11], #1\n\
+             \tstrb w10, [x12], #1\n"
+        );
+        Ok(())
+    }
 
     #[test]
     fn scalar_shift_immediate_uses_immediate_encoding() -> Result<(), String> {

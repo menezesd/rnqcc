@@ -321,30 +321,40 @@ fn emit_i128_unary(
             ));
         }
         AsmUnaryOp::Neg => {
-            instructions.push(AsmInstr::Unary(
-                AsmType::Quadword,
-                AsmUnaryOp::Not,
-                dst_low.clone(),
-            ));
-            instructions.push(AsmInstr::Unary(
-                AsmType::Quadword,
-                AsmUnaryOp::Not,
-                dst_high.clone(),
-            ));
-            instructions.push(AsmInstr::Binary(
-                AsmType::Quadword,
-                AsmBinaryOp::AddSetFlags,
-                AsmOperand::Imm(1),
-                dst_low,
-            ));
-            instructions.push(AsmInstr::Binary(
-                AsmType::Quadword,
-                AsmBinaryOp::Adc,
-                AsmOperand::Imm(0),
-                dst_high,
-            ));
+            emit_i128_negate_operand(instructions, &dst)?;
         }
     }
+    Ok(())
+}
+
+fn emit_i128_negate_operand(
+    instructions: &mut Vec<AsmInstr>,
+    dst: &AsmOperand,
+) -> Result<(), String> {
+    let dst_low = low64_operand(dst)?;
+    let dst_high = high64_operand(dst)?;
+    instructions.push(AsmInstr::Unary(
+        AsmType::Quadword,
+        AsmUnaryOp::Not,
+        dst_low.clone(),
+    ));
+    instructions.push(AsmInstr::Unary(
+        AsmType::Quadword,
+        AsmUnaryOp::Not,
+        dst_high.clone(),
+    ));
+    instructions.push(AsmInstr::Binary(
+        AsmType::Quadword,
+        AsmBinaryOp::AddSetFlags,
+        AsmOperand::Imm(1),
+        dst_low,
+    ));
+    instructions.push(AsmInstr::Binary(
+        AsmType::Quadword,
+        AsmBinaryOp::Adc,
+        AsmOperand::Imm(0),
+        dst_high,
+    ));
     Ok(())
 }
 
@@ -436,6 +446,32 @@ fn emit_i128_basic_binary(
                 ctx.stack_slots,
                 ctx.global_vars,
             )?;
+            return Ok(true);
+        }
+        if let Some(amount) = i128_constant_negative_power_of_two_shift(left) {
+            let count = TackyVal::Constant(amount);
+            emit_i128_shift(
+                instructions,
+                &TackyBinaryOp::ShiftLeft,
+                right,
+                &count,
+                dst.clone(),
+                ctx,
+            )?;
+            emit_i128_negate_operand(instructions, &dst)?;
+            return Ok(true);
+        }
+        if let Some(amount) = i128_constant_negative_power_of_two_shift(right) {
+            let count = TackyVal::Constant(amount);
+            emit_i128_shift(
+                instructions,
+                &TackyBinaryOp::ShiftLeft,
+                left,
+                &count,
+                dst.clone(),
+                ctx,
+            )?;
+            emit_i128_negate_operand(instructions, &dst)?;
             return Ok(true);
         }
     }
@@ -601,6 +637,17 @@ fn i128_constant_power_of_two_shift(value: &TackyVal) -> Option<i64> {
         TackyVal::Constant(value) if *value > 1 => *value as u128,
         TackyVal::Int128Constant(value) if *value > 1 => *value as u128,
         TackyVal::UInt128Constant(value) if *value > 1 => *value,
+        _ => return None,
+    };
+    value
+        .is_power_of_two()
+        .then_some(i64::from(value.trailing_zeros()))
+}
+
+fn i128_constant_negative_power_of_two_shift(value: &TackyVal) -> Option<i64> {
+    let value = match value {
+        TackyVal::Constant(value) if *value < -1 => value.unsigned_abs() as u128,
+        TackyVal::Int128Constant(value) if *value < -1 => value.unsigned_abs(),
         _ => return None,
     };
     value

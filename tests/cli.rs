@@ -25892,6 +25892,7 @@ __int128 mulzero128(__int128 a) { return a * 0; }
 __int128 mulone128(__int128 a) { return a * 1; }
 __int128 mulneg128(__int128 a) { return a * -1; }
 __int128 mulshift128(__int128 a) { return a * 8; }
+__int128 mulnegshift128(__int128 a) { return a * -8; }
 __int128 div128(__int128 a, __int128 b) { return a / b; }
 __int128 divone128(__int128 a) { return a / 1; }
 __int128 divneg128(__int128 a) { return a / -1; }
@@ -26018,6 +26019,13 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
     assert!(mulshift128.contains("\tlsl x0, x0, #3"), "{mulshift128}");
     assert!(mulshift128.contains("\textr x11,"), "{mulshift128}");
     assert!(!mulshift128.contains("\tumulh "), "{mulshift128}");
+    let mulnegshift128 = body("mulnegshift128");
+    assert!(
+        mulnegshift128.contains("\tlsl x0, x0, #3"),
+        "{mulnegshift128}"
+    );
+    assert!(mulnegshift128.contains("\tmvn x0, x0"), "{mulnegshift128}");
+    assert!(!mulnegshift128.contains("\tumulh "), "{mulnegshift128}");
 
     let divone128 = body("divone128");
     assert!(!divone128.contains("\tbl __divti3"), "{divone128}");

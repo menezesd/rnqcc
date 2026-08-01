@@ -1522,8 +1522,24 @@ fn emit_cmp(
     }
 
     let dst_reg = load_operand(w, target, ty, dst, Reg::R10)?;
+    if let Some((immediate, shift)) = cmp_immediate(src) {
+        if shift == 0 {
+            return writeln!(w, "\tcmp {}, #{}", dst_reg, immediate);
+        }
+        return writeln!(w, "\tcmp {}, #{}, lsl #{}", dst_reg, immediate, shift);
+    }
     let src_reg = load_operand(w, target, ty, src, Reg::R11)?;
     writeln!(w, "\tcmp {}, {}", dst_reg, src_reg)
+}
+
+fn cmp_immediate(src: &AsmOperand) -> Option<(i64, u8)> {
+    let AsmOperand::Imm(value) = src else {
+        return None;
+    };
+    if (0..=4095).contains(value) {
+        return Some((*value, 0));
+    }
+    (*value > 0 && value % 4096 == 0 && value / 4096 <= 4095).then_some((value / 4096, 12))
 }
 
 fn emit_lea(
@@ -2608,6 +2624,31 @@ mod tests {
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
         assert_eq!(asm, "\tfcmp d0, #0.0\n");
+        Ok(())
+    }
+
+    #[test]
+    fn integer_compare_immediates_avoid_register_materialization() -> Result<(), String> {
+        let mut out = Vec::new();
+        for instr in [
+            AsmInstr::Cmp(
+                AsmType::Longword,
+                AsmOperand::Imm(42),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            AsmInstr::Cmp(
+                AsmType::Quadword,
+                AsmOperand::Imm(0xabc000),
+                AsmOperand::Reg(Reg::AX),
+            ),
+        ] {
+            emit_instruction(&mut out, &instr, &Target::aarch64_linux())
+                .map_err(|err| err.to_string())?;
+        }
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(asm, "\tcmp w0, #42\n\tcmp x0, #2748, lsl #12\n");
+        assert_eq!(cmp_immediate(&AsmOperand::Imm(-1)), None);
         Ok(())
     }
 

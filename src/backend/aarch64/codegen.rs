@@ -354,8 +354,7 @@ fn emit_i128_basic_binary(
     left: &TackyVal,
     right: &TackyVal,
     dst: AsmOperand,
-    stack_slots: &HashMap<String, i32>,
-    global_vars: &HashSet<String>,
+    ctx: &Aarch64I128Context<'_>,
 ) -> Result<bool, String> {
     if !matches!(
         op,
@@ -386,11 +385,35 @@ fn emit_i128_basic_binary(
             return Ok(true);
         }
         if i128_constant_is_one(left) {
-            emit_i128_copy_to_operand(instructions, right, dst, stack_slots, global_vars)?;
+            emit_i128_copy_to_operand(instructions, right, dst, ctx.stack_slots, ctx.global_vars)?;
             return Ok(true);
         }
         if i128_constant_is_one(right) {
-            emit_i128_copy_to_operand(instructions, left, dst, stack_slots, global_vars)?;
+            emit_i128_copy_to_operand(instructions, left, dst, ctx.stack_slots, ctx.global_vars)?;
+            return Ok(true);
+        }
+        if let Some(amount) = i128_constant_power_of_two_shift(left) {
+            let count = TackyVal::Constant(amount);
+            emit_i128_shift(
+                instructions,
+                &TackyBinaryOp::ShiftLeft,
+                right,
+                &count,
+                dst,
+                ctx,
+            )?;
+            return Ok(true);
+        }
+        if let Some(amount) = i128_constant_power_of_two_shift(right) {
+            let count = TackyVal::Constant(amount);
+            emit_i128_shift(
+                instructions,
+                &TackyBinaryOp::ShiftLeft,
+                left,
+                &count,
+                dst,
+                ctx,
+            )?;
             return Ok(true);
         }
         if i128_constant_is_negative_one(left) {
@@ -399,8 +422,8 @@ fn emit_i128_basic_binary(
                 right,
                 dst,
                 AsmUnaryOp::Neg,
-                stack_slots,
-                global_vars,
+                ctx.stack_slots,
+                ctx.global_vars,
             )?;
             return Ok(true);
         }
@@ -410,17 +433,23 @@ fn emit_i128_basic_binary(
                 left,
                 dst,
                 AsmUnaryOp::Neg,
-                stack_slots,
-                global_vars,
+                ctx.stack_slots,
+                ctx.global_vars,
             )?;
             return Ok(true);
         }
     }
 
-    emit_i128_copy_to_operand(instructions, left, dst.clone(), stack_slots, global_vars)?;
+    emit_i128_copy_to_operand(
+        instructions,
+        left,
+        dst.clone(),
+        ctx.stack_slots,
+        ctx.global_vars,
+    )?;
     let dst_low = low64_operand(&dst)?;
     let dst_high = high64_operand(&dst)?;
-    let (right_low, right_high) = i128_part_operands(right, stack_slots, global_vars)?;
+    let (right_low, right_high) = i128_part_operands(right, ctx.stack_slots, ctx.global_vars)?;
     match op {
         TackyBinaryOp::BitwiseAnd | TackyBinaryOp::BitwiseOr | TackyBinaryOp::BitwiseXor => {
             let asm_op = match op {
@@ -565,6 +594,18 @@ fn i128_constant_is_negative_one(value: &TackyVal) -> bool {
             | TackyVal::Int128Constant(-1)
             | TackyVal::UInt128Constant(u128::MAX)
     )
+}
+
+fn i128_constant_power_of_two_shift(value: &TackyVal) -> Option<i64> {
+    let value = match value {
+        TackyVal::Constant(value) if *value > 1 => *value as u128,
+        TackyVal::Int128Constant(value) if *value > 1 => *value as u128,
+        TackyVal::UInt128Constant(value) if *value > 1 => *value,
+        _ => return None,
+    };
+    value
+        .is_power_of_two()
+        .then_some(i64::from(value.trailing_zeros()))
 }
 
 fn emit_i128_return_regs_to_operand(
@@ -3556,8 +3597,7 @@ fn convert_function(
                         left,
                         right,
                         AsmOperand::Reg(Reg::AX),
-                        &stack_slots,
-                        global_vars,
+                        &i128_ctx,
                     )? || emit_i128_helper_binary(
                         &mut instructions,
                         op,
@@ -4943,8 +4983,7 @@ fn convert_function(
                         left,
                         right,
                         dst_op.clone(),
-                        &stack_slots,
-                        global_vars,
+                        &i128_ctx,
                     )? {
                         continue;
                     }

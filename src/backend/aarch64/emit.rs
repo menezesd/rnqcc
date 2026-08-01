@@ -1431,6 +1431,9 @@ fn emit_binary(
             _ => unreachable!("only zero and one are trivial multiplication values"),
         };
     }
+    if binary_unsigned_divide_by_one(ty, op, src) {
+        return Ok(());
+    }
     let dst_reg = load_operand(w, target, ty, dst, Reg::R10)?;
     if let Some(offset) = binary_add_sub_immediate_offset(op, src) {
         emit_add_immediate(w, dst_reg, offset)?;
@@ -1568,6 +1571,16 @@ fn binary_unsigned_div_power_of_two_amount(
     let (value, width) = integer_immediate_value(ty, *value)?;
     let amount = value.trailing_zeros();
     (value.is_power_of_two() && amount < width).then_some(amount)
+}
+
+fn binary_unsigned_divide_by_one(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> bool {
+    if !matches!(op, AsmBinaryOp::UDiv) {
+        return false;
+    }
+    let AsmOperand::Imm(value) = src else {
+        return false;
+    };
+    matches!(integer_immediate_value(ty, *value), Some((1, _)))
 }
 
 fn integer_immediate_value(ty: AsmType, value: i64) -> Option<(u64, u32)> {
@@ -2911,6 +2924,25 @@ mod tests {
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
         assert_eq!(asm, "\tlsr w0, w0, #3\n");
+        Ok(())
+    }
+
+    #[test]
+    fn unsigned_divide_by_one_is_elided() -> Result<(), String> {
+        let mut out = Vec::new();
+        emit_instruction(
+            &mut out,
+            &AsmInstr::Binary(
+                AsmType::Longword,
+                AsmBinaryOp::UDiv,
+                AsmOperand::Imm(1),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            &Target::aarch64_linux(),
+        )
+        .map_err(|err| err.to_string())?;
+
+        assert!(out.is_empty());
         Ok(())
     }
 

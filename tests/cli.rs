@@ -8388,8 +8388,12 @@ fn emits_aarch64_shift_for_power_of_two_multiply_immediate() {
 fn emits_aarch64_shift_for_power_of_two_unsigned_divide() {
     let src = temp_file("aarch64-udiv-immediate", "i");
     let out = temp_file("aarch64-udiv-immediate", "s");
-    std::fs::write(&src, "unsigned divide(unsigned x) { return x / 8u; }\n")
-        .expect("failed to write input");
+    std::fs::write(
+        &src,
+        "unsigned divide(unsigned x) { return x / 8u; }\n\
+         unsigned divide_one(unsigned x) { return x / 1u; }\n",
+    )
+    .expect("failed to write input");
 
     let output = Command::new(rnqcc())
         .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
@@ -8402,6 +8406,7 @@ fn emits_aarch64_shift_for_power_of_two_unsigned_divide() {
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains("\tlsr w0, w0, #3"), "{asm}");
     assert!(!asm.contains("\tudiv w0, w0,"), "{asm}");
+    assert!(!asm.contains("\tlsr w0, w0, #0"), "{asm}");
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);

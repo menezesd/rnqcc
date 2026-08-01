@@ -941,43 +941,40 @@ fn zero_register_for_type(ty: AsmType) -> std::io::Result<&'static str> {
     }
 }
 
-/// Return an AArch64 `fmov` immediate spelling for common exactly encodable
-/// IEEE values.  The IR stores floating constants as their raw bit patterns,
-/// so matching those patterns avoids any host floating-point formatting.
-fn aarch64_fmov_immediate(ty: AsmType, value: i64) -> Option<&'static str> {
-    match ty {
-        AsmType::Float => match value as u32 {
-            0x3f00_0000 => Some("0.5"),
-            0x3f80_0000 => Some("1.0"),
-            0x4000_0000 => Some("2.0"),
-            0x4040_0000 => Some("3.0"),
-            0x4080_0000 => Some("4.0"),
-            0x40e0_0000 => Some("7.0"),
-            0xbf00_0000 => Some("-0.5"),
-            0xbf80_0000 => Some("-1.0"),
-            0xc000_0000 => Some("-2.0"),
-            0xc040_0000 => Some("-3.0"),
-            0xc080_0000 => Some("-4.0"),
-            0xc0e0_0000 => Some("-7.0"),
-            _ => None,
-        },
-        AsmType::Double => match value as u64 {
-            0x3fe0_0000_0000_0000 => Some("0.5"),
-            0x3ff0_0000_0000_0000 => Some("1.0"),
-            0x4000_0000_0000_0000 => Some("2.0"),
-            0x4008_0000_0000_0000 => Some("3.0"),
-            0x4010_0000_0000_0000 => Some("4.0"),
-            0x401c_0000_0000_0000 => Some("7.0"),
-            0xbfe0_0000_0000_0000 => Some("-0.5"),
-            0xbff0_0000_0000_0000 => Some("-1.0"),
-            0xc000_0000_0000_0000 => Some("-2.0"),
-            0xc008_0000_0000_0000 => Some("-3.0"),
-            0xc010_0000_0000_0000 => Some("-4.0"),
-            0xc01c_0000_0000_0000 => Some("-7.0"),
-            _ => None,
-        },
-        _ => None,
+/// Return an AArch64 `fmov` immediate spelling for an exactly encodable IEEE
+/// value. The immediate format represents `(1 + fraction / 16) * 2^exponent`
+/// for exponents from -3 through 4, with either sign. The IR stores raw IEEE
+/// bits, so this recognizes the format without depending on host parsing.
+fn aarch64_fmov_immediate(ty: AsmType, value: i64) -> Option<String> {
+    let (negative, exponent, fraction) = match ty {
+        AsmType::Float => {
+            let bits = value as u32;
+            let exponent = ((bits >> 23) & 0xff) as i32 - 127;
+            if bits & 0x0007_ffff != 0 {
+                return None;
+            }
+            (bits >> 31 != 0, exponent, (bits & 0x7f_ffff) >> 19)
+        }
+        AsmType::Double => {
+            let bits = value as u64;
+            let exponent = ((bits >> 52) & 0x7ff) as i32 - 1023;
+            if bits & 0x0000_ffff_ffff_ffff != 0 {
+                return None;
+            }
+            (bits >> 63 != 0, exponent, ((bits >> 48) & 0xf) as u32)
+        }
+        _ => return None,
+    };
+    if !(-3..=4).contains(&exponent) {
+        return None;
     }
+    let magnitude = (16 + fraction) as f64 * 2f64.powi(exponent - 4);
+    let value = if negative { -magnitude } else { magnitude };
+    Some(if value.fract() == 0.0 {
+        format!("{value:.1}")
+    } else {
+        value.to_string()
+    })
 }
 
 fn load_operand(
@@ -2910,6 +2907,21 @@ mod tests {
                 AsmOperand::Imm(0x401c_0000_0000_0000),
                 AsmOperand::Xmm(XmmReg::XMM3),
             ),
+            AsmInstr::Mov(
+                AsmType::Float,
+                AsmOperand::Imm(0x3fc0_0000),
+                AsmOperand::Xmm(XmmReg::XMM4),
+            ),
+            AsmInstr::Mov(
+                AsmType::Double,
+                AsmOperand::Imm(0x3fc0_0000_0000_0000),
+                AsmOperand::Xmm(XmmReg::XMM5),
+            ),
+            AsmInstr::Mov(
+                AsmType::Double,
+                AsmOperand::Imm(0xc03f_0000_0000_0000_u64 as i64),
+                AsmOperand::Xmm(XmmReg::XMM6),
+            ),
         ] {
             emit_instruction(&mut out, &instr, &Target::aarch64_linux())
                 .map_err(|err| err.to_string())?;
@@ -2921,9 +2933,30 @@ mod tests {
             "\tfmov s0, #1.0\n\
              \tfmov s1, #-0.5\n\
              \tfmov d2, #-1.0\n\
-             \tfmov d3, #7.0\n"
+             \tfmov d3, #7.0\n\
+             \tfmov s4, #1.5\n\
+             \tfmov d5, #0.125\n\
+             \tfmov d6, #-31.0\n"
         );
         Ok(())
+    }
+
+    #[test]
+    fn fmov_immediate_recognizes_full_encoding_space() {
+        for exponent in -3..=4 {
+            for fraction in 0..16_u32 {
+                let float_bits = ((exponent + 127) as u32) << 23 | fraction << 19;
+                let double_bits = ((exponent + 1023) as u64) << 52 | (fraction as u64) << 48;
+                for signed in [float_bits as i64, (float_bits | (1 << 31)) as i64] {
+                    assert!(aarch64_fmov_immediate(AsmType::Float, signed).is_some());
+                }
+                for signed in [double_bits as i64, (double_bits | (1 << 63)) as i64] {
+                    assert!(aarch64_fmov_immediate(AsmType::Double, signed).is_some());
+                }
+            }
+        }
+        assert!(aarch64_fmov_immediate(AsmType::Float, 0x3dcc_cccd).is_none());
+        assert!(aarch64_fmov_immediate(AsmType::Double, 0x3fb9_9999_9999_999a).is_none());
     }
 
     #[test]

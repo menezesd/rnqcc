@@ -7033,7 +7033,7 @@ fn emits_aarch64_assembly_for_double_return_constant() {
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
-    assert!(asm.contains("fmov d0, x9"));
+    assert!(asm.contains("fmov d0, #1.5"));
     assert!(!asm.contains("str d9, [sp"));
     assert!(!asm.contains("ldr d0, [sp"));
 

@@ -794,6 +794,45 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                     show_operand(dst, *t, platform)?
                 );
             }
+            if matches!(*op, AsmBinaryOp::Mul)
+                && matches!(*t, AsmType::Longword | AsmType::Quadword)
+            {
+                if let AsmOperand::Imm(value) = src {
+                    match *value {
+                        0 => {
+                            return writeln!(
+                                w,
+                                "\tmov{} $0, {}",
+                                suffix(*t),
+                                show_operand(dst, *t, platform)?
+                            )
+                        }
+                        1 => return Ok(()),
+                        -1 => {
+                            return writeln!(
+                                w,
+                                "\tneg{} {}",
+                                suffix(*t),
+                                show_operand(dst, *t, platform)?
+                            )
+                        }
+                        value if value > 1 && (value as u64).is_power_of_two() => {
+                            let amount = (value as u64).trailing_zeros();
+                            let width = if *t == AsmType::Quadword { 64 } else { 32 };
+                            if amount < width {
+                                return writeln!(
+                                    w,
+                                    "\tsal{} ${}, {}",
+                                    suffix(*t),
+                                    amount,
+                                    show_operand(dst, *t, platform)?
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             let mnemonic = match op {
                 AsmBinaryOp::Add | AsmBinaryOp::AddSetFlags => "add",
                 AsmBinaryOp::Adc => "adc",

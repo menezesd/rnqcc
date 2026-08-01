@@ -26199,6 +26199,8 @@ unsigned __int128 xorzero(unsigned __int128 a) { return a ^ 0; }
 unsigned __int128 xorones(unsigned __int128 a) { return a ^ ~(unsigned __int128)0; }
 int eqzero(unsigned __int128 a) { return a == 0; }
 int nezero(unsigned __int128 a) { return a != 0; }
+int sltzero(__int128 a) { return a < 0; }
+int sgezero(__int128 a) { return a >= 0; }
 int ultzero(unsigned __int128 a) { return a < 0; }
 int ugezero(unsigned __int128 a) { return a >= 0; }
 int ugtzero(unsigned __int128 a) { return a > 0; }
@@ -26269,6 +26271,13 @@ int ulezero(unsigned __int128 a) { return a <= 0; }
         assert!(body.contains(&format!("\t{setcc} ")), "{body}");
         assert!(!body.contains("\tje "), "{body}");
         assert!(!body.contains("\tjne "), "{body}");
+    }
+    for (name, setcc) in [("sltzero", "setl"), ("sgezero", "setge")] {
+        let body = body(name);
+        assert!(body.contains("\tcmpq $0,"), "{body}");
+        assert!(body.contains(&format!("\t{setcc} ")), "{body}");
+        assert!(!body.contains("\tjne "), "{body}");
+        assert!(!body.contains("\tje "), "{body}");
     }
     for name in ["ultzero", "ugezero"] {
         let body = body(name);

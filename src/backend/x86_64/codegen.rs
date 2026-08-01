@@ -2868,6 +2868,34 @@ fn convert_binary(
             x87_load_val(out, left, types, static_doubles);
             out.push(AsmInstr::X87Compare);
         } else if cmp_type == AsmType::Octword {
+            if !is_unsigned {
+                let (value, condition) = if i128_constant_is_zero(right) {
+                    match op {
+                        TackyBinaryOp::LessThan => (Some(left), Some(CondCode::L)),
+                        TackyBinaryOp::GreaterEqual => (Some(left), Some(CondCode::GE)),
+                        _ => (None, None),
+                    }
+                } else if i128_constant_is_zero(left) {
+                    match op {
+                        TackyBinaryOp::GreaterThan => (Some(right), Some(CondCode::L)),
+                        TackyBinaryOp::LessEqual => (Some(right), Some(CondCode::GE)),
+                        _ => (None, None),
+                    }
+                } else {
+                    (None, None)
+                };
+                if let (Some(value), Some(condition)) = (value, condition) {
+                    let (_, high) = i128_part_operands(value)?;
+                    out.push(AsmInstr::Cmp(AsmType::Quadword, AsmOperand::Imm(0), high));
+                    out.push(AsmInstr::Mov(
+                        AsmType::Longword,
+                        AsmOperand::Imm(0),
+                        convert_val(dst),
+                    ));
+                    out.push(AsmInstr::SetCC(condition, convert_val(dst)));
+                    return Ok(());
+                }
+            }
             if is_unsigned && i128_constant_is_zero(right) {
                 match op {
                     TackyBinaryOp::LessThan | TackyBinaryOp::GreaterEqual => {

@@ -3561,6 +3561,73 @@ fn convert_function(
     })
 }
 
+/// Remove the temporary boolean in `cmp; mov $0; setcc; cmp $0; j{e,ne}`
+/// before register allocation. The intervening instructions preserve the
+/// comparison flags, and the temporary is used only by the following branch.
+fn fuse_setcc_branches(func: &mut AsmFunction) {
+    fn invert_condition(cc: CondCode) -> CondCode {
+        match cc {
+            CondCode::E => CondCode::NE,
+            CondCode::NE => CondCode::E,
+            CondCode::L => CondCode::GE,
+            CondCode::LE => CondCode::G,
+            CondCode::G => CondCode::LE,
+            CondCode::GE => CondCode::L,
+            CondCode::B => CondCode::AE,
+            CondCode::BE => CondCode::A,
+            CondCode::A => CondCode::BE,
+            CondCode::AE => CondCode::B,
+            CondCode::P => CondCode::NP,
+            CondCode::NP => CondCode::P,
+            CondCode::S => CondCode::NS,
+            CondCode::NS => CondCode::S,
+        }
+    }
+
+    let old_instructions = std::mem::take(&mut func.instructions);
+    let mut instructions = Vec::with_capacity(old_instructions.len());
+    let mut index = 0;
+    while index < old_instructions.len() {
+        let fused_branch = match (
+            old_instructions.get(index),
+            old_instructions.get(index + 1),
+            old_instructions.get(index + 2),
+            old_instructions.get(index + 3),
+            old_instructions.get(index + 4),
+        ) {
+            (
+                Some(AsmInstr::Cmp(..)),
+                Some(AsmInstr::Mov(
+                    AsmType::Longword,
+                    AsmOperand::Imm(0),
+                    AsmOperand::Pseudo(zeroed),
+                )),
+                Some(AsmInstr::SetCC(set_cc, AsmOperand::Pseudo(set_dst))),
+                Some(AsmInstr::Cmp(
+                    AsmType::Longword,
+                    AsmOperand::Imm(0),
+                    AsmOperand::Pseudo(compared),
+                )),
+                Some(AsmInstr::JmpCC(branch_cc, label)),
+            ) if zeroed == set_dst && zeroed == compared => match branch_cc {
+                CondCode::E => Some((invert_condition(*set_cc), label)),
+                CondCode::NE => Some((*set_cc, label)),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((cc, label)) = fused_branch {
+            instructions.push(old_instructions[index].clone());
+            instructions.push(AsmInstr::JmpCC(cc, label.clone()));
+            index += 5;
+        } else {
+            instructions.push(old_instructions[index].clone());
+            index += 1;
+        }
+    }
+    func.instructions = instructions;
+}
+
 // ============================================================
 // Phase 2: Replace pseudo-registers with stack slots
 // ============================================================
@@ -4622,6 +4689,8 @@ pub fn gen(
                 let mut asm_func =
                     convert_function(tf, &function_ctx, &mut static_doubles, &mut static_floats)?;
 
+                fuse_setcc_branches(&mut asm_func);
+
                 // Compute aliased variables (address-taken + static)
                 let aliased = crate::backend::common::compute_aliased(&tf.body, static_vars);
 
@@ -4722,6 +4791,48 @@ mod tests {
             memory_param_blocks: Vec::new(),
             struct_param_groups: Vec::new(),
         }
+    }
+
+    #[test]
+    fn x86_64_preallocation_fuses_setcc_boolean_branch() {
+        let mut function = AsmFunction {
+            name: "f".to_string(),
+            global: false,
+            instructions: vec![
+                AsmInstr::Cmp(
+                    AsmType::Longword,
+                    AsmOperand::Imm(1),
+                    AsmOperand::Pseudo("x".to_string()),
+                ),
+                AsmInstr::Mov(
+                    AsmType::Longword,
+                    AsmOperand::Imm(0),
+                    AsmOperand::Pseudo("boolean".to_string()),
+                ),
+                AsmInstr::SetCC(CondCode::LE, AsmOperand::Pseudo("boolean".to_string())),
+                AsmInstr::Cmp(
+                    AsmType::Longword,
+                    AsmOperand::Imm(0),
+                    AsmOperand::Pseudo("boolean".to_string()),
+                ),
+                AsmInstr::JmpCC(CondCode::E, "false".to_string()),
+                AsmInstr::Label("false".to_string()),
+                AsmInstr::Ret,
+            ],
+        };
+
+        fuse_setcc_branches(&mut function);
+
+        assert_eq!(function.instructions.len(), 4);
+        assert!(matches!(
+            function.instructions.as_slice(),
+            [
+                AsmInstr::Cmp(AsmType::Longword, AsmOperand::Imm(1), AsmOperand::Pseudo(_)),
+                AsmInstr::JmpCC(CondCode::G, label),
+                AsmInstr::Label(_),
+                AsmInstr::Ret,
+            ] if label == "false"
+        ));
     }
 
     #[test]

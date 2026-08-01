@@ -1704,11 +1704,16 @@ fn binary_signed_div_power_of_two_amount(
     let AsmOperand::Imm(value) = src else {
         return None;
     };
-    if *value <= 1 {
+    let (value, width) = integer_immediate_value(ty, *value)?;
+    let value = if width == 64 {
+        value as i64
+    } else {
+        value as u32 as i32 as i64
+    };
+    if value <= 1 {
         return None;
     }
-    let (_, width) = integer_immediate_value(ty, *value)?;
-    let value = *value as u64;
+    let value = value as u64;
     let amount = value.trailing_zeros();
     (value.is_power_of_two() && amount < width - 1).then_some((amount, width))
 }

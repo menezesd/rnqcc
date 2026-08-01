@@ -26199,6 +26199,10 @@ unsigned __int128 xorzero(unsigned __int128 a) { return a ^ 0; }
 unsigned __int128 xorones(unsigned __int128 a) { return a ^ ~(unsigned __int128)0; }
 int eqzero(unsigned __int128 a) { return a == 0; }
 int nezero(unsigned __int128 a) { return a != 0; }
+int ultzero(unsigned __int128 a) { return a < 0; }
+int ugezero(unsigned __int128 a) { return a >= 0; }
+int ugtzero(unsigned __int128 a) { return a > 0; }
+int ulezero(unsigned __int128 a) { return a <= 0; }
 "#,
     )
     .expect("failed to write input");
@@ -26265,6 +26269,21 @@ int nezero(unsigned __int128 a) { return a != 0; }
         assert!(body.contains(&format!("\t{setcc} ")), "{body}");
         assert!(!body.contains("\tje "), "{body}");
         assert!(!body.contains("\tjne "), "{body}");
+    }
+    for name in ["ultzero", "ugezero"] {
+        let body = body(name);
+        assert!(
+            body.contains("\tmovl $") || body.contains("\txorl %eax, %eax"),
+            "{body}"
+        );
+        assert!(!body.contains("\tcmpq "), "{body}");
+        assert!(!body.contains("\tj"), "{body}");
+    }
+    for (name, setcc) in [("ugtzero", "setne"), ("ulezero", "sete")] {
+        let body = body(name);
+        assert!(body.contains("\torq "), "{body}");
+        assert!(body.contains(&format!("\t{setcc} ")), "{body}");
+        assert!(!body.contains("\tj"), "{body}");
     }
 
     let _ = std::fs::remove_file(src);

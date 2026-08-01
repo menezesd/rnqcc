@@ -457,6 +457,27 @@ fn emit_i128_not(out: &mut Vec<AsmInstr>, dst: &TackyVal) -> Result<(), String> 
     Ok(())
 }
 
+fn emit_i128_zero_cmp(out: &mut Vec<AsmInstr>, value: &TackyVal) -> Result<(), String> {
+    let (low, high) = i128_part_operands(value)?;
+    out.push(AsmInstr::Mov(
+        AsmType::Quadword,
+        low,
+        AsmOperand::Reg(Reg::R10),
+    ));
+    out.push(AsmInstr::Binary(
+        AsmType::Quadword,
+        AsmBinaryOp::Or,
+        high,
+        AsmOperand::Reg(Reg::R10),
+    ));
+    out.push(AsmInstr::Cmp(
+        AsmType::Quadword,
+        AsmOperand::Imm(0),
+        AsmOperand::Reg(Reg::R10),
+    ));
+    Ok(())
+}
+
 fn i128_constant_is_zero(value: &TackyVal) -> bool {
     matches!(
         value,
@@ -2847,6 +2868,74 @@ fn convert_binary(
             x87_load_val(out, left, types, static_doubles);
             out.push(AsmInstr::X87Compare);
         } else if cmp_type == AsmType::Octword {
+            if is_unsigned && i128_constant_is_zero(right) {
+                match op {
+                    TackyBinaryOp::LessThan | TackyBinaryOp::GreaterEqual => {
+                        out.push(AsmInstr::Mov(
+                            AsmType::Longword,
+                            AsmOperand::Imm(if matches!(op, TackyBinaryOp::GreaterEqual) {
+                                1
+                            } else {
+                                0
+                            }),
+                            convert_val(dst),
+                        ));
+                        return Ok(());
+                    }
+                    TackyBinaryOp::GreaterThan | TackyBinaryOp::LessEqual => {
+                        emit_i128_zero_cmp(out, left)?;
+                        out.push(AsmInstr::Mov(
+                            AsmType::Longword,
+                            AsmOperand::Imm(0),
+                            convert_val(dst),
+                        ));
+                        out.push(AsmInstr::SetCC(
+                            if matches!(op, TackyBinaryOp::GreaterThan) {
+                                CondCode::NE
+                            } else {
+                                CondCode::E
+                            },
+                            convert_val(dst),
+                        ));
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+            if is_unsigned && i128_constant_is_zero(left) {
+                match op {
+                    TackyBinaryOp::GreaterThan | TackyBinaryOp::LessEqual => {
+                        out.push(AsmInstr::Mov(
+                            AsmType::Longword,
+                            AsmOperand::Imm(if matches!(op, TackyBinaryOp::LessEqual) {
+                                1
+                            } else {
+                                0
+                            }),
+                            convert_val(dst),
+                        ));
+                        return Ok(());
+                    }
+                    TackyBinaryOp::GreaterEqual | TackyBinaryOp::LessThan => {
+                        emit_i128_zero_cmp(out, right)?;
+                        out.push(AsmInstr::Mov(
+                            AsmType::Longword,
+                            AsmOperand::Imm(0),
+                            convert_val(dst),
+                        ));
+                        out.push(AsmInstr::SetCC(
+                            if matches!(op, TackyBinaryOp::GreaterEqual) {
+                                CondCode::E
+                            } else {
+                                CondCode::NE
+                            },
+                            convert_val(dst),
+                        ));
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
             if matches!(op, TackyBinaryOp::Equal | TackyBinaryOp::NotEqual)
                 && (i128_constant_is_zero(left) || i128_constant_is_zero(right))
             {
@@ -2855,23 +2944,7 @@ fn convert_binary(
                 } else {
                     left
                 };
-                let (low, high) = i128_part_operands(value)?;
-                out.push(AsmInstr::Mov(
-                    AsmType::Quadword,
-                    low,
-                    AsmOperand::Reg(Reg::R10),
-                ));
-                out.push(AsmInstr::Binary(
-                    AsmType::Quadword,
-                    AsmBinaryOp::Or,
-                    high,
-                    AsmOperand::Reg(Reg::R10),
-                ));
-                out.push(AsmInstr::Cmp(
-                    AsmType::Quadword,
-                    AsmOperand::Imm(0),
-                    AsmOperand::Reg(Reg::R10),
-                ));
+                emit_i128_zero_cmp(out, value)?;
                 out.push(AsmInstr::Mov(
                     AsmType::Longword,
                     AsmOperand::Imm(0),

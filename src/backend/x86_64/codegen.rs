@@ -1768,12 +1768,15 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                             out.push(AsmInstr::Mov(
                                 AsmType::Quadword,
                                 dst_low.clone(),
-                                AsmOperand::Reg(Reg::R10),
+                                // R10/R11 are reserved for the later memory-to-memory
+                                // copy fixup. Preserve the product elsewhere until the
+                                // original dividend has been restored to `dst`.
+                                AsmOperand::Reg(Reg::R8),
                             ));
                             out.push(AsmInstr::Mov(
                                 AsmType::Quadword,
                                 dst_high.clone(),
-                                AsmOperand::Reg(Reg::R11),
+                                AsmOperand::Reg(Reg::R9),
                             ));
                             let (left_low, left_high) = i128_part_operands(left)?;
                             emit_i128_parts_to_operands(
@@ -1786,13 +1789,13 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                             out.push(AsmInstr::Binary(
                                 AsmType::Quadword,
                                 AsmBinaryOp::SubSetFlags,
-                                AsmOperand::Reg(Reg::R10),
+                                AsmOperand::Reg(Reg::R8),
                                 dst_low,
                             ));
                             out.push(AsmInstr::Binary(
                                 AsmType::Quadword,
                                 AsmBinaryOp::Sbb,
-                                AsmOperand::Reg(Reg::R11),
+                                AsmOperand::Reg(Reg::R9),
                                 dst_high,
                             ));
                             return Ok(());

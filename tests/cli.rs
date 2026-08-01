@@ -26474,16 +26474,16 @@ int ulezero(unsigned __int128 a) { return a <= 0; }
     let modshift = body("modshift");
     assert!(modshift.contains("\tsarq $63, %r10"), "{modshift}");
     assert!(modshift.contains("\tsalq $3,"), "{modshift}");
-    assert!(modshift.contains("\tsubq %r10,"), "{modshift}");
-    assert!(modshift.contains("\tsbbq %r11,"), "{modshift}");
+    assert!(modshift.contains("\tsubq %r8,"), "{modshift}");
+    assert!(modshift.contains("\tsbbq %r9,"), "{modshift}");
     assert!(!modshift.contains("\tcall __modti3"), "{modshift}");
     let modwide = body("modwide");
     assert!(modwide.contains("\tsarq $32,"), "{modwide}");
     assert!(modwide.contains("\tsalq $32,"), "{modwide}");
-    assert!(modwide.contains("\tsbbq %r11,"), "{modwide}");
+    assert!(modwide.contains("\tsbbq %r9,"), "{modwide}");
     assert!(!modwide.contains("\tcall __modti3"), "{modwide}");
     let modnegshift = body("modnegshift");
-    assert!(modnegshift.contains("\tsbbq %r11,"), "{modnegshift}");
+    assert!(modnegshift.contains("\tsbbq %r9,"), "{modnegshift}");
     assert!(!modnegshift.contains("\tcall __modti3"), "{modnegshift}");
     for name in ["modone", "modneg"] {
         let body = body(name);

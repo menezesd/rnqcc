@@ -28822,35 +28822,47 @@ fn runs_c23_bitint_width_runtime_matrix() {
         src.path(),
         r#"
 int main(void) {
+    unsigned _BitInt(8) u8 = 255U;
+    u8 += 1U;
+    if (u8 != 0U || sizeof(u8) != 1) return 1;
+    _BitInt(8) s8 = -40;
+    if (s8 + 82 != 42) return 2;
+
+    unsigned _BitInt(16) u16 = 65535U;
+    u16 += 1U;
+    if (u16 != 0U || sizeof(u16) != 2) return 3;
+    _BitInt(16) s16 = -100;
+    if (s16 + 142 != 42) return 4;
+
     unsigned _BitInt(32) u32 = 4294967295U;
-    if (u32 + 1U != 0U) return 1;
-    if ((unsigned _BitInt(32))0U - 1U != 4294967295U) return 2;
-    if ((unsigned _BitInt(32))65536U * 65536U != 0U) return 3;
+    if (u32 + 1U != 0U) return 5;
+    if ((unsigned _BitInt(32))0U - 1U != 4294967295U) return 6;
+    if ((unsigned _BitInt(32))65536U * 65536U != 0U) return 7;
 
     _BitInt(32) s32 = -100;
-    if (s32 + 58 != -42) return 4;
-    if ((_BitInt(32))2147483647 > (_BitInt(32))-1 != 1) return 5;
+    if (s32 + 58 != -42) return 8;
+    if ((_BitInt(32))2147483647 > (_BitInt(32))-1 != 1) return 9;
 
     unsigned _BitInt(64) u64 = 18446744073709551615UL;
-    if (u64 + 1UL != 0UL) return 6;
-    if (((unsigned _BitInt(64))1U << 63) >> 62 != 2U) return 7;
+    if (u64 + 1UL != 0UL) return 10;
+    if (((unsigned _BitInt(64))1U << 63) >> 62 != 2U) return 11;
 
     _BitInt(64) s64 = (_BitInt(64))1 << 40;
-    if (s64 / ((_BitInt(64))1 << 20) != ((_BitInt(64))1 << 20)) return 8;
-    if (s64 - 1099511627734L != 42) return 9;
+    if (s64 / ((_BitInt(64))1 << 20) != ((_BitInt(64))1 << 20)) return 12;
+    if (s64 - 1099511627734L != 42) return 13;
 
     unsigned _BitInt(128) u128 = (unsigned _BitInt(128))1 << 100;
     u128 += (unsigned _BitInt(128))1 << 65;
-    if (((u128 >> 100) & 1U) != 1U) return 10;
-    if (((u128 >> 65) & 1U) != 1U) return 11;
-    if ((unsigned long)u128 != 0UL) return 12;
+    if (((u128 >> 100) & 1U) != 1U) return 14;
+    if (((u128 >> 65) & 1U) != 1U) return 15;
+    if ((unsigned long)u128 != 0UL) return 16;
 
     _BitInt(128) s128 = (_BitInt(128))1 << 70;
-    if (s128 <= ((_BitInt(128))1 << 69)) return 13;
-    if ((s128 >> 68) != 4) return 14;
+    if (s128 <= ((_BitInt(128))1 << 69)) return 17;
+    if ((s128 >> 68) != 4) return 18;
 
     unsigned _BitInt(32) narrowed = (unsigned _BitInt(32))(unsigned _BitInt(64))0x10000002aUL;
-    if (narrowed != 42U) return 15;
+    if (narrowed != 42U) return 19;
 
     return 42;
 }

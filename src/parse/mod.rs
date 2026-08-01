@@ -1655,6 +1655,20 @@ impl Parser {
             return Err("signed _BitInt width must be greater than 1".to_string());
         }
         let storage = match width {
+            8 => {
+                if unsigned {
+                    CType::UChar
+                } else {
+                    CType::SChar
+                }
+            }
+            16 => {
+                if unsigned {
+                    CType::UShort
+                } else {
+                    CType::Short
+                }
+            }
             32 => {
                 if unsigned {
                     CType::UInt
@@ -4444,7 +4458,43 @@ mod tests {
     }
 
     #[test]
+    fn parses_small_exact_width_bitint_specifiers() -> Result<(), String> {
+        let program = parse_source(
+            "_BitInt(8) a;\nunsigned _BitInt(8) b;\n_BitInt(16) c;\nunsigned _BitInt(16) d;\n",
+        )?;
+        let types = program
+            .declarations
+            .iter()
+            .map(|declaration| match declaration {
+                Declaration::VarDecl(declaration) => Ok(declaration.var_type),
+                _ => Err("expected variable declaration".to_string()),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            types,
+            vec![CType::SChar, CType::UChar, CType::Short, CType::UShort]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn bitint_spec_tracks_width_signedness_and_storage() -> Result<(), String> {
+        assert_eq!(
+            Parser::bitint_spec(8, false)?,
+            BitIntSpec {
+                width: 8,
+                unsigned: false,
+                storage: CType::SChar,
+            }
+        );
+        assert_eq!(
+            Parser::bitint_spec(16, true)?,
+            BitIntSpec {
+                width: 16,
+                unsigned: true,
+                storage: CType::UShort,
+            }
+        );
         assert_eq!(
             Parser::bitint_spec(32, false)?,
             BitIntSpec {
@@ -4504,12 +4554,6 @@ mod tests {
     #[test]
     fn rejects_bitint_widths_without_exact_storage() -> Result<(), String> {
         let err = require_err(parse_source_err("_BitInt(5) x;\n"), "parse should fail")?;
-        assert!(
-            err.contains("_BitInt width is not supported by an exact storage type"),
-            "{err}"
-        );
-
-        let err = require_err(parse_source_err("_BitInt(16) x;\n"), "parse should fail")?;
         assert!(
             err.contains("_BitInt width is not supported by an exact storage type"),
             "{err}"

@@ -25887,6 +25887,12 @@ __int128 sub128(__int128 a, __int128 b) { return a - b; }
 unsigned __int128 and128(unsigned __int128 a, unsigned __int128 b) { return a & b; }
 unsigned __int128 or128(unsigned __int128 a, unsigned __int128 b) { return a | b; }
 unsigned __int128 xor128(unsigned __int128 a, unsigned __int128 b) { return a ^ b; }
+unsigned __int128 andzero128(unsigned __int128 a) { return a & 0; }
+unsigned __int128 andones128(unsigned __int128 a) { return a & ~(unsigned __int128)0; }
+unsigned __int128 orzero128(unsigned __int128 a) { return a | 0; }
+unsigned __int128 orones128(unsigned __int128 a) { return a | ~(unsigned __int128)0; }
+unsigned __int128 xorzero128(unsigned __int128 a) { return a ^ 0; }
+unsigned __int128 xorones128(unsigned __int128 a) { return a ^ ~(unsigned __int128)0; }
 __int128 mul128(__int128 a, __int128 b) { return a * b; }
 __int128 mulzero128(__int128 a) { return a * 0; }
 __int128 mulone128(__int128 a) { return a * 1; }
@@ -25993,6 +25999,24 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
         assert!(!body.contains("\tstr x9,"), "{body}");
         assert!(!body.contains("\tstr x10,"), "{body}");
     }
+    let andzero128 = body("andzero128");
+    assert!(andzero128.contains("\tmov x0, xzr"), "{andzero128}");
+    assert!(andzero128.contains("\tmov x1, xzr"), "{andzero128}");
+    assert!(!andzero128.contains("\tand "), "{andzero128}");
+    for name in ["andones128", "orzero128", "xorzero128"] {
+        let body = body(name);
+        assert!(!body.contains("\tand "), "{body}");
+        assert!(!body.contains("\torr "), "{body}");
+        assert!(!body.contains("\teor "), "{body}");
+    }
+    let orones128 = body("orones128");
+    assert!(orones128.contains("\tmovn x0, #0"), "{orones128}");
+    assert!(orones128.contains("\tmovn x1, #0"), "{orones128}");
+    assert!(!orones128.contains("\torr "), "{orones128}");
+    let xorones128 = body("xorones128");
+    assert!(xorones128.contains("\tmvn x0, x0"), "{xorones128}");
+    assert!(xorones128.contains("\tmvn x1, x1"), "{xorones128}");
+    assert!(!xorones128.contains("\teor "), "{xorones128}");
     let mul128 = body("mul128");
     assert!(mul128.contains("\tumulh "), "{mul128}");
     assert!(mul128.contains("\tmul "), "{mul128}");

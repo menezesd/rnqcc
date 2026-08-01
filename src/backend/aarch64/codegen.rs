@@ -358,6 +358,25 @@ fn emit_i128_negate_operand(
     Ok(())
 }
 
+fn emit_i128_zero_operand(
+    instructions: &mut Vec<AsmInstr>,
+    dst: &AsmOperand,
+) -> Result<(), String> {
+    let dst_low = low64_operand(dst)?;
+    let dst_high = high64_operand(dst)?;
+    instructions.push(AsmInstr::Mov(
+        AsmType::Quadword,
+        AsmOperand::Imm(0),
+        dst_low,
+    ));
+    instructions.push(AsmInstr::Mov(
+        AsmType::Quadword,
+        AsmOperand::Imm(0),
+        dst_high,
+    ));
+    Ok(())
+}
+
 fn emit_i128_basic_binary(
     instructions: &mut Vec<AsmInstr>,
     op: &TackyBinaryOp,
@@ -378,20 +397,70 @@ fn emit_i128_basic_binary(
         return Ok(false);
     }
 
+    if matches!(op, TackyBinaryOp::BitwiseAnd) {
+        if i128_constant_is_zero(left) || i128_constant_is_zero(right) {
+            emit_i128_zero_operand(instructions, &dst)?;
+            return Ok(true);
+        }
+        if i128_constant_is_all_ones(left) {
+            emit_i128_copy_to_operand(instructions, right, dst, ctx.stack_slots, ctx.global_vars)?;
+            return Ok(true);
+        }
+        if i128_constant_is_all_ones(right) {
+            emit_i128_copy_to_operand(instructions, left, dst, ctx.stack_slots, ctx.global_vars)?;
+            return Ok(true);
+        }
+    }
+    if matches!(op, TackyBinaryOp::BitwiseOr | TackyBinaryOp::BitwiseXor) {
+        if i128_constant_is_zero(left) {
+            emit_i128_copy_to_operand(instructions, right, dst, ctx.stack_slots, ctx.global_vars)?;
+            return Ok(true);
+        }
+        if i128_constant_is_zero(right) {
+            emit_i128_copy_to_operand(instructions, left, dst, ctx.stack_slots, ctx.global_vars)?;
+            return Ok(true);
+        }
+    }
+    if matches!(op, TackyBinaryOp::BitwiseOr)
+        && (i128_constant_is_all_ones(left) || i128_constant_is_all_ones(right))
+    {
+        emit_i128_copy_to_operand(
+            instructions,
+            &TackyVal::Int128Constant(-1),
+            dst,
+            ctx.stack_slots,
+            ctx.global_vars,
+        )?;
+        return Ok(true);
+    }
+    if matches!(op, TackyBinaryOp::BitwiseXor) {
+        if i128_constant_is_all_ones(left) {
+            emit_i128_unary(
+                instructions,
+                right,
+                dst,
+                AsmUnaryOp::Not,
+                ctx.stack_slots,
+                ctx.global_vars,
+            )?;
+            return Ok(true);
+        }
+        if i128_constant_is_all_ones(right) {
+            emit_i128_unary(
+                instructions,
+                left,
+                dst,
+                AsmUnaryOp::Not,
+                ctx.stack_slots,
+                ctx.global_vars,
+            )?;
+            return Ok(true);
+        }
+    }
+
     if matches!(op, TackyBinaryOp::Mul) {
         if i128_constant_is_zero(left) || i128_constant_is_zero(right) {
-            let dst_low = low64_operand(&dst)?;
-            let dst_high = high64_operand(&dst)?;
-            instructions.push(AsmInstr::Mov(
-                AsmType::Quadword,
-                AsmOperand::Imm(0),
-                dst_low,
-            ));
-            instructions.push(AsmInstr::Mov(
-                AsmType::Quadword,
-                AsmOperand::Imm(0),
-                dst_high,
-            ));
+            emit_i128_zero_operand(instructions, &dst)?;
             return Ok(true);
         }
         if i128_constant_is_one(left) {
@@ -632,6 +701,10 @@ fn i128_constant_is_negative_one(value: &TackyVal) -> bool {
     )
 }
 
+fn i128_constant_is_all_ones(value: &TackyVal) -> bool {
+    i128_constant_is_negative_one(value)
+}
+
 fn i128_constant_power_of_two_shift(value: &TackyVal) -> Option<i64> {
     let value = match value {
         TackyVal::Constant(value) if *value > 1 => *value as u128,
@@ -766,18 +839,7 @@ fn emit_i128_helper_binary(
     if matches!(op, TackyBinaryOp::Mod)
         && (i128_constant_is_one(right) || (!is_unsigned && i128_constant_is_negative_one(right)))
     {
-        let dst_low = low64_operand(&dst)?;
-        let dst_high = high64_operand(&dst)?;
-        instructions.push(AsmInstr::Mov(
-            AsmType::Quadword,
-            AsmOperand::Imm(0),
-            dst_low,
-        ));
-        instructions.push(AsmInstr::Mov(
-            AsmType::Quadword,
-            AsmOperand::Imm(0),
-            dst_high,
-        ));
+        emit_i128_zero_operand(instructions, &dst)?;
         return Ok(true);
     }
     let helper = match (op, is_unsigned_val(left, ctx.types)) {

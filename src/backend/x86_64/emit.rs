@@ -1424,6 +1424,59 @@ fn longword_self_move_is_redundant(instrs: &[AsmInstr], index: usize) -> bool {
     }
 }
 
+fn invert_condition(cc: &CondCode) -> CondCode {
+    match cc {
+        CondCode::E => CondCode::NE,
+        CondCode::NE => CondCode::E,
+        CondCode::L => CondCode::GE,
+        CondCode::LE => CondCode::G,
+        CondCode::G => CondCode::LE,
+        CondCode::GE => CondCode::L,
+        CondCode::A => CondCode::BE,
+        CondCode::AE => CondCode::B,
+        CondCode::B => CondCode::AE,
+        CondCode::BE => CondCode::A,
+        CondCode::P => CondCode::NP,
+        CondCode::NP => CondCode::P,
+        CondCode::S => CondCode::NS,
+        CondCode::NS => CondCode::S,
+    }
+}
+
+/// Fuse `cmp; mov $0; setcc; test; j{e,ne}` when the boolean has no other
+/// use.  The zeroing move preserves the flags for `setcc`; the final test only
+/// branches on that 0/1 result, so the original comparison can branch directly.
+fn fused_setcc_branch(instrs: &[AsmInstr], index: usize) -> Option<(CondCode, String)> {
+    if !matches!(instrs.get(index), Some(AsmInstr::Cmp(..))) {
+        return None;
+    }
+    let AsmInstr::Mov(AsmType::Longword, AsmOperand::Imm(0), AsmOperand::Reg(reg)) =
+        instrs.get(index + 1)?
+    else {
+        return None;
+    };
+    let AsmInstr::SetCC(set_cc, AsmOperand::Reg(set_reg)) = instrs.get(index + 2)? else {
+        return None;
+    };
+    let AsmInstr::Cmp(AsmType::Longword, AsmOperand::Imm(0), AsmOperand::Reg(cmp_reg)) =
+        instrs.get(index + 3)?
+    else {
+        return None;
+    };
+    let AsmInstr::JmpCC(branch_cc, label) = instrs.get(index + 4)? else {
+        return None;
+    };
+    if reg != set_reg || reg != cmp_reg {
+        return None;
+    }
+    let cc = match branch_cc {
+        CondCode::E => invert_condition(set_cc),
+        CondCode::NE => set_cc.clone(),
+        _ => return None,
+    };
+    Some((cc, label.clone()))
+}
+
 fn emit_function(w: &mut dyn Write, func: &AsmFunction, platform: &Target) -> std::io::Result<()> {
     let label = platform.show_symbol(&func.name);
     writeln!(w, "\t.text")?;
@@ -1438,8 +1491,17 @@ fn emit_function(w: &mut dyn Write, func: &AsmFunction, platform: &Target) -> st
         writeln!(w, "\tmovq %rsp, %rbp")?;
         start = 1;
     }
-    for (idx, instr) in instrs.iter().enumerate().skip(start) {
+    let mut idx = start;
+    while idx < instrs.len() {
+        let instr = &instrs[idx];
+        if let Some((cc, label)) = fused_setcc_branch(instrs, idx) {
+            emit_instruction(w, instr, platform)?;
+            emit_instruction(w, &AsmInstr::JmpCC(cc, label), platform)?;
+            idx += 5;
+            continue;
+        }
         if longword_self_move_is_redundant(instrs, idx) {
+            idx += 1;
             continue;
         }
         // `mov $0, reg` can shrink to `xor reg, reg`, but only where the flags
@@ -1447,10 +1509,12 @@ fn emit_function(w: &mut dyn Write, func: &AsmFunction, platform: &Target) -> st
         if let AsmInstr::Mov(t, AsmOperand::Imm(0), AsmOperand::Reg(reg)) = instr {
             if !matches!(*t, AsmType::Float | AsmType::Double | AsmType::LongDouble) {
                 emit_zeroing_mov(w, *t, reg, zeroing_can_use_xor(instrs, idx))?;
+                idx += 1;
                 continue;
             }
         }
         emit_instruction(w, instr, platform)?;
+        idx += 1;
     }
     Ok(())
 }
@@ -1824,6 +1888,36 @@ mod tests {
 
         assert!(asm.contains("\tsubl $1, %edi\n"), "{asm}");
         assert!(!asm.contains("\tmovl %edi, %edi\n"), "{asm}");
+    }
+
+    #[test]
+    fn x86_64_emitter_fuses_setcc_boolean_branch() {
+        let asm = emit_func_body(vec![
+            AsmInstr::Cmp(
+                AsmType::Longword,
+                AsmOperand::Imm(1),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            AsmInstr::Mov(
+                AsmType::Longword,
+                AsmOperand::Imm(0),
+                AsmOperand::Reg(Reg::DX),
+            ),
+            AsmInstr::SetCC(CondCode::LE, AsmOperand::Reg(Reg::DX)),
+            AsmInstr::Cmp(
+                AsmType::Longword,
+                AsmOperand::Imm(0),
+                AsmOperand::Reg(Reg::DX),
+            ),
+            AsmInstr::JmpCC(CondCode::E, "false".to_string()),
+            AsmInstr::Label("false".to_string()),
+            AsmInstr::Ret,
+        ]);
+
+        assert!(asm.contains("\tcmpl $1, %eax\n"), "{asm}");
+        assert!(asm.contains("\tjg .Lfalse\n"), "{asm}");
+        assert!(!asm.contains("setle"), "{asm}");
+        assert!(!asm.contains("testl %edx, %edx"), "{asm}");
     }
 
     #[test]

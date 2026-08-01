@@ -26335,6 +26335,8 @@ __int128 divword(__int128 a) { return a / ((__int128)1 << 64); }
 __int128 divwide(__int128 a) { return a / ((__int128)1 << 96); }
 __int128 modone(__int128 a) { return a % 1; }
 __int128 modneg(__int128 a) { return a % -1; }
+__int128 modshift(__int128 a) { return a % 8; }
+__int128 modwide(__int128 a) { return a % ((__int128)1 << 96); }
 unsigned __int128 udivshift(unsigned __int128 a) { return a / 8; }
 unsigned __int128 umodshift(unsigned __int128 a) { return a % 8; }
 unsigned __int128 umodwide(unsigned __int128 a) { return a % ((unsigned __int128)1 << 65); }
@@ -26445,6 +26447,17 @@ int ulezero(unsigned __int128 a) { return a <= 0; }
     assert!(divwide.contains("\tadcq %r11,"), "{divwide}");
     assert!(divwide.contains("\tsarq $32,"), "{divwide}");
     assert!(!divwide.contains("\tcall __divti3"), "{divwide}");
+    let modshift = body("modshift");
+    assert!(modshift.contains("\tsarq $63, %r10"), "{modshift}");
+    assert!(modshift.contains("\tsalq $3,"), "{modshift}");
+    assert!(modshift.contains("\tsubq %r10,"), "{modshift}");
+    assert!(modshift.contains("\tsbbq %r11,"), "{modshift}");
+    assert!(!modshift.contains("\tcall __modti3"), "{modshift}");
+    let modwide = body("modwide");
+    assert!(modwide.contains("\tsarq $32,"), "{modwide}");
+    assert!(modwide.contains("\tsalq $32,"), "{modwide}");
+    assert!(modwide.contains("\tsbbq %r11,"), "{modwide}");
+    assert!(!modwide.contains("\tcall __modti3"), "{modwide}");
     for name in ["modone", "modneg"] {
         let body = body(name);
         assert!(

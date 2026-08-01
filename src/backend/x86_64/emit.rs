@@ -833,6 +833,40 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                     }
                 }
             }
+            if matches!(*t, AsmType::Longword | AsmType::Quadword) {
+                if let AsmOperand::Imm(value) = src {
+                    match (op.clone(), *value) {
+                        (AsmBinaryOp::And, 0) => {
+                            return writeln!(
+                                w,
+                                "\tmov{} $0, {}",
+                                suffix(*t),
+                                show_operand(dst, *t, platform)?
+                            )
+                        }
+                        (AsmBinaryOp::And, -1) | (AsmBinaryOp::Or, 0) | (AsmBinaryOp::Xor, 0) => {
+                            return Ok(())
+                        }
+                        (AsmBinaryOp::Or, -1) => {
+                            return writeln!(
+                                w,
+                                "\tmov{} $-1, {}",
+                                suffix(*t),
+                                show_operand(dst, *t, platform)?
+                            )
+                        }
+                        (AsmBinaryOp::Xor, -1) => {
+                            return writeln!(
+                                w,
+                                "\tnot{} {}",
+                                suffix(*t),
+                                show_operand(dst, *t, platform)?
+                            )
+                        }
+                        _ => {}
+                    }
+                }
+            }
             let mnemonic = match op {
                 AsmBinaryOp::Add | AsmBinaryOp::AddSetFlags => "add",
                 AsmBinaryOp::Adc => "adc",

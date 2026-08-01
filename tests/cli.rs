@@ -26201,6 +26201,9 @@ unsigned __int128 umodshift(unsigned __int128 a) { return a % 8; }
 unsigned __int128 umodwide(unsigned __int128 a) { return a % ((unsigned __int128)1 << 65); }
 long scalar_mulshift(long a) { return a * 8; }
 int scalar_mulneg(int a) { return a * -1; }
+long scalar_andzero(long a) { return a & 0; }
+long scalar_orones(long a) { return a | -1; }
+long scalar_xorones(long a) { return a ^ -1; }
 unsigned __int128 andzero(unsigned __int128 a) { return a & 0; }
 unsigned __int128 andones(unsigned __int128 a) { return a & ~(unsigned __int128)0; }
 unsigned __int128 orzero(unsigned __int128 a) { return a | 0; }
@@ -26298,6 +26301,18 @@ int ulezero(unsigned __int128 a) { return a <= 0; }
     let scalar_mulneg = body("scalar_mulneg");
     assert!(scalar_mulneg.contains("\tnegl "), "{scalar_mulneg}");
     assert!(!scalar_mulneg.contains("\timull "), "{scalar_mulneg}");
+    let scalar_andzero = body("scalar_andzero");
+    assert!(
+        scalar_andzero.contains("\tmovq $0,") || scalar_andzero.contains("\txorq %r"),
+        "{scalar_andzero}"
+    );
+    assert!(!scalar_andzero.contains("\tandq "), "{scalar_andzero}");
+    let scalar_orones = body("scalar_orones");
+    assert!(scalar_orones.contains("\tmovq $-1,"), "{scalar_orones}");
+    assert!(!scalar_orones.contains("\torq "), "{scalar_orones}");
+    let scalar_xorones = body("scalar_xorones");
+    assert!(scalar_xorones.contains("\tnotq "), "{scalar_xorones}");
+    assert!(!scalar_xorones.contains("\txorq "), "{scalar_xorones}");
     let orones = body("orones");
     assert!(orones.contains("\tmovq $-1,"), "{orones}");
     assert!(!orones.contains("\torq "), "{orones}");

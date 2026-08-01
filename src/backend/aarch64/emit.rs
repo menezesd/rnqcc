@@ -1817,6 +1817,11 @@ fn is_aarch64_logical_immediate(value: u64, width: u32) -> bool {
     if value & value.wrapping_add(1) == 0 {
         return true;
     }
+    // Their complements are equally common for alignment and field masks.
+    let inverted = (!value) & full_mask;
+    if inverted & inverted.wrapping_add(1) == 0 {
+        return true;
+    }
 
     for element_width in [2, 4, 8, 16, 32, 64] {
         if element_width > width {
@@ -3468,6 +3473,7 @@ mod tests {
         assert!(is_aarch64_logical_immediate(0x00ff_00ff, 32));
         assert!(is_aarch64_logical_immediate(0xff00_ff00_ff00_ff00, 64));
         assert!(is_aarch64_logical_immediate(u64::MAX - 1, 64));
+        assert!(is_aarch64_logical_immediate(u64::MAX - 0xfff, 64));
         assert!(!is_aarch64_logical_immediate(0, 64));
         assert!(!is_aarch64_logical_immediate(u64::MAX, 64));
         assert!(!is_aarch64_logical_immediate(0x0123_4567, 32));

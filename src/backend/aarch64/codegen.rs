@@ -1513,66 +1513,49 @@ fn copy_bytes(
     global_vars: &HashSet<String>,
 ) -> Result<(), String> {
     let mut offset = 0usize;
-    while offset + 8 <= size {
-        let byte_offset = i32::try_from(offset)
-            .map_err(|_| format!("AArch64 backend aggregate offset too large: {}", src_name))?;
-        instructions.push(AsmInstr::Mov(
-            AsmType::Quadword,
-            stack_or_data_operand(src_name, byte_offset, stack_slots, global_vars)?,
-            AsmOperand::Reg(Reg::R10),
-        ));
-        instructions.push(AsmInstr::Mov(
-            AsmType::Quadword,
-            AsmOperand::Reg(Reg::R10),
-            stack_or_data_operand(dst_name, byte_offset, stack_slots, global_vars)?,
-        ));
-        offset += 8;
+    for (ty, width) in [
+        (AsmType::Quadword, 8),
+        (AsmType::Longword, 4),
+        (AsmType::Word, 2),
+        (AsmType::Byte, 1),
+    ] {
+        while offset + width <= size {
+            emit_aggregate_copy_chunk(
+                instructions,
+                src_name,
+                dst_name,
+                offset,
+                ty,
+                stack_slots,
+                global_vars,
+            )?;
+            offset += width;
+        }
     }
-    while offset + 4 <= size {
-        let byte_offset = i32::try_from(offset)
-            .map_err(|_| format!("AArch64 backend aggregate offset too large: {}", src_name))?;
-        instructions.push(AsmInstr::Mov(
-            AsmType::Longword,
-            stack_or_data_operand(src_name, byte_offset, stack_slots, global_vars)?,
-            AsmOperand::Reg(Reg::R10),
-        ));
-        instructions.push(AsmInstr::Mov(
-            AsmType::Longword,
-            AsmOperand::Reg(Reg::R10),
-            stack_or_data_operand(dst_name, byte_offset, stack_slots, global_vars)?,
-        ));
-        offset += 4;
-    }
-    if offset + 2 <= size {
-        let byte_offset = i32::try_from(offset)
-            .map_err(|_| format!("AArch64 backend aggregate offset too large: {}", src_name))?;
-        instructions.push(AsmInstr::Mov(
-            AsmType::Word,
-            stack_or_data_operand(src_name, byte_offset, stack_slots, global_vars)?,
-            AsmOperand::Reg(Reg::R10),
-        ));
-        instructions.push(AsmInstr::Mov(
-            AsmType::Word,
-            AsmOperand::Reg(Reg::R10),
-            stack_or_data_operand(dst_name, byte_offset, stack_slots, global_vars)?,
-        ));
-        offset += 2;
-    }
-    while offset < size {
-        let byte_offset = i32::try_from(offset)
-            .map_err(|_| format!("AArch64 backend aggregate offset too large: {}", src_name))?;
-        instructions.push(AsmInstr::Mov(
-            AsmType::Byte,
-            stack_or_data_operand(src_name, byte_offset, stack_slots, global_vars)?,
-            AsmOperand::Reg(Reg::R10),
-        ));
-        instructions.push(AsmInstr::Mov(
-            AsmType::Byte,
-            AsmOperand::Reg(Reg::R10),
-            stack_or_data_operand(dst_name, byte_offset, stack_slots, global_vars)?,
-        ));
-        offset += 1;
-    }
+    Ok(())
+}
+
+fn emit_aggregate_copy_chunk(
+    instructions: &mut Vec<AsmInstr>,
+    src_name: &str,
+    dst_name: &str,
+    offset: usize,
+    ty: AsmType,
+    stack_slots: &HashMap<String, i32>,
+    global_vars: &HashSet<String>,
+) -> Result<(), String> {
+    let byte_offset = i32::try_from(offset)
+        .map_err(|_| format!("AArch64 backend aggregate offset too large: {src_name}"))?;
+    instructions.push(AsmInstr::Mov(
+        ty,
+        stack_or_data_operand(src_name, byte_offset, stack_slots, global_vars)?,
+        AsmOperand::Reg(Reg::R10),
+    ));
+    instructions.push(AsmInstr::Mov(
+        ty,
+        AsmOperand::Reg(Reg::R10),
+        stack_or_data_operand(dst_name, byte_offset, stack_slots, global_vars)?,
+    ));
     Ok(())
 }
 

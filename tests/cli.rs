@@ -26346,6 +26346,7 @@ __int128 mulzero(__int128 a) { return a * 0; }
 __int128 mulone(__int128 a) { return a * 1; }
 __int128 mulneg(__int128 a) { return a * -1; }
 __int128 mulshift(__int128 a) { return a * 8; }
+__int128 mulnegshift(__int128 a) { return a * -8; }
 __int128 divone(__int128 a) { return a / 1; }
 __int128 divneg(__int128 a) { return a / -1; }
 __int128 divshift(__int128 a) { return a / 8; }
@@ -26447,6 +26448,10 @@ int ulezero(unsigned __int128 a) { return a <= 0; }
     let mulshift = body("mulshift");
     assert!(mulshift.contains("\tsalq $3,"), "{mulshift}");
     assert!(!mulshift.contains("\tmulq "), "{mulshift}");
+    let mulnegshift = body("mulnegshift");
+    assert!(mulnegshift.contains("\tsalq $3,"), "{mulnegshift}");
+    assert!(mulnegshift.contains("\tnotq "), "{mulnegshift}");
+    assert!(!mulnegshift.contains("\tmulq "), "{mulnegshift}");
     let divneg = body("divneg");
     assert!(divneg.contains("\tnotq "), "{divneg}");
     assert!(!divneg.contains("\tcall __divti3"), "{divneg}");
@@ -27134,6 +27139,7 @@ __int128 div128_3(__int128 value) { return value / 8; }
 __int128 div128_64(__int128 value) { return value / ((__int128)1 << 64); }
 __int128 div128_96(__int128 value) { return value / ((__int128)1 << 96); }
 __int128 div128_neg3(__int128 value) { return value / -8; }
+__int128 mul128_neg3(__int128 value) { return value * -8; }
 __int128 mod128_3(__int128 value) { return value % 8; }
 __int128 mod128_64(__int128 value) { return value % ((__int128)1 << 64); }
 __int128 mod128_96(__int128 value) { return value % ((__int128)1 << 96); }
@@ -27163,6 +27169,7 @@ int main(void) {
     if (mod128_64(-((__int128)1 << 100) + 7) != -((__int128)1 << 64) + 7) return 16;
     if (mod128_96(-((__int128)1 << 100) + 7) != -((__int128)1 << 96) + 7) return 17;
     if (mod128_neg3(-7) != -7 || mod128_neg3(-8) != 0 || mod128_neg3(-9) != -1) return 18;
+    if (mul128_neg3(-7) != 56 || mul128_neg3(7) != -56) return 19;
     return 0;
 }
 "#,

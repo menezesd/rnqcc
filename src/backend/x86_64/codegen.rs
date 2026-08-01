@@ -3280,6 +3280,17 @@ struct BinaryContext<'a> {
     function_name: &'a str,
 }
 
+fn emit_i128_negative_power_of_two_multiply(
+    multiplicand: &TackyVal,
+    amount: i64,
+    dst: &TackyVal,
+    ctx: &mut BinaryContext<'_>,
+) -> Result<(), String> {
+    let count = TackyVal::Constant(amount);
+    convert_binary(&TackyBinaryOp::ShiftLeft, multiplicand, &count, dst, ctx)?;
+    emit_i128_negate(ctx.out, dst)
+}
+
 fn convert_binary(
     op: &TackyBinaryOp,
     left: &TackyVal,
@@ -3862,6 +3873,14 @@ fn convert_binary(
                         if let Some(amount) = i128_constant_power_of_two_shift(right) {
                             let count = TackyVal::Constant(amount);
                             convert_binary(&TackyBinaryOp::ShiftLeft, left, &count, dst, ctx)?;
+                            return Ok(());
+                        }
+                        if let Some(amount) = i128_constant_negative_power_of_two_shift(left) {
+                            emit_i128_negative_power_of_two_multiply(right, amount, dst, ctx)?;
+                            return Ok(());
+                        }
+                        if let Some(amount) = i128_constant_negative_power_of_two_shift(right) {
+                            emit_i128_negative_power_of_two_multiply(left, amount, dst, ctx)?;
                             return Ok(());
                         }
                         if i128_constant_is_zero(left) || i128_constant_is_zero(right) {

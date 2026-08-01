@@ -5120,7 +5120,7 @@ fn aarch64_linux_long_double_supports_comparisons_and_negation() {
     assert!(asm.contains("bl __letf2"), "{asm}");
     assert!(asm.contains("bl __gttf2"), "{asm}");
     assert!(asm.contains("bl __getf2"), "{asm}");
-    assert!(asm.contains("cmp w0, w10"), "{asm}");
+    assert!(asm.contains("\tcmp w0, #0"), "{asm}");
     let body = |name: &str| {
         let label = format!("\n{name}:\n");
         let start = asm
@@ -6958,7 +6958,7 @@ fn emits_aarch64_assembly_for_integer_if_else() {
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
-    assert!(asm.contains("cmp w9, w10"));
+    assert!(asm.contains("cmp w9, #5"));
     assert!(asm.contains("cset w9, gt"));
     assert!(asm.contains("b.ne 1f"));
     assert!(asm.contains("b .Lif_else"));
@@ -6982,7 +6982,7 @@ fn emits_aarch64_assembly_for_logical_not() {
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
-    assert!(asm.contains("cmp w9, w10"));
+    assert!(asm.contains("cmp w9, #0"));
     assert!(asm.contains("cset w0, eq"));
 
     let _ = std::fs::remove_file(src);
@@ -26229,8 +26229,8 @@ long addl(long x) { return x + 4097; }
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
     assert!(asm.contains("\tadd w0, w0, #5"), "{asm}");
     assert!(asm.contains("\tsub w0, w0, #7"), "{asm}");
-    assert!(asm.contains("\tadd x0, x0, #4095"), "{asm}");
-    assert!(asm.contains("\tadd x0, x0, #2"), "{asm}");
+    assert!(asm.contains("\tadd x0, x0, #1, lsl #12"), "{asm}");
+    assert!(asm.contains("\tadd x0, x0, #1"), "{asm}");
     assert!(!asm.contains("\tmovz w10, #5"), "{asm}");
     assert!(!asm.contains("\tmovz x9, #4097"), "{asm}");
 

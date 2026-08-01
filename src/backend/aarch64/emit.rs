@@ -333,24 +333,26 @@ fn emit_store_stack(
 }
 
 fn emit_stack_pointer_adjust(w: &mut dyn Write, op: &str, bytes: i64) -> std::io::Result<()> {
-    if bytes <= 4095 {
-        writeln!(w, "\t{} sp, sp, #{}", op, bytes)
-    } else {
-        emit_load_immediate(w, AsmType::Quadword, "x16", bytes)?;
-        writeln!(w, "\t{} sp, sp, x16", op)
+    if let Ok(bytes) = i32::try_from(bytes) {
+        let offset = match op {
+            "add" => bytes,
+            "sub" => match bytes.checked_neg() {
+                Some(offset) => offset,
+                None => return invalid_input("AArch64 stack adjustment is out of range"),
+            },
+            _ => return invalid_input(format!("unsupported stack adjustment: {op}")),
+        };
+        return emit_add_immediate(w, "sp", offset);
     }
+    emit_load_immediate(w, AsmType::Quadword, "x16", bytes)?;
+    writeln!(w, "\t{} sp, sp, x16", op)
 }
 
 fn emit_large_stack_pointer_adjust(w: &mut dyn Write, op: &str, bytes: i64) -> std::io::Result<()> {
     if bytes <= 0 {
         return Ok(());
     }
-    if bytes <= 4095 {
-        writeln!(w, "\t{} sp, sp, #{}", op, bytes)
-    } else {
-        emit_load_immediate(w, AsmType::Quadword, "x16", bytes)?;
-        writeln!(w, "\t{} sp, sp, x16", op)
-    }
+    emit_stack_pointer_adjust(w, op, bytes)
 }
 
 fn emit_store_large_local_base(
@@ -412,21 +414,20 @@ fn stack_offset_i32(offset: i64) -> std::io::Result<i32> {
     })
 }
 
-fn emit_add_immediate(
-    w: &mut dyn Write,
-    reg: &'static str,
-    mut offset: i32,
-) -> std::io::Result<()> {
-    let op = if offset < 0 {
-        offset = -offset;
-        "sub"
+fn emit_add_immediate(w: &mut dyn Write, reg: &'static str, offset: i32) -> std::io::Result<()> {
+    let offset = i64::from(offset);
+    let (op, mut remaining) = if offset < 0 {
+        ("sub", offset.unsigned_abs())
     } else {
-        "add"
+        ("add", offset as u64)
     };
-    while offset > 0 {
-        let chunk = offset.min(4095);
-        writeln!(w, "\t{} {}, {}, #{}", op, reg, reg, chunk)?;
-        offset -= chunk;
+    while remaining >= 4096 {
+        let chunk = (remaining >> 12).min(4095);
+        writeln!(w, "\t{} {}, {}, #{}, lsl #12", op, reg, reg, chunk)?;
+        remaining -= chunk << 12;
+    }
+    if remaining > 0 {
+        writeln!(w, "\t{} {}, {}, #{}", op, reg, reg, remaining)?;
     }
     Ok(())
 }
@@ -2552,11 +2553,13 @@ mod tests {
             .map_err(|err| err.to_string())?;
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
-        assert!(asm.contains("sub sp, sp, x16"));
+        assert!(asm.contains("sub sp, sp, #24, lsl #12"));
+        assert!(asm.contains("sub sp, sp, #1744"));
         assert!(asm.contains("add x16, sp, x16"));
         assert!(asm.contains("str x30, [x16]"));
         assert!(asm.contains("ldr x30, [x16]"));
-        assert!(asm.contains("add sp, sp, x16"));
+        assert!(asm.contains("add sp, sp, #24, lsl #12"));
+        assert!(asm.contains("add sp, sp, #1744"));
         Ok(())
     }
 
@@ -2649,6 +2652,36 @@ mod tests {
 
         assert_eq!(asm, "\tcmp w0, #42\n\tcmp x0, #2748, lsl #12\n");
         assert_eq!(cmp_immediate(&AsmOperand::Imm(-1)), None);
+        Ok(())
+    }
+
+    #[test]
+    fn integer_add_sub_uses_shifted_immediate_encoding() -> Result<(), String> {
+        let mut out = Vec::new();
+        for instr in [
+            AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Add,
+                AsmOperand::Imm(0xabc000),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Sub,
+                AsmOperand::Imm(0xabc000),
+                AsmOperand::Reg(Reg::AX),
+            ),
+        ] {
+            emit_instruction(&mut out, &instr, &Target::aarch64_linux())
+                .map_err(|err| err.to_string())?;
+        }
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(
+            asm,
+            "\tadd x0, x0, #2748, lsl #12\n\
+             \tsub x0, x0, #2748, lsl #12\n"
+        );
         Ok(())
     }
 

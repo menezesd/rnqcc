@@ -25882,8 +25882,14 @@ int eqzero128(__int128 a) { return a == 0; }
 int nezero128(unsigned __int128 a) { return a != 0; }
 int lt128(__int128 a, __int128 b) { return a < b; }
 int ge128(__int128 a, __int128 b) { return a >= b; }
+int ltzero128(__int128 a) { return a < 0; }
+int gezero128(__int128 a) { return a >= 0; }
 int ugt128(unsigned __int128 a, unsigned __int128 b) { return a > b; }
 int ule128(unsigned __int128 a, unsigned __int128 b) { return a <= b; }
+int ultzero128(unsigned __int128 a) { return a < 0; }
+int ugezero128(unsigned __int128 a) { return a >= 0; }
+int ugtzero128(unsigned __int128 a) { return a > 0; }
+int ulezero128(unsigned __int128 a) { return a <= 0; }
 __int128 add128(__int128 a, __int128 b) { return a + b; }
 __int128 sub128(__int128 a, __int128 b) { return a - b; }
 unsigned __int128 and128(unsigned __int128 a, unsigned __int128 b) { return a & b; }
@@ -25973,6 +25979,13 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
         assert!(!body.contains("\tstr w9,"), "{body}");
         assert!(!body.contains("\tldr w0, [sp"), "{body}");
     }
+    for (name, condition) in [("ltzero128", "lt"), ("gezero128", "ge")] {
+        let body = body(name);
+        assert!(body.contains("\tcmp x"), "{body}");
+        assert!(body.contains(&format!("\tcset w0, {condition}")), "{body}");
+        assert!(!body.contains("i128_cmp_true"), "{body}");
+        assert!(!body.contains("\torr "), "{body}");
+    }
     for name in ["ugt128", "ule128"] {
         let body = body(name);
         assert!(body.contains("u128_cmp_true"), "{body}");
@@ -25993,6 +26006,21 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
         assert!(!body.contains("\tmovz w9, #1"), "{body}");
         assert!(!body.contains("\tstr w9,"), "{body}");
         assert!(!body.contains("\tldr w0, [sp"), "{body}");
+    }
+    for name in ["ultzero128", "ugezero128"] {
+        let body = body(name);
+        assert!(
+            body.contains("\tmov w0, wzr") || body.contains("\tmovz w0, #1"),
+            "{body}"
+        );
+        assert!(!body.contains("u128_cmp_true"), "{body}");
+        assert!(!body.contains("\tcmp "), "{body}");
+    }
+    for (name, condition) in [("ugtzero128", "ne"), ("ulezero128", "eq")] {
+        let body = body(name);
+        assert!(body.contains("\torr "), "{body}");
+        assert!(body.contains(&format!("\tcset w0, {condition}")), "{body}");
+        assert!(!body.contains("u128_cmp_true"), "{body}");
     }
     for (name, low_op, high_op) in [
         ("add128", "\tadds x0,", "\tadcs x1,"),

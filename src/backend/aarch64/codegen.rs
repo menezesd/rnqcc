@@ -905,6 +905,28 @@ fn emit_i128_signed_cmp(
     dst: AsmOperand,
     ctx: &Aarch64I128Context<'_>,
 ) -> Result<(), String> {
+    let (value, condition) = if i128_constant_is_zero(right) {
+        match op {
+            TackyBinaryOp::LessThan => (Some(left), Some(CondCode::L)),
+            TackyBinaryOp::GreaterEqual => (Some(left), Some(CondCode::GE)),
+            _ => (None, None),
+        }
+    } else if i128_constant_is_zero(left) {
+        match op {
+            TackyBinaryOp::GreaterThan => (Some(right), Some(CondCode::L)),
+            TackyBinaryOp::LessEqual => (Some(right), Some(CondCode::GE)),
+            _ => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+    if let (Some(value), Some(condition)) = (value, condition) {
+        let (_, high) = i128_part_operands(value, ctx.stack_slots, ctx.global_vars)?;
+        instructions.push(AsmInstr::Cmp(AsmType::Quadword, AsmOperand::Imm(0), high));
+        instructions.push(AsmInstr::SetCC(condition, dst));
+        return Ok(());
+    }
+
     let (left_low, left_high) = i128_part_operands(left, ctx.stack_slots, ctx.global_vars)?;
     let (right_low, right_high) = i128_part_operands(right, ctx.stack_slots, ctx.global_vars)?;
     let id = instructions.len();
@@ -943,6 +965,57 @@ fn emit_i128_unsigned_cmp(
     dst: AsmOperand,
     ctx: &Aarch64I128Context<'_>,
 ) -> Result<(), String> {
+    if i128_constant_is_zero(right) {
+        match op {
+            TackyBinaryOp::LessThan => {
+                instructions.push(AsmInstr::Mov(AsmType::Longword, AsmOperand::Imm(0), dst));
+                return Ok(());
+            }
+            TackyBinaryOp::GreaterEqual => {
+                instructions.push(AsmInstr::Mov(AsmType::Longword, AsmOperand::Imm(1), dst));
+                return Ok(());
+            }
+            TackyBinaryOp::GreaterThan | TackyBinaryOp::LessEqual => {
+                emit_i128_zero_cmp(instructions, left, ctx.stack_slots, ctx.global_vars)?;
+                instructions.push(AsmInstr::SetCC(
+                    if matches!(op, TackyBinaryOp::GreaterThan) {
+                        CondCode::NE
+                    } else {
+                        CondCode::E
+                    },
+                    dst,
+                ));
+                return Ok(());
+            }
+            _ => unreachable!(),
+        }
+    }
+    if i128_constant_is_zero(left) {
+        match op {
+            TackyBinaryOp::GreaterThan => {
+                instructions.push(AsmInstr::Mov(AsmType::Longword, AsmOperand::Imm(0), dst));
+                return Ok(());
+            }
+            TackyBinaryOp::LessEqual => {
+                instructions.push(AsmInstr::Mov(AsmType::Longword, AsmOperand::Imm(1), dst));
+                return Ok(());
+            }
+            TackyBinaryOp::GreaterEqual | TackyBinaryOp::LessThan => {
+                emit_i128_zero_cmp(instructions, right, ctx.stack_slots, ctx.global_vars)?;
+                instructions.push(AsmInstr::SetCC(
+                    if matches!(op, TackyBinaryOp::GreaterEqual) {
+                        CondCode::E
+                    } else {
+                        CondCode::NE
+                    },
+                    dst,
+                ));
+                return Ok(());
+            }
+            _ => unreachable!(),
+        }
+    }
+
     let (left_low, left_high) = i128_part_operands(left, ctx.stack_slots, ctx.global_vars)?;
     let (right_low, right_high) = i128_part_operands(right, ctx.stack_slots, ctx.global_vars)?;
     let id = instructions.len();

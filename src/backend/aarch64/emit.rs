@@ -1496,13 +1496,16 @@ fn emit_binary(
         writeln!(w, "\tneg {}, {}", dst_reg, dst_reg)?;
         return store_operand(w, target, ty, dst_reg, dst);
     }
-    if let Some((amount, width)) = binary_signed_div_power_of_two_amount(ty, op, src) {
+    if let Some((amount, width, negate)) = binary_signed_div_power_of_two_amount(ty, op, src) {
         let scratch = reg_name(Reg::R13, ty)?;
         let mask = (1u64 << amount) - 1;
         writeln!(w, "\tasr {}, {}, #{}", scratch, dst_reg, width - 1)?;
         writeln!(w, "\tand {}, {}, #{}", scratch, scratch, mask)?;
         writeln!(w, "\tadd {}, {}, {}", dst_reg, dst_reg, scratch)?;
         writeln!(w, "\tasr {}, {}, #{}", dst_reg, dst_reg, amount)?;
+        if negate {
+            writeln!(w, "\tneg {}, {}", dst_reg, dst_reg)?;
+        }
         return store_operand(w, target, ty, dst_reg, dst);
     }
     if binary_xor_negative_one(ty, op, src) {
@@ -1697,7 +1700,7 @@ fn binary_signed_div_power_of_two_amount(
     ty: AsmType,
     op: &AsmBinaryOp,
     src: &AsmOperand,
-) -> Option<(u32, u32)> {
+) -> Option<(u32, u32, bool)> {
     if !matches!(op, AsmBinaryOp::SDiv) {
         return None;
     }
@@ -1710,12 +1713,15 @@ fn binary_signed_div_power_of_two_amount(
     } else {
         value as u32 as i32 as i64
     };
-    if value <= 1 {
+    let (magnitude, negate) = if value > 1 {
+        (value as u64, false)
+    } else if value < -1 {
+        (value.unsigned_abs(), true)
+    } else {
         return None;
-    }
-    let value = value as u64;
-    let amount = value.trailing_zeros();
-    (value.is_power_of_two() && amount < width - 1).then_some((amount, width))
+    };
+    let amount = magnitude.trailing_zeros();
+    (magnitude.is_power_of_two() && amount < width - 1).then_some((amount, width, negate))
 }
 
 fn binary_logical_noop(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> bool {
@@ -2373,7 +2379,7 @@ fn emit_remainder(
         }
     }
     if !is_unsigned {
-        if let Some((amount, width)) =
+        if let Some((amount, width, _)) =
             binary_signed_div_power_of_two_amount(ty, &AsmBinaryOp::SDiv, right)
         {
             let quotient_reg = reg_name(Reg::R13, ty)?;
@@ -3228,6 +3234,29 @@ mod tests {
     }
 
     #[test]
+    fn signed_divide_by_negative_power_of_two_uses_bias_shift_and_negate() -> Result<(), String> {
+        let mut out = Vec::new();
+        emit_instruction(
+            &mut out,
+            &AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::SDiv,
+                AsmOperand::Imm(-8),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            &Target::aarch64_linux(),
+        )
+        .map_err(|err| err.to_string())?;
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(
+            asm,
+            "\tasr x11, x0, #63\n\tand x11, x11, #7\n\tadd x0, x0, x11\n\tasr x0, x0, #3\n\tneg x0, x0\n"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn integer_divide_by_one_is_elided() -> Result<(), String> {
         let mut out = Vec::new();
         for op in [AsmBinaryOp::SDiv, AsmBinaryOp::UDiv] {
@@ -3299,6 +3328,30 @@ mod tests {
                 false,
                 AsmOperand::Reg(Reg::AX),
                 AsmOperand::Imm(8),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            &Target::aarch64_linux(),
+        )
+        .map_err(|err| err.to_string())?;
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(
+            asm,
+            "\tasr x11, x0, #63\n\tand x11, x11, #7\n\tadd x11, x0, x11\n\tasr x11, x11, #3\n\tlsl x11, x11, #3\n\tsub x0, x0, x11\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn signed_remainder_by_negative_power_of_two_uses_bias_and_shift() -> Result<(), String> {
+        let mut out = Vec::new();
+        emit_instruction(
+            &mut out,
+            &AsmInstr::AArch64Rem(
+                AsmType::Quadword,
+                false,
+                AsmOperand::Reg(Reg::AX),
+                AsmOperand::Imm(-8),
                 AsmOperand::Reg(Reg::AX),
             ),
             &Target::aarch64_linux(),

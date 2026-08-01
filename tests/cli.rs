@@ -26957,6 +26957,12 @@ int div32(int value) { return value / 8; }
 long div64(long value) { return value / 8; }
 int mod32(int value) { return value % 8; }
 long mod64(long value) { return value % 8; }
+long div_pressure(long a, long b, long c, long d, long e, long f, long g, long h) {
+    return a / 8 + b + c + d + e + f + g + h;
+}
+long mod_pressure(long a, long b, long c, long d, long e, long f, long g, long h) {
+    return a % 8 + b + c + d + e + f + g + h;
+}
 int main(void) {
     if (div32(-7) != 0 || div32(-8) != -1 || div32(-9) != -1) return 1;
     if (div32(-2147483647 - 1) != -268435456) return 2;
@@ -26966,6 +26972,8 @@ int main(void) {
     if (mod32(-2147483647 - 1) != 0) return 6;
     if (mod64(-7) != -7 || mod64(-8) != 0 || mod64(-9) != -1) return 7;
     if (mod64(-9223372036854775807L - 1) != 0) return 8;
+    if (div_pressure(-9, 2, 3, 5, 7, 11, 13, 17) != 57) return 9;
+    if (mod_pressure(-9, 2, 3, 5, 7, 11, 13, 17) != 57) return 10;
     return 0;
 }
 "#,

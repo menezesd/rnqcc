@@ -369,6 +369,32 @@ fn emit_i128_basic_binary(
         return Ok(false);
     }
 
+    if matches!(op, TackyBinaryOp::Mul) {
+        if i128_constant_is_zero(left) || i128_constant_is_zero(right) {
+            let dst_low = low64_operand(&dst)?;
+            let dst_high = high64_operand(&dst)?;
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Imm(0),
+                dst_low,
+            ));
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Imm(0),
+                dst_high,
+            ));
+            return Ok(true);
+        }
+        if i128_constant_is_one(left) {
+            emit_i128_copy_to_operand(instructions, right, dst, stack_slots, global_vars)?;
+            return Ok(true);
+        }
+        if i128_constant_is_one(right) {
+            emit_i128_copy_to_operand(instructions, left, dst, stack_slots, global_vars)?;
+            return Ok(true);
+        }
+    }
+
     emit_i128_copy_to_operand(instructions, left, dst.clone(), stack_slots, global_vars)?;
     let dst_low = low64_operand(&dst)?;
     let dst_high = high64_operand(&dst)?;
@@ -494,6 +520,20 @@ fn emit_i128_basic_binary(
         _ => return Err("internal error: expected basic 128-bit binary op".to_string()),
     }
     Ok(true)
+}
+
+fn i128_constant_is_zero(value: &TackyVal) -> bool {
+    matches!(
+        value,
+        TackyVal::Constant(0) | TackyVal::Int128Constant(0) | TackyVal::UInt128Constant(0)
+    )
+}
+
+fn i128_constant_is_one(value: &TackyVal) -> bool {
+    matches!(
+        value,
+        TackyVal::Constant(1) | TackyVal::Int128Constant(1) | TackyVal::UInt128Constant(1)
+    )
 }
 
 fn emit_i128_return_regs_to_operand(

@@ -25888,6 +25888,8 @@ unsigned __int128 and128(unsigned __int128 a, unsigned __int128 b) { return a & 
 unsigned __int128 or128(unsigned __int128 a, unsigned __int128 b) { return a | b; }
 unsigned __int128 xor128(unsigned __int128 a, unsigned __int128 b) { return a ^ b; }
 __int128 mul128(__int128 a, __int128 b) { return a * b; }
+__int128 mulzero128(__int128 a) { return a * 0; }
+__int128 mulone128(__int128 a) { return a * 1; }
 __int128 div128(__int128 a, __int128 b) { return a / b; }
 __int128 mod128(__int128 a, __int128 b) { return a % b; }
 unsigned __int128 udiv128(unsigned __int128 a, unsigned __int128 b) { return a / b; }
@@ -25989,6 +25991,14 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
     assert!(!mul128.contains("\tldr x30,"), "{mul128}");
     assert!(!mul128.contains("\tstr x9,"), "{mul128}");
     assert!(!mul128.contains("\tstr x10,"), "{mul128}");
+
+    let mulzero128 = body("mulzero128");
+    assert!(mulzero128.contains("\tmov x0, xzr"), "{mulzero128}");
+    assert!(mulzero128.contains("\tmov x1, xzr"), "{mulzero128}");
+    assert!(!mulzero128.contains("\tumulh "), "{mulzero128}");
+    let mulone128 = body("mulone128");
+    assert!(!mulone128.contains("\tumulh "), "{mulone128}");
+    assert!(!mulone128.contains("\tmul "), "{mulone128}");
 
     for (name, call) in [
         ("div128", "\tbl __divti3"),

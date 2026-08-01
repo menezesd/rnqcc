@@ -882,19 +882,50 @@ fn emit_load_immediate(
         value as u64
     };
 
-    let mut wrote = false;
-    for shift in (0..width).step_by(16) {
-        let chunk = ((bits >> shift) & 0xffff) as u16;
-        if chunk == 0 && wrote {
+    let chunks: Vec<_> = (0..width)
+        .step_by(16)
+        .map(|shift| ((bits >> shift) & 0xffff) as u16)
+        .collect();
+    let zero_cost = chunks.iter().filter(|&&chunk| chunk != 0).count();
+    let ones_cost = chunks.iter().filter(|&&chunk| chunk != u16::MAX).count();
+    let use_movn = ones_cost < zero_cost;
+    let base = if use_movn {
+        chunks
+            .iter()
+            .position(|&chunk| chunk != u16::MAX)
+            .unwrap_or(0)
+    } else {
+        chunks
+            .iter()
+            .position(|&chunk| chunk != 0)
+            .expect("nonzero immediate must have a nonzero chunk")
+    };
+    let base_shift = base * 16;
+    let base_chunk = chunks[base];
+    let (base_op, base_value) = if use_movn {
+        ("movn", !base_chunk)
+    } else {
+        ("movz", base_chunk)
+    };
+    if base_shift == 0 {
+        writeln!(w, "\t{} {}, #{}", base_op, reg, base_value)?;
+    } else {
+        writeln!(
+            w,
+            "\t{} {}, #{}, lsl #{}",
+            base_op, reg, base_value, base_shift
+        )?;
+    }
+    for (index, &chunk) in chunks.iter().enumerate() {
+        if index == base || chunk == if use_movn { u16::MAX } else { 0 } {
             continue;
         }
-        let op = if wrote { "movk" } else { "movz" };
+        let shift = index * 16;
         if shift == 0 {
-            writeln!(w, "\t{} {}, #{}", op, reg, chunk)?;
+            writeln!(w, "\tmovk {}, #{}", reg, chunk)?;
         } else {
-            writeln!(w, "\t{} {}, #{}, lsl #{}", op, reg, chunk, shift)?;
+            writeln!(w, "\tmovk {}, #{}, lsl #{}", reg, chunk, shift)?;
         }
-        wrote = true;
     }
 
     Ok(())
@@ -2589,6 +2620,21 @@ mod tests {
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
         assert_eq!(asm, "\tmov x9, xzr\n");
+        Ok(())
+    }
+
+    #[test]
+    fn integer_immediates_choose_shortest_move_wide_sequence() -> Result<(), String> {
+        let mut out = Vec::new();
+        emit_load_immediate(&mut out, AsmType::Quadword, "x9", -1)
+            .map_err(|err| err.to_string())?;
+        emit_load_immediate(&mut out, AsmType::Quadword, "x10", 1 << 32)
+            .map_err(|err| err.to_string())?;
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert!(asm.contains("movn x9, #0"), "{asm}");
+        assert!(asm.contains("movz x10, #1, lsl #32"), "{asm}");
+        assert_eq!(asm.lines().count(), 2, "{asm}");
         Ok(())
     }
 

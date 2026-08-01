@@ -2050,6 +2050,25 @@ fn convert_comparison_op(op: &TackyBinaryOp, is_unsigned: bool) -> Option<CondCo
     }
 }
 
+fn invert_condition(cc: &CondCode) -> CondCode {
+    match cc {
+        CondCode::E => CondCode::NE,
+        CondCode::NE => CondCode::E,
+        CondCode::L => CondCode::GE,
+        CondCode::LE => CondCode::G,
+        CondCode::G => CondCode::LE,
+        CondCode::GE => CondCode::L,
+        CondCode::A => CondCode::BE,
+        CondCode::AE => CondCode::B,
+        CondCode::B => CondCode::AE,
+        CondCode::BE => CondCode::A,
+        CondCode::P => CondCode::NP,
+        CondCode::NP => CondCode::P,
+        CondCode::S => CondCode::NS,
+        CondCode::NS => CondCode::S,
+    }
+}
+
 fn is_unsigned_val(val: &TackyVal, types: &IndexMap<String, CType>) -> bool {
     match val {
         TackyVal::Var(name) => types
@@ -4711,6 +4730,15 @@ fn convert_function(
                 }
                 if let Some(cc) = convert_comparison_op(op, is_unsigned_comparison_val(left, types))
                 {
+                    let branch_cc = match next_instr {
+                        Some(TackyInstr::JumpIfZero(value, _)) if value == dst => {
+                            Some(invert_condition(&cc))
+                        }
+                        Some(TackyInstr::JumpIfNotZero(value, _)) if value == dst => {
+                            Some(cc.clone())
+                        }
+                        _ => None,
+                    };
                     let left_cmp_ty = asm_type_for_val(left, types)?;
                     let right_cmp_ty = asm_type_for_val(right, types)?;
                     let cmp_ty = match (left_cmp_ty, right_cmp_ty) {
@@ -4732,6 +4760,16 @@ fn convert_function(
                         val_operand(left, &stack_slots, global_vars)?
                     };
                     instructions.push(AsmInstr::Cmp(cmp_ty, right_op, left_op));
+                    if let Some(branch_cc) = branch_cc {
+                        let label = match next_instr {
+                            Some(TackyInstr::JumpIfZero(_, label))
+                            | Some(TackyInstr::JumpIfNotZero(_, label)) => label.clone(),
+                            _ => unreachable!("comparison branch must have a jump target"),
+                        };
+                        instructions.push(AsmInstr::JmpCC(branch_cc, label));
+                        body_iter.next();
+                        continue;
+                    }
                     instructions.push(AsmInstr::SetCC(cc, dst_op));
                     continue;
                 }
@@ -5167,6 +5205,27 @@ mod tests {
                 AsmInstr::Lea(AsmOperand::Data(name), _) if name == "inc"
             )
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn comparison_branch_avoids_boolean_stack_temporary() -> Result<(), String> {
+        let program = codegen_source("int f(int x) { if (x <= 1) return 1; return 0; }")?;
+        let function = function(&program, "f")?;
+
+        assert!(function.instructions.windows(2).any(|pair| {
+            matches!(
+                pair,
+                [
+                    AsmInstr::Cmp(AsmType::Longword, AsmOperand::Imm(1), _),
+                    AsmInstr::JmpCC(CondCode::G, _)
+                ]
+            )
+        }));
+        assert!(!function
+            .instructions
+            .iter()
+            .any(|instr| matches!(instr, AsmInstr::SetCC(_, _))));
         Ok(())
     }
 

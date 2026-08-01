@@ -6959,8 +6959,8 @@ fn emits_aarch64_assembly_for_integer_if_else() {
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains("cmp w9, #5"));
-    assert!(asm.contains("cset w9, gt"));
-    assert!(asm.contains("b.ne 1f"));
+    assert!(!asm.contains("cset w9, gt"));
+    assert!(asm.contains("b.gt 1f"));
     assert!(asm.contains("b .Lif_else"));
     assert!(asm.contains(".Lif_else"));
 

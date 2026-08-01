@@ -4459,7 +4459,17 @@ pub fn replace_preprocessor_predicates(
                     )?;
                     let (operand, parameters) =
                         preprocess::directive::parse_embed_tokens(&expanded)?;
-                    let parameters = parse_embed_parameters(&parameters, macros)?;
+                    let parameters = match parse_embed_parameters(&parameters, macros) {
+                        Ok(parameters) => parameters,
+                        // C23 requires __has_embed to report NOT_FOUND when
+                        // any implementation-defined parameter is unsupported.
+                        Err(error) if error.starts_with("unsupported #embed parameter ") => {
+                            out.push(predicate_integer_token(&tokens[index], 0));
+                            index = parsed.next_index;
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
                     let spec = parse_token_include_operand(
                         &operand,
                         macros,

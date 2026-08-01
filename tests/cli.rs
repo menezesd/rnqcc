@@ -5763,6 +5763,9 @@ unsigned char bytes[] = {{
 #if __has_embed("rnqcc-missing-embed.bin") != __STDC_EMBED_NOT_FOUND__
 #error expected missing embedded asset
 #endif
+#if __has_embed(EMBED_ASSET unknown(42)) != __STDC_EMBED_NOT_FOUND__
+#error expected unsupported embed parameter
+#endif
 #embed EMBED_ASSET
 }};
 unsigned char limited[] = {{

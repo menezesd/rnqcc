@@ -941,6 +941,25 @@ fn zero_register_for_type(ty: AsmType) -> std::io::Result<&'static str> {
     }
 }
 
+/// Return an AArch64 `fmov` immediate spelling for common exactly encodable
+/// IEEE values.  The IR stores floating constants as their raw bit patterns,
+/// so matching those patterns avoids any host floating-point formatting.
+fn aarch64_fmov_immediate(ty: AsmType, value: i64) -> Option<&'static str> {
+    match ty {
+        AsmType::Float => match value as u32 {
+            0x3f80_0000 => Some("1.0"),
+            0xbf80_0000 => Some("-1.0"),
+            _ => None,
+        },
+        AsmType::Double => match value as u64 {
+            0x3ff0_0000_0000_0000 => Some("1.0"),
+            0xbff0_0000_0000_0000 => Some("-1.0"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn load_operand(
     w: &mut dyn Write,
     target: &Target,
@@ -959,6 +978,8 @@ fn load_operand(
                 if *value == 0 {
                     let zero_reg = zero_register_for_type(ty)?;
                     writeln!(w, "\tfmov {}, {}", reg, zero_reg)?;
+                } else if let Some(immediate) = aarch64_fmov_immediate(ty, *value) {
+                    writeln!(w, "\tfmov {}, #{}", reg, immediate)?;
                 } else {
                     let int_ty = if ty == AsmType::Float {
                         AsmType::Longword
@@ -1069,6 +1090,8 @@ fn emit_mov(
             if *value == 0 {
                 let zero_reg = if ty == AsmType::Float { "wzr" } else { "xzr" };
                 writeln!(w, "\tfmov {}, {}", fp_name_typed(*reg, ty)?, zero_reg)
+            } else if let Some(immediate) = aarch64_fmov_immediate(ty, *value) {
+                writeln!(w, "\tfmov {}, #{}", fp_name_typed(*reg, ty)?, immediate)
             } else {
                 let int_ty = if ty == AsmType::Float {
                     AsmType::Longword
@@ -2760,6 +2783,30 @@ mod tests {
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
         assert_eq!(asm, "\tfmov d0, xzr\n");
+        Ok(())
+    }
+
+    #[test]
+    fn common_float_immediates_use_direct_fmov_encoding() -> Result<(), String> {
+        let mut out = Vec::new();
+        for instr in [
+            AsmInstr::Mov(
+                AsmType::Float,
+                AsmOperand::Imm(0x3f80_0000),
+                AsmOperand::Xmm(XmmReg::XMM0),
+            ),
+            AsmInstr::Mov(
+                AsmType::Double,
+                AsmOperand::Imm(0xbff0_0000_0000_0000_u64 as i64),
+                AsmOperand::Xmm(XmmReg::XMM1),
+            ),
+        ] {
+            emit_instruction(&mut out, &instr, &Target::aarch64_linux())
+                .map_err(|err| err.to_string())?;
+        }
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(asm, "\tfmov s0, #1.0\n\tfmov d1, #-1.0\n");
         Ok(())
     }
 

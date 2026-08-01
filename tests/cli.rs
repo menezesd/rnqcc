@@ -25878,6 +25878,8 @@ double addd(double a, double b) { return a + b; }
 int lt(int a, int b) { return a < b; }
 int eq128(__int128 a, __int128 b) { return a == b; }
 int ne128(unsigned __int128 a, unsigned __int128 b) { return a != b; }
+int eqzero128(__int128 a) { return a == 0; }
+int nezero128(unsigned __int128 a) { return a != 0; }
 int lt128(__int128 a, __int128 b) { return a < b; }
 int ge128(__int128 a, __int128 b) { return a >= b; }
 int ugt128(unsigned __int128 a, unsigned __int128 b) { return a > b; }
@@ -25953,6 +25955,12 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
         assert!(!body.contains("\tcset w9,"), "{body}");
         assert!(!body.contains("\tstr w9,"), "{body}");
         assert!(!body.contains("\tldr w0, [sp"), "{body}");
+    }
+    for (name, condition) in [("eqzero128", "eq"), ("nezero128", "ne")] {
+        let body = body(name);
+        assert!(body.contains("\torr "), "{body}");
+        assert!(body.contains(&format!("\tcset w0, {condition}")), "{body}");
+        assert!(!body.contains("\teor "), "{body}");
     }
     for name in ["lt128", "ge128"] {
         let body = body(name);

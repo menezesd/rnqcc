@@ -982,6 +982,24 @@ fn emit_i128_eq_cmp(
     stack_slots: &HashMap<String, i32>,
     global_vars: &HashSet<String>,
 ) -> Result<(), String> {
+    if i128_constant_is_zero(left) || i128_constant_is_zero(right) {
+        let value = if i128_constant_is_zero(left) {
+            right
+        } else {
+            left
+        };
+        emit_i128_zero_cmp(instructions, value, stack_slots, global_vars)?;
+        instructions.push(AsmInstr::SetCC(
+            if matches!(op, TackyBinaryOp::Equal) {
+                CondCode::E
+            } else {
+                CondCode::NE
+            },
+            dst,
+        ));
+        return Ok(());
+    }
+
     let (left_low, left_high) = i128_part_operands(left, stack_slots, global_vars)?;
     let (right_low, right_high) = i128_part_operands(right, stack_slots, global_vars)?;
     instructions.push(AsmInstr::Mov(

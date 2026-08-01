@@ -1471,7 +1471,7 @@ fn fused_setcc_branch(instrs: &[AsmInstr], index: usize) -> Option<(CondCode, St
     }
     let cc = match branch_cc {
         CondCode::E => invert_condition(set_cc),
-        CondCode::NE => set_cc.clone(),
+        CondCode::NE => *set_cc,
         _ => return None,
     };
     Some((cc, label.clone()))

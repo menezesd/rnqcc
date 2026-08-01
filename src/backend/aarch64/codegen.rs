@@ -4734,9 +4734,7 @@ fn convert_function(
                         Some(TackyInstr::JumpIfZero(value, _)) if value == dst => {
                             Some(invert_condition(&cc))
                         }
-                        Some(TackyInstr::JumpIfNotZero(value, _)) if value == dst => {
-                            Some(cc.clone())
-                        }
+                        Some(TackyInstr::JumpIfNotZero(value, _)) if value == dst => Some(cc),
                         _ => None,
                     };
                     let left_cmp_ty = asm_type_for_val(left, types)?;

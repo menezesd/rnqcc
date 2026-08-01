@@ -1445,6 +1445,10 @@ fn emit_binary(
     }
     let dst_reg = load_operand(w, target, ty, dst, Reg::R10)?;
     if let Some(offset) = binary_add_sub_immediate_offset(op, src) {
+        if matches!(op, AsmBinaryOp::AddSetFlags | AsmBinaryOp::SubSetFlags) {
+            emit_add_set_flags_immediate(w, dst_reg, offset)?;
+            return store_operand(w, target, ty, dst_reg, dst);
+        }
         emit_add_immediate(w, dst_reg, offset)?;
         return store_operand(w, target, ty, dst_reg, dst);
     }
@@ -1499,6 +1503,11 @@ fn emit_binary(
         writeln!(w, "\t{} {}, {}, #{}", mnemonic, dst_reg, dst_reg, mask)?;
         return store_operand(w, target, ty, dst_reg, dst);
     }
+    if matches!(op, AsmBinaryOp::Adc | AsmBinaryOp::Sbb) && matches!(src, AsmOperand::Imm(0)) {
+        let zero = zero_register_for_type(ty)?;
+        writeln!(w, "\t{} {}, {}, {}", mnemonic, dst_reg, dst_reg, zero)?;
+        return store_operand(w, target, ty, dst_reg, dst);
+    }
     let src_reg = load_operand(w, target, ty, src, Reg::R11)?;
     writeln!(w, "\t{} {}, {}, {}", mnemonic, dst_reg, dst_reg, src_reg)?;
     store_operand(w, target, ty, dst_reg, dst)
@@ -1509,12 +1518,44 @@ fn binary_add_sub_immediate_offset(op: &AsmBinaryOp, src: &AsmOperand) -> Option
         return None;
     };
     let offset = match op {
-        AsmBinaryOp::Add => *value,
-        AsmBinaryOp::Sub => value.checked_neg()?,
+        AsmBinaryOp::Add | AsmBinaryOp::AddSetFlags => *value,
+        AsmBinaryOp::Sub | AsmBinaryOp::SubSetFlags => value.checked_neg()?,
         _ => return None,
     };
     let offset = i32::try_from(offset).ok()?;
     (offset != i32::MIN).then_some(offset)
+}
+
+fn emit_add_set_flags_immediate(
+    w: &mut dyn Write,
+    dst_reg: &str,
+    offset: i32,
+) -> std::io::Result<()> {
+    let (mnemonic, magnitude) = if offset >= 0 {
+        ("adds", offset as u32)
+    } else {
+        ("subs", offset.unsigned_abs())
+    };
+    if magnitude <= 4095 {
+        return writeln!(w, "\t{} {}, {}, #{}", mnemonic, dst_reg, dst_reg, magnitude);
+    }
+    if magnitude % 4096 == 0 && magnitude / 4096 <= 4095 {
+        return writeln!(
+            w,
+            "\t{} {}, {}, #{}, lsl #12",
+            mnemonic,
+            dst_reg,
+            dst_reg,
+            magnitude / 4096
+        );
+    }
+    let (ty, scratch) = if dst_reg.starts_with('w') {
+        (AsmType::Longword, "w11")
+    } else {
+        (AsmType::Quadword, "x11")
+    };
+    emit_load_immediate(w, ty, scratch, i64::from(magnitude))?;
+    writeln!(w, "\t{} {}, {}, {}", mnemonic, dst_reg, dst_reg, scratch)
 }
 
 fn binary_shift_immediate_amount(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> Option<i64> {
@@ -3020,6 +3061,32 @@ mod tests {
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
         assert_eq!(asm, "\tmov x0, xzr\n\tmovn x0, #0\n\tmvn x0, x0\n");
+        Ok(())
+    }
+
+    #[test]
+    fn carry_chain_immediates_use_native_encodings() -> Result<(), String> {
+        let mut out = Vec::new();
+        for instr in [
+            AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::AddSetFlags,
+                AsmOperand::Imm(1),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Adc,
+                AsmOperand::Imm(0),
+                AsmOperand::Reg(Reg::DI),
+            ),
+        ] {
+            emit_instruction(&mut out, &instr, &Target::aarch64_linux())
+                .map_err(|err| err.to_string())?;
+        }
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(asm, "\tadds x0, x0, #1\n\tadcs x1, x1, xzr\n");
         Ok(())
     }
 

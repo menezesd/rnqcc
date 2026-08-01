@@ -25890,6 +25890,7 @@ unsigned __int128 xor128(unsigned __int128 a, unsigned __int128 b) { return a ^ 
 __int128 mul128(__int128 a, __int128 b) { return a * b; }
 __int128 mulzero128(__int128 a) { return a * 0; }
 __int128 mulone128(__int128 a) { return a * 1; }
+__int128 mulneg128(__int128 a) { return a * -1; }
 __int128 div128(__int128 a, __int128 b) { return a / b; }
 __int128 mod128(__int128 a, __int128 b) { return a % b; }
 unsigned __int128 udiv128(unsigned __int128 a, unsigned __int128 b) { return a / b; }
@@ -25999,6 +26000,12 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
     let mulone128 = body("mulone128");
     assert!(!mulone128.contains("\tumulh "), "{mulone128}");
     assert!(!mulone128.contains("\tmul "), "{mulone128}");
+    let mulneg128 = body("mulneg128");
+    assert!(mulneg128.contains("\tmvn x0, x0"), "{mulneg128}");
+    assert!(mulneg128.contains("\tmvn x1, x1"), "{mulneg128}");
+    assert!(mulneg128.contains("\tadds x0, x0, #1"), "{mulneg128}");
+    assert!(mulneg128.contains("\tadcs x1, x1, xzr"), "{mulneg128}");
+    assert!(!mulneg128.contains("\tumulh "), "{mulneg128}");
 
     for (name, call) in [
         ("div128", "\tbl __divti3"),

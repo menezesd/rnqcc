@@ -393,6 +393,28 @@ fn emit_i128_basic_binary(
             emit_i128_copy_to_operand(instructions, left, dst, stack_slots, global_vars)?;
             return Ok(true);
         }
+        if i128_constant_is_negative_one(left) {
+            emit_i128_unary(
+                instructions,
+                right,
+                dst,
+                AsmUnaryOp::Neg,
+                stack_slots,
+                global_vars,
+            )?;
+            return Ok(true);
+        }
+        if i128_constant_is_negative_one(right) {
+            emit_i128_unary(
+                instructions,
+                left,
+                dst,
+                AsmUnaryOp::Neg,
+                stack_slots,
+                global_vars,
+            )?;
+            return Ok(true);
+        }
     }
 
     emit_i128_copy_to_operand(instructions, left, dst.clone(), stack_slots, global_vars)?;
@@ -533,6 +555,15 @@ fn i128_constant_is_one(value: &TackyVal) -> bool {
     matches!(
         value,
         TackyVal::Constant(1) | TackyVal::Int128Constant(1) | TackyVal::UInt128Constant(1)
+    )
+}
+
+fn i128_constant_is_negative_one(value: &TackyVal) -> bool {
+    matches!(
+        value,
+        TackyVal::Constant(-1)
+            | TackyVal::Int128Constant(-1)
+            | TackyVal::UInt128Constant(u128::MAX)
     )
 }
 

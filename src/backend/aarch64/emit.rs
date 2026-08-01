@@ -2372,6 +2372,21 @@ fn emit_remainder(
             return store_operand(w, target, ty, left_reg, dst);
         }
     }
+    if !is_unsigned {
+        if let Some((amount, width)) =
+            binary_signed_div_power_of_two_amount(ty, &AsmBinaryOp::SDiv, right)
+        {
+            let quotient_reg = reg_name(Reg::R13, ty)?;
+            let mask = (1u64 << amount) - 1;
+            writeln!(w, "\tasr {}, {}, #{}", quotient_reg, left_reg, width - 1)?;
+            writeln!(w, "\tand {}, {}, #{}", quotient_reg, quotient_reg, mask)?;
+            writeln!(w, "\tadd {}, {}, {}", quotient_reg, left_reg, quotient_reg)?;
+            writeln!(w, "\tasr {}, {}, #{}", quotient_reg, quotient_reg, amount)?;
+            writeln!(w, "\tlsl {}, {}, #{}", quotient_reg, quotient_reg, amount)?;
+            writeln!(w, "\tsub {}, {}, {}", left_reg, left_reg, quotient_reg)?;
+            return store_operand(w, target, ty, left_reg, dst);
+        }
+    }
     let right_reg = load_operand(w, target, ty, right, Reg::R11)?;
     let quotient_reg = reg_name(Reg::R13, ty)?;
     let div_mnemonic = if is_unsigned { "udiv" } else { "sdiv" };
@@ -3271,6 +3286,30 @@ mod tests {
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
         assert_eq!(asm, "\tand w0, w0, #7\n");
+        Ok(())
+    }
+
+    #[test]
+    fn signed_remainder_by_power_of_two_uses_bias_and_shift() -> Result<(), String> {
+        let mut out = Vec::new();
+        emit_instruction(
+            &mut out,
+            &AsmInstr::AArch64Rem(
+                AsmType::Quadword,
+                false,
+                AsmOperand::Reg(Reg::AX),
+                AsmOperand::Imm(8),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            &Target::aarch64_linux(),
+        )
+        .map_err(|err| err.to_string())?;
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(
+            asm,
+            "\tasr x11, x0, #63\n\tand x11, x11, #7\n\tadd x11, x0, x11\n\tasr x11, x11, #3\n\tlsl x11, x11, #3\n\tsub x0, x0, x11\n"
+        );
         Ok(())
     }
 

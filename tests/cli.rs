@@ -25879,6 +25879,7 @@ int band(int a, int b) { return a & b; }
 long mull(long a, long b) { return a * b; }
 long mulnegshiftl(long a) { return a * -8; }
 long divshiftl(long a) { return a / 8; }
+long modshiftl(long a) { return a % 8; }
 double addd(double a, double b) { return a + b; }
 int lt(int a, int b) { return a < b; }
 int eq128(__int128 a, __int128 b) { return a == b; }
@@ -25970,6 +25971,13 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
     assert!(divshiftl.contains("\tadd x0, x0, x11"), "{divshiftl}");
     assert!(divshiftl.contains("\tasr x0, x0, #3"), "{divshiftl}");
     assert!(!divshiftl.contains("\tsdiv "), "{divshiftl}");
+    let modshiftl = body("modshiftl");
+    assert!(modshiftl.contains("\tasr x11, x9, #63"), "{modshiftl}");
+    assert!(modshiftl.contains("\tand x11, x11, #7"), "{modshiftl}");
+    assert!(modshiftl.contains("\tlsl x11, x11, #3"), "{modshiftl}");
+    assert!(modshiftl.contains("\tsub x9, x9, x11"), "{modshiftl}");
+    assert!(modshiftl.contains("\tmov x0, x9"), "{modshiftl}");
+    assert!(!modshiftl.contains("\tsdiv "), "{modshiftl}");
     for (name, condition) in [("eq128", "eq"), ("ne128", "ne")] {
         let body = body(name);
         assert!(body.contains("\teor "), "{body}");

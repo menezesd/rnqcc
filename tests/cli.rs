@@ -26191,6 +26191,7 @@ __int128 zerosub(__int128 a) { return 0 - a; }
 __int128 mulzero(__int128 a) { return a * 0; }
 __int128 mulone(__int128 a) { return a * 1; }
 __int128 mulneg(__int128 a) { return a * -1; }
+__int128 mulshift(__int128 a) { return a * 8; }
 __int128 divone(__int128 a) { return a / 1; }
 __int128 divneg(__int128 a) { return a / -1; }
 __int128 modone(__int128 a) { return a % 1; }
@@ -26266,6 +26267,9 @@ int ulezero(unsigned __int128 a) { return a <= 0; }
         assert!(!body.contains("\timulq "), "{body}");
         assert!(!body.contains("\tmulq "), "{body}");
     }
+    let mulshift = body("mulshift");
+    assert!(mulshift.contains("\tsalq $3,"), "{mulshift}");
+    assert!(!mulshift.contains("\tmulq "), "{mulshift}");
     let divneg = body("divneg");
     assert!(divneg.contains("\tnotq "), "{divneg}");
     assert!(!divneg.contains("\tcall __divti3"), "{divneg}");

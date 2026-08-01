@@ -3468,6 +3468,16 @@ fn convert_binary(
                         }
                     }
                     if matches!(op, TackyBinaryOp::Mul) {
+                        if let Some(amount) = i128_constant_power_of_two_shift(left) {
+                            let count = TackyVal::Constant(amount);
+                            convert_binary(&TackyBinaryOp::ShiftLeft, right, &count, dst, ctx)?;
+                            return Ok(());
+                        }
+                        if let Some(amount) = i128_constant_power_of_two_shift(right) {
+                            let count = TackyVal::Constant(amount);
+                            convert_binary(&TackyBinaryOp::ShiftLeft, left, &count, dst, ctx)?;
+                            return Ok(());
+                        }
                         if i128_constant_is_zero(left) || i128_constant_is_zero(right) {
                             emit_i128_zero(out, dst)?;
                             return Ok(());

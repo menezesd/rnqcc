@@ -1424,6 +1424,13 @@ fn emit_binary(
         return store_operand(w, target, ty, dst_reg, dst);
     }
 
+    if let Some(value) = binary_mul_trivial_value(ty, op, src) {
+        return match value {
+            0 => store_operand(w, target, ty, zero_register_for_type(ty)?, dst),
+            1 => Ok(()),
+            _ => unreachable!("only zero and one are trivial multiplication values"),
+        };
+    }
     let dst_reg = load_operand(w, target, ty, dst, Reg::R10)?;
     if let Some(offset) = binary_add_sub_immediate_offset(op, src) {
         emit_add_immediate(w, dst_reg, offset)?;
@@ -1454,6 +1461,10 @@ fn emit_binary(
     };
     if let Some(amount) = binary_shift_immediate_amount(ty, op, src) {
         writeln!(w, "\t{} {}, {}, #{}", mnemonic, dst_reg, dst_reg, amount)?;
+        return store_operand(w, target, ty, dst_reg, dst);
+    }
+    if let Some(amount) = binary_mul_power_of_two_amount(ty, op, src) {
+        writeln!(w, "\tlsl {}, {}, #{}", dst_reg, dst_reg, amount)?;
         return store_operand(w, target, ty, dst_reg, dst);
     }
     if let Some(mask) = binary_logical_immediate(ty, op, src) {
@@ -1491,6 +1502,37 @@ fn binary_shift_immediate_amount(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand
         _ => return None,
     };
     (0..width).contains(amount).then_some(*amount)
+}
+
+fn binary_mul_trivial_value(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> Option<u64> {
+    if !matches!(op, AsmBinaryOp::Mul) {
+        return None;
+    }
+    let AsmOperand::Imm(value) = src else {
+        return None;
+    };
+    match ty {
+        AsmType::Byte | AsmType::Word | AsmType::Longword => Some(*value as u32 as u64),
+        AsmType::Quadword => Some(*value as u64),
+        _ => None,
+    }
+    .filter(|value| matches!(value, 0 | 1))
+}
+
+fn binary_mul_power_of_two_amount(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> Option<u32> {
+    if !matches!(op, AsmBinaryOp::Mul) {
+        return None;
+    }
+    let AsmOperand::Imm(value) = src else {
+        return None;
+    };
+    let (value, width) = match ty {
+        AsmType::Byte | AsmType::Word | AsmType::Longword => (*value as u32 as u64, 32),
+        AsmType::Quadword => (*value as u64, 64),
+        _ => return None,
+    };
+    let amount = value.trailing_zeros();
+    (value.is_power_of_two() && amount < width).then_some(amount)
 }
 
 fn binary_logical_immediate(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> Option<u64> {
@@ -2700,6 +2742,28 @@ mod tests {
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
         assert_eq!(asm, "\textr x11, x1, x0, #13\n\tmov x0, x11\n");
+        Ok(())
+    }
+
+    #[test]
+    fn integer_multiply_immediates_use_shift_or_trivial_forms() -> Result<(), String> {
+        let mut out = Vec::new();
+        for source in [AsmOperand::Imm(8), AsmOperand::Imm(0), AsmOperand::Imm(1)] {
+            emit_instruction(
+                &mut out,
+                &AsmInstr::Binary(
+                    AsmType::Quadword,
+                    AsmBinaryOp::Mul,
+                    source,
+                    AsmOperand::Reg(Reg::AX),
+                ),
+                &Target::aarch64_linux(),
+            )
+            .map_err(|err| err.to_string())?;
+        }
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(asm, "\tlsl x0, x0, #3\n\tmov x0, xzr\n");
         Ok(())
     }
 

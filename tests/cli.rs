@@ -8416,8 +8416,12 @@ fn emits_aarch64_shift_for_power_of_two_unsigned_divide() {
 fn emits_aarch64_negate_for_signed_divide_by_negative_one() {
     let src = temp_file("aarch64-sdiv-negative-one", "i");
     let out = temp_file("aarch64-sdiv-negative-one", "s");
-    std::fs::write(&src, "long negate(long x) { return x / -1; }\n")
-        .expect("failed to write input");
+    std::fs::write(
+        &src,
+        "long negate(long x) { return x / -1; }\n\
+         long identity(long x) { return x / 1; }\n",
+    )
+    .expect("failed to write input");
 
     let output = Command::new(rnqcc())
         .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
@@ -8430,6 +8434,7 @@ fn emits_aarch64_negate_for_signed_divide_by_negative_one() {
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
     assert!(asm.contains("\tneg x0, x0"), "{asm}");
     assert!(!asm.contains("\tsdiv x0, x0,"), "{asm}");
+    assert!(!asm.contains("\tsdiv x0, x0, #1"), "{asm}");
 
     let _ = std::fs::remove_file(src);
     let _ = std::fs::remove_file(out);

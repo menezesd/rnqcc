@@ -1317,32 +1317,10 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                 };
                 if t == AsmType::Octword {
                     emit_i128_copy(out, src, dst)?;
-                    let dst_op = convert_val(dst);
-                    let dst_low = low64_operand(dst_op.clone())?;
-                    let dst_high = high64_operand(dst_op)?;
-                    out.push(AsmInstr::Unary(
-                        AsmType::Quadword,
-                        AsmUnaryOp::Not,
-                        dst_low.clone(),
-                    ));
-                    out.push(AsmInstr::Unary(
-                        AsmType::Quadword,
-                        AsmUnaryOp::Not,
-                        dst_high.clone(),
-                    ));
                     if matches!(op, TackyUnaryOp::Negate) {
-                        out.push(AsmInstr::Binary(
-                            AsmType::Quadword,
-                            AsmBinaryOp::AddSetFlags,
-                            AsmOperand::Imm(1),
-                            dst_low,
-                        ));
-                        out.push(AsmInstr::Binary(
-                            AsmType::Quadword,
-                            AsmBinaryOp::Adc,
-                            AsmOperand::Imm(0),
-                            dst_high,
-                        ));
+                        emit_i128_negate(out, dst)?;
+                    } else {
+                        emit_i128_not(out, dst)?;
                     }
                     return Ok(());
                 }

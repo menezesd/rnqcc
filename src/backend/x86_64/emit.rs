@@ -829,6 +829,25 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                                 );
                             }
                         }
+                        value if value < -1 && value.unsigned_abs().is_power_of_two() => {
+                            let amount = value.unsigned_abs().trailing_zeros();
+                            let width = if *t == AsmType::Quadword { 64 } else { 32 };
+                            if amount < width {
+                                writeln!(
+                                    w,
+                                    "\tsal{} ${}, {}",
+                                    suffix(*t),
+                                    amount,
+                                    show_operand(dst, *t, platform)?
+                                )?;
+                                return writeln!(
+                                    w,
+                                    "\tneg{} {}",
+                                    suffix(*t),
+                                    show_operand(dst, *t, platform)?
+                                );
+                            }
+                        }
                         _ => {}
                     }
                 }

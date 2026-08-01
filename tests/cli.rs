@@ -26201,6 +26201,7 @@ unsigned __int128 umodshift(unsigned __int128 a) { return a % 8; }
 unsigned __int128 umodwide(unsigned __int128 a) { return a % ((unsigned __int128)1 << 65); }
 long scalar_mulshift(long a) { return a * 8; }
 int scalar_mulneg(int a) { return a * -1; }
+long scalar_mulnegshift(long a) { return a * -8; }
 long scalar_andzero(long a) { return a & 0; }
 long scalar_orones(long a) { return a | -1; }
 long scalar_xorones(long a) { return a ^ -1; }
@@ -26309,6 +26310,19 @@ int ulezero(unsigned __int128 a) { return a <= 0; }
     let scalar_mulneg = body("scalar_mulneg");
     assert!(scalar_mulneg.contains("\tnegl "), "{scalar_mulneg}");
     assert!(!scalar_mulneg.contains("\timull "), "{scalar_mulneg}");
+    let scalar_mulnegshift = body("scalar_mulnegshift");
+    assert!(
+        scalar_mulnegshift.contains("\tsalq $3,"),
+        "{scalar_mulnegshift}"
+    );
+    assert!(
+        scalar_mulnegshift.contains("\tnegq "),
+        "{scalar_mulnegshift}"
+    );
+    assert!(
+        !scalar_mulnegshift.contains("\timulq "),
+        "{scalar_mulnegshift}"
+    );
     let scalar_andzero = body("scalar_andzero");
     assert!(
         scalar_andzero.contains("\tmovq $0,") || scalar_andzero.contains("\txorq %r"),

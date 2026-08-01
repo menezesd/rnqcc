@@ -1881,6 +1881,24 @@ fn emit_add_ptr(
     store_operand(w, target, AsmType::Quadword, ptr_reg, dst)
 }
 
+fn emit_extract(
+    w: &mut dyn Write,
+    target: &Target,
+    high: &AsmOperand,
+    low: &AsmOperand,
+    lsb: u8,
+    dst: &AsmOperand,
+) -> std::io::Result<()> {
+    if !(1..64).contains(&lsb) {
+        return invalid_input(format!("invalid AArch64 extr shift amount: {lsb}"));
+    }
+    let high_reg = load_operand(w, target, AsmType::Quadword, high, Reg::R10)?;
+    let low_reg = load_operand(w, target, AsmType::Quadword, low, Reg::R11)?;
+    let dst_reg = reg_name(Reg::R13, AsmType::Quadword)?;
+    writeln!(w, "\textr {}, {}, {}, #{}", dst_reg, high_reg, low_reg, lsb)?;
+    store_operand(w, target, AsmType::Quadword, dst_reg, dst)
+}
+
 fn scaled_add_shift(scale: i64) -> Option<u32> {
     let scale = u64::try_from(scale).ok()?;
     (scale > 1 && scale.is_power_of_two()).then_some(scale.trailing_zeros())
@@ -2187,6 +2205,7 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, target: &Target) -> std
         AsmInstr::AArch64AddPtr(ptr, index, scale, dst) => {
             emit_add_ptr(w, target, ptr, index, *scale, dst)
         }
+        AsmInstr::AArch64Extr(high, low, lsb, dst) => emit_extract(w, target, high, low, *lsb, dst),
         AsmInstr::AArch64LoadAdjusted(ty, src, dst, stack_rebase) => {
             emit_load_adjusted(w, target, *ty, src, *dst, *stack_rebase)
         }
@@ -2661,6 +2680,26 @@ mod tests {
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
         assert_eq!(asm, "\tlsr x0, x0, #12\n");
+        Ok(())
+    }
+
+    #[test]
+    fn cross_limb_extract_preserves_high_low_operand_order() -> Result<(), String> {
+        let mut out = Vec::new();
+        emit_instruction(
+            &mut out,
+            &AsmInstr::AArch64Extr(
+                AsmOperand::Reg(Reg::DI),
+                AsmOperand::Reg(Reg::AX),
+                13,
+                AsmOperand::Reg(Reg::AX),
+            ),
+            &Target::aarch64_linux(),
+        )
+        .map_err(|err| err.to_string())?;
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(asm, "\textr x11, x1, x0, #13\n\tmov x0, x11\n");
         Ok(())
     }
 

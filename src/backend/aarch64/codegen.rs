@@ -1026,27 +1026,10 @@ fn emit_i128_shift(
                     dst_low,
                 ));
             } else {
-                instructions.push(AsmInstr::Mov(
-                    AsmType::Quadword,
-                    dst_low.clone(),
-                    AsmOperand::Reg(Reg::R13),
-                ));
-                instructions.push(AsmInstr::Binary(
-                    AsmType::Quadword,
-                    AsmBinaryOp::Sal,
-                    AsmOperand::Imm(amount),
+                instructions.push(AsmInstr::AArch64Extr(
                     dst_high.clone(),
-                ));
-                instructions.push(AsmInstr::Binary(
-                    AsmType::Quadword,
-                    AsmBinaryOp::Shr,
-                    AsmOperand::Imm(64 - amount),
-                    AsmOperand::Reg(Reg::R13),
-                ));
-                instructions.push(AsmInstr::Binary(
-                    AsmType::Quadword,
-                    AsmBinaryOp::Or,
-                    AsmOperand::Reg(Reg::R13),
+                    dst_low.clone(),
+                    (64 - amount) as u8,
                     dst_high,
                 ));
                 instructions.push(AsmInstr::Binary(
@@ -1106,27 +1089,10 @@ fn emit_i128_shift(
                     ));
                 }
             } else {
-                instructions.push(AsmInstr::Mov(
-                    AsmType::Quadword,
+                instructions.push(AsmInstr::AArch64Extr(
                     dst_high.clone(),
-                    AsmOperand::Reg(Reg::R13),
-                ));
-                instructions.push(AsmInstr::Binary(
-                    AsmType::Quadword,
-                    AsmBinaryOp::Shr,
-                    AsmOperand::Imm(amount),
                     dst_low.clone(),
-                ));
-                instructions.push(AsmInstr::Binary(
-                    AsmType::Quadword,
-                    AsmBinaryOp::Sal,
-                    AsmOperand::Imm(64 - amount),
-                    AsmOperand::Reg(Reg::R13),
-                ));
-                instructions.push(AsmInstr::Binary(
-                    AsmType::Quadword,
-                    AsmBinaryOp::Or,
-                    AsmOperand::Reg(Reg::R13),
+                    amount as u8,
                     dst_low,
                 ));
                 instructions.push(AsmInstr::Binary(
@@ -1378,6 +1344,11 @@ fn rewrite_tls_operands(func: &mut AsmFunction, tls_vars: &HashSet<String>) {
             AsmInstr::AArch64AddPtr(ptr, index, _, dst) => {
                 rewrite_tls_operand(ptr, tls_vars);
                 rewrite_tls_operand(index, tls_vars);
+                rewrite_tls_operand(dst, tls_vars);
+            }
+            AsmInstr::AArch64Extr(high, low, _, dst) => {
+                rewrite_tls_operand(high, tls_vars);
+                rewrite_tls_operand(low, tls_vars);
                 rewrite_tls_operand(dst, tls_vars);
             }
             AsmInstr::AArch64LoadAdjusted(_, src, _, _)
@@ -2373,6 +2344,11 @@ fn replace_spilled_pseudos(
             AsmInstr::AArch64AddPtr(ptr, index, _, dst) => {
                 replace_op(ptr, stack_slots)?;
                 replace_op(index, stack_slots)?;
+                replace_op(dst, stack_slots)?;
+            }
+            AsmInstr::AArch64Extr(high, low, _, dst) => {
+                replace_op(high, stack_slots)?;
+                replace_op(low, stack_slots)?;
                 replace_op(dst, stack_slots)?;
             }
             AsmInstr::AArch64LoadAdjusted(_, src, _, _) => {
@@ -5219,6 +5195,26 @@ mod tests {
                 AsmInstr::Mov(AsmType::Quadword, _, AsmOperand::Reg(Reg::R12))
             )
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn constant_i128_cross_limb_shifts_use_extract() -> Result<(), String> {
+        let program = codegen_source(
+            "unsigned __int128 left(unsigned __int128 x) { return x << 13; }\n\
+             unsigned __int128 right(unsigned __int128 x) { return x >> 13; }\n",
+        )?;
+
+        let left = function(&program, "left")?;
+        assert!(left
+            .instructions
+            .iter()
+            .any(|instr| { matches!(instr, AsmInstr::AArch64Extr(_, _, 51, _)) }));
+        let right = function(&program, "right")?;
+        assert!(right
+            .instructions
+            .iter()
+            .any(|instr| { matches!(instr, AsmInstr::AArch64Extr(_, _, 13, _)) }));
         Ok(())
     }
 

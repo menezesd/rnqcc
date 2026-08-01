@@ -25848,10 +25848,10 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
         assert!(!after_call.contains("\tldr x1, [sp"), "{body}");
     }
     for (name, low_op, high_op) in [
-        ("shl128", "\tlsl x0,", "\tlsl x1,"),
+        ("shl128", "\tlsl x0,", "\textr x11,"),
         ("shl64", "\tmov x1, x0", "\tmov x0, xzr"),
-        ("shr128", "\tlsr x0,", "\tlsr x1,"),
-        ("sar128", "\tlsr x0,", "\tasr x1,"),
+        ("shr128", "\textr x11,", "\tlsr x1,"),
+        ("sar128", "\textr x11,", "\tasr x1,"),
     ] {
         let body = body(name);
         assert!(body.contains(low_op), "{body}");

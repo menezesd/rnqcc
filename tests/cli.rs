@@ -26315,11 +26315,14 @@ fn aarch64_unoptimized_wide_shift_counts_emit_successfully() {
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
-    assert!(
-        asm.contains("i128_shift_loop.typed_shift_count128"),
-        "{asm}"
-    );
-    assert!(asm.contains("i128_shift_loop.bitint_shift128"), "{asm}");
+    for name in ["typed_shift_count128", "bitint_shift128"] {
+        assert!(asm.contains(&format!("i128_shift_upper.{name}")), "{asm}");
+        assert!(
+            asm.contains(&format!("i128_shift_overflow.{name}")),
+            "{asm}"
+        );
+        assert!(!asm.contains(&format!("i128_shift_loop.{name}")), "{asm}");
+    }
 
     let _ = std::fs::remove_file(out);
 }

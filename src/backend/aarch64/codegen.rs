@@ -704,7 +704,8 @@ fn emit_i128_variable_shift(
         val_operand(right, ctx.stack_slots, ctx.global_vars)?
     };
     let id = instructions.len();
-    let loop_label = format!("i128_shift_loop.{}.{}", ctx.function_name, id);
+    let upper_label = format!("i128_shift_upper.{}.{}", ctx.function_name, id);
+    let overflow_label = format!("i128_shift_overflow.{}.{}", ctx.function_name, id);
     let end_label = format!("i128_shift_end.{}.{}", ctx.function_name, id);
 
     instructions.push(AsmInstr::Mov(
@@ -731,44 +732,146 @@ fn emit_i128_variable_shift(
         amount_src,
         AsmOperand::Reg(Reg::R12),
     ));
-    instructions.push(AsmInstr::Label(loop_label.clone()));
     instructions.push(AsmInstr::Cmp(
         AsmType::Quadword,
         AsmOperand::Imm(0),
         AsmOperand::Reg(Reg::R12),
     ));
     instructions.push(AsmInstr::JmpCC(CondCode::E, end_label.clone()));
+    instructions.push(AsmInstr::Cmp(
+        AsmType::Quadword,
+        AsmOperand::Imm(64),
+        AsmOperand::Reg(Reg::R12),
+    ));
+    instructions.push(AsmInstr::JmpCC(CondCode::AE, upper_label.clone()));
 
     match op {
         TackyBinaryOp::ShiftLeft => {
+            // For 1 <= count < 64, the high limb receives its own shifted
+            // bits plus the low limb's carry.  Negating the count makes the
+            // register shift perform `64 - count` modulo 64.
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Imm(0),
+                AsmOperand::Reg(Reg::R14),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Sub,
+                AsmOperand::Reg(Reg::R12),
+                AsmOperand::Reg(Reg::R14),
+            ));
             instructions.push(AsmInstr::Mov(
                 AsmType::Quadword,
                 AsmOperand::Reg(Reg::R10),
-                AsmOperand::Reg(Reg::R14),
+                AsmOperand::Reg(Reg::R15),
             ));
             instructions.push(AsmInstr::Binary(
                 AsmType::Quadword,
                 AsmBinaryOp::Shr,
-                AsmOperand::Imm(63),
                 AsmOperand::Reg(Reg::R14),
+                AsmOperand::Reg(Reg::R15),
             ));
             instructions.push(AsmInstr::Binary(
                 AsmType::Quadword,
                 AsmBinaryOp::Sal,
-                AsmOperand::Imm(1),
-                AsmOperand::Reg(Reg::R10),
-            ));
-            instructions.push(AsmInstr::Binary(
-                AsmType::Quadword,
-                AsmBinaryOp::Sal,
-                AsmOperand::Imm(1),
+                AsmOperand::Reg(Reg::R12),
                 AsmOperand::Reg(Reg::R13),
             ));
             instructions.push(AsmInstr::Binary(
                 AsmType::Quadword,
                 AsmBinaryOp::Or,
-                AsmOperand::Reg(Reg::R14),
+                AsmOperand::Reg(Reg::R15),
                 AsmOperand::Reg(Reg::R13),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Sal,
+                AsmOperand::Reg(Reg::R12),
+                AsmOperand::Reg(Reg::R10),
+            ));
+        }
+        TackyBinaryOp::ShiftRight => {
+            let high_shift = if is_unsigned_val(left, ctx.types) {
+                AsmBinaryOp::Shr
+            } else {
+                AsmBinaryOp::Sar
+            };
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Imm(0),
+                AsmOperand::Reg(Reg::R14),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Sub,
+                AsmOperand::Reg(Reg::R12),
+                AsmOperand::Reg(Reg::R14),
+            ));
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Reg(Reg::R13),
+                AsmOperand::Reg(Reg::R15),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Sal,
+                AsmOperand::Reg(Reg::R14),
+                AsmOperand::Reg(Reg::R15),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Shr,
+                AsmOperand::Reg(Reg::R12),
+                AsmOperand::Reg(Reg::R10),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                high_shift,
+                AsmOperand::Reg(Reg::R12),
+                AsmOperand::Reg(Reg::R13),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Or,
+                AsmOperand::Reg(Reg::R15),
+                AsmOperand::Reg(Reg::R10),
+            ));
+        }
+        _ => return Err("internal error: expected i128 shift op".to_string()),
+    }
+    instructions.push(AsmInstr::Jmp(end_label.clone()));
+
+    instructions.push(AsmInstr::Label(upper_label));
+    instructions.push(AsmInstr::Cmp(
+        AsmType::Quadword,
+        AsmOperand::Imm(128),
+        AsmOperand::Reg(Reg::R12),
+    ));
+    instructions.push(AsmInstr::JmpCC(CondCode::AE, overflow_label.clone()));
+    instructions.push(AsmInstr::Binary(
+        AsmType::Quadword,
+        AsmBinaryOp::Sub,
+        AsmOperand::Imm(64),
+        AsmOperand::Reg(Reg::R12),
+    ));
+    match op {
+        TackyBinaryOp::ShiftLeft => {
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Reg(Reg::R10),
+                AsmOperand::Reg(Reg::R13),
+            ));
+            instructions.push(AsmInstr::Binary(
+                AsmType::Quadword,
+                AsmBinaryOp::Sal,
+                AsmOperand::Reg(Reg::R12),
+                AsmOperand::Reg(Reg::R13),
+            ));
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Imm(0),
+                AsmOperand::Reg(Reg::R10),
             ));
         }
         TackyBinaryOp::ShiftRight => {
@@ -780,43 +883,74 @@ fn emit_i128_variable_shift(
             instructions.push(AsmInstr::Mov(
                 AsmType::Quadword,
                 AsmOperand::Reg(Reg::R13),
-                AsmOperand::Reg(Reg::R14),
-            ));
-            instructions.push(AsmInstr::Binary(
-                AsmType::Quadword,
-                AsmBinaryOp::Sal,
-                AsmOperand::Imm(63),
-                AsmOperand::Reg(Reg::R14),
-            ));
-            instructions.push(AsmInstr::Binary(
-                AsmType::Quadword,
-                AsmBinaryOp::Shr,
-                AsmOperand::Imm(1),
                 AsmOperand::Reg(Reg::R10),
             ));
             instructions.push(AsmInstr::Binary(
                 AsmType::Quadword,
-                high_shift,
-                AsmOperand::Imm(1),
+                high_shift.clone(),
+                AsmOperand::Reg(Reg::R12),
+                AsmOperand::Reg(Reg::R10),
+            ));
+            if matches!(high_shift, AsmBinaryOp::Shr) {
+                instructions.push(AsmInstr::Mov(
+                    AsmType::Quadword,
+                    AsmOperand::Imm(0),
+                    AsmOperand::Reg(Reg::R13),
+                ));
+            } else {
+                instructions.push(AsmInstr::Binary(
+                    AsmType::Quadword,
+                    AsmBinaryOp::Sar,
+                    AsmOperand::Imm(63),
+                    AsmOperand::Reg(Reg::R13),
+                ));
+            }
+        }
+        _ => unreachable!(),
+    }
+    instructions.push(AsmInstr::Jmp(end_label.clone()));
+
+    instructions.push(AsmInstr::Label(overflow_label));
+    match op {
+        TackyBinaryOp::ShiftLeft => {
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Imm(0),
+                AsmOperand::Reg(Reg::R10),
+            ));
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Imm(0),
                 AsmOperand::Reg(Reg::R13),
             ));
+        }
+        TackyBinaryOp::ShiftRight if is_unsigned_val(left, ctx.types) => {
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Imm(0),
+                AsmOperand::Reg(Reg::R10),
+            ));
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Imm(0),
+                AsmOperand::Reg(Reg::R13),
+            ));
+        }
+        TackyBinaryOp::ShiftRight => {
             instructions.push(AsmInstr::Binary(
                 AsmType::Quadword,
-                AsmBinaryOp::Or,
-                AsmOperand::Reg(Reg::R14),
+                AsmBinaryOp::Sar,
+                AsmOperand::Imm(63),
+                AsmOperand::Reg(Reg::R13),
+            ));
+            instructions.push(AsmInstr::Mov(
+                AsmType::Quadword,
+                AsmOperand::Reg(Reg::R13),
                 AsmOperand::Reg(Reg::R10),
             ));
         }
-        _ => return Err("internal error: expected i128 shift op".to_string()),
+        _ => unreachable!(),
     }
-
-    instructions.push(AsmInstr::Binary(
-        AsmType::Quadword,
-        AsmBinaryOp::Sub,
-        AsmOperand::Imm(1),
-        AsmOperand::Reg(Reg::R12),
-    ));
-    instructions.push(AsmInstr::Jmp(loop_label));
     instructions.push(AsmInstr::Label(end_label));
     instructions.push(AsmInstr::Mov(
         AsmType::Quadword,

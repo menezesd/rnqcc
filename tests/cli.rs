@@ -25900,6 +25900,8 @@ __int128 modone128(__int128 a) { return a % 1; }
 __int128 modneg128(__int128 a) { return a % -1; }
 unsigned __int128 udiv128(unsigned __int128 a, unsigned __int128 b) { return a / b; }
 unsigned __int128 udivshift128(unsigned __int128 a) { return a / 8; }
+unsigned __int128 umodshift128(unsigned __int128 a) { return a % 8; }
+unsigned __int128 umodwide128(unsigned __int128 a) { return a % ((unsigned __int128)1 << 65); }
 unsigned __int128 umod128(unsigned __int128 a, unsigned __int128 b) { return a % b; }
 unsigned __int128 shl128(unsigned __int128 a) { return a << 13; }
 unsigned __int128 shl64(unsigned __int128 a) { return a << 64; }
@@ -26036,6 +26038,14 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
     assert!(udivshift128.contains("\tlsr x1, x1, #3"), "{udivshift128}");
     assert!(!udivshift128.contains("\tbl __udivti3"), "{udivshift128}");
     assert!(!udivshift128.contains("\tstr x30,"), "{udivshift128}");
+    let umodshift128 = body("umodshift128");
+    assert!(umodshift128.contains("\tand x0, x0, #7"), "{umodshift128}");
+    assert!(umodshift128.contains("\tmov x1, xzr"), "{umodshift128}");
+    assert!(!umodshift128.contains("\tbl __umodti3"), "{umodshift128}");
+    assert!(!umodshift128.contains("\tstr x30,"), "{umodshift128}");
+    let umodwide128 = body("umodwide128");
+    assert!(umodwide128.contains("\tand x1, x1, #1"), "{umodwide128}");
+    assert!(!umodwide128.contains("\tbl __umodti3"), "{umodwide128}");
 
     for (name, call) in [
         ("div128", "\tbl __divti3"),

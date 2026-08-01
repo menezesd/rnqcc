@@ -658,6 +658,53 @@ fn emit_i128_helper_binary(
             return Ok(true);
         }
     }
+    if matches!(op, TackyBinaryOp::Mod) && is_unsigned {
+        if let Some(amount) = i128_constant_power_of_two_shift(right) {
+            emit_i128_copy_to_operand(
+                instructions,
+                left,
+                dst.clone(),
+                ctx.stack_slots,
+                ctx.global_vars,
+            )?;
+            let dst_low = low64_operand(&dst)?;
+            let dst_high = high64_operand(&dst)?;
+            match amount {
+                1..=63 => {
+                    let mask = ((1u64 << amount) - 1) as i64;
+                    instructions.push(AsmInstr::Binary(
+                        AsmType::Quadword,
+                        AsmBinaryOp::And,
+                        AsmOperand::Imm(mask),
+                        dst_low,
+                    ));
+                    instructions.push(AsmInstr::Mov(
+                        AsmType::Quadword,
+                        AsmOperand::Imm(0),
+                        dst_high,
+                    ));
+                }
+                64 => {
+                    instructions.push(AsmInstr::Mov(
+                        AsmType::Quadword,
+                        AsmOperand::Imm(0),
+                        dst_high,
+                    ));
+                }
+                65..=127 => {
+                    let mask = ((1u64 << (amount - 64)) - 1) as i64;
+                    instructions.push(AsmInstr::Binary(
+                        AsmType::Quadword,
+                        AsmBinaryOp::And,
+                        AsmOperand::Imm(mask),
+                        dst_high,
+                    ));
+                }
+                _ => unreachable!("128-bit power-of-two remainder shift is in range"),
+            }
+            return Ok(true);
+        }
+    }
     if matches!(op, TackyBinaryOp::Div) && !is_unsigned && i128_constant_is_negative_one(right) {
         emit_i128_unary(
             instructions,
@@ -728,7 +775,7 @@ fn i128_div_or_mod_requires_helper(
 ) -> bool {
     matches!(op, TackyBinaryOp::Div | TackyBinaryOp::Mod)
         && !i128_constant_is_one(right)
-        && !(matches!(op, TackyBinaryOp::Div)
+        && !(matches!(op, TackyBinaryOp::Div | TackyBinaryOp::Mod)
             && is_unsigned_val(left, types)
             && i128_constant_power_of_two_shift(right).is_some())
         && (is_unsigned_val(left, types) || !i128_constant_is_negative_one(right))

@@ -863,6 +863,7 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
                                 show_operand(dst, *t, platform)?
                             )
                         }
+                        (AsmBinaryOp::Add, 0) | (AsmBinaryOp::Sub, 0) => return Ok(()),
                         _ => {}
                     }
                 }

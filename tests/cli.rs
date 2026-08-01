@@ -26204,6 +26204,8 @@ int scalar_mulneg(int a) { return a * -1; }
 long scalar_andzero(long a) { return a & 0; }
 long scalar_orones(long a) { return a | -1; }
 long scalar_xorones(long a) { return a ^ -1; }
+long scalar_addzero(long a) { return a + 0; }
+long scalar_subzero(long a) { return a - 0; }
 unsigned __int128 andzero(unsigned __int128 a) { return a & 0; }
 unsigned __int128 andones(unsigned __int128 a) { return a & ~(unsigned __int128)0; }
 unsigned __int128 orzero(unsigned __int128 a) { return a | 0; }
@@ -26313,6 +26315,11 @@ int ulezero(unsigned __int128 a) { return a <= 0; }
     let scalar_xorones = body("scalar_xorones");
     assert!(scalar_xorones.contains("\tnotq "), "{scalar_xorones}");
     assert!(!scalar_xorones.contains("\txorq "), "{scalar_xorones}");
+    for name in ["scalar_addzero", "scalar_subzero"] {
+        let body = body(name);
+        assert!(!body.contains("\taddq $0,"), "{body}");
+        assert!(!body.contains("\tsubq $0,"), "{body}");
+    }
     let orones = body("orones");
     assert!(orones.contains("\tmovq $-1,"), "{orones}");
     assert!(!orones.contains("\torq "), "{orones}");

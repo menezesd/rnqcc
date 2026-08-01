@@ -8379,6 +8379,29 @@ fn emits_aarch64_shift_for_power_of_two_multiply_immediate() {
 }
 
 #[test]
+fn emits_aarch64_shift_for_power_of_two_unsigned_divide() {
+    let src = temp_file("aarch64-udiv-immediate", "i");
+    let out = temp_file("aarch64-udiv-immediate", "s");
+    std::fs::write(&src, "unsigned divide(unsigned x) { return x / 8u; }\n")
+        .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
+    assert!(asm.contains("\tlsr w0, w0, #3"), "{asm}");
+    assert!(!asm.contains("\tudiv w0, w0,"), "{asm}");
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn emits_aarch64_assembly_for_unsigned_division_and_shift() {
     let src = temp_file("aarch64-unsigned-div-shift", "i");
     let out = temp_file("aarch64-unsigned-div-shift", "s");

@@ -1467,6 +1467,10 @@ fn emit_binary(
         writeln!(w, "\tlsl {}, {}, #{}", dst_reg, dst_reg, amount)?;
         return store_operand(w, target, ty, dst_reg, dst);
     }
+    if let Some(amount) = binary_unsigned_div_power_of_two_amount(ty, op, src) {
+        writeln!(w, "\tlsr {}, {}, #{}", dst_reg, dst_reg, amount)?;
+        return store_operand(w, target, ty, dst_reg, dst);
+    }
     if let Some(mask) = binary_logical_immediate(ty, op, src) {
         writeln!(w, "\t{} {}, {}, #{}", mnemonic, dst_reg, dst_reg, mask)?;
         return store_operand(w, target, ty, dst_reg, dst);
@@ -1511,12 +1515,9 @@ fn binary_mul_trivial_value(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> 
     let AsmOperand::Imm(value) = src else {
         return None;
     };
-    match ty {
-        AsmType::Byte | AsmType::Word | AsmType::Longword => Some(*value as u32 as u64),
-        AsmType::Quadword => Some(*value as u64),
-        _ => None,
-    }
-    .filter(|value| matches!(value, 0 | 1))
+    integer_immediate_value(ty, *value)
+        .map(|(value, _)| value)
+        .filter(|value| matches!(value, 0 | 1))
 }
 
 fn binary_mul_power_of_two_amount(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> Option<u32> {
@@ -1526,13 +1527,33 @@ fn binary_mul_power_of_two_amount(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperan
     let AsmOperand::Imm(value) = src else {
         return None;
     };
-    let (value, width) = match ty {
-        AsmType::Byte | AsmType::Word | AsmType::Longword => (*value as u32 as u64, 32),
-        AsmType::Quadword => (*value as u64, 64),
-        _ => return None,
-    };
+    let (value, width) = integer_immediate_value(ty, *value)?;
     let amount = value.trailing_zeros();
     (value.is_power_of_two() && amount < width).then_some(amount)
+}
+
+fn binary_unsigned_div_power_of_two_amount(
+    ty: AsmType,
+    op: &AsmBinaryOp,
+    src: &AsmOperand,
+) -> Option<u32> {
+    if !matches!(op, AsmBinaryOp::UDiv) {
+        return None;
+    }
+    let AsmOperand::Imm(value) = src else {
+        return None;
+    };
+    let (value, width) = integer_immediate_value(ty, *value)?;
+    let amount = value.trailing_zeros();
+    (value.is_power_of_two() && amount < width).then_some(amount)
+}
+
+fn integer_immediate_value(ty: AsmType, value: i64) -> Option<(u64, u32)> {
+    Some(match ty {
+        AsmType::Byte | AsmType::Word | AsmType::Longword => (value as u32 as u64, 32),
+        AsmType::Quadword => (value as u64, 64),
+        _ => return None,
+    })
 }
 
 fn binary_logical_immediate(ty: AsmType, op: &AsmBinaryOp, src: &AsmOperand) -> Option<u64> {
@@ -2783,6 +2804,26 @@ mod tests {
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
         assert_eq!(asm, "\tmovz x11, #3\n\tmadd x0, x1, x11, x0\n");
+        Ok(())
+    }
+
+    #[test]
+    fn unsigned_divide_by_power_of_two_uses_shift() -> Result<(), String> {
+        let mut out = Vec::new();
+        emit_instruction(
+            &mut out,
+            &AsmInstr::Binary(
+                AsmType::Longword,
+                AsmBinaryOp::UDiv,
+                AsmOperand::Imm(8),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            &Target::aarch64_linux(),
+        )
+        .map_err(|err| err.to_string())?;
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(asm, "\tlsr w0, w0, #3\n");
         Ok(())
     }
 

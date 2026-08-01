@@ -1543,6 +1543,21 @@ fn copy_bytes(
         ));
         offset += 4;
     }
+    if offset + 2 <= size {
+        let byte_offset = i32::try_from(offset)
+            .map_err(|_| format!("AArch64 backend aggregate offset too large: {}", src_name))?;
+        instructions.push(AsmInstr::Mov(
+            AsmType::Word,
+            stack_or_data_operand(src_name, byte_offset, stack_slots, global_vars)?,
+            AsmOperand::Reg(Reg::R10),
+        ));
+        instructions.push(AsmInstr::Mov(
+            AsmType::Word,
+            AsmOperand::Reg(Reg::R10),
+            stack_or_data_operand(dst_name, byte_offset, stack_slots, global_vars)?,
+        ));
+        offset += 2;
+    }
     while offset < size {
         let byte_offset = i32::try_from(offset)
             .map_err(|_| format!("AArch64 backend aggregate offset too large: {}", src_name))?;
@@ -4872,6 +4887,39 @@ mod tests {
         let resolved = resolve::resolve(ast).map_err(|err| err.render())?.program;
         let tacky = tacky::generate(resolved)?;
         gen(&tacky, &Target::aarch64_linux(), false)
+    }
+
+    #[test]
+    fn aggregate_copy_uses_halfword_for_two_byte_tail() -> Result<(), String> {
+        let mut instructions = Vec::new();
+        let stack_slots = HashMap::from([("src".to_string(), 0), ("dst".to_string(), 32)]);
+        copy_bytes(
+            &mut instructions,
+            "src",
+            "dst",
+            10,
+            &stack_slots,
+            &HashSet::new(),
+        )?;
+
+        assert_eq!(instructions.len(), 4);
+        assert!(matches!(
+            instructions[2],
+            AsmInstr::Mov(
+                AsmType::Word,
+                AsmOperand::Stack(8),
+                AsmOperand::Reg(Reg::R10)
+            )
+        ));
+        assert!(matches!(
+            instructions[3],
+            AsmInstr::Mov(
+                AsmType::Word,
+                AsmOperand::Reg(Reg::R10),
+                AsmOperand::Stack(40)
+            )
+        ));
+        Ok(())
     }
 
     fn function<'a>(program: &'a AsmProgram, name: &str) -> Result<&'a AsmFunction, String> {

@@ -401,6 +401,41 @@ fn emit_i128_copy(out: &mut Vec<AsmInstr>, src: &TackyVal, dst: &TackyVal) -> Re
     Ok(())
 }
 
+fn emit_i128_zero(out: &mut Vec<AsmInstr>, dst: &TackyVal) -> Result<(), String> {
+    let dst_op = convert_val(dst);
+    emit_i128_parts_to_operands(
+        out,
+        AsmOperand::Imm(0),
+        AsmOperand::Imm(0),
+        low64_operand(dst_op.clone())?,
+        high64_operand(dst_op)?,
+    );
+    Ok(())
+}
+
+fn i128_constant_is_zero(value: &TackyVal) -> bool {
+    matches!(
+        value,
+        TackyVal::Constant(0) | TackyVal::Int128Constant(0) | TackyVal::UInt128Constant(0)
+    )
+}
+
+fn i128_constant_is_one(value: &TackyVal) -> bool {
+    matches!(
+        value,
+        TackyVal::Constant(1) | TackyVal::Int128Constant(1) | TackyVal::UInt128Constant(1)
+    )
+}
+
+fn i128_constant_is_all_ones(value: &TackyVal) -> bool {
+    matches!(
+        value,
+        TackyVal::Constant(-1)
+            | TackyVal::Int128Constant(-1)
+            | TackyVal::UInt128Constant(u128::MAX)
+    )
+}
+
 fn emit_i128_parts_to_operands(
     out: &mut Vec<AsmInstr>,
     low: AsmOperand,
@@ -3141,6 +3176,59 @@ fn convert_binary(
                             amount
                         ));
                     }
+                    if matches!(op, TackyBinaryOp::Add) {
+                        if i128_constant_is_zero(left) {
+                            emit_i128_copy(out, right, dst)?;
+                            return Ok(());
+                        }
+                        if i128_constant_is_zero(right) {
+                            emit_i128_copy(out, left, dst)?;
+                            return Ok(());
+                        }
+                    }
+                    if matches!(op, TackyBinaryOp::Sub) && i128_constant_is_zero(right) {
+                        emit_i128_copy(out, left, dst)?;
+                        return Ok(());
+                    }
+                    if matches!(op, TackyBinaryOp::Mul) {
+                        if i128_constant_is_zero(left) || i128_constant_is_zero(right) {
+                            emit_i128_zero(out, dst)?;
+                            return Ok(());
+                        }
+                        if i128_constant_is_one(left) {
+                            emit_i128_copy(out, right, dst)?;
+                            return Ok(());
+                        }
+                        if i128_constant_is_one(right) {
+                            emit_i128_copy(out, left, dst)?;
+                            return Ok(());
+                        }
+                    }
+                    if matches!(op, TackyBinaryOp::BitwiseAnd) {
+                        if i128_constant_is_zero(left) || i128_constant_is_zero(right) {
+                            emit_i128_zero(out, dst)?;
+                            return Ok(());
+                        }
+                        if i128_constant_is_all_ones(left) {
+                            emit_i128_copy(out, right, dst)?;
+                            return Ok(());
+                        }
+                        if i128_constant_is_all_ones(right) {
+                            emit_i128_copy(out, left, dst)?;
+                            return Ok(());
+                        }
+                    }
+                    if matches!(op, TackyBinaryOp::BitwiseOr | TackyBinaryOp::BitwiseXor) {
+                        if i128_constant_is_zero(left) {
+                            emit_i128_copy(out, right, dst)?;
+                            return Ok(());
+                        }
+                        if i128_constant_is_zero(right) {
+                            emit_i128_copy(out, left, dst)?;
+                            return Ok(());
+                        }
+                    }
+
                     emit_i128_copy(out, left, dst)?;
                     let (right_low, right_high) = i128_part_operands(right)?;
                     if matches!(op, TackyBinaryOp::Mul) {

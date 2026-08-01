@@ -26179,6 +26179,72 @@ __int128 vsar128(__int128 a, int n) { return a >> n; }
 }
 
 #[test]
+fn x86_64_i128_identity_operations_avoid_general_arithmetic() {
+    let src = temp_file("x86-i128-identities", "c");
+    let out = temp_file("x86-i128-identities", "s");
+    std::fs::write(
+        &src,
+        r#"
+__int128 addzero(__int128 a) { return a + 0; }
+__int128 subzero(__int128 a) { return a - 0; }
+__int128 mulzero(__int128 a) { return a * 0; }
+__int128 mulone(__int128 a) { return a * 1; }
+unsigned __int128 andzero(unsigned __int128 a) { return a & 0; }
+unsigned __int128 andones(unsigned __int128 a) { return a & ~(unsigned __int128)0; }
+unsigned __int128 orzero(unsigned __int128 a) { return a | 0; }
+unsigned __int128 xorzero(unsigned __int128 a) { return a ^ 0; }
+"#,
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "--optimize", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+    let body = |name: &str| {
+        let label = format!("\n{name}:\n");
+        let start = asm
+            .find(&label)
+            .unwrap_or_else(|| panic!("missing function {name}"));
+        let after_label = start + label.len();
+        let rest = &asm[after_label..];
+        let end = rest.find("\n\t.text").unwrap_or(rest.len());
+        &rest[..end]
+    };
+    for name in [
+        "addzero", "subzero", "mulone", "andones", "orzero", "xorzero",
+    ] {
+        let body = body(name);
+        assert!(!body.contains("\taddq "), "{body}");
+        assert!(!body.contains("\tadcq "), "{body}");
+        assert!(!body.contains("\tsbbq "), "{body}");
+        assert!(!body.contains("\timulq "), "{body}");
+        assert!(!body.contains("\tmulq "), "{body}");
+        assert!(!body.contains("\tandq "), "{body}");
+        assert!(!body.contains("\torq "), "{body}");
+        assert!(!body.contains("\txorq "), "{body}");
+    }
+    for name in ["mulzero", "andzero"] {
+        let body = body(name);
+        assert!(
+            body.contains("\tmovq $0,") || body.contains("\txorq %r"),
+            "{body}"
+        );
+        assert!(!body.contains("\timulq "), "{body}");
+        assert!(!body.contains("\tmulq "), "{body}");
+        assert!(!body.contains("\tandq "), "{body}");
+    }
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn aarch64_returned_conversions_use_return_registers() {
     let src = temp_file("aarch64-returned-conversions", "c");
     let out = temp_file("aarch64-returned-conversions", "s");

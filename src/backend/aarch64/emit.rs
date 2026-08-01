@@ -1917,8 +1917,7 @@ fn emit_add_ptr(
         )?;
     } else {
         emit_load_immediate(w, AsmType::Quadword, "x11", scale)?;
-        writeln!(w, "\tmul {}, {}, x11", index_reg, index_reg)?;
-        writeln!(w, "\tadd {}, {}, {}", ptr_reg, ptr_reg, index_reg)?;
+        writeln!(w, "\tmadd {}, {}, x11, {}", ptr_reg, index_reg, ptr_reg)?;
     }
     store_operand(w, target, AsmType::Quadword, ptr_reg, dst)
 }
@@ -2764,6 +2763,26 @@ mod tests {
         let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
 
         assert_eq!(asm, "\tlsl x0, x0, #3\n\tmov x0, xzr\n");
+        Ok(())
+    }
+
+    #[test]
+    fn non_power_of_two_pointer_scales_use_madd() -> Result<(), String> {
+        let mut out = Vec::new();
+        emit_instruction(
+            &mut out,
+            &AsmInstr::AArch64AddPtr(
+                AsmOperand::Reg(Reg::AX),
+                AsmOperand::Reg(Reg::DI),
+                3,
+                AsmOperand::Reg(Reg::AX),
+            ),
+            &Target::aarch64_linux(),
+        )
+        .map_err(|err| err.to_string())?;
+        let asm = String::from_utf8(out).map_err(|err| err.to_string())?;
+
+        assert_eq!(asm, "\tmovz x11, #3\n\tmadd x0, x1, x11, x0\n");
         Ok(())
     }
 

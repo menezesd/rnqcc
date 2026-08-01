@@ -25466,6 +25466,8 @@ fn aarch64_dynamic_scaled_pointer_offsets_use_shifted_add() {
         r#"
 int geti(int *p, long i) { return p[i]; }
 long getl(long *p, long i) { return p[i]; }
+struct three { char a; char b; char c; };
+char get3(struct three *p, long i) { return p[i].a; }
 "#,
     )
     .expect("failed to write input");
@@ -25481,6 +25483,7 @@ long getl(long *p, long i) { return p[i]; }
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
     assert!(asm.contains(", lsl #2"), "{asm}");
     assert!(asm.contains(", lsl #3"), "{asm}");
+    assert!(asm.contains("\tmadd "), "{asm}");
     assert!(!asm.contains("\tmul "), "{asm}");
 
     let _ = std::fs::remove_file(src);

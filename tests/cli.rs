@@ -7296,8 +7296,7 @@ double f(void) {
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
-    assert!(asm.contains("\tmovz x9, #65535"), "{asm}");
-    assert!(asm.contains("\tmovk x9, #65535, lsl #48"), "{asm}");
+    assert!(asm.contains("\tmovn x9, #0"), "{asm}");
     assert!(asm.contains("\tldr x0, [sp]"), "{asm}");
     assert!(asm.contains("\tucvtf d0, x9"), "{asm}");
     assert!(!asm.contains("\tmovz w0, #65535"), "{asm}");
@@ -25281,11 +25280,9 @@ double d(void) { return 7; }
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
-    assert!(asm.contains("\tmovz w9, #0"), "{asm}");
-    assert!(asm.contains("\tmovk w9, #16608, lsl #16"), "{asm}");
+    assert!(asm.contains("\tmovz w9, #16608, lsl #16"), "{asm}");
     assert!(asm.contains("\tfmov s0, w9"), "{asm}");
-    assert!(asm.contains("\tmovz x9, #0"), "{asm}");
-    assert!(asm.contains("\tmovk x9, #16412, lsl #48"), "{asm}");
+    assert!(asm.contains("\tmovz x9, #16412, lsl #48"), "{asm}");
     assert!(asm.contains("\tfmov d0, x9"), "{asm}");
 
     let _ = std::fs::remove_file(src);
@@ -26442,8 +26439,7 @@ float f(void) { return -0.0f; }
 
     assert!(output.status.success(), "{}", stderr(output));
     let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
-    assert!(asm.contains("\tmovz w9, #0"), "{asm}");
-    assert!(asm.contains("\tmovk w9, #32768, lsl #16"), "{asm}");
+    assert!(asm.contains("\tmovz w9, #32768, lsl #16"), "{asm}");
     assert!(asm.contains("\tfmov s0, w9"), "{asm}");
 
     let _ = std::fs::remove_file(src);

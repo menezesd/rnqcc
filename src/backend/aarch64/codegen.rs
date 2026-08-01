@@ -2096,11 +2096,7 @@ fn aarch64_register_allocation_enabled_value(value: &str) -> bool {
 fn aarch64_register_allocation_enabled() -> bool {
     std::env::var("RNQCC_AARCH64_REGALLOC")
         .map(|value| aarch64_register_allocation_enabled_value(&value))
-        // The allocator keeps non-aliased scalar temporaries in caller-saved
-        // registers and spills values across calls. Keep the environment
-        // switch as an escape hatch, but make the better code generation the
-        // normal path.
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 fn compute_register_candidates(

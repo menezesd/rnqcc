@@ -45,8 +45,8 @@ Known simplifications:
 - The external C driver handles preprocessing, assembly, and linking.
 - Direct calls to variadic prototypes and indirect calls through variadic
   function pointers are supported.
-- AArch64 uses register allocation for non-aliased scalar temporaries while
-  retaining conservative stack placement for aggregates and address-taken values.
+- Generated AArch64 assembly favors correctness over register allocation quality;
+  it is intentionally stack-heavy today.
 
 ## Usage
 

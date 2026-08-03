@@ -768,22 +768,20 @@ fn emit_instruction(w: &mut dyn Write, instr: &AsmInstr, platform: &Target) -> s
         }
         AsmInstr::Binary(t, op, src, dst) => {
             if matches!(*t, AsmType::Float | AsmType::Double) {
-                let suffix = suffix(*t);
-                let mnemonic = match op {
-                    AsmBinaryOp::Add => format!("add{}", suffix),
-                    AsmBinaryOp::Sub => format!("sub{}", suffix),
-                    AsmBinaryOp::Mul => format!("mul{}", suffix),
-                    AsmBinaryOp::SDiv | AsmBinaryOp::UDiv => {
+                let mnemonic: &'static str = match (op, *t) {
+                    (AsmBinaryOp::Add, AsmType::Double) => "addsd",
+                    (AsmBinaryOp::Add, _) => "addss",
+                    (AsmBinaryOp::Sub, AsmType::Double) => "subsd",
+                    (AsmBinaryOp::Sub, _) => "subss",
+                    (AsmBinaryOp::Mul, AsmType::Double) => "mulsd",
+                    (AsmBinaryOp::Mul, _) => "mulss",
+                    (AsmBinaryOp::SDiv, _) | (AsmBinaryOp::UDiv, _) => {
                         return invalid_input("AArch64 integer division op reached x86_64 emitter")
                     }
-                    AsmBinaryOp::DivDouble => format!("div{}", suffix),
-                    AsmBinaryOp::Xor => {
-                        if *t == AsmType::Float {
-                            "xorps".to_string()
-                        } else {
-                            "xorpd".to_string()
-                        }
-                    }
+                    (AsmBinaryOp::DivDouble, AsmType::Double) => "divsd",
+                    (AsmBinaryOp::DivDouble, _) => "divss",
+                    (AsmBinaryOp::Xor, AsmType::Float) => "xorps",
+                    (AsmBinaryOp::Xor, _) => "xorpd",
                     _ => return invalid_input(format!("Unsupported floating binary op: {:?}", op)),
                 };
                 return writeln!(

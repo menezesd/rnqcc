@@ -1500,11 +1500,7 @@ fn emit_binary(
     }
     if let Some((amount, width, negate)) = binary_signed_div_power_of_two_amount(ty, op, src) {
         let scratch = reg_name(Reg::R13, ty)?;
-        let mask = (1u64 << amount) - 1;
-        writeln!(w, "\tasr {}, {}, #{}", scratch, dst_reg, width - 1)?;
-        writeln!(w, "\tand {}, {}, #{}", scratch, scratch, mask)?;
-        writeln!(w, "\tadd {}, {}, {}", dst_reg, dst_reg, scratch)?;
-        writeln!(w, "\tasr {}, {}, #{}", dst_reg, dst_reg, amount)?;
+        emit_signed_pow2_biased_quotient(w, dst_reg, scratch, dst_reg, width, amount)?;
         if negate {
             writeln!(w, "\tneg {}, {}", dst_reg, dst_reg)?;
         }
@@ -1690,6 +1686,24 @@ fn binary_signed_divide_by_negative_one(ty: AsmType, op: &AsmBinaryOp, src: &Asm
         } else {
             u32::MAX as u64
         }
+}
+
+// Computes floor-toward-zero division by 2^amount via a rounding bias:
+// out_reg = (dividend_reg + ((dividend_reg >> (width-1)) & mask)) >> amount.
+// tmp_reg must differ from dividend_reg; out_reg may alias either one.
+fn emit_signed_pow2_biased_quotient(
+    w: &mut dyn Write,
+    dividend_reg: &str,
+    tmp_reg: &str,
+    out_reg: &str,
+    width: u32,
+    amount: u32,
+) -> std::io::Result<()> {
+    let mask = (1u64 << amount) - 1;
+    writeln!(w, "\tasr {}, {}, #{}", tmp_reg, dividend_reg, width - 1)?;
+    writeln!(w, "\tand {}, {}, #{}", tmp_reg, tmp_reg, mask)?;
+    writeln!(w, "\tadd {}, {}, {}", out_reg, dividend_reg, tmp_reg)?;
+    writeln!(w, "\tasr {}, {}, #{}", out_reg, out_reg, amount)
 }
 
 fn binary_signed_div_power_of_two_amount(
@@ -2388,11 +2402,14 @@ fn emit_remainder(
             binary_signed_div_power_of_two_amount(ty, &AsmBinaryOp::SDiv, right)
         {
             let quotient_reg = reg_name(Reg::R13, ty)?;
-            let mask = (1u64 << amount) - 1;
-            writeln!(w, "\tasr {}, {}, #{}", quotient_reg, left_reg, width - 1)?;
-            writeln!(w, "\tand {}, {}, #{}", quotient_reg, quotient_reg, mask)?;
-            writeln!(w, "\tadd {}, {}, {}", quotient_reg, left_reg, quotient_reg)?;
-            writeln!(w, "\tasr {}, {}, #{}", quotient_reg, quotient_reg, amount)?;
+            emit_signed_pow2_biased_quotient(
+                w,
+                left_reg,
+                quotient_reg,
+                quotient_reg,
+                width,
+                amount,
+            )?;
             writeln!(w, "\tlsl {}, {}, #{}", quotient_reg, quotient_reg, amount)?;
             writeln!(w, "\tsub {}, {}, {}", left_reg, left_reg, quotient_reg)?;
             return store_operand(w, target, ty, left_reg, dst);

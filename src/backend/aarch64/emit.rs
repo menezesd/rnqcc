@@ -946,7 +946,7 @@ fn zero_register_for_type(ty: AsmType) -> std::io::Result<&'static str> {
 /// value. The immediate format represents `(1 + fraction / 16) * 2^exponent`
 /// for exponents from -3 through 4, with either sign. The IR stores raw IEEE
 /// bits, so this recognizes the format without depending on host parsing.
-fn aarch64_fmov_immediate(ty: AsmType, value: i64) -> Option<String> {
+fn aarch64_fmov_immediate(ty: AsmType, value: i64) -> Option<f64> {
     let (negative, exponent, fraction) = match ty {
         AsmType::Float => {
             let bits = value as u32;
@@ -970,12 +970,15 @@ fn aarch64_fmov_immediate(ty: AsmType, value: i64) -> Option<String> {
         return None;
     }
     let magnitude = (16 + fraction) as f64 * 2f64.powi(exponent - 4);
-    let value = if negative { -magnitude } else { magnitude };
-    Some(if value.fract() == 0.0 {
-        format!("{value:.1}")
+    Some(if negative { -magnitude } else { magnitude })
+}
+
+fn write_fmov_immediate(w: &mut dyn Write, reg: &str, value: f64) -> std::io::Result<()> {
+    if value.fract() == 0.0 {
+        writeln!(w, "\tfmov {}, #{:.1}", reg, value)
     } else {
-        value.to_string()
-    })
+        writeln!(w, "\tfmov {}, #{}", reg, value)
+    }
 }
 
 fn load_operand(
@@ -997,7 +1000,7 @@ fn load_operand(
                     let zero_reg = zero_register_for_type(ty)?;
                     writeln!(w, "\tfmov {}, {}", reg, zero_reg)?;
                 } else if let Some(immediate) = aarch64_fmov_immediate(ty, *value) {
-                    writeln!(w, "\tfmov {}, #{}", reg, immediate)?;
+                    write_fmov_immediate(w, reg, immediate)?;
                 } else {
                     let int_ty = if ty == AsmType::Float {
                         AsmType::Longword
@@ -1109,7 +1112,7 @@ fn emit_mov(
                 let zero_reg = if ty == AsmType::Float { "wzr" } else { "xzr" };
                 writeln!(w, "\tfmov {}, {}", fp_name_typed(*reg, ty)?, zero_reg)
             } else if let Some(immediate) = aarch64_fmov_immediate(ty, *value) {
-                writeln!(w, "\tfmov {}, #{}", fp_name_typed(*reg, ty)?, immediate)
+                write_fmov_immediate(w, fp_name_typed(*reg, ty)?, immediate)
             } else {
                 let int_ty = if ty == AsmType::Float {
                     AsmType::Longword

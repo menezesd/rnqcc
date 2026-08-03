@@ -659,6 +659,43 @@ fn scalar_signed_power_of_two_divisor(value: i64, width: u32) -> Option<(u32, bo
     None
 }
 
+// Computes floor-toward-zero division by 2^amount via a rounding bias:
+// dst_op = (dst_op + ((dst_op >> (width-1)) & mask)) >> amount.
+// dst_op must already hold the dividend; the biased quotient replaces it.
+fn push_signed_pow2_biased_quotient(
+    out: &mut Vec<AsmInstr>,
+    t: AsmType,
+    dst_op: &AsmOperand,
+    width: u32,
+    amount: u32,
+) {
+    out.push(AsmInstr::Mov(t, dst_op.clone(), AsmOperand::Reg(Reg::R10)));
+    out.push(AsmInstr::Binary(
+        t,
+        AsmBinaryOp::Sar,
+        AsmOperand::Imm(i64::from(width - 1)),
+        AsmOperand::Reg(Reg::R10),
+    ));
+    out.push(AsmInstr::Binary(
+        t,
+        AsmBinaryOp::And,
+        AsmOperand::Imm(((1u64 << amount) - 1) as i64),
+        AsmOperand::Reg(Reg::R10),
+    ));
+    out.push(AsmInstr::Binary(
+        t,
+        AsmBinaryOp::Add,
+        AsmOperand::Reg(Reg::R10),
+        dst_op.clone(),
+    ));
+    out.push(AsmInstr::Binary(
+        t,
+        AsmBinaryOp::Sar,
+        AsmOperand::Imm(i64::from(amount)),
+        dst_op.clone(),
+    ));
+}
+
 fn emit_i128_parts_to_operands(
     out: &mut Vec<AsmInstr>,
     low: AsmOperand,
@@ -1561,35 +1598,7 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                         // arithmetic shift rounds negative values down. Add a
                         // sign-dependent bias before shifting to bridge that gap.
                         out.push(AsmInstr::Mov(t, convert_val(left), convert_val(dst)));
-                        out.push(AsmInstr::Mov(
-                            t,
-                            convert_val(dst),
-                            AsmOperand::Reg(Reg::R10),
-                        ));
-                        out.push(AsmInstr::Binary(
-                            t,
-                            AsmBinaryOp::Sar,
-                            AsmOperand::Imm(i64::from(width - 1)),
-                            AsmOperand::Reg(Reg::R10),
-                        ));
-                        out.push(AsmInstr::Binary(
-                            t,
-                            AsmBinaryOp::And,
-                            AsmOperand::Imm(((1u64 << amount) - 1) as i64),
-                            AsmOperand::Reg(Reg::R10),
-                        ));
-                        out.push(AsmInstr::Binary(
-                            t,
-                            AsmBinaryOp::Add,
-                            AsmOperand::Reg(Reg::R10),
-                            convert_val(dst),
-                        ));
-                        out.push(AsmInstr::Binary(
-                            t,
-                            AsmBinaryOp::Sar,
-                            AsmOperand::Imm(i64::from(amount)),
-                            convert_val(dst),
-                        ));
+                        push_signed_pow2_biased_quotient(out, t, &convert_val(dst), width, amount);
                         if negate_result {
                             out.push(AsmInstr::Unary(t, AsmUnaryOp::Neg, convert_val(dst)));
                         }
@@ -1635,35 +1644,7 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                             convert_val(dst),
                             AsmOperand::Reg(Reg::R11),
                         ));
-                        out.push(AsmInstr::Mov(
-                            t,
-                            convert_val(dst),
-                            AsmOperand::Reg(Reg::R10),
-                        ));
-                        out.push(AsmInstr::Binary(
-                            t,
-                            AsmBinaryOp::Sar,
-                            AsmOperand::Imm(i64::from(width - 1)),
-                            AsmOperand::Reg(Reg::R10),
-                        ));
-                        out.push(AsmInstr::Binary(
-                            t,
-                            AsmBinaryOp::And,
-                            AsmOperand::Imm(((1u64 << amount) - 1) as i64),
-                            AsmOperand::Reg(Reg::R10),
-                        ));
-                        out.push(AsmInstr::Binary(
-                            t,
-                            AsmBinaryOp::Add,
-                            AsmOperand::Reg(Reg::R10),
-                            convert_val(dst),
-                        ));
-                        out.push(AsmInstr::Binary(
-                            t,
-                            AsmBinaryOp::Sar,
-                            AsmOperand::Imm(i64::from(amount)),
-                            convert_val(dst),
-                        ));
+                        push_signed_pow2_biased_quotient(out, t, &convert_val(dst), width, amount);
                         out.push(AsmInstr::Binary(
                             t,
                             AsmBinaryOp::Sal,

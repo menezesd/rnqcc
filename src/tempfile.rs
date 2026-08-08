@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 struct FileIdentity {
     volume_or_device: u64,
     file_index_or_inode: u64,
+    change_time_seconds: i64,
+    change_time_nanos: i64,
 }
 
 #[cfg(unix)]
@@ -15,6 +17,11 @@ fn file_identity(path: &Path) -> Option<FileIdentity> {
     Some(FileIdentity {
         volume_or_device: metadata.dev(),
         file_index_or_inode: metadata.ino(),
+        // Device/inode pairs can be reused immediately after unlinking a
+        // file. Include ctime so a replacement file is not mistaken for the
+        // guarded original on filesystems that reuse the inode.
+        change_time_seconds: metadata.ctime(),
+        change_time_nanos: metadata.ctime_nsec(),
     })
 }
 
@@ -65,6 +72,8 @@ fn file_identity(path: &Path) -> Option<FileIdentity> {
         volume_or_device: information.volume_serial_number as u64,
         file_index_or_inode: u64::from(information.file_index_high) << 32
             | u64::from(information.file_index_low),
+        change_time_seconds: 0,
+        change_time_nanos: 0,
     })
 }
 

@@ -233,7 +233,16 @@ impl Parser {
                                 let align = alignment.get();
                                 if align > def.alignment {
                                     def.alignment = align;
-                                    def.size = def.size.next_multiple_of(align);
+                                    let remainder = def.size % align;
+                                    if remainder != 0 {
+                                        def.size = def
+                                            .size
+                                            .checked_add(align - remainder)
+                                            .ok_or_else(|| {
+                                                "structure size overflows during alignment"
+                                                    .to_string()
+                                            })?;
+                                    }
                                 }
                             }
                         }
@@ -259,7 +268,8 @@ impl Parser {
                     )
                 {
                     if let Some(bound) = direct_vla_bound {
-                        if let Some(size) = Self::vla_size_expr_from_bound(bound, &member_full_type)
+                        if let Some(size) =
+                            Self::vla_size_expr_from_bound(bound, &member_full_type, 0)
                         {
                             vla_elem_sizes.push(StructMemberVlaElemSize {
                                 member: name.clone(),
@@ -2451,7 +2461,10 @@ impl Parser {
                     let operand = self.parse_unary()?;
                     if let Exp::Var(name) = &operand {
                         if let Some(alignment) = self.function_alignments.get(name) {
-                            return Ok(Exp::Constant(*alignment as i64));
+                            let alignment = i64::try_from(*alignment).map_err(|_| {
+                                self.format_error("function alignment exceeds i64 range")
+                            })?;
+                            return Ok(Exp::Constant(alignment));
                         }
                     }
                     let full_type = self.typeof_expression(&operand)?;
@@ -2828,6 +2841,13 @@ impl Parser {
                     let args = self.parse_arg_list()?;
                     self.expect_token(Token::CloseParen)?;
                     if name == "__builtin_expect" || name == "__builtin_expect_with_probability" {
+                        let expected_args = if name == "__builtin_expect" { 2 } else { 3 };
+                        if args.len() != expected_args {
+                            return Err(self.format_error(&format!(
+                                "{} requires exactly {} arguments",
+                                name, expected_args
+                            )));
+                        }
                         let mut args = args;
                         let value = args.drain(..1).next().ok_or_else(|| {
                             self.format_error(&format!("{} requires an argument", name))
@@ -2835,6 +2855,11 @@ impl Parser {
                         return Ok(Exp::BuiltinExpect(Box::new(value), args));
                     }
                     if name == "__builtin_constant_p" {
+                        if args.len() > 1 {
+                            return Err(self.format_error(
+                                "__builtin_constant_p requires exactly one argument",
+                            ));
+                        }
                         let Some(arg) = args.first() else {
                             return Err(
                                 self.format_error("__builtin_constant_p requires an argument")
@@ -2850,6 +2875,11 @@ impl Parser {
                         return Ok(Exp::Constant(is_constant as i64));
                     }
                     if name == "__builtin_classify_type" {
+                        if args.len() > 1 {
+                            return Err(self.format_error(
+                                "__builtin_classify_type requires exactly one argument",
+                            ));
+                        }
                         let Some(arg) = args.first() else {
                             return Err(
                                 self.format_error("__builtin_classify_type requires an argument")
@@ -2859,6 +2889,10 @@ impl Parser {
                         return Ok(Exp::Constant(if ty.is_floating() { 8 } else { 1 }));
                     }
                     if name == "__builtin_signbit" {
+                        if args.len() > 1 {
+                            return Err(self
+                                .format_error("__builtin_signbit requires exactly one argument"));
+                        }
                         let Some(arg) = args.first() else {
                             return Err(self.format_error("__builtin_signbit requires an argument"));
                         };
@@ -2883,11 +2917,19 @@ impl Parser {
                         ));
                     }
                     if name == "__builtin_strlen" {
+                        if args.len() > 1 {
+                            return Err(
+                                self.format_error("__builtin_strlen requires exactly one argument")
+                            );
+                        }
                         let Some(arg) = args.first() else {
                             return Err(self.format_error("__builtin_strlen requires an argument"));
                         };
                         if let Exp::StringLiteral(s) = arg {
-                            return Ok(Exp::ULongConstant(c_string_byte_len(s) as i64));
+                            let length = i64::try_from(c_string_byte_len(s)).map_err(|_| {
+                                self.format_error("__builtin_strlen result exceeds i64 range")
+                            })?;
+                            return Ok(Exp::ULongConstant(length));
                         }
                     }
                     if let Some(fallback) = Self::fortified_builtin_fallback(&name, &args) {
@@ -2897,14 +2939,24 @@ impl Parser {
                         name.as_str(),
                         "__builtin_object_size" | "__builtin_dynamic_object_size"
                     ) {
-                        if args.len() < 2 {
-                            return Err(
-                                self.format_error(&format!("{} requires two arguments", name))
-                            );
+                        if args.len() != 2 {
+                            return Err(self.format_error(&format!(
+                                "{} requires exactly two arguments",
+                                name
+                            )));
                         }
                         let mode = self
                             .eval_integer_constant_exp_with_layout(&args[1])
-                            .unwrap_or(0);
+                            .ok_or_else(|| {
+                                self.format_error(&format!(
+                                    "{} mode argument must be an integer constant",
+                                    name
+                                ))
+                            })?;
+                        if !(0..=3).contains(&mode) {
+                            return Err(self
+                                .format_error(&format!("{} mode must be between 0 and 3", name)));
+                        }
                         return Ok(if mode >= 2 {
                             Exp::ULongConstant(0)
                         } else {
@@ -2912,38 +2964,73 @@ impl Parser {
                         });
                     }
                     if name == "__builtin_assume_aligned" {
-                        return args.into_iter().next().ok_or_else(|| {
-                            self.format_error("__builtin_assume_aligned requires an argument")
-                        });
+                        if !(2..=3).contains(&args.len()) {
+                            return Err(self.format_error(
+                                "__builtin_assume_aligned requires two or three arguments",
+                            ));
+                        }
+                        let value = args[0].clone();
+                        let mut result = value;
+                        for arg in args[1..].iter().rev() {
+                            result = Exp::Comma(Box::new(arg.clone()), Box::new(result));
+                        }
+                        return Ok(result);
                     }
                     if name == "__builtin_prefetch" {
-                        let Some(addr) = args.into_iter().next() else {
-                            return Err(
-                                self.format_error("__builtin_prefetch requires an argument")
-                            );
-                        };
-                        return Ok(Exp::Comma(Box::new(addr), Box::new(Exp::Constant(0))));
+                        if !(1..=3).contains(&args.len()) {
+                            return Err(self.format_error(
+                                "__builtin_prefetch requires one to three arguments",
+                            ));
+                        }
+                        let result = args.into_iter().fold(Exp::Constant(0), |result, arg| {
+                            Exp::Comma(Box::new(arg), Box::new(result))
+                        });
+                        return Ok(result);
                     }
                     if name == "__builtin_va_end" {
-                        return Ok(args
-                            .into_iter()
-                            .next()
-                            .map(|arg| Exp::Comma(Box::new(arg), Box::new(Exp::Constant(0))))
-                            .unwrap_or(Exp::Constant(0)));
+                        if args.len() != 1 {
+                            return Err(
+                                self.format_error("__builtin_va_end requires exactly one argument")
+                            );
+                        }
+                        let arg = args.into_iter().next().ok_or_else(|| {
+                            self.format_error("__builtin_va_end requires exactly one argument")
+                        })?;
+                        return Ok(Exp::Comma(Box::new(arg), Box::new(Exp::Constant(0))));
                     }
                     if matches!(
                         name.as_str(),
-                        "__atomic_thread_fence" | "__atomic_signal_fence" | "__sync_synchronize"
+                        "__atomic_thread_fence" | "__atomic_signal_fence"
                     ) {
+                        if args.len() != 1 {
+                            return Err(self
+                                .format_error(&format!("{} requires exactly one argument", name)));
+                        }
+                        return Ok(Exp::AtomicFence);
+                    }
+                    if name == "__sync_synchronize" {
+                        if !args.is_empty() {
+                            return Err(
+                                self.format_error("__sync_synchronize requires no arguments")
+                            );
+                        }
                         return Ok(Exp::AtomicFence);
                     }
                     if name == "__builtin_bswap32" {
+                        if args.len() > 1 {
+                            return Err(self
+                                .format_error("__builtin_bswap32 requires exactly one argument"));
+                        }
                         let Some(arg) = args.first() else {
                             return Err(self.format_error("__builtin_bswap32 requires an argument"));
                         };
                         return Ok(Self::bswap_exp(arg.clone(), 32));
                     }
                     if name == "__builtin_bswap64" {
+                        if args.len() > 1 {
+                            return Err(self
+                                .format_error("__builtin_bswap64 requires exactly one argument"));
+                        }
                         let Some(arg) = args.first() else {
                             return Err(self.format_error("__builtin_bswap64 requires an argument"));
                         };
@@ -2961,25 +3048,25 @@ impl Parser {
                             }
                         }
                     }
-                    if name == "__atomic_load_n" && args.len() >= 2 {
+                    if name == "__atomic_load_n" && args.len() == 2 {
                         return Ok(Self::ordered_atomic_builtin_exp(Exp::Unary(
                             UnaryOp::Deref,
                             Box::new(args[0].clone()),
                         )));
                     }
-                    if name == "__atomic_store_n" && args.len() >= 3 {
+                    if name == "__atomic_store_n" && args.len() == 3 {
                         return Ok(Self::ordered_atomic_builtin_exp(Exp::Assign(
                             Box::new(Exp::Unary(UnaryOp::Deref, Box::new(args[0].clone()))),
                             Box::new(args[1].clone()),
                         )));
                     }
-                    if name == "__atomic_exchange_n" && args.len() >= 3 {
+                    if name == "__atomic_exchange_n" && args.len() == 3 {
                         return Ok(Exp::AtomicExchange {
                             ptr: Box::new(args[0].clone()),
                             value: Box::new(args[1].clone()),
                         });
                     }
-                    if name == "__atomic_compare_exchange_n" && args.len() >= 6 {
+                    if name == "__atomic_compare_exchange_n" && args.len() == 6 {
                         return Ok(Exp::AtomicCompareExchange {
                             ptr: Box::new(args[0].clone()),
                             expected: Box::new(args[1].clone()),
@@ -2989,7 +3076,7 @@ impl Parser {
                     if matches!(
                         name.as_str(),
                         "__sync_bool_compare_and_swap" | "__sync_val_compare_and_swap"
-                    ) && args.len() >= 3
+                    ) && args.len() == 3
                     {
                         return Ok(Exp::AtomicCompareSwap {
                             ptr: Box::new(args[0].clone()),
@@ -3000,7 +3087,7 @@ impl Parser {
                     }
                     if let Some(op) = Self::atomic_fetch_op(&name) {
                         let min_args = if name.starts_with("__sync_") { 2 } else { 3 };
-                        if args.len() >= min_args {
+                        if args.len() == min_args {
                             return Ok(Exp::AtomicFetch {
                                 op,
                                 ptr: Box::new(args[0].clone()),

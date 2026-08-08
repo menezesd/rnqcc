@@ -86,6 +86,8 @@ is the least surprising behavior.
 
 ## Tests
 
+The smoke and corpus scripts require Python 3.10 or newer.
+
 The shell runner expects the Writing a C Compiler test suite next to this repo by default:
 
 ```sh

@@ -1303,8 +1303,9 @@ fn binary_constant_result_type(op: &BinaryOp, operand_type: CType) -> CType {
 fn constant_type_size(ft: &FullType) -> Option<usize> {
     match ft {
         FullType::Struct(_) => None,
-        FullType::Array { elem, size } => Some(constant_type_size(elem)? * size),
-        FullType::Vector { elem, lanes, .. } => Some(constant_type_size(elem)? * lanes),
+        FullType::Array { size, .. } if *size == VLA_STATIC_SCALE_FALLBACK => None,
+        FullType::Array { elem, size } => constant_type_size(elem)?.checked_mul(*size),
+        FullType::Vector { elem, lanes, .. } => constant_type_size(elem)?.checked_mul(*lanes),
         _ => Some(ft.byte_size()),
     }
 }
@@ -1402,15 +1403,21 @@ fn eval_integer_constant_value_with_type_context(
         Exp::SizeOf(inner) => {
             let full_type =
                 expression_full_type_with_context(inner, var_full_types, struct_members)?;
+            if full_type.contains_vla_placeholder_with(struct_defs) {
+                return None;
+            }
             Some(IntegerConstantValue::new(
-                full_type.byte_size_with(struct_defs) as i128,
+                i128::try_from(full_type.checked_byte_size_with(struct_defs)?).ok()?,
                 CType::ULong,
             ))
         }
-        Exp::SizeOfType(_, ft) => Some(IntegerConstantValue::new(
-            ft.byte_size_with(struct_defs) as i128,
-            CType::ULong,
-        )),
+        Exp::SizeOfType(_, ft) if !ft.contains_vla_placeholder_with(struct_defs) => {
+            Some(IntegerConstantValue::new(
+                i128::try_from(ft.checked_byte_size_with(struct_defs)?).ok()?,
+                CType::ULong,
+            ))
+        }
+        Exp::SizeOfType(_, _) => None,
         Exp::AlignOfType(ft) => Some(IntegerConstantValue::new(
             ft.alignment_with(struct_defs) as i128,
             CType::ULong,
@@ -1449,6 +1456,14 @@ fn eval_integer_constant_value_with_type_context(
                 struct_defs,
             )
             .or_else(|| eval_integer_constant_value(left))?;
+            if (matches!(op, BinaryOp::LogicalAnd) && left.value == 0)
+                || (matches!(op, BinaryOp::LogicalOr) && left.value != 0)
+            {
+                return Some(IntegerConstantValue::new(
+                    (left.value != 0) as i128,
+                    CType::Int,
+                ));
+            }
             let right = eval_integer_constant_value_with_type_context(
                 right,
                 var_full_types,
@@ -1515,10 +1530,10 @@ fn eval_integer_constant_value(exp: &Exp) -> Option<IntegerConstantValue> {
         Exp::DoubleConstant(d) | Exp::LongDoubleConstant(d) => {
             Some(IntegerConstantValue::new(*d as i128, CType::Long))
         }
-        Exp::SizeOfType(_, ft) => Some(IntegerConstantValue::new(
-            constant_type_size(ft)? as i128,
-            CType::ULong,
-        )),
+        Exp::SizeOfType(_, ft) if !ft.contains_vla_placeholder() => Some(
+            IntegerConstantValue::new(constant_type_size(ft)? as i128, CType::ULong),
+        ),
+        Exp::SizeOfType(_, _) => None,
         Exp::AlignOfType(ft) => Some(IntegerConstantValue::new(
             constant_type_alignment(ft)? as i128,
             CType::ULong,
@@ -1547,6 +1562,14 @@ fn eval_integer_constant_value(exp: &Exp) -> Option<IntegerConstantValue> {
         }
         Exp::Binary(op, left, right) => {
             let left = eval_integer_constant_value(left)?;
+            if (matches!(op, BinaryOp::LogicalAnd) && left.value == 0)
+                || (matches!(op, BinaryOp::LogicalOr) && left.value != 0)
+            {
+                return Some(IntegerConstantValue::new(
+                    (left.value != 0) as i128,
+                    CType::Int,
+                ));
+            }
             let right = eval_integer_constant_value(right)?;
             let operand_type = binary_constant_operand_type(op, left.ctype, right.ctype);
             if !operand_type.is_signed() || left.is_unsigned() || right.is_unsigned() {
@@ -1819,6 +1842,65 @@ mod tests {
             Some(8)
         );
         Ok(())
+    }
+
+    #[test]
+    fn integer_constant_eval_short_circuits_logical_operators() -> Result<(), String> {
+        let divide_by_zero = Exp::Binary(
+            BinaryOp::Div,
+            Box::new(Exp::LongConstant(1)),
+            Box::new(Exp::LongConstant(0)),
+        );
+
+        assert_eq!(
+            eval_integer_constant_exp(&Exp::Binary(
+                BinaryOp::LogicalAnd,
+                Box::new(Exp::LongConstant(0)),
+                Box::new(divide_by_zero.clone()),
+            )),
+            Some(0)
+        );
+        assert_eq!(
+            eval_integer_constant_exp(&Exp::Binary(
+                BinaryOp::LogicalOr,
+                Box::new(Exp::LongConstant(1)),
+                Box::new(divide_by_zero),
+            )),
+            Some(1)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn constant_type_size_rejects_overflow() {
+        let oversized = FullType::Array {
+            elem: Box::new(FullType::Scalar(CType::Long)),
+            size: usize::MAX,
+        };
+        assert_eq!(constant_type_size(&oversized), None);
+        assert!(eval_integer_constant_value_with_type_context(
+            &Exp::SizeOfType(CType::ULong, oversized),
+            &HashMap::new(),
+            &HashMap::new(),
+            &IndexMap::new(),
+        )
+        .is_none());
+
+        let vla = FullType::Array {
+            elem: Box::new(FullType::Scalar(CType::Int)),
+            size: VLA_STATIC_SCALE_FALLBACK,
+        };
+        assert!(eval_integer_constant_value(&Exp::SizeOfType(CType::ULong, vla)).is_none());
+        let pointer_to_vla = FullType::Pointer(Box::new(FullType::Array {
+            elem: Box::new(FullType::Scalar(CType::Int)),
+            size: VLA_STATIC_SCALE_FALLBACK,
+        }));
+        assert!(!pointer_to_vla.contains_vla_placeholder());
+        assert_eq!(
+            eval_integer_constant_value(&Exp::SizeOfType(CType::ULong, pointer_to_vla))
+                .map(|value| value.value),
+            Some(8)
+        );
     }
 
     #[test]

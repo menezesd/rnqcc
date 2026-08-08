@@ -22,7 +22,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-from smoke_utils import env_timeout, timeout_text
+try:
+    from smoke_utils import env_timeout, is_positive_finite, run_with_timeout
+except ModuleNotFoundError as err:
+    if err.name != "smoke_utils":
+        raise
+    from scripts.smoke_utils import env_timeout, is_positive_finite, run_with_timeout
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,31 +72,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def run(cmd: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(
-            cmd,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return subprocess.CompletedProcess(
-            cmd,
-            124,
-            stdout=timeout_text(exc.stdout),
-            stderr=(timeout_text(exc.stderr) + f"\ntimed out after {timeout:.1f}s").lstrip(),
-        )
+    return run_with_timeout(cmd, timeout=timeout)
 
 
 def build_rnqcc(rnqcc: Path, timeout: float) -> None:
-    if rnqcc.exists():
+    if rnqcc.is_file():
         return
-    result = run(["cargo", "build", "--manifest-path", str(ROOT / "Cargo.toml")], timeout)
+    if rnqcc.exists():
+        raise SystemExit(f"--rnqcc path is not a file: {rnqcc}")
+    result = run(["cargo", "build", "--locked", "--manifest-path", str(ROOT / "Cargo.toml")], timeout)
     if result.returncode != 0:
         sys.stderr.write(result.stdout)
         sys.stderr.write(result.stderr)
         raise SystemExit(result.returncode)
+    if not rnqcc.is_file():
+        raise SystemExit(f"--rnqcc not found after build: {rnqcc}")
 
 
 def save_failure_artifact(index: int, entry: Entry, cmd: list[str], text: str) -> None:
@@ -119,7 +114,11 @@ def resolve_flag(flag: str) -> str:
 
 def parse_manifest(path: Path) -> list[Entry]:
     entries = []
-    for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise SystemExit(f"could not read corpus manifest {path}: {exc}") from exc
+    for line_no, raw in enumerate(lines, start=1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
@@ -145,7 +144,7 @@ def parse_manifest(path: Path) -> list[Entry]:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
-    if args.timeout <= 0:
+    if not is_positive_finite(args.timeout):
         print("--timeout must be positive", file=sys.stderr)
         return 1
     manifest = Path(args.manifest)

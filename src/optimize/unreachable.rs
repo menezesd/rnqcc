@@ -37,7 +37,12 @@ fn unreachable_code_pass(instructions: Vec<TackyInstr>) -> (Vec<TackyInstr>, boo
         }
     }
 
-    let mut result = Vec::with_capacity(cfg.blocks.len());
+    let total_instructions: usize = cfg
+        .blocks
+        .iter()
+        .map(|block| block.instructions.len())
+        .sum();
+    let mut result = Vec::with_capacity(total_instructions);
     let mut changed = false;
     for block in cfg.blocks {
         if !reachable_blocks.contains(&block.id) {
@@ -128,11 +133,11 @@ fn resolve_jump_target(
     label_positions: &HashMap<String, usize>,
     instructions: &[TackyInstr],
 ) -> Option<String> {
-    let mut visited = HashSet::new();
+    let mut visited = HashSet::<&str>::new();
     let mut current = target;
 
     loop {
-        if !visited.insert(current.to_string()) {
+        if !visited.insert(current) {
             return None;
         }
         let &label_idx = label_positions.get(current)?;
@@ -153,5 +158,25 @@ fn jump_target(instr: &TackyInstr) -> Option<&str> {
         | TackyInstr::JumpIfZero(_, target)
         | TackyInstr::JumpIfNotZero(_, target) => Some(target.as_str()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jump_threading_terminates_on_cyclic_label_chain() {
+        let instructions = vec![
+            TackyInstr::Label("first".to_string()),
+            TackyInstr::Jump("second".to_string()),
+            TackyInstr::Label("second".to_string()),
+            TackyInstr::Jump("first".to_string()),
+        ];
+
+        let (optimized, changed) = thread_jump_chains(instructions.clone());
+
+        assert!(!changed);
+        assert_eq!(optimized, instructions);
     }
 }

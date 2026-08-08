@@ -1,10 +1,11 @@
-use clap::{App, Arg};
+use clap::{Arg, ArgAction, Command};
 
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::{Command as ProcessCommand, ExitStatus};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rnqcc::types::*;
 use rnqcc::{compile, optimize};
@@ -100,6 +101,21 @@ pub fn same_existing_path(left: &str, right: &str) -> bool {
         return true;
     }
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        if let (Ok(left), Ok(right)) = (std::fs::metadata(left), std::fs::metadata(right)) {
+            if left.is_file()
+                && right.is_file()
+                && left.dev() == right.dev()
+                && left.ino() == right.ino()
+            {
+                return true;
+            }
+        }
+    }
+
     match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
@@ -131,9 +147,179 @@ pub fn copy_output(src: &str, dst: &str) -> Result<(), String> {
     if same_existing_path(src, dst) {
         return Ok(());
     }
-    std::fs::copy(src, dst)
-        .map(|_| ())
-        .map_err(|err| format!("could not write {}: {}", dst, err))
+    if let Ok(metadata) = std::fs::symlink_metadata(dst) {
+        // Preserve the traditional behavior for device files and symlinks:
+        // copying to them writes through the destination instead of replacing
+        // the directory entry with a regular file.
+        if !metadata.file_type().is_file() {
+            return std::fs::copy(src, dst)
+                .map(|_| ())
+                .map_err(|err| format!("could not write {}: {}", dst, err));
+        }
+    }
+
+    let (temporary, file) = create_output_copy_temp(dst)?;
+    drop(file);
+    let temporary_path = temporary.to_string_lossy().into_owned();
+    let temporary_guard = rnqcc::tempfile::TempFile::new(&temporary);
+    let source_permissions = std::fs::metadata(src)
+        .ok()
+        .map(|metadata| metadata.permissions());
+    let destination_permissions = std::fs::metadata(dst)
+        .ok()
+        .map(|metadata| metadata.permissions());
+
+    if let Err(error) = std::fs::copy(src, &temporary) {
+        return Err(format!("could not write {}: {}", dst, error));
+    }
+    if let Some(permissions) = destination_permissions.or(source_permissions) {
+        if let Err(error) = std::fs::set_permissions(&temporary, permissions) {
+            return Err(format!(
+                "could not preserve permissions for {}: {}",
+                dst, error
+            ));
+        }
+    }
+    match std::fs::rename(&temporary, dst) {
+        Ok(()) => {}
+        #[cfg(windows)]
+        Err(rename_error) if Path::new(dst).exists() => {
+            // Windows does not replace an existing directory entry with
+            // rename. Remove it only after the complete copy has succeeded.
+            std::fs::remove_file(dst).map_err(|remove_error| {
+                format!(
+                    "could not replace {} after staging {}: {}; initial rename failed: {}",
+                    dst, temporary_path, remove_error, rename_error
+                )
+            })?;
+            std::fs::rename(&temporary, dst).map_err(|error| {
+                format!(
+                    "could not publish {} from temporary {}: {}",
+                    dst, temporary_path, error
+                )
+            })?;
+        }
+        Err(error) => {
+            return Err(format!(
+                "could not publish {} from temporary {}: {}",
+                dst, temporary_path, error
+            ));
+        }
+    }
+    drop(temporary_guard);
+    Ok(())
+}
+
+pub fn write_text_output(path: &str, contents: &str) -> Result<(), String> {
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if !metadata.file_type().is_file() {
+            return std::fs::write(path, contents)
+                .map_err(|err| format!("could not write {}: {}", path, err));
+        }
+    }
+
+    let (temporary, file) = create_output_text_temp(path)?;
+    drop(file);
+    let temporary_path = temporary.to_string_lossy().into_owned();
+    let temporary_guard = rnqcc::tempfile::TempFile::new(&temporary);
+    if let Err(error) = std::fs::write(&temporary, contents) {
+        return Err(format!("could not write {}: {}", path, error));
+    }
+    if let Ok(metadata) = std::fs::metadata(path) {
+        if let Err(error) = std::fs::set_permissions(&temporary, metadata.permissions()) {
+            return Err(format!(
+                "could not preserve permissions for {}: {}",
+                path, error
+            ));
+        }
+    }
+    match std::fs::rename(&temporary, path) {
+        Ok(()) => {}
+        #[cfg(windows)]
+        Err(rename_error) if Path::new(path).exists() => {
+            std::fs::remove_file(path).map_err(|remove_error| {
+                format!(
+                    "could not replace {} after staging {}: {}; initial rename failed: {}",
+                    path, temporary_path, remove_error, rename_error
+                )
+            })?;
+            std::fs::rename(&temporary, path).map_err(|error| {
+                format!(
+                    "could not publish {} from temporary {}: {}",
+                    path, temporary_path, error
+                )
+            })?;
+        }
+        Err(error) => {
+            return Err(format!(
+                "could not publish {} from temporary {}: {}",
+                path, temporary_path, error
+            ));
+        }
+    }
+    drop(temporary_guard);
+    Ok(())
+}
+
+static OUTPUT_COPY_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+fn create_output_copy_temp(dst: &str) -> Result<(PathBuf, std::fs::File), String> {
+    create_output_temp(dst, 0o600)
+}
+
+fn create_output_text_temp(dst: &str) -> Result<(PathBuf, std::fs::File), String> {
+    create_output_temp(dst, 0o666)
+}
+
+fn create_output_temp(dst: &str, mode: u32) -> Result<(PathBuf, std::fs::File), String> {
+    #[cfg(not(unix))]
+    let _ = mode;
+    let destination = Path::new(dst);
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    let basename = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("output");
+    let process_id = std::process::id();
+
+    for _ in 0..100 {
+        let counter = OUTPUT_COPY_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(".{basename}.rnqcc-copy-{process_id}-{counter}"));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(mode);
+        }
+        match options.open(&candidate) {
+            Ok(file) => return Ok((candidate, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "could not create temporary output beside {}: {}",
+                    dst, error
+                ));
+            }
+        }
+    }
+
+    Err(format!(
+        "could not reserve a unique temporary output beside {}",
+        dst
+    ))
+}
+
+fn cleanup_generated_artifact(path: &str, generated: bool, keep_temps: bool) {
+    if generated && !keep_temps {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn cleanup_generated_artifacts(artifacts: &[DriverArtifact], keep_temps: bool) {
+    for artifact in artifacts {
+        cleanup_generated_artifact(&artifact.path, artifact.generated, keep_temps);
+    }
 }
 
 fn describe_exit_status(status: ExitStatus) -> String {
@@ -152,7 +338,7 @@ where
         .into_iter()
         .map(|arg| arg.as_ref().to_os_string())
         .collect();
-    let output = Command::new(program)
+    let output = ProcessCommand::new(program)
         .args(&args)
         .output()
         .map_err(|err| format!("failed to run {}: {}", program, err))?;
@@ -352,7 +538,10 @@ pub fn normalize_driver_arg_text(text: &str) -> Vec<OsString> {
         "-Wno-deprecated-declarations" => {
             normalized.push(OsString::from("--Wno-deprecated-declarations"));
         }
-        "-Wextra" | "-Wpedantic" | "-pedantic" | "-pipe" => {}
+        // Build systems use `-v` for compiler identification and diagnostics.
+        // rnqcc does not currently expose a verbose-driver mode, but it must
+        // accept the flag so compiler probes can proceed.
+        "-Wextra" | "-Wpedantic" | "-pedantic" | "-pipe" | "-v" => {}
         "-O" | "-O1" | "-O2" | "-O3" | "-Os" | "-Oz" | "-Og" | "-Ofast" => {
             normalized.push(OsString::from("--optimize"));
         }
@@ -408,12 +597,15 @@ pub fn normalize_driver_arg_text(text: &str) -> Vec<OsString> {
                 .filter(|part| !part.is_empty())
             {
                 normalized.push(OsString::from("--linker-arg"));
-                normalized.push(OsString::from(part));
+                normalized.push(OsString::from(format!("-Wl,{part}")));
             }
         }
         _ if text.starts_with("-Xlinker=") => {
             normalized.push(OsString::from("--linker-arg"));
-            normalized.push(OsString::from(&text["-Xlinker=".len()..]));
+            normalized.push(OsString::from(format!(
+                "-Wl,{}",
+                &text["-Xlinker=".len()..]
+            )));
         }
         _ if text.starts_with("-Xassembler=") => {
             normalized.push(OsString::from("--assembler-arg"));
@@ -429,9 +621,9 @@ pub fn normalize_driver_arg_text(text: &str) -> Vec<OsString> {
             }
         }
         _ if text.starts_with("-W") => {}
-        _ if text.starts_with("-isysroot") && text.len() > 9 => {
+        _ if text.starts_with("-isysroot") && text.len() > "-isysroot".len() => {
             normalized.push(OsString::from("--isysroot"));
-            normalized.push(OsString::from(&text[9..]));
+            normalized.push(OsString::from(&text["-isysroot".len()..]));
         }
         _ if text.starts_with("--sysroot=") => {
             normalized.push(OsString::from("--sysroot"));
@@ -467,61 +659,61 @@ pub fn normalize_driver_arg_text(text: &str) -> Vec<OsString> {
             normalized.push(OsString::from("--Xpreprocessor"));
             normalized.push(OsString::from(text));
         }
-        _ if text.starts_with("-F") && text.len() > 2 => {
+        _ if text.starts_with("-F") && text.len() > "-F".len() => {
             normalized.push(OsString::from("--linker-arg"));
             normalized.push(OsString::from(text));
         }
-        _ if text.starts_with("-L") && text.len() > 2 => {
+        _ if text.starts_with("-L") && text.len() > "-L".len() => {
             normalized.push(OsString::from("--linker-arg"));
             normalized.push(OsString::from(text));
         }
-        _ if text.starts_with("-l") && text.len() > 2 => {
+        _ if text.starts_with("-l") && text.len() > "-l".len() => {
             normalized.push(OsString::from("--linker-arg"));
             normalized.push(OsString::from(text));
         }
-        _ if text.starts_with("-MF") && text.len() > 3 => {
+        _ if text.starts_with("-MF") && text.len() > "-MF".len() => {
             normalized.push(OsString::from("--MF"));
-            normalized.push(OsString::from(&text[3..]));
+            normalized.push(OsString::from(&text["-MF".len()..]));
         }
-        _ if text.starts_with("-MT") && text.len() > 3 => {
+        _ if text.starts_with("-MT") && text.len() > "-MT".len() => {
             normalized.push(OsString::from("--MT"));
-            normalized.push(OsString::from(&text[3..]));
+            normalized.push(OsString::from(&text["-MT".len()..]));
         }
-        _ if text.starts_with("-MQ") && text.len() > 3 => {
+        _ if text.starts_with("-MQ") && text.len() > "-MQ".len() => {
             normalized.push(OsString::from("--MQ"));
-            normalized.push(OsString::from(&text[3..]));
+            normalized.push(OsString::from(&text["-MQ".len()..]));
         }
-        _ if text.starts_with("-imacros") && text.len() > 8 => {
+        _ if text.starts_with("-imacros") && text.len() > "-imacros".len() => {
             normalized.push(OsString::from("--imacros"));
-            normalized.push(OsString::from(&text[8..]));
+            normalized.push(OsString::from(&text["-imacros".len()..]));
         }
-        _ if text.starts_with("-include") && text.len() > 8 => {
+        _ if text.starts_with("-include") && text.len() > "-include".len() => {
             normalized.push(OsString::from("--include"));
-            normalized.push(OsString::from(&text[8..]));
+            normalized.push(OsString::from(&text["-include".len()..]));
         }
-        _ if text.starts_with("-iquote") && text.len() > 7 => {
+        _ if text.starts_with("-iquote") && text.len() > "-iquote".len() => {
             normalized.push(OsString::from("--iquote"));
-            normalized.push(OsString::from(&text[7..]));
+            normalized.push(OsString::from(&text["-iquote".len()..]));
         }
-        _ if text.starts_with("-isystem") && text.len() > 8 => {
+        _ if text.starts_with("-isystem") && text.len() > "-isystem".len() => {
             normalized.push(OsString::from("--isystem"));
-            normalized.push(OsString::from(&text[8..]));
+            normalized.push(OsString::from(&text["-isystem".len()..]));
         }
-        _ if text.starts_with("-idirafter") && text.len() > 10 => {
+        _ if text.starts_with("-idirafter") && text.len() > "-idirafter".len() => {
             normalized.push(OsString::from("--idirafter"));
-            normalized.push(OsString::from(&text[10..]));
+            normalized.push(OsString::from(&text["-idirafter".len()..]));
         }
-        _ if text.starts_with("-I") && text.len() > 2 => {
+        _ if text.starts_with("-I") && text.len() > "-I".len() => {
             normalized.push(OsString::from("-I"));
-            normalized.push(OsString::from(&text[2..]));
+            normalized.push(OsString::from(&text["-I".len()..]));
         }
-        _ if text.starts_with("-D") && text.len() > 2 => {
+        _ if text.starts_with("-D") && text.len() > "-D".len() => {
             normalized.push(OsString::from("-D"));
-            normalized.push(OsString::from(&text[2..]));
+            normalized.push(OsString::from(&text["-D".len()..]));
         }
-        _ if text.starts_with("-U") && text.len() > 2 => {
+        _ if text.starts_with("-U") && text.len() > "-U".len() => {
             normalized.push(OsString::from("-U"));
-            normalized.push(OsString::from(&text[2..]));
+            normalized.push(OsString::from(&text["-U".len()..]));
         }
         _ => normalized.push(OsString::from(text)),
     }
@@ -532,10 +724,117 @@ pub fn normalize_driver_args<I>(args: I) -> Vec<OsString>
 where
     I: IntoIterator<Item = OsString>,
 {
+    fn normalize_separate_arg(flag: &str, value: &str) -> Option<Vec<OsString>> {
+        let mut normalized = Vec::new();
+        match flag {
+            "-std" => {
+                normalized.push(OsString::from("--Xpreprocessor"));
+                normalized.push(OsString::from(format!("-std={value}")));
+            }
+            "-isysroot" => {
+                normalized.push(OsString::from("--isysroot"));
+                normalized.push(OsString::from(value));
+            }
+            "-Xpreprocessor" => {
+                normalized.push(OsString::from("--Xpreprocessor"));
+                normalized.push(OsString::from(value));
+            }
+            "-Xlinker" => {
+                normalized.push(OsString::from("--linker-arg"));
+                normalized.push(OsString::from(format!("-Wl,{value}")));
+            }
+            "-Xassembler" => {
+                normalized.push(OsString::from("--assembler-arg"));
+                normalized.push(OsString::from(value));
+            }
+            "-imacros" => {
+                normalized.push(OsString::from("--imacros"));
+                normalized.push(OsString::from(value));
+            }
+            "-include" => {
+                normalized.push(OsString::from("--include"));
+                normalized.push(OsString::from(value));
+            }
+            "-iquote" => {
+                normalized.push(OsString::from("--iquote"));
+                normalized.push(OsString::from(value));
+            }
+            "-isystem" => {
+                normalized.push(OsString::from("--isystem"));
+                normalized.push(OsString::from(value));
+            }
+            "-idirafter" => {
+                normalized.push(OsString::from("--idirafter"));
+                normalized.push(OsString::from(value));
+            }
+            "-MF" => {
+                normalized.push(OsString::from("--MF"));
+                normalized.push(OsString::from(value));
+            }
+            "-MT" => {
+                normalized.push(OsString::from("--MT"));
+                normalized.push(OsString::from(value));
+            }
+            "-MQ" => {
+                normalized.push(OsString::from("--MQ"));
+                normalized.push(OsString::from(value));
+            }
+            "-I" | "-D" | "-U" => {
+                normalized.push(OsString::from(flag));
+                normalized.push(OsString::from(value));
+            }
+            "-L" => {
+                normalized.push(OsString::from("--linker-arg"));
+                normalized.push(OsString::from(format!("-L{value}")));
+            }
+            "-l" => {
+                normalized.push(OsString::from("--linker-arg"));
+                normalized.push(OsString::from(format!("-l{value}")));
+            }
+            "-F" => {
+                normalized.push(OsString::from("--linker-arg"));
+                normalized.push(OsString::from(format!("-F{value}")));
+            }
+            "-framework" => {
+                normalized.push(OsString::from("--linker-arg"));
+                normalized.push(OsString::from("-framework"));
+                normalized.push(OsString::from("--linker-arg"));
+                normalized.push(OsString::from(value));
+            }
+            "-arch" => {
+                normalized.push(OsString::from("--Xpreprocessor"));
+                normalized.push(OsString::from("-arch"));
+                normalized.push(OsString::from("--Xpreprocessor"));
+                normalized.push(OsString::from(value));
+                normalized.push(OsString::from("--linker-arg"));
+                normalized.push(OsString::from("-arch"));
+                normalized.push(OsString::from("--linker-arg"));
+                normalized.push(OsString::from(value));
+            }
+            _ => return None,
+        }
+        Some(normalized)
+    }
+
+    let args: Vec<OsString> = args.into_iter().collect();
     let mut normalized = Vec::new();
-    for arg in args {
+    let mut index = 0;
+    while index < args.len() {
+        if let (Some(flag), Some(value)) = (
+            args[index].to_str(),
+            args.get(index + 1).and_then(|arg| arg.to_str()),
+        ) {
+            if let Some(pair) = normalize_separate_arg(flag, value) {
+                normalized.extend(pair);
+                index += 2;
+                continue;
+            }
+        }
+
+        let arg = args[index].clone();
         let Some(text) = arg.to_str() else {
             normalized.push(arg);
+            index += 1;
             continue;
         };
 
@@ -551,25 +850,55 @@ where
                 normalized.extend(normalized_arg);
             }
         }
+        index += 1;
     }
     normalized
 }
 
-pub fn temp_path_for(src: &str, index: usize, extension: &str) -> String {
+pub fn temp_path_for(src: &str, index: usize, extension: &str) -> Result<String, String> {
+    static TEMP_PATH_COUNTER: AtomicUsize = AtomicUsize::new(0);
     let stem = Path::new(src)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("input");
-    std::env::temp_dir()
-        .join(format!(
-            "rnqcc-{}-{}-{}.{}",
+    let directory = std::env::temp_dir();
+    for _ in 0..100 {
+        let counter = TEMP_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate = directory.join(format!(
+            "rnqcc-{}-{}-{}-{}.{}",
             std::process::id(),
             index,
             stem,
+            counter,
             extension
-        ))
-        .to_string_lossy()
-        .into_owned()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&candidate) {
+            Ok(file) => {
+                drop(file);
+                return Ok(candidate.to_string_lossy().into_owned());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "could not reserve temporary path {}: {}",
+                    candidate.to_string_lossy(),
+                    error
+                ));
+            }
+        }
+    }
+
+    Err(format!(
+        "could not reserve a unique temporary path in {}",
+        directory.to_string_lossy()
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -785,10 +1114,10 @@ pub struct DriverArtifact {
 }
 
 pub fn quote_make_word(value: &str) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
-            ' ' | '\t' | '#' => {
+            ' ' | '\t' | '#' | '*' | '?' | '[' | ']' | '%' => {
                 out.push('\\');
                 out.push(ch);
             }
@@ -808,10 +1137,11 @@ pub fn dependency_target(src: &str, options: &DependencyOptions) -> String {
 }
 
 pub fn dependency_rule(src: &str, dependencies: &[PathBuf], options: &DependencyOptions) -> String {
-    let mut parts = vec![quote_make_word(src)];
-    let mut seen = HashSet::new();
+    let mut parts = Vec::with_capacity(dependencies.len() + 1);
+    parts.push(quote_make_word(src));
+    let mut seen = HashSet::with_capacity(dependencies.len() + 1);
     seen.insert(PathBuf::from(src));
-    let mut unique_dependencies = Vec::new();
+    let mut unique_dependencies = Vec::with_capacity(dependencies.len());
     for dep in dependencies {
         if seen.insert(dep.clone()) {
             parts.push(quote_make_word(&dep.to_string_lossy()));
@@ -836,7 +1166,7 @@ pub fn emit_dependency_rule(
 ) -> Result<(), String> {
     let rule = dependency_rule(src, dependencies, options);
     if let Some(path) = &options.file {
-        std::fs::write(path, rule).map_err(|err| format!("could not write {}: {}", path, err))
+        write_text_output(path, &rule)
     } else {
         print!("{}", rule);
         Ok(())
@@ -852,8 +1182,7 @@ pub fn write_dependency_side_effect(
         .file
         .clone()
         .unwrap_or_else(|| replace_extension(src, "d"));
-    std::fs::write(&path, dependency_rule(src, dependencies, options))
-        .map_err(|err| format!("could not write {}: {}", path, err))
+    write_text_output(&path, &dependency_rule(src, dependencies, options))
 }
 
 pub fn driver(options: DriverOptions<'_>) -> Result<(), String> {
@@ -971,10 +1300,15 @@ pub fn driver(options: DriverOptions<'_>) -> Result<(), String> {
                     });
                     continue;
                 }
-                _ => ensure_compilable_c_input(kind, &stage)?,
+                _ => {
+                    if let Err(error) = ensure_compilable_c_input(kind, &stage) {
+                        cleanup_generated_artifacts(&compiled, keep_temps);
+                        return Err(error);
+                    }
+                }
             }
         }
-        let preprocessed_name = preprocess(PreprocessInvocation {
+        let preprocessed_name = match preprocess(PreprocessInvocation {
             src,
             index,
             language,
@@ -994,20 +1328,44 @@ pub fn driver(options: DriverOptions<'_>) -> Result<(), String> {
             line_markers,
             sysroot,
             extra_preprocessor_args: &extra_preprocessor_args,
-        })?;
-        if dependency_options.emit && !dependency_options.side_effect {
-            emit_dependency_rule(src, &preprocessed_name.dependencies, &dependency_options)?;
-            if preprocessed_name.generated && !keep_temps {
-                let _ = std::fs::remove_file(&preprocessed_name.path);
+        }) {
+            Ok(preprocessed_name) => preprocessed_name,
+            Err(error) => {
+                cleanup_generated_artifacts(&compiled, keep_temps);
+                return Err(error);
             }
+        };
+        if dependency_options.emit && !dependency_options.side_effect {
+            if let Err(error) =
+                emit_dependency_rule(src, &preprocessed_name.dependencies, &dependency_options)
+            {
+                cleanup_generated_artifact(
+                    &preprocessed_name.path,
+                    preprocessed_name.generated,
+                    keep_temps,
+                );
+                return Err(error);
+            }
+            cleanup_generated_artifact(
+                &preprocessed_name.path,
+                preprocessed_name.generated,
+                keep_temps,
+            );
             continue;
         }
         if dependency_options.side_effect {
-            write_dependency_side_effect(
+            if let Err(error) = write_dependency_side_effect(
                 src,
                 &preprocessed_name.dependencies,
                 &dependency_options,
-            )?;
+            ) {
+                cleanup_generated_artifact(
+                    &preprocessed_name.path,
+                    preprocessed_name.generated,
+                    keep_temps,
+                );
+                return Err(error);
+            }
         }
         if stage == Stage::Preprocess {
             compiled.push(DriverArtifact {
@@ -1017,7 +1375,7 @@ pub fn driver(options: DriverOptions<'_>) -> Result<(), String> {
             });
             continue;
         }
-        let mut assembly_name = do_compile(CompileInvocation {
+        let mut assembly_name = match do_compile(CompileInvocation {
             stage: &stage,
             preprocessed_src: &preprocessed_name.path,
             target: &target,
@@ -1029,16 +1387,27 @@ pub fn driver(options: DriverOptions<'_>) -> Result<(), String> {
             cleanup_preprocessed: preprocessed_name.generated,
             dumps,
             warnings,
-        })?;
+        }) {
+            Ok(assembly_name) => assembly_name,
+            Err(error) => {
+                cleanup_generated_artifacts(&compiled, keep_temps);
+                return Err(error);
+            }
+        };
+        let mut assembly_generated = true;
         if stage == Stage::Assembly && output.is_none() {
             let final_asm = replace_extension(src, "s");
-            move_or_copy_output(&assembly_name, &final_asm)?;
+            if let Err(error) = move_or_copy_output(&assembly_name, &final_asm) {
+                cleanup_generated_artifact(&assembly_name, true, keep_temps);
+                return Err(error);
+            }
             assembly_name = final_asm;
+            assembly_generated = false;
         }
         compiled.push(DriverArtifact {
             src: src.to_string(),
             path: assembly_name,
-            generated: true,
+            generated: assembly_generated,
         });
     }
 
@@ -1049,39 +1418,51 @@ pub fn driver(options: DriverOptions<'_>) -> Result<(), String> {
     if stage == Stage::Preprocess {
         if let Some(output_file) = output {
             if compiled.len() != 1 {
+                cleanup_generated_artifacts(&compiled, keep_temps);
                 return Err("-o with -E requires exactly one input file".to_string());
             }
             if compiled[0].generated {
-                move_or_copy_output(&compiled[0].path, output_file)?;
+                if let Err(error) = move_or_copy_output(&compiled[0].path, output_file) {
+                    cleanup_generated_artifact(&compiled[0].path, true, keep_temps);
+                    return Err(error);
+                }
             } else {
                 copy_output(&compiled[0].path, output_file)?;
             }
         } else {
             for artifact in &compiled {
-                let contents = std::fs::read_to_string(&artifact.path)
-                    .map_err(|err| format!("could not read {}: {}", artifact.path, err))?;
+                let contents = match std::fs::read_to_string(&artifact.path) {
+                    Ok(contents) => contents,
+                    Err(error) => {
+                        cleanup_generated_artifact(&artifact.path, artifact.generated, keep_temps);
+                        return Err(format!("could not read {}: {}", artifact.path, error));
+                    }
+                };
                 print!("{}", contents);
                 if !contents.ends_with('\n') {
                     println!();
                 }
-                if artifact.generated && !keep_temps {
-                    let _ = std::fs::remove_file(&artifact.path);
-                }
+                cleanup_generated_artifact(&artifact.path, artifact.generated, keep_temps);
             }
         }
     } else if stage == Stage::Assembly {
         if let Some(output_file) = output {
             if compiled.len() != 1 {
+                cleanup_generated_artifacts(&compiled, keep_temps);
                 return Err("-o with -S requires exactly one input file".to_string());
             }
             if compiled[0].generated {
-                move_or_copy_output(&compiled[0].path, output_file)?;
+                if let Err(error) = move_or_copy_output(&compiled[0].path, output_file) {
+                    cleanup_generated_artifact(&compiled[0].path, true, keep_temps);
+                    return Err(error);
+                }
             } else {
                 copy_output(&compiled[0].path, output_file)?;
             }
         }
     } else if stage == Stage::Object {
         if output.is_some() && compiled.len() != 1 {
+            cleanup_generated_artifacts(&compiled, keep_temps);
             return Err("-o with -c requires exactly one input file".to_string());
         }
         // Assemble each .s to .o
@@ -1097,9 +1478,15 @@ pub fn driver(options: DriverOptions<'_>) -> Result<(), String> {
                 if artifact.generated {
                     let _ = std::fs::remove_file(&artifact.path);
                 }
-                result?;
+                if let Err(error) = result {
+                    cleanup_generated_artifacts(&compiled, keep_temps);
+                    return Err(error);
+                }
             } else {
-                run_command(cc, args)?;
+                if let Err(error) = run_command(cc, args) {
+                    cleanup_generated_artifacts(&compiled, keep_temps || debug);
+                    return Err(error);
+                }
             }
         }
     } else if stage == Stage::Executable {
@@ -1128,465 +1515,467 @@ pub fn driver(options: DriverOptions<'_>) -> Result<(), String> {
 pub fn real_main() -> Result<(), String> {
     let args = normalize_driver_args(expand_response_args(std::env::args_os())?);
     let dependency_targets = crate::dependency_targets_from_args(&args);
-    let matches = App::new("rnqcc")
+    let matches = Command::new("rnqcc")
         .version("0.2.0")
         .author("Dean Menezes")
         .about("A not-quite-C compiler")
         .arg(
-            Arg::with_name("stage")
+            Arg::new("stage")
                 .long("stage")
-                .takes_value(true)
-                .possible_values(Stage::NAMES)
+                .num_args(1)
+                .value_parser(clap::builder::PossibleValuesParser::new(Stage::NAMES))
                 .conflicts_with("emit_asm")
                 .conflicts_with("compile_only")
                 .conflicts_with("preprocess_only")
                 .help("Run the specified compiler stage"),
         )
         .arg(
-            Arg::with_name("emit_asm")
+            Arg::new("emit_asm")
                 .short('S')
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .conflicts_with("compile_only")
                 .conflicts_with("preprocess_only")
                 .help("Emit assembly (like gcc -S)"),
         )
         .arg(
-            Arg::with_name("compile_only")
+            Arg::new("compile_only")
                 .short('c')
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .conflicts_with("emit_asm")
                 .conflicts_with("preprocess_only")
                 .help("Compile to object file (like gcc -c)"),
         )
         .arg(
-            Arg::with_name("preprocess_only")
+            Arg::new("preprocess_only")
                 .short('E')
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .conflicts_with("emit_asm")
                 .conflicts_with("compile_only")
                 .help("Emit preprocessed source (like gcc -E)"),
         )
         .arg(
-            Arg::with_name("dep_only")
+            Arg::new("dep_only")
                 .short('M')
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Emit makefile dependencies instead of compiling"),
         )
         .arg(
-            Arg::with_name("dep_user_only")
+            Arg::new("dep_user_only")
                 .long("MM")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Emit makefile dependencies excluding system headers"),
         )
         .arg(
-            Arg::with_name("dep_side_effect")
+            Arg::new("dep_side_effect")
                 .long("MD")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Write makefile dependencies as a side effect"),
         )
         .arg(
-            Arg::with_name("dep_missing_generated")
+            Arg::new("dep_missing_generated")
                 .long("MG")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Treat missing headers as generated files in dependency output"),
         )
         .arg(
-            Arg::with_name("dep_side_effect_user")
+            Arg::new("dep_side_effect_user")
                 .long("MMD")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Write user-header dependencies as a side effect"),
         )
         .arg(
-            Arg::with_name("dep_file")
+            Arg::new("dep_file")
                 .long("MF")
-                .takes_value(true)
+                .num_args(1)
                 .help("Write dependency output to the specified file"),
         )
         .arg(
-            Arg::with_name("dep_phony")
+            Arg::new("dep_phony")
                 .long("MP")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Emit phony make targets for dependency headers"),
         )
         .arg(
-            Arg::with_name("dep_target")
+            Arg::new("dep_target")
                 .long("MT")
-                .takes_value(true)
-                .multiple(true)
-                .number_of_values(1)
+                .num_args(1)
+                .action(ArgAction::Append)
+                .num_args(1)
                 .help("Set a dependency target"),
         )
         .arg(
-            Arg::with_name("dep_quoted_target")
+            Arg::new("dep_quoted_target")
                 .long("MQ")
-                .takes_value(true)
-                .multiple(true)
-                .number_of_values(1)
+                .num_args(1)
+                .action(ArgAction::Append)
+                .num_args(1)
                 .help("Set a make-quoted dependency target"),
         )
         .arg(
-            Arg::with_name("dump_macro_definitions")
+            Arg::new("dump_macro_definitions")
                 .long("dump-macro-definitions")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Dump macro definitions while emitting preprocessed source"),
         )
         .arg(
-            Arg::with_name("dump_macros")
+            Arg::new("dump_macros")
                 .long("dump-macros")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Dump macro definitions after preprocessing"),
         )
         .arg(
-            Arg::with_name("trace_includes")
+            Arg::new("trace_includes")
                 .long("trace-includes")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Print include nesting while preprocessing"),
         )
         .arg(
-            Arg::with_name("line_markers")
+            Arg::new("line_markers")
                 .long("line-markers")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .conflicts_with("suppress_line_markers")
                 .help("Emit preprocessor line markers in -E output"),
         )
         .arg(
-            Arg::with_name("suppress_line_markers")
+            Arg::new("suppress_line_markers")
                 .long("suppress-line-markers")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Suppress preprocessor line markers"),
         )
         .arg(
-            Arg::with_name("language")
+            Arg::new("language")
                 .short('x')
-                .takes_value(true)
+                .num_args(1)
                 .help("Specify the source language for following inputs"),
         )
         .arg(
-            Arg::with_name("output")
+            Arg::new("output")
                 .short('o')
-                .takes_value(true)
+                .num_args(1)
                 .help("Write output to the specified file"),
         )
         .arg(
-            Arg::with_name("target")
+            Arg::new("target")
                 .short('t')
                 .long("target")
-                .takes_value(true)
-                .possible_values(Target::ALIASES.map(|(name, _)| name))
+                .num_args(1)
+                .value_parser(clap::builder::PossibleValuesParser::new(
+                    Target::ALIASES.map(|(name, _)| name),
+                ))
                 .help("Choose target platform"),
         )
         .arg(
-            Arg::with_name("cc")
+            Arg::new("cc")
                 .long("cc")
-                .takes_value(true)
+                .num_args(1)
                 .help("C compiler driver to use for preprocessing, assembly, and linking"),
         )
         .arg(
-            Arg::with_name("sysroot")
+            Arg::new("sysroot")
                 .long("sysroot")
-                .takes_value(true)
+                .num_args(1)
                 .help("Pass a target sysroot to preprocessing and linking"),
         )
         .arg(
-            Arg::with_name("isysroot")
+            Arg::new("isysroot")
                 .long("isysroot")
-                .takes_value(true)
+                .num_args(1)
                 .help("Pass an include sysroot to preprocessing"),
         )
         .arg(
-            Arg::with_name("nostdlib")
+            Arg::new("nostdlib")
                 .long("nostdlib")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Do not link standard startup files or libraries"),
         )
         .arg(
-            Arg::with_name("nodefaultlibs")
+            Arg::new("nodefaultlibs")
                 .long("nodefaultlibs")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Do not link default system libraries"),
         )
         .arg(
-            Arg::with_name("linker_arg")
+            Arg::new("linker_arg")
                 .long("linker-arg")
-                .takes_value(true)
+                .num_args(1)
                 .allow_hyphen_values(true)
-                .multiple(true)
-                .number_of_values(1)
+                .action(ArgAction::Append)
+                .num_args(1)
                 .help("Pass an argument through to the linker driver"),
         )
         .arg(
-            Arg::with_name("assembler_arg")
+            Arg::new("assembler_arg")
                 .long("assembler-arg")
-                .takes_value(true)
+                .num_args(1)
                 .allow_hyphen_values(true)
-                .multiple(true)
-                .number_of_values(1)
+                .action(ArgAction::Append)
+                .num_args(1)
                 .help("Pass an argument through to the assembler driver"),
         )
         .arg(
-            Arg::with_name("xpreprocessor")
+            Arg::new("xpreprocessor")
                 .long("Xpreprocessor")
-                .takes_value(true)
+                .num_args(1)
                 .allow_hyphen_values(true)
-                .multiple(true)
-                .number_of_values(1)
+                .action(ArgAction::Append)
+                .num_args(1)
                 .help("Pass an argument through to the external preprocessor"),
         )
         .arg(
-            Arg::with_name("internal_cpp")
+            Arg::new("internal_cpp")
                 .long("internal-cpp")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Use rnqcc's internal preprocessor for self-contained sources and local includes"),
         )
         .arg(
-            Arg::with_name("include_path")
+            Arg::new("include_path")
                 .short('I')
-                .takes_value(true)
-                .multiple(true)
-                .number_of_values(1)
+                .num_args(1)
+                .action(ArgAction::Append)
+                .num_args(1)
                 .help("Add an include search directory for preprocessing"),
         )
         .arg(
-            Arg::with_name("macro_include")
+            Arg::new("macro_include")
                 .long("imacros")
-                .takes_value(true)
-                .multiple(true)
-                .number_of_values(1)
+                .num_args(1)
+                .action(ArgAction::Append)
+                .num_args(1)
                 .help("Preprocess a header for macro definitions before each source file"),
         )
         .arg(
-            Arg::with_name("forced_include")
+            Arg::new("forced_include")
                 .long("include")
-                .takes_value(true)
-                .multiple(true)
-                .number_of_values(1)
+                .num_args(1)
+                .action(ArgAction::Append)
+                .num_args(1)
                 .help("Preprocess a header before each source file"),
         )
         .arg(
-            Arg::with_name("iquote")
+            Arg::new("iquote")
                 .long("iquote")
-                .takes_value(true)
-                .multiple(true)
-                .number_of_values(1)
+                .num_args(1)
+                .action(ArgAction::Append)
+                .num_args(1)
                 .help("Add a quote-include-only search directory for preprocessing"),
         )
         .arg(
-            Arg::with_name("isystem")
+            Arg::new("isystem")
                 .long("isystem")
-                .takes_value(true)
-                .multiple(true)
-                .number_of_values(1)
+                .num_args(1)
+                .action(ArgAction::Append)
+                .num_args(1)
                 .help("Add a system include search directory for preprocessing"),
         )
         .arg(
-            Arg::with_name("idirafter")
+            Arg::new("idirafter")
                 .long("idirafter")
-                .takes_value(true)
-                .multiple(true)
-                .number_of_values(1)
+                .num_args(1)
+                .action(ArgAction::Append)
+                .num_args(1)
                 .help("Add a late system include search directory for preprocessing"),
         )
         .arg(
-            Arg::with_name("nostdinc")
+            Arg::new("nostdinc")
                 .long("nostdinc")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Do not search standard system include directories"),
         )
         .arg(
-            Arg::with_name("define")
+            Arg::new("define")
                 .short('D')
-                .takes_value(true)
-                .multiple(true)
-                .number_of_values(1)
+                .num_args(1)
+                .action(ArgAction::Append)
+                .num_args(1)
                 .help("Define a preprocessor macro"),
         )
         .arg(
-            Arg::with_name("undefine")
+            Arg::new("undefine")
                 .short('U')
-                .takes_value(true)
-                .multiple(true)
-                .number_of_values(1)
+                .num_args(1)
+                .action(ArgAction::Append)
+                .num_args(1)
                 .help("Undefine a preprocessor macro"),
         )
         .arg(
-            Arg::with_name("print_targets")
+            Arg::new("print_targets")
                 .long("print-targets")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Print supported backend targets"),
         )
         .arg(
-            Arg::with_name("debug")
+            Arg::new("debug")
                 .short('d')
                 .long("debug")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Write out debug information"),
         )
         .arg(
-            Arg::with_name("dump_ast")
+            Arg::new("dump_ast")
                 .long("dump-ast")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Print the resolved AST to stderr while continuing compilation"),
         )
         .arg(
-            Arg::with_name("dump_tacky")
+            Arg::new("dump_tacky")
                 .long("dump-tacky")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Print optimized TACKY IR to stderr while continuing compilation"),
         )
         .arg(
-            Arg::with_name("dump_tacky_pre_opt")
+            Arg::new("dump_tacky_pre_opt")
                 .long("dump-tacky-pre-opt")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Print TACKY IR before optimization to stderr while continuing compilation"),
         )
         .arg(
-            Arg::with_name("dump_asm_ir")
+            Arg::new("dump_asm_ir")
                 .long("dump-asm-ir")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Print assembly IR to stderr while continuing compilation"),
         )
         .arg(
-            Arg::with_name("source_comments")
+            Arg::new("source_comments")
                 .long("source-comments")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Annotate generated assembly with the preprocessed source path"),
         )
         .arg(
-            Arg::with_name("wall")
+            Arg::new("wall")
                 .long("Wall")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Enable warning diagnostics"),
         )
         .arg(
-            Arg::with_name("werror")
+            Arg::new("werror")
                 .long("Werror")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Treat enabled warning diagnostics as errors"),
         )
         .arg(
-            Arg::with_name("wno_unreachable")
+            Arg::new("wno_unreachable")
                 .long("Wno-unreachable")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Disable unreachable statement warnings"),
         )
         .arg(
-            Arg::with_name("wno_missing_return")
+            Arg::new("wno_missing_return")
                 .long("Wno-missing-return")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Disable missing return warnings"),
         )
         .arg(
-            Arg::with_name("wcompare_distinct_pointer_types")
+            Arg::new("wcompare_distinct_pointer_types")
                 .long("Wcompare-distinct-pointer-types")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Enable distinct pointer comparison warnings"),
         )
         .arg(
-            Arg::with_name("wno_compare_distinct_pointer_types")
+            Arg::new("wno_compare_distinct_pointer_types")
                 .long("Wno-compare-distinct-pointer-types")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Disable distinct pointer comparison warnings"),
         )
         .arg(
-            Arg::with_name("wdeprecated_declarations")
+            Arg::new("wdeprecated_declarations")
                 .long("Wdeprecated-declarations")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Enable deprecated declaration warnings"),
         )
         .arg(
-            Arg::with_name("wno_deprecated_declarations")
+            Arg::new("wno_deprecated_declarations")
                 .long("Wno-deprecated-declarations")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Disable deprecated declaration warnings"),
         )
         .arg(
-            Arg::with_name("keep_temps")
+            Arg::new("keep_temps")
                 .long("keep-temps")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Keep preprocessed and assembly intermediate files"),
         )
         .arg(
-            Arg::with_name("fold_constants")
+            Arg::new("fold_constants")
                 .long("fold-constants")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Enable constant folding optimization"),
         )
         .arg(
-            Arg::with_name("eliminate_unreachable_code")
+            Arg::new("eliminate_unreachable_code")
                 .long("eliminate-unreachable-code")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Enable unreachable code elimination"),
         )
         .arg(
-            Arg::with_name("propagate_copies")
+            Arg::new("propagate_copies")
                 .long("propagate-copies")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Enable copy propagation"),
         )
         .arg(
-            Arg::with_name("eliminate_dead_stores")
+            Arg::new("eliminate_dead_stores")
                 .long("eliminate-dead-stores")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Enable dead store elimination"),
         )
         .arg(
-            Arg::with_name("licm")
+            Arg::new("licm")
                 .long("licm")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Enable loop-invariant code motion"),
         )
         .arg(
-            Arg::with_name("cse")
+            Arg::new("cse")
                 .long("cse")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Enable common subexpression elimination"),
         )
         .arg(
-            Arg::with_name("inline_functions")
+            Arg::new("inline_functions")
                 .long("inline-functions")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Enable function inlining"),
         )
         .arg(
-            Arg::with_name("ipcp")
+            Arg::new("ipcp")
                 .long("ipcp")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Enable interprocedural constant propagation"),
         )
         .arg(
-            Arg::with_name("optimize")
+            Arg::new("optimize")
                 .long("optimize")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Enable all optimizations"),
         )
         .arg(
-            Arg::with_name("no_coalescing")
+            Arg::new("no_coalescing")
                 .long("no-coalescing")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Disable register coalescing"),
         )
         .arg(
-            Arg::with_name("instrument_functions")
+            Arg::new("instrument_functions")
                 .long("finstrument-functions")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Emit __cyg_profile_func_enter/exit calls"),
         )
         .arg(
-            Arg::with_name("permissive")
+            Arg::new("permissive")
                 .long("fpermissive")
-                .takes_value(false)
+                .action(ArgAction::SetTrue)
                 .help("Permit selected GCC invalid-C compatibility cases"),
         )
         .arg(
-            Arg::with_name("src_files")
+            Arg::new("src_files")
                 .index(1)
                 .required_unless_present("print_targets")
-                .multiple(true)
+                .action(ArgAction::Append)
                 .help("Input file(s)"),
         )
         .get_matches_from(args);
 
-    if matches.is_present("print_targets") {
+    if matches.get_flag("print_targets") {
         for target in Target::SUPPORTED {
             println!("{}", target.triple_name());
         }
@@ -1600,29 +1989,31 @@ pub fn real_main() -> Result<(), String> {
         "dep_side_effect_user",
     ]
     .iter()
-    .filter(|name| matches.is_present(name))
+    .filter(|name| matches.get_flag(name))
     .count();
     if dependency_mode_count > 1 {
         return Err("-M, -MM, -MD, and -MMD are mutually exclusive".to_string());
     }
     if dependency_mode_count == 0
-        && (matches.is_present("dep_file")
-            || matches.is_present("dep_phony")
-            || matches.is_present("dep_target")
-            || matches.is_present("dep_quoted_target"))
+        && (matches.get_one::<String>("dep_file").is_some()
+            || matches.get_flag("dep_phony")
+            || matches.get_many::<String>("dep_target").is_some()
+            || matches.get_many::<String>("dep_quoted_target").is_some())
     {
         return Err("-MF, -MP, -MT, and -MQ require -M, -MM, -MD, or -MMD".to_string());
     }
 
     let dependency_options = DependencyOptions {
-        emit: matches.is_present("dep_only") || matches.is_present("dep_user_only"),
-        side_effect: matches.is_present("dep_side_effect")
-            || matches.is_present("dep_side_effect_user"),
-        user_only: matches.is_present("dep_user_only")
-            || matches.is_present("dep_side_effect_user"),
-        phony_targets: matches.is_present("dep_phony"),
-        missing_headers_generated: matches.is_present("dep_missing_generated"),
-        file: matches.value_of("dep_file").map(str::to_string),
+        emit: matches.get_flag("dep_only") || matches.get_flag("dep_user_only"),
+        side_effect: matches.get_flag("dep_side_effect")
+            || matches.get_flag("dep_side_effect_user"),
+        user_only: matches.get_flag("dep_user_only") || matches.get_flag("dep_side_effect_user"),
+        phony_targets: matches.get_flag("dep_phony"),
+        missing_headers_generated: matches.get_flag("dep_missing_generated"),
+        file: matches
+            .get_one::<String>("dep_file")
+            .map(String::as_str)
+            .map(str::to_string),
         targets: dependency_targets,
     };
 
@@ -1630,127 +2021,130 @@ pub fn real_main() -> Result<(), String> {
         return Err("-MG requires -M or -MM".to_string());
     }
 
-    let dump_macros =
-        matches.is_present("dump_macros") || matches.is_present("dump_macro_definitions");
+    let dump_macros = matches.get_flag("dump_macros") || matches.get_flag("dump_macro_definitions");
     let suppress_preprocessed_output =
-        matches.is_present("dump_macros") && !matches.is_present("dump_macro_definitions");
-    let stage = if matches.is_present("preprocess_only") || dependency_options.emit || dump_macros {
+        matches.get_flag("dump_macros") && !matches.get_flag("dump_macro_definitions");
+    let stage = if matches.get_flag("preprocess_only") || dependency_options.emit || dump_macros {
         Stage::Preprocess
-    } else if matches.is_present("emit_asm") {
+    } else if matches.get_flag("emit_asm") {
         Stage::Assembly
-    } else if matches.is_present("compile_only") {
+    } else if matches.get_flag("compile_only") {
         Stage::Object
     } else {
         matches
-            .value_of("stage")
+            .get_one::<String>("stage")
+            .map(String::as_str)
             .and_then(Stage::parse)
             .unwrap_or(Stage::Executable)
     };
 
-    let target = match matches.value_of("target") {
+    let target = match matches.get_one::<String>("target").map(String::as_str) {
         Some(target_name) => Target::parse(target_name)
             .ok_or_else(|| format!("unsupported target: {}", target_name))?,
         _ => current_target(),
     };
 
-    let debug = matches.is_present("debug");
-    let keep_temps = matches.is_present("keep_temps");
+    let debug = matches.get_flag("debug");
+    let keep_temps = matches.get_flag("keep_temps");
     let src_files: Vec<&str> = matches
-        .values_of("src_files")
+        .get_many::<String>("src_files")
         .ok_or_else(|| "no input files".to_string())?
+        .map(String::as_str)
         .collect();
-    let output = matches.value_of("output");
-    let language = matches.value_of("language");
+    let output = matches.get_one::<String>("output").map(String::as_str);
+    let language = matches.get_one::<String>("language").map(String::as_str);
     let sysroot = matches
-        .value_of("sysroot")
-        .or_else(|| matches.value_of("isysroot"));
+        .get_one::<String>("sysroot")
+        .map(String::as_str)
+        .or_else(|| matches.get_one::<String>("isysroot").map(String::as_str));
     let cc = matches
-        .value_of("cc")
+        .get_one::<String>("cc")
+        .map(String::as_str)
         .map(str::to_string)
         .or_else(|| std::env::var("CC").ok())
         .unwrap_or_else(|| "gcc".to_string());
 
-    let all_opts = matches.is_present("optimize");
+    let all_opts = matches.get_flag("optimize");
     let opt_flags = optimize::OptimizationFlags::from_cli(
         all_opts,
         optimize::OptimizationFlagSelections {
-            fold_constants: matches.is_present("fold_constants"),
-            eliminate_unreachable_code: matches.is_present("eliminate_unreachable_code"),
-            propagate_copies: matches.is_present("propagate_copies"),
-            eliminate_dead_stores: matches.is_present("eliminate_dead_stores"),
-            licm: matches.is_present("licm"),
-            eliminate_common_subexpressions: matches.is_present("cse"),
-            inline_functions: matches.is_present("inline_functions"),
-            interprocedural_constant_propagation: matches.is_present("ipcp"),
+            fold_constants: matches.get_flag("fold_constants"),
+            eliminate_unreachable_code: matches.get_flag("eliminate_unreachable_code"),
+            propagate_copies: matches.get_flag("propagate_copies"),
+            eliminate_dead_stores: matches.get_flag("eliminate_dead_stores"),
+            licm: matches.get_flag("licm"),
+            eliminate_common_subexpressions: matches.get_flag("cse"),
+            inline_functions: matches.get_flag("inline_functions"),
+            interprocedural_constant_propagation: matches.get_flag("ipcp"),
         },
     );
 
-    let no_coalescing = matches.is_present("no_coalescing");
-    let instrument_functions = matches.is_present("instrument_functions");
-    let internal_cpp = matches.is_present("internal_cpp");
+    let no_coalescing = matches.get_flag("no_coalescing");
+    let instrument_functions = matches.get_flag("instrument_functions");
+    let internal_cpp = matches.get_flag("internal_cpp");
     let include_paths = IncludePaths {
         quote: matches
-            .values_of("iquote")
+            .get_many::<String>("iquote")
             .map(|values| values.map(PathBuf::from).collect())
             .unwrap_or_default(),
         user: matches
-            .values_of("include_path")
+            .get_many::<String>("include_path")
             .map(|values| values.map(PathBuf::from).collect())
             .unwrap_or_default(),
         system: matches
-            .values_of("isystem")
+            .get_many::<String>("isystem")
             .map(|values| values.map(PathBuf::from).collect())
             .unwrap_or_default(),
         after: matches
-            .values_of("idirafter")
+            .get_many::<String>("idirafter")
             .map(|values| values.map(PathBuf::from).collect())
             .unwrap_or_default(),
-        use_standard_system: !matches.is_present("nostdinc"),
+        use_standard_system: !matches.get_flag("nostdinc"),
     };
     let macro_includes: Vec<PathBuf> = matches
-        .values_of("macro_include")
+        .get_many::<String>("macro_include")
         .map(|values| values.map(PathBuf::from).collect())
         .unwrap_or_default();
     let forced_includes: Vec<PathBuf> = matches
-        .values_of("forced_include")
+        .get_many::<String>("forced_include")
         .map(|values| values.map(PathBuf::from).collect())
         .unwrap_or_default();
     let defines: Vec<String> = matches
-        .values_of("define")
-        .map(|values| values.map(str::to_string).collect())
+        .get_many::<String>("define")
+        .map(|values| values.map(|value| value.to_string()).collect())
         .unwrap_or_default();
     let undefs: Vec<String> = matches
-        .values_of("undefine")
-        .map(|values| values.map(str::to_string).collect())
+        .get_many::<String>("undefine")
+        .map(|values| values.map(|value| value.to_string()).collect())
         .unwrap_or_default();
     let linker_args: Vec<OsString> = matches
-        .values_of("linker_arg")
+        .get_many::<String>("linker_arg")
         .map(|values| values.map(OsString::from).collect())
         .unwrap_or_default();
     let assembler_args: Vec<OsString> = matches
-        .values_of("assembler_arg")
+        .get_many::<String>("assembler_arg")
         .map(|values| values.map(OsString::from).collect())
         .unwrap_or_default();
     let extra_preprocessor_args: Vec<OsString> = matches
-        .values_of("xpreprocessor")
+        .get_many::<String>("xpreprocessor")
         .map(|values| values.map(OsString::from).collect())
         .unwrap_or_default();
     let dumps = compile::DumpOptions {
-        ast: matches.is_present("dump_ast"),
-        tacky_pre_opt: matches.is_present("dump_tacky_pre_opt"),
-        tacky: matches.is_present("dump_tacky"),
-        asm_ir: matches.is_present("dump_asm_ir"),
-        source_comments: matches.is_present("source_comments"),
+        ast: matches.get_flag("dump_ast"),
+        tacky_pre_opt: matches.get_flag("dump_tacky_pre_opt"),
+        tacky: matches.get_flag("dump_tacky"),
+        asm_ir: matches.get_flag("dump_asm_ir"),
+        source_comments: matches.get_flag("source_comments"),
     };
     let warnings = compile::WarningOptions {
         enabled: true,
-        unreachable: !matches.is_present("wno_unreachable"),
-        missing_return: !matches.is_present("wno_missing_return"),
-        compare_distinct_pointer_types: !matches.is_present("wno_compare_distinct_pointer_types"),
-        deprecated_declarations: !matches.is_present("wno_deprecated_declarations"),
-        error: matches.is_present("werror"),
+        unreachable: !matches.get_flag("wno_unreachable"),
+        missing_return: !matches.get_flag("wno_missing_return"),
+        compare_distinct_pointer_types: !matches.get_flag("wno_compare_distinct_pointer_types"),
+        deprecated_declarations: !matches.get_flag("wno_deprecated_declarations"),
+        error: matches.get_flag("werror"),
     };
-    let permissive = matches.is_present("permissive");
+    let permissive = matches.get_flag("permissive");
 
     driver(DriverOptions {
         target,
@@ -1776,13 +2170,193 @@ pub fn real_main() -> Result<(), String> {
         dependency_options,
         dump_macros,
         suppress_preprocessed_output,
-        trace_includes: matches.is_present("trace_includes"),
-        line_markers: matches.is_present("line_markers"),
+        trace_includes: matches.get_flag("trace_includes"),
+        line_markers: matches.get_flag("line_markers"),
         sysroot,
-        nostdlib: matches.is_present("nostdlib"),
-        nodefaultlibs: matches.is_present("nodefaultlibs"),
+        nostdlib: matches.get_flag("nostdlib"),
+        nodefaultlibs: matches.get_flag("nodefaultlibs"),
         linker_args,
         assembler_args,
         extra_preprocessor_args,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_separate_driver_option_values() {
+        let args = normalize_driver_args([
+            OsString::from("-std"),
+            OsString::from("c11"),
+            OsString::from("-Xlinker"),
+            OsString::from("-z"),
+            OsString::from("-include"),
+            OsString::from("config.h"),
+            OsString::from("-L"),
+            OsString::from("lib"),
+            OsString::from("-l"),
+            OsString::from("m"),
+        ]);
+        let args = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            args,
+            vec![
+                "--Xpreprocessor",
+                "-std=c11",
+                "--linker-arg",
+                "-Wl,-z",
+                "--include",
+                "config.h",
+                "--linker-arg",
+                "-Llib",
+                "--linker-arg",
+                "-lm",
+            ]
+        );
+    }
+
+    #[test]
+    fn normalizes_cmake_arch_option() {
+        let args = normalize_driver_args([OsString::from("-arch"), OsString::from("arm64")]);
+        let args = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            args,
+            vec![
+                "--Xpreprocessor",
+                "-arch",
+                "--Xpreprocessor",
+                "arm64",
+                "--linker-arg",
+                "-arch",
+                "--linker-arg",
+                "arm64",
+            ]
+        );
+    }
+
+    #[test]
+    fn accepts_cmake_verbose_driver_option() {
+        assert!(normalize_driver_args([OsString::from("-v")]).is_empty());
+    }
+
+    #[test]
+    fn preserves_glued_isysroot_path() {
+        let args = normalize_driver_args([
+            OsString::from("-isysroot/usr/local/sysroot"),
+            OsString::from("-isysroot=/opt/sysroot"),
+        ]);
+        let args = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            args,
+            vec![
+                "--isysroot",
+                "/usr/local/sysroot",
+                "--isysroot",
+                "=/opt/sysroot",
+            ]
+        );
+    }
+
+    #[test]
+    fn temporary_paths_are_unique_and_reserved() -> Result<(), String> {
+        let first = temp_path_for("collision.c", 0, "i")?;
+        let second = temp_path_for("collision.c", 0, "i")?;
+        assert_ne!(first, second);
+        assert!(Path::new(&first).is_file());
+        assert!(Path::new(&second).is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&first)
+                    .map_err(|err| err.to_string())?
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        std::fs::remove_file(first).map_err(|err| err.to_string())?;
+        std::fs::remove_file(second).map_err(|err| err.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn text_output_replaces_contents_and_preserves_permissions() -> Result<(), String> {
+        let path = temp_path_for("dependency", 0, "d")?;
+        std::fs::write(&path, "old\n").map_err(|err| err.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+                .map_err(|err| err.to_string())?;
+        }
+
+        write_text_output(&path, "new\n")?;
+        assert_eq!(
+            std::fs::read_to_string(&path).map_err(|err| err.to_string())?,
+            "new\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path)
+                    .map_err(|err| err.to_string())?
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o640
+            );
+        }
+        std::fs::remove_file(path).map_err(|err| err.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn make_words_escape_wildcards_and_pattern_markers() {
+        assert_eq!(
+            quote_make_word("dir/a*b?[header]%name.h"),
+            "dir/a\\*b\\?\\[header\\]\\%name.h"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temporary_path_reservation_does_not_follow_symlinks() -> Result<(), String> {
+        use std::os::unix::fs::symlink;
+
+        let first = temp_path_for("symlink.c", 0, "i")?;
+        std::fs::remove_file(&first).map_err(|err| err.to_string())?;
+        let sentinel = format!("{first}.sentinel");
+        std::fs::write(&sentinel, "untouched").map_err(|err| err.to_string())?;
+        symlink(&sentinel, &first).map_err(|err| err.to_string())?;
+
+        let second = temp_path_for("symlink.c", 0, "i")?;
+        assert_ne!(first, second);
+        assert!(Path::new(&first).is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).map_err(|err| err.to_string())?,
+            "untouched"
+        );
+
+        std::fs::remove_file(first).map_err(|err| err.to_string())?;
+        std::fs::remove_file(second).map_err(|err| err.to_string())?;
+        std::fs::remove_file(sentinel).map_err(|err| err.to_string())?;
+        Ok(())
+    }
 }

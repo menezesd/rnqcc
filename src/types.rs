@@ -5,6 +5,22 @@ pub use crate::target::*;
 
 use indexmap::IndexMap;
 
+/// Internal placeholder used for a nonconstant array bound.
+///
+/// This value is deliberately outside the small range used by normal object
+/// layouts.  It must not overlap a valid fixed dimension such as `[16]`.
+pub const VLA_STATIC_SCALE_FALLBACK: usize = usize::MAX - 1;
+
+const VLA_SIZE_ESTIMATE: usize = 16;
+
+fn array_size_for_layout(size: usize) -> usize {
+    if size == VLA_STATIC_SCALE_FALLBACK {
+        VLA_SIZE_ESTIMATE
+    } else {
+        size
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Stage {
     Preprocess,
@@ -76,7 +92,7 @@ pub enum CType {
 }
 
 pub fn c_string_bytes(s: &str) -> Vec<u8> {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(s.len());
     for c in s.chars() {
         let value = c as u32;
         if value <= u8::MAX as u32 {
@@ -90,11 +106,23 @@ pub fn c_string_bytes(s: &str) -> Vec<u8> {
 }
 
 pub fn c_string_byte_len(s: &str) -> usize {
-    c_string_bytes(s).len()
+    s.chars()
+        .map(|c| {
+            if (c as u32) <= u8::MAX as u32 {
+                1
+            } else {
+                c.len_utf8()
+            }
+        })
+        .sum()
+}
+
+pub fn c_string_contains_zero(s: &str) -> bool {
+    s.as_bytes().contains(&0)
 }
 
 pub fn c_string_truncate_bytes(s: &str, max_bytes: usize) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(max_bytes.min(s.len()));
     let mut used = 0usize;
     for c in s.chars() {
         let width = if (c as u32) <= u8::MAX as u32 {
@@ -261,14 +289,19 @@ impl FullType {
         }
     }
 
-    /// Total byte size of this type (note: for Struct, returns 0 without struct_defs)
+    /// Total byte size of this type (note: for Struct, returns 0 without
+    /// struct_defs). This compatibility API saturates on oversized arrays or
+    /// vectors; callers that need to diagnose overflow should use
+    /// [`FullType::checked_byte_size_with`].
     pub fn byte_size(&self) -> usize {
         match self {
             FullType::Scalar(t) => std::cmp::max(t.size() as usize, 1),
             FullType::Pointer(_) => 8,
             FullType::Function { .. } => 8,
-            FullType::Array { elem, size } => elem.byte_size() * size,
-            FullType::Vector { elem, lanes, .. } => elem.byte_size() * lanes,
+            FullType::Array { elem, size } => elem
+                .byte_size()
+                .saturating_mul(array_size_for_layout(*size)),
+            FullType::Vector { elem, lanes, .. } => elem.byte_size().saturating_mul(*lanes),
             FullType::Struct(_) => 0, // need struct_defs to compute; caller should use byte_size_with
         }
     }
@@ -277,9 +310,73 @@ impl FullType {
     pub fn byte_size_with(&self, struct_defs: &IndexMap<String, StructDef>) -> usize {
         match self {
             FullType::Struct(tag) => struct_defs.get(tag).map(|d| d.size).unwrap_or(0),
-            FullType::Array { elem, size } => elem.byte_size_with(struct_defs) * size,
-            FullType::Vector { elem, lanes, .. } => elem.byte_size_with(struct_defs) * lanes,
+            FullType::Array { elem, size } => elem
+                .byte_size_with(struct_defs)
+                .saturating_mul(array_size_for_layout(*size)),
+            FullType::Vector { elem, lanes, .. } => {
+                elem.byte_size_with(struct_defs).saturating_mul(*lanes)
+            }
             _ => self.byte_size(),
+        }
+    }
+
+    /// Checked variant for declaration and layout validation paths that must
+    /// reject impossible object sizes instead of allowing arithmetic to wrap.
+    pub fn checked_byte_size_with(
+        &self,
+        struct_defs: &IndexMap<String, StructDef>,
+    ) -> Option<usize> {
+        match self {
+            // Preserve `byte_size_with` semantics for forward declarations;
+            // incomplete structs have no concrete object size yet.
+            FullType::Struct(tag) => Some(struct_defs.get(tag).map_or(0, |def| def.size)),
+            FullType::Array { elem, size } => elem
+                .checked_byte_size_with(struct_defs)?
+                .checked_mul(array_size_for_layout(*size)),
+            FullType::Vector { elem, lanes, .. } => elem
+                .checked_byte_size_with(struct_defs)?
+                .checked_mul(*lanes),
+            _ => Some(self.byte_size()),
+        }
+    }
+
+    /// Returns whether this type contains a nonconstant array bound.
+    ///
+    /// The size APIs intentionally use a conservative estimate for lowering
+    /// VLA storage, but that estimate must never make `sizeof` an integer
+    /// constant expression.
+    #[must_use]
+    pub fn contains_vla_placeholder(&self) -> bool {
+        match self {
+            FullType::Array { elem, size } => {
+                *size == VLA_STATIC_SCALE_FALLBACK || elem.contains_vla_placeholder()
+            }
+            FullType::Vector { elem, .. } => elem.contains_vla_placeholder(),
+            FullType::Pointer(_)
+            | FullType::Function { .. }
+            | FullType::Scalar(_)
+            | FullType::Struct(_) => false,
+        }
+    }
+
+    /// Like [`FullType::contains_vla_placeholder`], also following complete
+    /// aggregate definitions when checking a `struct` or `union` type.
+    #[must_use]
+    pub fn contains_vla_placeholder_with(&self, struct_defs: &IndexMap<String, StructDef>) -> bool {
+        match self {
+            FullType::Struct(tag) => struct_defs.get(tag).is_some_and(|def| {
+                def.members.iter().any(|member| {
+                    member
+                        .member_full_type
+                        .contains_vla_placeholder_with(struct_defs)
+                })
+            }),
+            FullType::Array { elem, size } => {
+                *size == VLA_STATIC_SCALE_FALLBACK
+                    || elem.contains_vla_placeholder_with(struct_defs)
+            }
+            FullType::Vector { elem, .. } => elem.contains_vla_placeholder_with(struct_defs),
+            FullType::Pointer(_) | FullType::Function { .. } | FullType::Scalar(_) => false,
         }
     }
 
@@ -412,6 +509,29 @@ pub enum ParamClass {
 }
 
 impl StructDef {
+    fn type_contains_unaligned_fields(
+        full_type: &FullType,
+        struct_defs: &IndexMap<String, StructDef>,
+    ) -> bool {
+        match full_type {
+            FullType::Struct(tag) => struct_defs
+                .get(tag)
+                .is_some_and(|def| def.has_unaligned_fields(struct_defs)),
+            FullType::Array { elem, .. } | FullType::Vector { elem, .. } => {
+                Self::type_contains_unaligned_fields(elem, struct_defs)
+            }
+            FullType::Scalar(_) | FullType::Pointer(_) | FullType::Function { .. } => false,
+        }
+    }
+
+    fn has_unaligned_fields(&self, struct_defs: &IndexMap<String, StructDef>) -> bool {
+        self.members.iter().any(|mem| {
+            let alignment = mem.member_full_type.alignment_with(struct_defs).max(1);
+            mem.offset % alignment != 0
+                || Self::type_contains_unaligned_fields(&mem.member_full_type, struct_defs)
+        })
+    }
+
     /// Classify a struct for System V ABI parameter/return passing.
     /// Returns a list of ParamClass for each 8-byte chunk, or Memory if passed on stack.
     /// Flatten all fields to (byte_offset, scalar_type) pairs,
@@ -423,41 +543,7 @@ impl StructDef {
     ) -> Vec<(usize, CType)> {
         let mut fields = Vec::new();
         for mem in &self.members {
-            let abs_offset = base_offset + mem.offset;
-            match &mem.member_full_type {
-                FullType::Struct(tag) => {
-                    if let Some(def) = struct_defs.get(tag) {
-                        fields.extend(def.flatten_fields(abs_offset, struct_defs));
-                    }
-                }
-                FullType::Array { elem, size: _ } => {
-                    let mut inner = elem.as_ref();
-                    while let FullType::Array { elem: e, .. } = inner {
-                        inner = e;
-                    }
-                    let elem_size = inner.byte_size();
-                    let scalar_type = inner.to_ctype();
-                    // For arrays of structs, recurse
-                    if let FullType::Struct(tag) = inner {
-                        if let Some(def) = struct_defs.get(tag) {
-                            let total_elems: usize = mem.size / std::cmp::max(def.size, 1);
-                            for i in 0..total_elems {
-                                fields.extend(
-                                    def.flatten_fields(abs_offset + i * def.size, struct_defs),
-                                );
-                            }
-                        }
-                    } else {
-                        let total_elems = mem.size.checked_div(elem_size).unwrap_or(0);
-                        for i in 0..total_elems {
-                            fields.push((abs_offset + i * elem_size, scalar_type));
-                        }
-                    }
-                }
-                _ => {
-                    fields.push((abs_offset, mem.member_type));
-                }
-            }
+            fields.extend(self.flatten_member_fields(mem, base_offset, struct_defs));
         }
         fields
     }
@@ -468,7 +554,9 @@ impl StructDef {
         base_offset: usize,
         struct_defs: &IndexMap<String, StructDef>,
     ) -> Vec<(usize, CType)> {
-        let abs_offset = base_offset + mem.offset;
+        let Some(abs_offset) = base_offset.checked_add(mem.offset) else {
+            return vec![];
+        };
         match &mem.member_full_type {
             FullType::Struct(tag) => {
                 if let Some(def) = struct_defs.get(tag) {
@@ -482,14 +570,46 @@ impl StructDef {
                 while let FullType::Array { elem: e, .. } = inner {
                     inner = e;
                 }
+                if let FullType::Struct(tag) = inner {
+                    if let Some(def) = struct_defs.get(tag) {
+                        let stride = def.size.max(1);
+                        let total_elems = mem.size / stride;
+                        return (0..total_elems)
+                            .filter_map(|i| {
+                                i.checked_mul(def.size)
+                                    .and_then(|delta| abs_offset.checked_add(delta))
+                            })
+                            .flat_map(|offset| def.flatten_fields(offset, struct_defs))
+                            .collect();
+                    }
+                    return vec![];
+                }
                 let scalar_type = inner.to_ctype();
-                let elem_size = inner.byte_size();
+                let elem_size = inner.byte_size_with(struct_defs);
                 if elem_size == 0 {
                     return vec![];
                 }
                 let total_elems = mem.size / elem_size;
                 (0..total_elems)
-                    .map(|i| (abs_offset + i * elem_size, scalar_type))
+                    .filter_map(|i| {
+                        i.checked_mul(elem_size)
+                            .and_then(|delta| abs_offset.checked_add(delta))
+                            .map(|offset| (offset, scalar_type))
+                    })
+                    .collect()
+            }
+            FullType::Vector { elem, lanes, .. } => {
+                let elem_size = elem.byte_size_with(struct_defs);
+                if elem_size == 0 {
+                    return vec![];
+                }
+                let scalar_type = elem.to_ctype();
+                (0..*lanes)
+                    .filter_map(|i| {
+                        i.checked_mul(elem_size)
+                            .and_then(|delta| abs_offset.checked_add(delta))
+                            .map(|offset| (offset, scalar_type))
+                    })
                     .collect()
             }
             _ => vec![(abs_offset, mem.member_type)],
@@ -497,7 +617,9 @@ impl StructDef {
     }
 
     pub fn classify_with(&self, struct_defs: &IndexMap<String, StructDef>) -> Vec<ParamClass> {
-        if self.size > 16 {
+        // SysV requires aggregates containing unaligned fields to be passed
+        // in memory, even when their total size fits in two eightbytes.
+        if self.size > 16 || self.has_unaligned_fields(struct_defs) {
             return vec![ParamClass::Memory];
         }
         let num_eightbytes = self.size.div_ceil(8);
@@ -523,14 +645,13 @@ impl StructDef {
                         let mem_ebs = mem.size.div_ceil(8);
                         let mut mc = Vec::new();
                         for eb in 0..std::cmp::min(mem_ebs, num_eightbytes) {
-                            let has_double = fields
-                                .iter()
-                                .any(|(off, ct)| off / 8 == eb && *ct == CType::Double);
-                            mc.push(if has_double {
-                                ParamClass::Sse
-                            } else {
-                                ParamClass::Integer
-                            });
+                            let mut class = None;
+                            for (off, ctype) in &fields {
+                                if off / 8 == eb {
+                                    merge_param_class(&mut class, abi_field_class(*ctype));
+                                }
+                            }
+                            mc.push(class.unwrap_or(ParamClass::Integer));
                         }
                         mc
                     }
@@ -557,23 +678,42 @@ impl StructDef {
                 .collect()
         } else {
             // Struct classification: based on flattened fields
-            let mut classes = vec![ParamClass::Integer; num_eightbytes];
+            let mut classes = vec![None::<ParamClass>; num_eightbytes];
             let fields = self.flatten_fields(0, struct_defs);
             for (offset, ctype) in &fields {
-                if *ctype == CType::Double {
-                    let eb = offset / 8;
-                    if eb < num_eightbytes {
-                        classes[eb] = ParamClass::Sse;
-                    }
+                let eb = offset / 8;
+                if eb < num_eightbytes {
+                    merge_param_class(&mut classes[eb], abi_field_class(*ctype));
                 }
             }
             classes
+                .into_iter()
+                .map(|c| c.unwrap_or(ParamClass::Integer))
+                .collect()
         }
     }
 
     pub fn classify(&self) -> Vec<ParamClass> {
         // Legacy version without struct_defs — works for structs without nested structs
         self.classify_with(&IndexMap::new())
+    }
+}
+
+fn abi_field_class(ctype: CType) -> ParamClass {
+    if matches!(ctype, CType::Float | CType::Double) {
+        ParamClass::Sse
+    } else {
+        ParamClass::Integer
+    }
+}
+
+fn merge_param_class(current: &mut Option<ParamClass>, incoming: ParamClass) {
+    match current {
+        None => *current = Some(incoming),
+        Some(ParamClass::Sse) if incoming == ParamClass::Integer => {
+            *current = Some(ParamClass::Integer)
+        }
+        _ => {}
     }
 }
 
@@ -668,7 +808,9 @@ impl StructDef {
                 ) {
                     return Err(format!("bit-field '{}' must have integer type", m.name));
                 }
-                let storage_bits = m_size * 8;
+                let storage_bits = m_size
+                    .checked_mul(8)
+                    .ok_or_else(|| format!("bit-field '{}' storage size is too large", m.name))?;
                 if width as usize > storage_bits {
                     return Err(format!(
                         "bit-field '{}' width {} exceeds storage width {}",
@@ -695,7 +837,9 @@ impl StructDef {
                 } else {
                     storage_align
                 };
-                let storage_bits = storage_size * 8;
+                let storage_bits = storage_size
+                    .checked_mul(8)
+                    .ok_or_else(|| format!("bit-field '{}' storage size is too large", m.name))?;
                 if width == 0 {
                     if !m.name.is_empty() {
                         return Err("zero-width bit-field may not have a name".to_string());
@@ -734,10 +878,13 @@ impl StructDef {
                     continue;
                 }
 
+                let current_bit_end = next_bit_offset
+                    .checked_add(width as usize)
+                    .ok_or_else(|| format!("bit-field '{}' offset is too large", m.name))?;
                 let needs_new_unit = bit_unit_size == 0
                     || bit_unit_size != storage_size
                     || bit_unit_align != storage_align
-                    || next_bit_offset + width as usize > storage_bits;
+                    || current_bit_end > storage_bits;
                 if needs_new_unit {
                     offset = round_up_to(offset, storage_align)?;
                     bit_unit_offset = offset;
@@ -765,13 +912,19 @@ impl StructDef {
                         reverse_storage_order,
                     });
                 }
-                next_bit_offset += width as usize;
+                next_bit_offset = if needs_new_unit {
+                    width as usize
+                } else {
+                    current_bit_end
+                };
                 max_align = max_align.max(storage_align);
                 continue;
             }
 
             if next_bit_offset > 0 {
-                offset = bit_unit_offset + next_bit_offset.div_ceil(8);
+                offset = bit_unit_offset
+                    .checked_add(next_bit_offset.div_ceil(8))
+                    .ok_or_else(|| format!("struct '{}' layout is too large", tag))?;
             }
             next_bit_offset = 0;
             bit_unit_size = 0;
@@ -859,6 +1012,7 @@ impl StructDef {
         })
     }
 
+    #[must_use]
     pub fn find_member(&self, name: &str) -> Option<&StructMember> {
         self.members.iter().find(|m| m.name == name)
     }
@@ -888,13 +1042,18 @@ fn member_size_align(
         FullType::Function { .. } => Ok((8, 8)),
         FullType::Array { elem, size } => {
             let (elem_size, elem_align) = member_size_align(elem, struct_defs)?;
-            let total = elem_size * size;
+            let total = elem_size
+                .checked_mul(array_size_for_layout(*size))
+                .ok_or_else(|| "struct member array size is too large".to_string())?;
             // Inside structs, array alignment is just the element alignment
             Ok((total, elem_align))
         }
         FullType::Vector { elem, lanes, .. } => {
             let (elem_size, elem_align) = member_size_align(elem, struct_defs)?;
-            Ok((elem_size * lanes, elem_align))
+            let total = elem_size
+                .checked_mul(*lanes)
+                .ok_or_else(|| "struct member vector size is too large".to_string())?;
+            Ok((total, elem_align))
         }
         FullType::Struct(tag) => {
             if let Some(def) = struct_defs.get(tag) {
@@ -1268,18 +1427,22 @@ pub enum StorageClass {
 }
 
 impl StorageClass {
+    #[must_use]
     pub fn is_static(&self) -> bool {
         matches!(self, Self::Static | Self::StaticThreadLocal)
     }
 
+    #[must_use]
     pub fn is_extern(&self) -> bool {
         matches!(self, Self::Extern | Self::ExternThreadLocal)
     }
 
+    #[must_use]
     pub fn is_typedef(&self) -> bool {
         matches!(self, Self::Typedef)
     }
 
+    #[must_use]
     pub fn is_thread_local(&self) -> bool {
         matches!(
             self,
@@ -1287,6 +1450,7 @@ impl StorageClass {
         )
     }
 
+    #[must_use]
     pub fn with_static(self) -> Self {
         match self {
             Self::ThreadLocal => Self::StaticThreadLocal,
@@ -1294,6 +1458,7 @@ impl StorageClass {
         }
     }
 
+    #[must_use]
     pub fn with_extern(self) -> Self {
         match self {
             Self::ThreadLocal => Self::ExternThreadLocal,
@@ -1301,6 +1466,7 @@ impl StorageClass {
         }
     }
 
+    #[must_use]
     pub fn with_thread_local(self) -> Self {
         match self {
             Self::Static => Self::StaticThreadLocal,
@@ -1733,6 +1899,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn c_string_byte_helpers_preserve_byte_semantics() {
+        let value = "A\u{00e9}\u{20ac}";
+        let bytes = c_string_bytes(value);
+        assert_eq!(bytes, vec![b'A', 0xe9, 0xe2, 0x82, 0xac]);
+        assert_eq!(c_string_byte_len(value), bytes.len());
+        assert!(!c_string_contains_zero(value));
+        assert!(c_string_contains_zero("a\0b"));
+        assert_eq!(c_string_truncate_bytes(value, 2), "A\u{00e9}");
+        assert_eq!(c_string_truncate_bytes(value, 3), "A\u{00e9}");
+        assert_eq!(c_string_truncate_bytes(value, 4), "A\u{00e9}");
+        assert_eq!(c_string_truncate_bytes(value, 5), value);
+    }
+
+    #[test]
     fn host_target_matches_compilation_platform() {
         let host = Target::host();
         assert_eq!(
@@ -1858,5 +2038,239 @@ mod tests {
             vec![ParamClass::Integer]
         );
         Ok(())
+    }
+
+    #[test]
+    fn union_classification_flattens_arrays_of_structs() -> Result<(), String> {
+        let child_members = vec![MemberDeclaration {
+            name: "d".to_string(),
+            member_type: CType::Double,
+            member_full_type: FullType::Scalar(CType::Double),
+            bit_width: None,
+            flexible_array: false,
+            alignment: None,
+            packed: false,
+        }];
+        let child = StructDef::from_members("Child", &child_members, &IndexMap::new())?;
+        let mut defs = IndexMap::new();
+        defs.insert("Child".to_string(), child);
+        let union_members = vec![MemberDeclaration {
+            name: "items".to_string(),
+            member_type: CType::Struct,
+            member_full_type: FullType::Array {
+                elem: Box::new(FullType::Struct("Child".to_string())),
+                size: 2,
+            },
+            bit_width: None,
+            flexible_array: false,
+            alignment: None,
+            packed: false,
+        }];
+        let union = StructDef::from_members_union("U", &union_members, &defs)?;
+
+        assert_eq!(
+            union.classify_with(&defs),
+            vec![ParamClass::Sse, ParamClass::Sse]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn struct_classification_treats_float_as_sse_and_integer_dominates() -> Result<(), String> {
+        let float_member = MemberDeclaration {
+            name: "f".to_string(),
+            member_type: CType::Float,
+            member_full_type: FullType::Scalar(CType::Float),
+            bit_width: None,
+            flexible_array: false,
+            alignment: None,
+            packed: false,
+        };
+        let float_struct = StructDef::from_members(
+            "FloatOnly",
+            std::slice::from_ref(&float_member),
+            &IndexMap::new(),
+        )?;
+        assert_eq!(float_struct.classify(), vec![ParamClass::Sse]);
+
+        let int_member = MemberDeclaration {
+            name: "i".to_string(),
+            member_type: CType::Int,
+            member_full_type: FullType::Scalar(CType::Int),
+            bit_width: None,
+            flexible_array: false,
+            alignment: None,
+            packed: false,
+        };
+        let mixed_struct =
+            StructDef::from_members("FloatAndInt", &[float_member, int_member], &IndexMap::new())?;
+        assert_eq!(mixed_struct.classify(), vec![ParamClass::Integer]);
+        Ok(())
+    }
+
+    #[test]
+    fn struct_classification_passes_unaligned_packed_fields_in_memory() -> Result<(), String> {
+        let members = [
+            MemberDeclaration {
+                name: "prefix".to_string(),
+                member_type: CType::Char,
+                member_full_type: FullType::Scalar(CType::Char),
+                bit_width: None,
+                flexible_array: false,
+                alignment: None,
+                packed: false,
+            },
+            MemberDeclaration {
+                name: "value".to_string(),
+                member_type: CType::Double,
+                member_full_type: FullType::Scalar(CType::Double),
+                bit_width: None,
+                flexible_array: false,
+                alignment: None,
+                packed: true,
+            },
+        ];
+        let packed = StructDef::from_members("Packed", &members, &IndexMap::new())?;
+
+        assert_eq!(packed.members[1].offset, 1);
+        assert_eq!(packed.size, 9);
+        assert_eq!(packed.classify(), vec![ParamClass::Memory]);
+        Ok(())
+    }
+
+    #[test]
+    fn struct_classification_flattens_vector_lanes() -> Result<(), String> {
+        let member = MemberDeclaration {
+            name: "v".to_string(),
+            member_type: CType::Float,
+            member_full_type: FullType::Vector {
+                elem: Box::new(FullType::Scalar(CType::Float)),
+                lanes: 4,
+                complex: false,
+            },
+            bit_width: None,
+            flexible_array: false,
+            alignment: None,
+            packed: false,
+        };
+        let vector_struct = StructDef::from_members("Vector", &[member], &IndexMap::new())?;
+
+        assert_eq!(vector_struct.size, 16);
+        assert_eq!(
+            vector_struct.classify(),
+            vec![ParamClass::Sse, ParamClass::Sse]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn abi_flattening_rejects_overflowing_member_offsets() {
+        let member = StructMember {
+            name: "overflow".to_string(),
+            member_type: CType::Double,
+            member_full_type: FullType::Scalar(CType::Double),
+            flexible_array: false,
+            offset: usize::MAX,
+            size: 8,
+            bit_offset: 0,
+            bit_width: None,
+            reverse_storage_order: false,
+        };
+        let def = StructDef {
+            tag: "Overflow".to_string(),
+            members: vec![member],
+            size: 8,
+            alignment: 8,
+            is_union: false,
+        };
+
+        assert!(def.flatten_fields(1, &IndexMap::new()).is_empty());
+    }
+
+    #[test]
+    fn abi_flattening_rejects_overflowing_struct_array_offsets() {
+        let child = StructDef {
+            tag: "Child".to_string(),
+            members: vec![StructMember {
+                name: "value".to_string(),
+                member_type: CType::Double,
+                member_full_type: FullType::Scalar(CType::Double),
+                flexible_array: false,
+                offset: 0,
+                size: 8,
+                bit_offset: 0,
+                bit_width: None,
+                reverse_storage_order: false,
+            }],
+            size: usize::MAX / 2,
+            alignment: 8,
+            is_union: false,
+        };
+        let member = StructMember {
+            name: "children".to_string(),
+            member_type: CType::Struct,
+            member_full_type: FullType::Array {
+                elem: Box::new(FullType::Struct("Child".to_string())),
+                size: 2,
+            },
+            flexible_array: false,
+            offset: 0,
+            size: usize::MAX,
+            bit_offset: 0,
+            bit_width: None,
+            reverse_storage_order: false,
+        };
+        let outer = StructDef {
+            tag: "Outer".to_string(),
+            members: vec![member],
+            size: usize::MAX,
+            alignment: 8,
+            is_union: false,
+        };
+        let mut defs = IndexMap::new();
+        defs.insert("Child".to_string(), child);
+
+        assert_eq!(outer.flatten_fields(usize::MAX - 1, &defs).len(), 1);
+    }
+
+    #[test]
+    fn struct_member_size_overflow_is_reported() {
+        let member = MemberDeclaration {
+            name: "huge".to_string(),
+            member_type: CType::Int,
+            member_full_type: FullType::Array {
+                elem: Box::new(FullType::Scalar(CType::Int)),
+                size: usize::MAX,
+            },
+            bit_width: None,
+            flexible_array: false,
+            alignment: None,
+            packed: false,
+        };
+        let error = StructDef::from_members("Huge", &[member], &IndexMap::new())
+            .expect_err("overflowing array member size should be rejected");
+        assert!(
+            error.contains("struct member array size is too large"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn checked_full_type_size_rejects_array_overflow() {
+        let ty = FullType::Array {
+            elem: Box::new(FullType::Scalar(CType::Long)),
+            size: usize::MAX,
+        };
+        assert_eq!(ty.checked_byte_size_with(&IndexMap::new()), None);
+    }
+
+    #[test]
+    fn unchecked_full_type_size_saturates_on_overflow() {
+        let ty = FullType::Array {
+            elem: Box::new(FullType::Scalar(CType::Long)),
+            size: usize::MAX,
+        };
+        assert_eq!(ty.byte_size(), usize::MAX);
+        assert_eq!(ty.byte_size_with(&IndexMap::new()), usize::MAX);
     }
 }

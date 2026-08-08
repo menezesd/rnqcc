@@ -12,6 +12,8 @@ use rnqcc::{compile, preprocess, tempfile};
 
 use super::*;
 
+const MAX_INCLUDE_DEPTH: usize = 256;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MacroDef {
     Object(String),
@@ -38,6 +40,10 @@ pub struct PreprocessorState {
 }
 
 pub fn civil_date_from_days(days: i64) -> (i32, u32, u32) {
+    // Keep the intermediate arithmetic wider than the public result.  The
+    // SOURCE_DATE_EPOCH environment variable is parsed as an i64, so values
+    // near either limit must not overflow while converting to a civil date.
+    let days = i128::from(days);
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
@@ -48,7 +54,14 @@ pub fn civil_date_from_days(days: i64) -> (i32, u32, u32) {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = mp + if mp < 10 { 3 } else { -9 };
     let year = y + if month <= 2 { 1 } else { 0 };
-    (year as i32, month as u32, day as u32)
+    let year = if year < i128::from(i32::MIN) {
+        i32::MIN
+    } else if year > i128::from(i32::MAX) {
+        i32::MAX
+    } else {
+        year as i32
+    };
+    (year, month as u32, day as u32)
 }
 
 pub fn format_c_date_time(seconds: i64) -> (String, String) {
@@ -284,11 +297,14 @@ impl IncludePaths {
             .chain(self.system.iter().cloned())
             .chain(self.after.iter().cloned())
             .collect();
-        let start = dirs
+        let mut start = dirs
             .iter()
-            .rposition(|dir| same_include_dir(dir, base_dir))
+            .position(|dir| same_include_dir(dir, base_dir))
             .map(|index| index + 1)
             .unwrap_or(0);
+        while start < dirs.len() && same_include_dir(&dirs[start], base_dir) {
+            start += 1;
+        }
         dirs[start..].to_vec()
     }
 }
@@ -852,15 +868,10 @@ pub fn resolve_include_path(
     };
 
     match spec {
-        IncludeSpec::Quoted(name) | IncludeSpec::Angled(name) => {
-            let direct = PathBuf::from(name);
-            if !include_next && direct.exists() {
-                return Some(direct);
-            }
-            dirs.into_iter()
-                .map(|dir| dir.join(name))
-                .find(|path| path.exists())
-        }
+        IncludeSpec::Quoted(name) | IncludeSpec::Angled(name) => dirs
+            .into_iter()
+            .map(|dir| dir.join(name))
+            .find(|path| path.exists()),
     }
 }
 
@@ -3574,6 +3585,19 @@ pub fn recursive_include_error(src: &Path, canonical: &Path, include_stack: &[Pa
     )
 }
 
+pub fn include_depth_error(src: &Path, include_stack: &[PathBuf]) -> String {
+    let mut chain: Vec<String> = include_stack
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    chain.push(src.display().to_string());
+    format!(
+        "include nesting too deep (limit {}): {}",
+        MAX_INCLUDE_DEPTH,
+        chain.join(" -> ")
+    )
+}
+
 pub fn push_line_marker(out: &mut String, line: usize, file: &str) {
     out.push_str(&format!("# {} \"{}\"\n", line, escape_c_string(file)));
 }
@@ -4902,6 +4926,9 @@ pub fn internal_preprocess_source(
             context.include_stack,
         ));
     }
+    if context.include_stack.len() >= MAX_INCLUDE_DEPTH {
+        return Err(include_depth_error(src, context.include_stack));
+    }
     context.include_stack.push(canonical.clone());
     let include_depth = context.include_stack.len().saturating_sub(1);
     if let Some(stats) = context.stats_mut() {
@@ -5608,10 +5635,10 @@ pub fn preprocess(invocation: PreprocessInvocation<'_>) -> Result<PreprocessedSo
         std::io::stdin()
             .read_to_string(&mut source)
             .map_err(|err| format!("could not read stdin: {}", err))?;
-        let path = temp_path_for("stdin", invocation.index, "c");
+        let path = temp_path_for("stdin", invocation.index, "c")?;
+        stdin_temp_guard = Some(tempfile::TempFile::new(path.clone()));
         std::fs::write(&path, source)
             .map_err(|err| format!("could not write {}: {}", path, err))?;
-        stdin_temp_guard = Some(tempfile::TempFile::new(path.clone()));
         path
     } else {
         invocation.src.to_string()
@@ -5626,9 +5653,9 @@ pub fn preprocess(invocation: PreprocessInvocation<'_>) -> Result<PreprocessedSo
     let output = if invocation.keep_temps {
         replace_extension(&actual_src, "i")
     } else {
-        temp_path_for(&actual_src, invocation.index, "i")
+        temp_path_for(&actual_src, invocation.index, "i")?
     };
-    let preprocessing_result = if invocation.internal_cpp {
+    let preprocessing_result: Result<Vec<PathBuf>, String> = if invocation.internal_cpp {
         internal_preprocess(InternalPreprocessInvocation {
             src: &actual_src,
             output: &output,
@@ -5644,7 +5671,7 @@ pub fn preprocess(invocation: PreprocessInvocation<'_>) -> Result<PreprocessedSo
             suppress_preprocessed_output: invocation.suppress_preprocessed_output,
             trace_includes: invocation.trace_includes,
             line_markers: invocation.line_markers,
-        })?
+        })
     } else {
         let mut args: Vec<OsString> = if Target::host().os == TargetOs::MacOs {
             gcc_arch_args(invocation.target)
@@ -5741,11 +5768,31 @@ pub fn preprocess(invocation: PreprocessInvocation<'_>) -> Result<PreprocessedSo
             OsString::from("-o"),
             OsString::from(output.as_str()),
         ]);
-        run_command(invocation.cc, args)?;
-        Vec::new()
+        run_command(invocation.cc, args).map(|()| Vec::new())
     };
     drop(stdin_temp_guard);
-    let dependencies = preprocessing_result;
+    let dependencies = match preprocessing_result {
+        Ok(dependencies) => dependencies,
+        Err(error) => {
+            if !invocation.keep_temps {
+                let _ = std::fs::remove_file(&output);
+            }
+            return Err(error);
+        }
+    };
+    if !invocation.keep_temps {
+        if let Ok(permissions) =
+            std::fs::metadata(&actual_src).map(|metadata| metadata.permissions())
+        {
+            if let Err(err) = std::fs::set_permissions(&output, permissions) {
+                let _ = std::fs::remove_file(&output);
+                return Err(format!(
+                    "could not preserve permissions for {}: {}",
+                    output, err
+                ));
+            }
+        }
+    }
     Ok(PreprocessedSource {
         path: output,
         generated: true,
@@ -5756,6 +5803,74 @@ pub fn preprocess(invocation: PreprocessInvocation<'_>) -> Result<PreprocessedSo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn date_conversion_handles_extreme_epoch_values() {
+        for seconds in [i64::MIN, i64::MAX] {
+            let (date, time) = format_c_date_time(seconds);
+            assert!(!date.is_empty());
+            assert_eq!(time.len(), 8);
+            assert_eq!(time.as_bytes()[2], b':');
+            assert_eq!(time.as_bytes()[5], b':');
+        }
+    }
+
+    #[test]
+    fn quoted_includes_search_including_directory_before_working_directory() -> Result<(), String> {
+        let root = std::env::temp_dir().join(format!(
+            "rnqcc-include-search-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let source_dir = root.join("source");
+        std::fs::create_dir_all(&source_dir).map_err(|err| err.to_string())?;
+        std::fs::write(source_dir.join("header.h"), "source\n").map_err(|err| err.to_string())?;
+
+        let cwd_header = PathBuf::from("header.h");
+        let cwd_header_was_present = cwd_header.exists();
+        if cwd_header_was_present {
+            let _ = std::fs::remove_dir_all(&root);
+            return Err(
+                "test requires no header.h in the repository working directory".to_string(),
+            );
+        }
+
+        let paths = IncludePaths {
+            use_standard_system: false,
+            ..IncludePaths::default()
+        };
+        let resolved = resolve_include_path(
+            &IncludeSpec::Quoted("header.h".to_string()),
+            &source_dir,
+            &paths,
+            false,
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(resolved, Some(source_dir.join("header.h")));
+        Ok(())
+    }
+
+    #[test]
+    fn include_next_starts_after_first_duplicate_directory() {
+        let first = PathBuf::from("first");
+        let second = PathBuf::from("second");
+        let paths = IncludePaths {
+            quote: vec![first.clone()],
+            user: vec![second.clone(), first.clone()],
+            use_standard_system: false,
+            ..IncludePaths::default()
+        };
+        assert_eq!(paths.include_next_dirs(&first), vec![second, first]);
+    }
+
+    #[test]
+    fn include_depth_error_reports_the_full_chain() {
+        let stack = vec![PathBuf::from("root.c"), PathBuf::from("one.h")];
+        let error = include_depth_error(Path::new("two.h"), &stack);
+        assert!(error.contains("include nesting too deep"));
+        assert!(error.contains("limit 256"));
+        assert!(error.contains("root.c -> one.h -> two.h"));
+    }
 
     #[test]
     fn if_expressions_accept_c23_digit_separators() -> Result<(), String> {

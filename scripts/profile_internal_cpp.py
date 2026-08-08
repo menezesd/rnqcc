@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import subprocess
 import sys
 import tempfile
 import time
@@ -14,19 +13,26 @@ from pathlib import Path
 try:
     from gcc_torture_smoke import (
         DEFAULT_RNQCC,
+        resolve_suite,
         rnqcc_options_for_test,
         rnqcc_target_for_test,
-        resolve_suite,
     )
 except ModuleNotFoundError as err:
     if err.name != "gcc_torture_smoke":
         raise
     from scripts.gcc_torture_smoke import (
         DEFAULT_RNQCC,
+        resolve_suite,
         rnqcc_options_for_test,
         rnqcc_target_for_test,
-        resolve_suite,
     )
+
+try:
+    from smoke_utils import positive_finite_float, run_with_timeout
+except ModuleNotFoundError as err:
+    if err.name != "smoke_utils":
+        raise
+    from scripts.smoke_utils import positive_finite_float, run_with_timeout
 
 
 DEFAULT_TESTS = [
@@ -42,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", type=Path, help="gcc.c-torture suite path")
     parser.add_argument("--rnqcc", type=Path, default=DEFAULT_RNQCC)
-    parser.add_argument("--timeout", type=float, default=240.0)
+    parser.add_argument("--timeout", type=positive_finite_float, default=240.0)
     parser.add_argument(
         "--test",
         action="append",
@@ -81,22 +87,10 @@ def profile_test(rnqcc: Path, suite: Path, rel: str, timeout: float, tmpdir: Pat
     env = os.environ.copy()
     env["RNQCC_INTERNAL_CPP_STATS"] = "1"
     start = time.perf_counter()
-    try:
-        result = subprocess.run(
-            cmd,
-            env=env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-        )
-        elapsed = time.perf_counter() - start
-    except subprocess.TimeoutExpired as err:
-        elapsed = time.perf_counter() - start
-        stderr = err.stderr or ""
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode(errors="replace")
-        print(f"{rel}\tTIMEOUT\t{elapsed:.3f}s\t{stats_line(stderr)}")
+    result = run_with_timeout(cmd, env=env, timeout=timeout)
+    elapsed = time.perf_counter() - start
+    if result.returncode == 124:
+        print(f"{rel}\tTIMEOUT\t{elapsed:.3f}s\t{stats_line(result.stderr)}")
         return 1
 
     status = "PASS" if result.returncode == 0 else f"FAIL({result.returncode})"

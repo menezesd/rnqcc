@@ -1,7 +1,13 @@
 use super::token::{PpToken, PpTokenKind};
 
 pub fn emit_tokens(tokens: &[PpToken]) -> String {
-    let mut out = String::with_capacity(tokens.iter().map(|token| token.text().len()).sum());
+    // Capacity is only a hint; saturating here keeps malformed or very large
+    // token streams from turning an otherwise valid emission into an integer
+    // overflow panic before the actual output is built.
+    let estimated_len = tokens.iter().fold(0usize, |total, token| {
+        total.saturating_add(token.text().len())
+    });
+    let mut out = String::with_capacity(estimated_len);
     let mut previous: Option<&PpToken> = None;
     let mut previous_emitted_whitespace = false;
     for token in tokens {
@@ -10,7 +16,7 @@ pub fn emit_tokens(tokens: &[PpToken]) -> String {
         }
         let text = token.text();
         out.push_str(text);
-        previous_emitted_whitespace = text.chars().last().is_some_and(char::is_whitespace);
+        previous_emitted_whitespace = text.chars().next_back().is_some_and(char::is_whitespace);
         previous = Some(token);
     }
     out
@@ -63,18 +69,18 @@ fn tokens_would_merge(previous: &PpToken, current: &PpToken) -> bool {
 
 fn can_continue_identifier(left: &str) -> bool {
     left.chars()
-        .last()
+        .next_back()
         .is_some_and(super::lexer::is_ident_continue)
 }
 
 fn can_continue_pp_number(left: &str) -> bool {
     left.chars()
-        .last()
+        .next_back()
         .is_some_and(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '\''))
 }
 
 fn ends_pp_exponent(text: &str) -> bool {
-    matches!(text.chars().last(), Some('e' | 'E' | 'p' | 'P'))
+    matches!(text.as_bytes().last(), Some(b'e' | b'E' | b'p' | b'P'))
 }
 
 fn punctuators_or_comments_would_merge(left: &str, right: &str) -> bool {

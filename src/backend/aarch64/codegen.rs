@@ -82,24 +82,33 @@ impl Deref for RegisterStackSlots<'_> {
     }
 }
 
-fn align_to(value: i32, alignment: i32) -> i32 {
+fn align_to(value: i32, alignment: i32) -> Result<i32, String> {
+    if alignment <= 0 {
+        return Err("AArch64 stack alignment must be positive".to_string());
+    }
     if value == 0 {
-        0
-    } else {
-        (value + alignment - 1) & !(alignment - 1)
+        return Ok(0);
     }
+    value
+        .checked_add(alignment - 1)
+        .map(|rounded| rounded & !(alignment - 1))
+        .ok_or_else(|| "AArch64 stack frame size overflow".to_string())
 }
 
-fn compute_frame_size(local_stack_size: i32, saves_link_register: bool) -> i32 {
+fn compute_frame_size(local_stack_size: i32, saves_link_register: bool) -> Result<i32, String> {
     if saves_link_register {
-        local_stack_size + LINK_REGISTER_SAVE_SIZE
-    } else {
         local_stack_size
+            .checked_add(LINK_REGISTER_SAVE_SIZE)
+            .ok_or_else(|| "AArch64 stack frame size overflow".to_string())
+    } else {
+        Ok(local_stack_size)
     }
 }
 
-fn compute_link_register_offset(frame_size: i32) -> i32 {
-    frame_size - STACK_SLOT_SIZE
+fn compute_link_register_offset(frame_size: i32) -> Result<i32, String> {
+    frame_size
+        .checked_sub(STACK_SLOT_SIZE)
+        .ok_or_else(|| "AArch64 link-register stack offset overflow".to_string())
 }
 
 fn align_usize_to(value: usize, alignment: usize) -> Result<usize, String> {
@@ -122,12 +131,37 @@ fn align_i64_to(value: i64, alignment: i64) -> Result<i64, String> {
         .ok_or_else(|| "AArch64 backend large stack alignment overflow".to_string())
 }
 
-fn stack_arg_offset(base: i32, index: usize) -> i32 {
-    base + (index as i32 * STACK_SLOT_SIZE)
+fn stack_arg_offset(base: i32, index: usize) -> Result<i32, String> {
+    let index = i32::try_from(index)
+        .map_err(|_| "AArch64 stack argument slot index overflow".to_string())?;
+    let byte_offset = index
+        .checked_mul(STACK_SLOT_SIZE)
+        .ok_or_else(|| "AArch64 stack argument offset overflow".to_string())?;
+    base.checked_add(byte_offset)
+        .ok_or_else(|| "AArch64 stack argument offset overflow".to_string())
 }
 
-fn outgoing_stack_size(stack_arg_count: usize) -> i32 {
-    align_to(stack_arg_count as i32 * STACK_SLOT_SIZE, STACK_ALIGNMENT)
+fn align_stack_slots(index: usize, alignment: usize) -> Result<usize, String> {
+    let remainder = index % alignment;
+    if remainder == 0 {
+        Ok(index)
+    } else {
+        index
+            .checked_add(alignment - remainder)
+            .ok_or_else(|| "AArch64 outgoing stack slot offset overflow".to_string())
+    }
+}
+
+fn outgoing_stack_size(stack_arg_count: usize) -> Result<i32, String> {
+    let bytes = stack_arg_count
+        .checked_mul(STACK_SLOT_SIZE as usize)
+        .ok_or_else(|| "AArch64 outgoing stack argument size overflow".to_string())?;
+    let bytes = i32::try_from(bytes)
+        .map_err(|_| "AArch64 outgoing stack argument size overflow".to_string())?;
+    bytes
+        .checked_add(STACK_ALIGNMENT - 1)
+        .map(|rounded| rounded & !(STACK_ALIGNMENT - 1))
+        .ok_or_else(|| "AArch64 outgoing stack argument size overflow".to_string())
 }
 
 fn emit_epilogue(
@@ -163,7 +197,10 @@ fn low64_operand(op: &AsmOperand) -> Result<AsmOperand, String> {
 
 fn high64_operand(op: &AsmOperand) -> Result<AsmOperand, String> {
     match op {
-        AsmOperand::Stack(offset) => Ok(AsmOperand::Stack(*offset + 8)),
+        AsmOperand::Stack(offset) => offset
+            .checked_add(8)
+            .map(AsmOperand::Stack)
+            .ok_or_else(|| "AArch64 high 128-bit stack offset overflow".to_string()),
         AsmOperand::Data(name) => Ok(data_operand_with_offset(name, 8)),
         AsmOperand::Reg(Reg::AX) => Ok(AsmOperand::Reg(Reg::DI)),
         AsmOperand::Reg(reg) => Err(format!(
@@ -182,7 +219,10 @@ fn high64_operand(op: &AsmOperand) -> Result<AsmOperand, String> {
 
 fn byte_offset_operand(op: &AsmOperand, offset: i32) -> Result<AsmOperand, String> {
     match op {
-        AsmOperand::Stack(base) => Ok(AsmOperand::Stack(*base + i64::from(offset))),
+        AsmOperand::Stack(base) => base
+            .checked_add(i64::from(offset))
+            .map(AsmOperand::Stack)
+            .ok_or_else(|| "AArch64 stack byte offset overflow".to_string()),
         AsmOperand::Data(name) => Ok(data_operand_with_offset(name, offset)),
         other => Err(format!(
             "AArch64 backend cannot address byte offset {} of {:?}",
@@ -2186,18 +2226,23 @@ fn rewrite_tls_operands(func: &mut AsmFunction, tls_vars: &HashSet<String>) {
 
 fn stack_or_data_operand(
     name: &str,
-    offset: i32,
+    offset: i64,
     stack_slots: &HashMap<String, i32>,
     global_vars: &HashSet<String>,
 ) -> Result<AsmOperand, String> {
     if global_vars.contains(name) {
+        let offset = i32::try_from(offset)
+            .map_err(|_| format!("AArch64 aggregate offset too large for {}", name))?;
         Ok(data_operand_with_offset(name, offset))
     } else {
-        stack_slots
+        let base = stack_slots
             .get(name)
             .copied()
-            .map(|base| AsmOperand::Stack(i64::from(base + offset)))
-            .ok_or_else(|| format!("AArch64 backend missing stack slot for {}", name))
+            .ok_or_else(|| format!("AArch64 backend missing stack slot for {}", name))?;
+        let offset = i64::from(base)
+            .checked_add(offset)
+            .ok_or_else(|| format!("AArch64 aggregate offset overflows for {}", name))?;
+        Ok(AsmOperand::Stack(offset))
     }
 }
 
@@ -2291,6 +2336,11 @@ fn copy_bytes(
     stack_slots: &HashMap<String, i32>,
     global_vars: &HashSet<String>,
 ) -> Result<(), String> {
+    if size > i32::MAX as usize {
+        return Err(format!(
+            "AArch64 backend aggregate copy {src_name} -> {dst_name} is too large"
+        ));
+    }
     let mut offset = 0usize;
     for (ty, width) in [
         (AsmType::Quadword, 8),
@@ -2298,7 +2348,7 @@ fn copy_bytes(
         (AsmType::Word, 2),
         (AsmType::Byte, 1),
     ] {
-        while offset + width <= size {
+        while offset <= size.saturating_sub(width) {
             emit_aggregate_copy_chunk(
                 instructions,
                 src_name,
@@ -2327,13 +2377,13 @@ fn emit_aggregate_copy_chunk(
         .map_err(|_| format!("AArch64 backend aggregate offset too large: {src_name}"))?;
     instructions.push(AsmInstr::Mov(
         ty,
-        stack_or_data_operand(src_name, byte_offset, stack_slots, global_vars)?,
+        stack_or_data_operand(src_name, i64::from(byte_offset), stack_slots, global_vars)?,
         AsmOperand::Reg(Reg::R10),
     ));
     instructions.push(AsmInstr::Mov(
         ty,
         AsmOperand::Reg(Reg::R10),
-        stack_or_data_operand(dst_name, byte_offset, stack_slots, global_vars)?,
+        stack_or_data_operand(dst_name, i64::from(byte_offset), stack_slots, global_vars)?,
     ));
     Ok(())
 }
@@ -2351,13 +2401,15 @@ fn move_struct_to_return_regs(
     let mut gp_idx = 0usize;
     let mut fp_idx = 0usize;
     for (chunk_idx, class) in classes.iter().enumerate() {
-        let offset = i32::try_from(chunk_idx * 8)
-            .map_err(|_| format!("AArch64 backend aggregate offset too large: {}", name))?;
+        let offset = chunk_idx
+            .checked_mul(8)
+            .and_then(|offset| i32::try_from(offset).ok())
+            .ok_or_else(|| format!("AArch64 backend aggregate offset too large: {}", name))?;
         match class {
             ParamClass::Integer if gp_idx < RETURN_GP_REGS.len() => {
                 instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
-                    stack_or_data_operand(name, offset, stack_slots, global_vars)?,
+                    stack_or_data_operand(name, i64::from(offset), stack_slots, global_vars)?,
                     AsmOperand::Reg(RETURN_GP_REGS[gp_idx]),
                 ));
                 gp_idx += 1;
@@ -2365,7 +2417,7 @@ fn move_struct_to_return_regs(
             ParamClass::Sse if fp_idx < RETURN_FP_REGS.len() => {
                 instructions.push(AsmInstr::Mov(
                     AsmType::Double,
-                    stack_or_data_operand(name, offset, stack_slots, global_vars)?,
+                    stack_or_data_operand(name, i64::from(offset), stack_slots, global_vars)?,
                     AsmOperand::Xmm(RETURN_FP_REGS[fp_idx]),
                 ));
                 fp_idx += 1;
@@ -2400,14 +2452,16 @@ fn move_return_regs_to_struct(
     let mut gp_idx = 0usize;
     let mut fp_idx = 0usize;
     for (chunk_idx, class) in classes.iter().enumerate() {
-        let offset = i32::try_from(chunk_idx * 8)
-            .map_err(|_| format!("AArch64 backend aggregate offset too large: {}", name))?;
+        let offset = chunk_idx
+            .checked_mul(8)
+            .and_then(|offset| i32::try_from(offset).ok())
+            .ok_or_else(|| format!("AArch64 backend aggregate offset too large: {}", name))?;
         match class {
             ParamClass::Integer if gp_idx < RETURN_GP_REGS.len() => {
                 instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     AsmOperand::Reg(RETURN_GP_REGS[gp_idx]),
-                    stack_or_data_operand(name, offset, stack_slots, global_vars)?,
+                    stack_or_data_operand(name, i64::from(offset), stack_slots, global_vars)?,
                 ));
                 gp_idx += 1;
             }
@@ -2415,7 +2469,7 @@ fn move_return_regs_to_struct(
                 instructions.push(AsmInstr::Mov(
                     AsmType::Double,
                     AsmOperand::Xmm(RETURN_FP_REGS[fp_idx]),
-                    stack_or_data_operand(name, offset, stack_slots, global_vars)?,
+                    stack_or_data_operand(name, i64::from(offset), stack_slots, global_vars)?,
                 ));
                 fp_idx += 1;
             }
@@ -2620,10 +2674,12 @@ fn collect_stack_slots(
         let size =
             if let Some(size) = aggregate_size(&var, array_sizes, var_struct_tags, struct_defs) {
                 if size > i32::MAX as usize {
-                    offset = align_to(offset, STACK_SLOT_SIZE);
+                    offset = align_to(offset, STACK_SLOT_SIZE)?;
                     let base_slot = offset;
                     slots.insert(var.clone(), base_slot);
-                    offset += STACK_SLOT_SIZE;
+                    offset = offset
+                        .checked_add(STACK_SLOT_SIZE)
+                        .ok_or_else(|| "AArch64 stack frame size overflow".to_string())?;
                     large_locals.push(LargeLocal {
                         name: var,
                         size,
@@ -2659,14 +2715,16 @@ fn collect_stack_slots(
         } else {
             MIN_STACK_SLOT_SIZE
         };
-        offset = align_to(offset, align);
+        offset = align_to(offset, align)?;
         slots.insert(var, offset);
-        offset += size.max(MIN_STACK_SLOT_SIZE);
+        offset = offset
+            .checked_add(size.max(MIN_STACK_SLOT_SIZE))
+            .ok_or_else(|| "AArch64 stack frame size overflow".to_string())?;
     }
 
     Ok(StackLayout {
         slots,
-        local_stack_size: align_to(offset, STACK_ALIGNMENT),
+        local_stack_size: align_to(offset, STACK_ALIGNMENT)?,
         large_locals,
     })
 }
@@ -3279,9 +3337,10 @@ fn convert_function(
         }
         _ => false,
     });
-    let frame_size = compute_frame_size(stack_size, saves_link_register);
-    let link_register_offset =
-        saves_link_register.then(|| compute_link_register_offset(frame_size));
+    let frame_size = compute_frame_size(stack_size, saves_link_register)?;
+    let link_register_offset = saves_link_register
+        .then(|| compute_link_register_offset(frame_size))
+        .transpose()?;
     let mut large_local_offsets = HashMap::with_capacity(stack_layout.large_locals.len());
     let mut large_stack_size = 0i64;
     for local in &stack_layout.large_locals {
@@ -3346,7 +3405,7 @@ fn convert_function(
     let mut param_index = 0usize;
     while param_index < function.params.len() {
         if let Some((dst_name, size)) = memory_param_blocks.get(&param_index).copied() {
-            let src_start = stack_arg_offset(frame_size, stack_param_count);
+            let src_start = stack_arg_offset(frame_size, stack_param_count)?;
             emit_copy_incoming_arg_to_aggregate(
                 &mut instructions,
                 src_start,
@@ -3380,7 +3439,7 @@ fn convert_function(
                     let src = AsmOperand::Stack(i64::from(stack_arg_offset(
                         frame_size,
                         stack_param_count,
-                    )));
+                    )?));
                     stack_param_count += 1;
                     src
                 };
@@ -3420,7 +3479,7 @@ fn convert_function(
                 let dst = val_operand(&TackyVal::Var(param.clone()), &stack_slots, global_vars)?;
                 instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
-                    AsmOperand::Stack(i64::from(stack_arg_offset(frame_size, stack_param_count))),
+                    AsmOperand::Stack(i64::from(stack_arg_offset(frame_size, stack_param_count)?)),
                     low64_operand(&dst)?,
                 ));
                 instructions.push(AsmInstr::Mov(
@@ -3428,14 +3487,15 @@ fn convert_function(
                     AsmOperand::Stack(i64::from(stack_arg_offset(
                         frame_size,
                         stack_param_count + 1,
-                    ))),
+                    )?)),
                     high64_operand(&dst)?,
                 ));
                 stack_param_count += 2;
                 param_index += 1;
                 continue;
             }
-            let src = AsmOperand::Stack(i64::from(stack_arg_offset(frame_size, stack_param_count)));
+            let src =
+                AsmOperand::Stack(i64::from(stack_arg_offset(frame_size, stack_param_count)?));
             stack_param_count += 1;
             src
         } else if matches!(ty, AsmType::Float | AsmType::Double | AsmType::LongDouble) {
@@ -3445,7 +3505,7 @@ fn convert_function(
                 src
             } else {
                 let src =
-                    AsmOperand::Stack(i64::from(stack_arg_offset(frame_size, stack_param_count)));
+                    AsmOperand::Stack(i64::from(stack_arg_offset(frame_size, stack_param_count)?));
                 stack_param_count += if ty == AsmType::LongDouble { 2 } else { 1 };
                 src
             }
@@ -3462,7 +3522,7 @@ fn convert_function(
                         AsmOperand::Stack(i64::from(stack_arg_offset(
                             frame_size,
                             stack_param_count,
-                        ))),
+                        )?)),
                         dst,
                     ));
                 } else {
@@ -3471,7 +3531,7 @@ fn convert_function(
                         AsmOperand::Stack(i64::from(stack_arg_offset(
                             frame_size,
                             stack_param_count,
-                        ))),
+                        )?)),
                         low64_operand(&dst)?,
                     ));
                     instructions.push(AsmInstr::Mov(
@@ -3479,7 +3539,7 @@ fn convert_function(
                         AsmOperand::Stack(i64::from(stack_arg_offset(
                             frame_size,
                             stack_param_count + 1,
-                        ))),
+                        )?)),
                         high64_operand(&dst)?,
                     ));
                 }
@@ -3487,7 +3547,8 @@ fn convert_function(
                 param_index += 1;
                 continue;
             }
-            let src = AsmOperand::Stack(i64::from(stack_arg_offset(frame_size, stack_param_count)));
+            let src =
+                AsmOperand::Stack(i64::from(stack_arg_offset(frame_size, stack_param_count)?));
             stack_param_count += 1;
             src
         };
@@ -3498,7 +3559,7 @@ fn convert_function(
         ));
         param_index += 1;
     }
-    let va_start_stack_offset = stack_arg_offset(frame_size, stack_param_count);
+    let va_start_stack_offset = stack_arg_offset(frame_size, stack_param_count)?;
     let i128_ctx = Aarch64I128Context {
         function_name: &function.name,
         types,
@@ -3936,7 +3997,7 @@ fn convert_function(
                     && asm_type_for_val(dst, types)? == AsmType::Octword
                 {
                     let src_op =
-                        stack_or_data_operand(src_name, *offset as i32, &stack_slots, global_vars)?;
+                        stack_or_data_operand(src_name, *offset, &stack_slots, global_vars)?;
                     instructions.push(AsmInstr::Mov(
                         AsmType::Quadword,
                         low64_operand(&src_op)?,
@@ -3960,7 +4021,7 @@ fn convert_function(
                     let ret_dst = scalar_return_operand(ty);
                     instructions.push(AsmInstr::Mov(
                         ty,
-                        stack_or_data_operand(src_name, *offset as i32, &stack_slots, global_vars)?,
+                        stack_or_data_operand(src_name, *offset, &stack_slots, global_vars)?,
                         ret_dst,
                     ));
                     emit_epilogue(
@@ -5023,7 +5084,7 @@ fn convert_function(
                 instructions.push(AsmInstr::Mov(
                     src_ty,
                     val_operand(src, &stack_slots, global_vars)?,
-                    stack_or_data_operand(dst_name, *offset as i32, &stack_slots, global_vars)?,
+                    stack_or_data_operand(dst_name, *offset, &stack_slots, global_vars)?,
                 ));
             }
             TackyInstr::CopyFromOffset {
@@ -5034,7 +5095,7 @@ fn convert_function(
                 let dst_ty = asm_type_for_val(dst, types)?;
                 instructions.push(AsmInstr::Mov(
                     dst_ty,
-                    stack_or_data_operand(src_name, *offset as i32, &stack_slots, global_vars)?,
+                    stack_or_data_operand(src_name, *offset, &stack_slots, global_vars)?,
                     val_operand(dst, &stack_slots, global_vars)?,
                 ));
             }
@@ -5228,15 +5289,18 @@ fn convert_function(
                     arg_index += 1;
                 }
 
-                let stack_arg_count = stack_args.iter().fold(0usize, |index, arg| {
-                    index.next_multiple_of(arg.slot_alignment()) + arg.slot_count()
-                });
-                let outgoing_bytes = outgoing_stack_size(stack_arg_count);
+                let mut stack_arg_count = 0usize;
+                for arg in &stack_args {
+                    stack_arg_count = align_stack_slots(stack_arg_count, arg.slot_alignment())?
+                        .checked_add(arg.slot_count())
+                        .ok_or_else(|| "AArch64 outgoing stack slot count overflow".to_string())?;
+                }
+                let outgoing_bytes = outgoing_stack_size(stack_arg_count)?;
                 if outgoing_bytes > 0 {
                     instructions.push(AsmInstr::AllocateStack(i64::from(outgoing_bytes)));
                     let mut stack_index = 0usize;
                     for arg in &stack_args {
-                        stack_index = stack_index.next_multiple_of(arg.slot_alignment());
+                        stack_index = align_stack_slots(stack_index, arg.slot_alignment())?;
                         match arg {
                             StackArg::Scalar(AsmType::Octword, val) => {
                                 let (src_low, src_high) =
@@ -5262,13 +5326,13 @@ fn convert_function(
                                 instructions.push(AsmInstr::AArch64StoreOutgoingArg(
                                     AsmType::Quadword,
                                     AsmOperand::Reg(Reg::R10),
-                                    stack_arg_offset(0, stack_index),
+                                    stack_arg_offset(0, stack_index)?,
                                     outgoing_bytes,
                                 ));
                                 instructions.push(AsmInstr::AArch64StoreOutgoingArg(
                                     AsmType::Quadword,
                                     AsmOperand::Reg(Reg::R13),
-                                    stack_arg_offset(0, stack_index + 1),
+                                    stack_arg_offset(0, stack_index + 1)?,
                                     outgoing_bytes,
                                 ));
                                 stack_index += arg.slot_count();
@@ -5277,7 +5341,7 @@ fn convert_function(
                                 instructions.push(AsmInstr::AArch64StoreOutgoingArg(
                                     AsmType::LongDouble,
                                     val_operand(val, &stack_slots, global_vars)?,
-                                    stack_arg_offset(0, stack_index),
+                                    stack_arg_offset(0, stack_index)?,
                                     outgoing_bytes,
                                 ));
                                 stack_index += arg.slot_count();
@@ -5286,7 +5350,7 @@ fn convert_function(
                                 instructions.push(AsmInstr::AArch64StoreOutgoingArg(
                                     *ty,
                                     val_operand(val, &stack_slots, global_vars)?,
-                                    stack_arg_offset(0, stack_index),
+                                    stack_arg_offset(0, stack_index)?,
                                     outgoing_bytes,
                                 ));
                                 stack_index += arg.slot_count();
@@ -5296,7 +5360,7 @@ fn convert_function(
                                     &mut instructions,
                                     val_operand(src_ptr, &stack_slots, global_vars)?,
                                     *size,
-                                    stack_arg_offset(0, stack_index),
+                                    stack_arg_offset(0, stack_index)?,
                                     outgoing_bytes,
                                 );
                                 stack_index += arg.slot_count();
@@ -5738,6 +5802,48 @@ mod tests {
     use super::*;
     use crate::backend::x86_64::regalloc::RegId;
     use crate::{lex, parse, resolve, tacky};
+
+    #[test]
+    fn high_128_bit_stack_operand_rejects_offset_overflow() {
+        assert_eq!(
+            high64_operand(&AsmOperand::Stack(12)).unwrap(),
+            AsmOperand::Stack(20)
+        );
+        assert!(high64_operand(&AsmOperand::Stack(i64::MAX)).is_err());
+    }
+
+    #[test]
+    fn outgoing_stack_layout_rejects_overflow() {
+        let error = outgoing_stack_size(usize::MAX)
+            .expect_err("overflowing outgoing stack size should be rejected");
+        assert!(
+            error.contains("outgoing stack argument size overflow"),
+            "{error}"
+        );
+
+        let error = align_stack_slots(usize::MAX - 1, 16)
+            .expect_err("overflowing outgoing slot alignment should be rejected");
+        assert!(
+            error.contains("outgoing stack slot offset overflow"),
+            "{error}"
+        );
+
+        let error = stack_arg_offset(i32::MAX, 1)
+            .expect_err("overflowing incoming stack offset should be rejected");
+        assert!(error.contains("stack argument offset overflow"), "{error}");
+
+        let error = align_to(i32::MAX - 1, 16)
+            .expect_err("overflowing local stack alignment should be rejected");
+        assert!(error.contains("stack frame size overflow"), "{error}");
+
+        assert!(compute_frame_size(i32::MAX, true).is_err());
+        assert!(compute_link_register_offset(i32::MIN).is_err());
+
+        let globals = HashSet::from(["g".to_string()]);
+        assert!(stack_or_data_operand("g", i64::MAX, &HashMap::new(), &globals).is_err());
+        let slots = HashMap::from([("x".to_string(), 1)]);
+        assert!(stack_or_data_operand("x", i64::MAX, &slots, &HashSet::new()).is_err());
+    }
 
     fn codegen_source(source: &str) -> Result<AsmProgram, String> {
         let tokens = lex::lex(source)?;

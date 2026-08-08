@@ -1,10 +1,11 @@
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use rnqcc::compile::{compile, CompatibilityOptions, CompileOptions, DumpOptions, WarningOptions};
 use rnqcc::optimize::{optimize_program, OptimizationFlags};
 use rnqcc::tempfile::TempFile;
 use rnqcc::types::{Stage, Target};
 use rnqcc::{lex, parse, resolve, tacky};
 use std::fs;
+use std::hint::black_box;
 
 fn lower_and_optimize(source: &str) {
     let tokens = lex::lex(black_box(source)).expect("lex failed");

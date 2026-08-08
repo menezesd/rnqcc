@@ -351,7 +351,10 @@ fn low64_operand(op: AsmOperand) -> Result<AsmOperand, String> {
 fn high64_operand(op: AsmOperand) -> Result<AsmOperand, String> {
     match op {
         AsmOperand::Pseudo(name) => Ok(AsmOperand::PseudoMem(name, 8)),
-        AsmOperand::PseudoMem(name, offset) => Ok(AsmOperand::PseudoMem(name, offset + 8)),
+        AsmOperand::PseudoMem(name, offset) => offset
+            .checked_add(8)
+            .map(|offset| AsmOperand::PseudoMem(name, offset))
+            .ok_or_else(|| "x86-64 high 128-bit operand offset overflow".to_string()),
         AsmOperand::Reg(Reg::AX) => Ok(AsmOperand::Reg(Reg::DX)),
         AsmOperand::Reg(reg) => Err(format!(
             "x86-64 backend cannot address high half of 128-bit register {:?}",
@@ -1005,15 +1008,26 @@ impl StackArgLayout {
         }
     }
 
-    fn for_memory_block(size: usize, align: usize) -> Self {
-        Self {
+    fn for_memory_block(size: usize, align: usize) -> Result<Self, String> {
+        let size = size
+            .checked_add(7)
+            .map(|rounded| rounded / 8 * 8)
+            .ok_or_else(|| "x86-64 memory argument size overflow".to_string())?;
+        Ok(Self {
             align: align.clamp(1, 16),
-            size: size.next_multiple_of(8),
-        }
+            size,
+        })
     }
 
-    fn place_at(self, offset: usize) -> usize {
-        offset.next_multiple_of(self.align)
+    fn place_at(self, offset: usize) -> Result<usize, String> {
+        let remainder = offset % self.align;
+        if remainder == 0 {
+            Ok(offset)
+        } else {
+            offset
+                .checked_add(self.align - remainder)
+                .ok_or_else(|| "x86-64 stack argument offset overflow".to_string())
+        }
     }
 }
 
@@ -1030,6 +1044,13 @@ struct InstructionContext<'a> {
     struct_defs: &'a IndexMap<String, StructDef>,
     local_function_names: &'a std::collections::HashSet<String>,
     va_start_stack_offset: i32,
+}
+
+fn pseudo_mem_offset(offset: i64, extra: i64) -> Result<i32, String> {
+    offset
+        .checked_add(extra)
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(|| "x86-64 pseudo-memory offset overflow".to_string())
 }
 
 fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> Result<(), String> {
@@ -1175,10 +1196,22 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
         TackyInstr::CopyStruct { src_name, dst_name } => {
             // Emit bytewise copy for struct-to-struct assignment
             let struct_size = get_struct_def(dst_name, var_struct_tags, struct_defs)
+                .or_else(|| get_struct_def(src_name, var_struct_tags, struct_defs))
                 .map(|d| d.size)
-                .unwrap_or(0);
+                .ok_or_else(|| {
+                    format!(
+                        "x86-64 backend missing aggregate size for struct copy {} -> {}",
+                        src_name, dst_name
+                    )
+                })?;
+            if struct_size > i32::MAX as usize {
+                return Err(format!(
+                    "x86-64 backend struct copy {} -> {} is too large",
+                    src_name, dst_name
+                ));
+            }
             let mut off = 0i32;
-            while (off as usize) + 8 <= struct_size {
+            while (off as usize) <= struct_size.saturating_sub(8) {
                 out.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     AsmOperand::PseudoMem(src_name.clone(), off),
@@ -1191,7 +1224,7 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                 ));
                 off += 8;
             }
-            while (off as usize) + 4 <= struct_size {
+            while (off as usize) <= struct_size.saturating_sub(4) {
                 out.push(AsmInstr::Mov(
                     AsmType::Longword,
                     AsmOperand::PseudoMem(src_name.clone(), off),
@@ -2472,18 +2505,18 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                 out.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     low,
-                    AsmOperand::PseudoMem(dst_name.clone(), *offset as i32),
+                    AsmOperand::PseudoMem(dst_name.clone(), pseudo_mem_offset(*offset, 0)?),
                 ));
                 out.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     high,
-                    AsmOperand::PseudoMem(dst_name.clone(), (*offset + 8) as i32),
+                    AsmOperand::PseudoMem(dst_name.clone(), pseudo_mem_offset(*offset, 8)?),
                 ));
             } else if src_t == AsmType::LongDouble {
                 x87_load_val(out, src, types, static_doubles);
                 out.push(AsmInstr::X87Store(AsmOperand::PseudoMem(
                     dst_name.clone(),
-                    *offset as i32,
+                    pseudo_mem_offset(*offset, 0)?,
                 )));
             } else if matches!(src_t, AsmType::Float | AsmType::Double) {
                 let src_op = if src_t == AsmType::Float {
@@ -2494,13 +2527,13 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                 out.push(AsmInstr::Mov(
                     src_t,
                     src_op,
-                    AsmOperand::PseudoMem(dst_name.clone(), *offset as i32),
+                    AsmOperand::PseudoMem(dst_name.clone(), pseudo_mem_offset(*offset, 0)?),
                 ));
             } else {
                 out.push(AsmInstr::Mov(
                     src_t,
                     convert_val(src),
-                    AsmOperand::PseudoMem(dst_name.clone(), *offset as i32),
+                    AsmOperand::PseudoMem(dst_name.clone(), pseudo_mem_offset(*offset, 0)?),
                 ));
             }
         }
@@ -2514,24 +2547,24 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                 let dst_op = convert_val(dst);
                 out.push(AsmInstr::Mov(
                     AsmType::Quadword,
-                    AsmOperand::PseudoMem(src_name.clone(), *offset as i32),
+                    AsmOperand::PseudoMem(src_name.clone(), pseudo_mem_offset(*offset, 0)?),
                     low64_operand(dst_op.clone())?,
                 ));
                 out.push(AsmInstr::Mov(
                     AsmType::Quadword,
-                    AsmOperand::PseudoMem(src_name.clone(), (*offset + 8) as i32),
+                    AsmOperand::PseudoMem(src_name.clone(), pseudo_mem_offset(*offset, 8)?),
                     high64_operand(dst_op)?,
                 ));
             } else if dst_t == AsmType::LongDouble {
                 out.push(AsmInstr::X87Load(
                     AsmType::LongDouble,
-                    AsmOperand::PseudoMem(src_name.clone(), *offset as i32),
+                    AsmOperand::PseudoMem(src_name.clone(), pseudo_mem_offset(*offset, 0)?),
                 ));
                 out.push(AsmInstr::X87Store(convert_val(dst)));
             } else {
                 out.push(AsmInstr::Mov(
                     dst_t,
-                    AsmOperand::PseudoMem(src_name.clone(), *offset as i32),
+                    AsmOperand::PseudoMem(src_name.clone(), pseudo_mem_offset(*offset, 0)?),
                     convert_val(dst),
                 ));
             }
@@ -2907,9 +2940,9 @@ fn convert_funcall(call: &FuncallArgs<'_>, ctx: &mut FuncallContext<'_>) -> Resu
                     force_stack_args.insert(arg_idx);
                     continue;
                 }
-                let group = struct_arg_groups
-                    .iter()
-                    .find(|(start, count, _)| arg_idx >= *start && arg_idx < *start + *count);
+                let group = struct_arg_groups.iter().find(|(start, count, _)| {
+                    arg_idx >= *start && arg_idx.saturating_sub(*start) < *count
+                });
                 if let Some((start, count, is_sse_vec)) = group {
                     if arg_idx == *start {
                         let int_needed: usize =
@@ -2919,7 +2952,7 @@ fn convert_funcall(call: &FuncallArgs<'_>, ctx: &mut FuncallContext<'_>) -> Resu
                             sim_int += int_needed;
                             sim_xmm += sse_needed;
                         } else {
-                            for j in *start..*start + *count {
+                            for j in *start..start.saturating_add(*count).min(args.len()) {
                                 force_stack_args.insert(j);
                             }
                         }
@@ -2953,11 +2986,11 @@ fn convert_funcall(call: &FuncallArgs<'_>, ctx: &mut FuncallContext<'_>) -> Resu
         }
 
         impl StackArg<'_> {
-            fn layout(&self) -> StackArgLayout {
+            fn layout(&self) -> Result<StackArgLayout, String> {
                 match self {
-                    StackArg::Scalar(_) => StackArgLayout::for_scalar(AsmType::Quadword),
-                    StackArg::WideScalar(_) => StackArgLayout::for_scalar(AsmType::Octword),
-                    StackArg::LongDouble(_) => StackArgLayout::for_scalar(AsmType::LongDouble),
+                    StackArg::Scalar(_) => Ok(StackArgLayout::for_scalar(AsmType::Quadword)),
+                    StackArg::WideScalar(_) => Ok(StackArgLayout::for_scalar(AsmType::Octword)),
+                    StackArg::LongDouble(_) => Ok(StackArgLayout::for_scalar(AsmType::LongDouble)),
                     StackArg::MemoryBlock { size, align, .. } => {
                         StackArgLayout::for_memory_block(*size, *align)
                     }
@@ -3030,18 +3063,31 @@ fn convert_funcall(call: &FuncallArgs<'_>, ctx: &mut FuncallContext<'_>) -> Resu
             }
         }
 
-        let stack_bytes = stack_args_list.iter().fold(0usize, |offset, item| {
-            let layout = item.layout();
-            layout.place_at(offset) + layout.size
-        });
-        let libc_va_list_bridge = libc_va_list_arg.and_then(|arg_idx| {
+        let mut stack_bytes = 0usize;
+        for item in &stack_args_list {
+            let layout = item.layout()?;
+            let start = layout.place_at(stack_bytes)?;
+            stack_bytes = start
+                .checked_add(layout.size)
+                .ok_or_else(|| "x86-64 outgoing stack argument size overflow".to_string())?;
+        }
+        let libc_va_list_bridge_arg = libc_va_list_arg.and_then(|arg_idx| {
             int_reg_args
                 .iter()
                 .find(|(_, actual_arg_idx, _)| *actual_arg_idx == arg_idx)
-                .map(|(reg_idx, _, arg)| (*reg_idx, *arg, stack_bytes as i32))
+                .map(|(reg_idx, _, arg)| (*reg_idx, *arg))
         });
+        let libc_va_list_bridge = libc_va_list_bridge_arg
+            .map(|(reg_idx, arg)| {
+                i32::try_from(stack_bytes)
+                    .map(|offset| (reg_idx, arg, offset))
+                    .map_err(|_| "x86-64 va_list bridge offset overflow".to_string())
+            })
+            .transpose()?;
         let stack_bytes_with_bridge = if libc_va_list_bridge.is_some() {
-            stack_bytes + 32
+            stack_bytes
+                .checked_add(32)
+                .ok_or_else(|| "x86-64 outgoing stack argument size overflow".to_string())?
         } else {
             stack_bytes
         };
@@ -3050,14 +3096,22 @@ fn convert_funcall(call: &FuncallArgs<'_>, ctx: &mut FuncallContext<'_>) -> Resu
         } else {
             0
         };
-        let outgoing_bytes = stack_bytes_with_bridge + padding;
+        let outgoing_bytes = stack_bytes_with_bridge
+            .checked_add(padding)
+            .ok_or_else(|| "x86-64 outgoing stack argument size overflow".to_string())?;
         if outgoing_bytes > 0 {
-            out.push(AsmInstr::AllocateStack(outgoing_bytes as i64));
+            out.push(AsmInstr::AllocateStack(
+                i64::try_from(outgoing_bytes)
+                    .map_err(|_| "x86-64 outgoing stack argument size overflow".to_string())?,
+            ));
             let mut stack_offset = 0i32;
             for item in &stack_args_list {
-                let layout = item.layout();
+                let layout = item.layout()?;
                 stack_offset = layout
-                    .place_at(stack_offset as usize)
+                    .place_at(
+                        usize::try_from(stack_offset)
+                            .map_err(|_| "x86-64 stack argument offset overflow".to_string())?,
+                    )?
                     .try_into()
                     .map_err(|_| "x86-64 stack argument offset overflow".to_string())?;
                 match item {
@@ -3073,7 +3127,13 @@ fn convert_funcall(call: &FuncallArgs<'_>, ctx: &mut FuncallContext<'_>) -> Resu
                                 AsmOperand::StackArg(stack_offset),
                             ));
                         }
-                        stack_offset += layout.size as i32;
+                        stack_offset = stack_offset
+                            .checked_add(
+                                i32::try_from(layout.size).map_err(|_| {
+                                    "x86-64 stack argument offset overflow".to_string()
+                                })?,
+                            )
+                            .ok_or_else(|| "x86-64 stack argument offset overflow".to_string())?;
                     }
                     StackArg::WideScalar(arg) => {
                         let (low, high) = i128_part_operands(arg)?;
@@ -3082,14 +3142,28 @@ fn convert_funcall(call: &FuncallArgs<'_>, ctx: &mut FuncallContext<'_>) -> Resu
                             low,
                             high,
                             AsmOperand::StackArg(stack_offset),
-                            AsmOperand::StackArg(stack_offset + 8),
+                            AsmOperand::StackArg(stack_offset.checked_add(8).ok_or_else(|| {
+                                "x86-64 stack argument offset overflow".to_string()
+                            })?),
                         );
-                        stack_offset += layout.size as i32;
+                        stack_offset = stack_offset
+                            .checked_add(
+                                i32::try_from(layout.size).map_err(|_| {
+                                    "x86-64 stack argument offset overflow".to_string()
+                                })?,
+                            )
+                            .ok_or_else(|| "x86-64 stack argument offset overflow".to_string())?;
                     }
                     StackArg::LongDouble(arg) => {
                         x87_load_val(out, arg, types, static_doubles);
                         out.push(AsmInstr::X87Store(AsmOperand::StackArg(stack_offset)));
-                        stack_offset += layout.size as i32;
+                        stack_offset = stack_offset
+                            .checked_add(
+                                i32::try_from(layout.size).map_err(|_| {
+                                    "x86-64 stack argument offset overflow".to_string()
+                                })?,
+                            )
+                            .ok_or_else(|| "x86-64 stack argument offset overflow".to_string())?;
                     }
                     StackArg::MemoryBlock { src_ptr, size, .. } => {
                         out.push(AsmInstr::CopyToStackArg {
@@ -3097,7 +3171,13 @@ fn convert_funcall(call: &FuncallArgs<'_>, ctx: &mut FuncallContext<'_>) -> Resu
                             dst_offset: stack_offset,
                             size: *size,
                         });
-                        stack_offset += layout.size as i32;
+                        stack_offset = stack_offset
+                            .checked_add(
+                                i32::try_from(layout.size).map_err(|_| {
+                                    "x86-64 stack argument offset overflow".to_string()
+                                })?,
+                            )
+                            .ok_or_else(|| "x86-64 stack argument offset overflow".to_string())?;
                     }
                 }
             }
@@ -3113,17 +3193,29 @@ fn convert_funcall(call: &FuncallArgs<'_>, ctx: &mut FuncallContext<'_>) -> Resu
                 out.push(AsmInstr::Mov(
                     AsmType::Longword,
                     AsmOperand::Imm(304),
-                    AsmOperand::StackArg(va_list_offset + 4),
+                    AsmOperand::StackArg(
+                        va_list_offset
+                            .checked_add(4)
+                            .ok_or_else(|| "x86-64 va_list bridge offset overflow".to_string())?,
+                    ),
                 ));
                 out.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     convert_val(va_list_arg),
-                    AsmOperand::StackArg(va_list_offset + 8),
+                    AsmOperand::StackArg(
+                        va_list_offset
+                            .checked_add(8)
+                            .ok_or_else(|| "x86-64 va_list bridge offset overflow".to_string())?,
+                    ),
                 ));
                 out.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     AsmOperand::Imm(0),
-                    AsmOperand::StackArg(va_list_offset + 16),
+                    AsmOperand::StackArg(
+                        va_list_offset
+                            .checked_add(16)
+                            .ok_or_else(|| "x86-64 va_list bridge offset overflow".to_string())?,
+                    ),
                 ));
             }
         }
@@ -3192,7 +3284,8 @@ fn convert_funcall(call: &FuncallArgs<'_>, ctx: &mut FuncallContext<'_>) -> Resu
             indirect,
             !indirect && ctx.local_function_names.contains(name),
         ));
-        let bytes_to_dealloc = outgoing_bytes as i64;
+        let bytes_to_dealloc = i64::try_from(outgoing_bytes)
+            .map_err(|_| "x86-64 outgoing stack argument size overflow".to_string())?;
         if bytes_to_dealloc > 0 {
             out.push(AsmInstr::DeallocateStack(bytes_to_dealloc));
         }
@@ -4144,6 +4237,12 @@ fn convert_function(
     let mut int_reg_idx = 0usize;
     let mut xmm_reg_idx = 0usize;
     let mut stack_arg_offset = 0usize;
+    let stack_arg_offset_i32 = |offset: usize| {
+        i32::try_from(offset)
+            .ok()
+            .and_then(|offset| offset.checked_add(16))
+            .ok_or_else(|| "x86-64 incoming stack argument offset overflow".to_string())
+    };
     let mut memory_param_blocks: HashMap<usize, (&String, usize)> =
         HashMap::with_capacity(func.memory_param_blocks.len());
     for (index, name, size) in &func.memory_param_blocks {
@@ -4169,7 +4268,7 @@ fn convert_function(
             let group = func
                 .struct_param_groups
                 .iter()
-                .find(|(start, count, _)| i >= *start && i < *start + *count);
+                .find(|(start, count, _)| i >= *start && i.saturating_sub(*start) < *count);
             if let Some((start, count, is_sse_vec)) = group {
                 if i == *start {
                     // First eightbyte in group — check if ALL fit
@@ -4181,7 +4280,7 @@ fn convert_function(
                         sim_xmm_idx += sse_needed;
                     } else {
                         // Don't fit — force all to stack
-                        for j in *start..*start + *count {
+                        for j in *start..start.saturating_add(*count).min(func.params.len()) {
                             force_stack.insert(j);
                         }
                     }
@@ -4220,22 +4319,24 @@ fn convert_function(
                     .map(|def| def.alignment.clamp(1, 16))
                     .unwrap_or(8)
             };
-            let layout = StackArgLayout::for_memory_block(size, align);
-            stack_arg_offset = layout.place_at(stack_arg_offset);
-            let offset = 16 + stack_arg_offset as i32;
+            let layout = StackArgLayout::for_memory_block(size, align)?;
+            stack_arg_offset = layout.place_at(stack_arg_offset)?;
+            let offset = stack_arg_offset_i32(stack_arg_offset)?;
             stack_param_instructions.push(AsmInstr::CopyFromStackArg {
                 src_offset: offset,
                 dst: AsmOperand::PseudoMem(dst_name.clone(), 0),
                 size,
             });
-            stack_arg_offset += layout.size;
+            stack_arg_offset = stack_arg_offset
+                .checked_add(layout.size)
+                .ok_or_else(|| "x86-64 incoming stack argument offset overflow".to_string())?;
             continue;
         }
         if force_stack.contains(&i) || func.stack_params.contains(param) {
             let t: AsmType = ctx.types.get(param).copied().unwrap_or(CType::Long).into();
             let layout = StackArgLayout::for_scalar(t);
-            stack_arg_offset = layout.place_at(stack_arg_offset);
-            let offset = 16 + stack_arg_offset as i32;
+            stack_arg_offset = layout.place_at(stack_arg_offset)?;
+            let offset = stack_arg_offset_i32(stack_arg_offset)?;
             if t == AsmType::LongDouble {
                 stack_param_instructions.push(AsmInstr::X87Load(
                     AsmType::LongDouble,
@@ -4251,7 +4352,9 @@ fn convert_function(
                 ));
                 stack_param_instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
-                    AsmOperand::Stack(i64::from(offset + 8)),
+                    AsmOperand::Stack(i64::from(offset.checked_add(8).ok_or_else(|| {
+                        "x86-64 incoming stack argument offset overflow".to_string()
+                    })?)),
                     AsmOperand::PseudoMem(param.clone(), 8),
                 ));
             } else {
@@ -4261,20 +4364,24 @@ fn convert_function(
                     AsmOperand::Pseudo(param.clone()),
                 ));
             }
-            stack_arg_offset += layout.size;
+            stack_arg_offset = stack_arg_offset
+                .checked_add(layout.size)
+                .ok_or_else(|| "x86-64 incoming stack argument offset overflow".to_string())?;
             continue;
         }
         let t: AsmType = ctx.types.get(param).copied().unwrap_or(CType::Int).into();
         if t == AsmType::LongDouble {
             let layout = StackArgLayout::for_scalar(t);
-            stack_arg_offset = layout.place_at(stack_arg_offset);
-            let offset = 16 + stack_arg_offset as i32;
+            stack_arg_offset = layout.place_at(stack_arg_offset)?;
+            let offset = stack_arg_offset_i32(stack_arg_offset)?;
             stack_param_instructions.push(AsmInstr::X87Load(
                 AsmType::LongDouble,
                 AsmOperand::Stack(i64::from(offset)),
             ));
             stack_param_instructions.push(AsmInstr::X87Store(AsmOperand::Pseudo(param.clone())));
-            stack_arg_offset += layout.size;
+            stack_arg_offset = stack_arg_offset
+                .checked_add(layout.size)
+                .ok_or_else(|| "x86-64 incoming stack argument offset overflow".to_string())?;
         } else if matches!(t, AsmType::Float | AsmType::Double) {
             if xmm_reg_idx < 8 {
                 register_param_instructions.push(AsmInstr::Mov(
@@ -4285,14 +4392,16 @@ fn convert_function(
                 xmm_reg_idx += 1;
             } else {
                 let layout = StackArgLayout::for_scalar(t);
-                stack_arg_offset = layout.place_at(stack_arg_offset);
-                let offset = 16 + stack_arg_offset as i32;
+                stack_arg_offset = layout.place_at(stack_arg_offset)?;
+                let offset = stack_arg_offset_i32(stack_arg_offset)?;
                 stack_param_instructions.push(AsmInstr::Mov(
                     t,
                     AsmOperand::Stack(i64::from(offset)),
                     AsmOperand::Pseudo(param.clone()),
                 ));
-                stack_arg_offset += layout.size;
+                stack_arg_offset = stack_arg_offset
+                    .checked_add(layout.size)
+                    .ok_or_else(|| "x86-64 incoming stack argument offset overflow".to_string())?;
             }
         } else if t == AsmType::Octword {
             if int_reg_idx + 1 < 6 {
@@ -4309,8 +4418,8 @@ fn convert_function(
                 int_reg_idx += 2;
             } else {
                 let layout = StackArgLayout::for_scalar(t);
-                stack_arg_offset = layout.place_at(stack_arg_offset);
-                let offset = 16 + stack_arg_offset as i32;
+                stack_arg_offset = layout.place_at(stack_arg_offset)?;
+                let offset = stack_arg_offset_i32(stack_arg_offset)?;
                 stack_param_instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     AsmOperand::Stack(i64::from(offset)),
@@ -4318,10 +4427,14 @@ fn convert_function(
                 ));
                 stack_param_instructions.push(AsmInstr::Mov(
                     AsmType::Quadword,
-                    AsmOperand::Stack(i64::from(offset + 8)),
+                    AsmOperand::Stack(i64::from(offset.checked_add(8).ok_or_else(|| {
+                        "x86-64 incoming stack argument offset overflow".to_string()
+                    })?)),
                     AsmOperand::PseudoMem(param.clone(), 8),
                 ));
-                stack_arg_offset += layout.size;
+                stack_arg_offset = stack_arg_offset
+                    .checked_add(layout.size)
+                    .ok_or_else(|| "x86-64 incoming stack argument offset overflow".to_string())?;
             }
         } else {
             if int_reg_idx < 6 {
@@ -4333,14 +4446,16 @@ fn convert_function(
                 int_reg_idx += 1;
             } else {
                 let layout = StackArgLayout::for_scalar(t);
-                stack_arg_offset = layout.place_at(stack_arg_offset);
-                let offset = 16 + stack_arg_offset as i32;
+                stack_arg_offset = layout.place_at(stack_arg_offset)?;
+                let offset = stack_arg_offset_i32(stack_arg_offset)?;
                 stack_param_instructions.push(AsmInstr::Mov(
                     t,
                     AsmOperand::Stack(i64::from(offset)),
                     AsmOperand::Pseudo(param.clone()),
                 ));
-                stack_arg_offset += layout.size;
+                stack_arg_offset = stack_arg_offset
+                    .checked_add(layout.size)
+                    .ok_or_else(|| "x86-64 incoming stack argument offset overflow".to_string())?;
             }
         }
     }
@@ -4348,7 +4463,7 @@ fn convert_function(
     instructions.extend(stack_param_instructions);
 
     for instr in &func.body {
-        let va_start_stack_offset = 16 + stack_arg_offset as i32;
+        let va_start_stack_offset = stack_arg_offset_i32(stack_arg_offset)?;
         let mut instruction_ctx = InstructionContext {
             function_name: &func.name,
             return_type: func.return_type,
@@ -4466,14 +4581,15 @@ fn replace_pseudos(func: &mut AsmFunction, ctx: &ReplacePseudoContext<'_>) -> Re
         if ct == CType::Void {
             Ok(4)
         } else if ct == CType::Struct {
-            ctx.var_struct_tags
+            let tag = ctx
+                .var_struct_tags
                 .get(name)
-                .and_then(|tag| ctx.struct_defs.get(tag))
-                .map(|def| {
-                    i64::try_from(def.size)
-                        .map_err(|_| format!("stack object `{}` is too large", name))
-                })
-                .unwrap_or(Ok(0))
+                .ok_or_else(|| format!("missing struct tag for stack object `{name}`"))?;
+            let def = ctx
+                .struct_defs
+                .get(tag)
+                .ok_or_else(|| format!("missing struct definition `{tag}` for `{name}`"))?;
+            i64::try_from(def.size).map_err(|_| format!("stack object `{}` is too large", name))
         } else {
             Ok(i64::from(std::cmp::max(ct.size(), 1)))
         }
@@ -4697,10 +4813,23 @@ fn materialize_stack_address(out: &mut Vec<AsmInstr>, offset: i64, scratch: Reg)
     ));
 }
 
-fn fixup_instructions(func: &mut AsmFunction, stack_size: i64, callee_saved: &[Reg]) {
+fn fixup_instructions(
+    func: &mut AsmFunction,
+    stack_size: i64,
+    callee_saved: &[Reg],
+) -> Result<(), String> {
     let num_cs = callee_saved.len() as i64;
-    let total_aligned = (stack_size + 8 * num_cs + 15) & !15;
-    let adjusted_stack = total_aligned - 8 * num_cs;
+    let saved_bytes = num_cs
+        .checked_mul(8)
+        .ok_or_else(|| "x86-64 callee-saved register area overflow".to_string())?;
+    let total_aligned = stack_size
+        .checked_add(saved_bytes)
+        .and_then(|size| size.checked_add(15))
+        .map(|size| size & !15)
+        .ok_or_else(|| "x86-64 stack frame size overflow".to_string())?;
+    let adjusted_stack = total_aligned
+        .checked_sub(saved_bytes)
+        .ok_or_else(|| "x86-64 stack frame size overflow".to_string())?;
     let old_instructions = std::mem::take(&mut func.instructions);
     let mut new_instructions = Vec::with_capacity(old_instructions.len() + callee_saved.len() + 2);
 
@@ -5288,6 +5417,7 @@ fn fixup_instructions(func: &mut AsmFunction, stack_size: i64, callee_saved: &[R
         _ => true,
     });
     func.instructions = new_instructions;
+    Ok(())
 }
 
 fn assert_no_pseudo_operand(op: &AsmOperand, instr: &AsmInstr) -> Result<(), String> {
@@ -5532,7 +5662,7 @@ pub fn gen(
                 let stack_size = replace_pseudos(&mut asm_func, &replace_ctx)?;
 
                 // Phase 3: fix up instructions + callee-saved register handling
-                fixup_instructions(&mut asm_func, stack_size, &allocation.callee_saved);
+                fixup_instructions(&mut asm_func, stack_size, &allocation.callee_saved)?;
                 verify_final_function(&asm_func)?;
                 top_level.push(AsmTopLevel::Function(asm_func));
             }
@@ -5591,6 +5721,13 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    #[test]
+    fn pseudo_memory_offsets_reject_narrowing_and_addition_overflow() {
+        assert_eq!(pseudo_mem_offset(12, 8).unwrap(), 20);
+        assert!(pseudo_mem_offset(i64::from(i32::MAX) + 1, 0).is_err());
+        assert!(pseudo_mem_offset(i64::MAX, 1).is_err());
+    }
+
     fn function_returning(return_type: CType, val: TackyVal) -> TackyFunction {
         TackyFunction {
             name: "f".to_string(),
@@ -5602,6 +5739,15 @@ mod tests {
             memory_param_blocks: Vec::new(),
             struct_param_groups: Vec::new(),
         }
+    }
+
+    #[test]
+    fn stack_memory_argument_layout_rejects_size_rounding_overflow() {
+        let error = match StackArgLayout::for_memory_block(usize::MAX, 8) {
+            Ok(_) => panic!("overflowing memory argument size should be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.contains("memory argument size overflow"), "{error}");
     }
 
     #[test]
@@ -5786,7 +5932,7 @@ mod tests {
             ],
         };
 
-        fixup_instructions(&mut func, 0, &[]);
+        fixup_instructions(&mut func, 0, &[]).unwrap();
 
         assert!(!func.instructions.iter().any(|instr| matches!(
             instr,
@@ -5818,7 +5964,7 @@ mod tests {
             )],
         };
 
-        fixup_instructions(&mut func, 0, &[]);
+        fixup_instructions(&mut func, 0, &[]).unwrap();
 
         assert!(func.instructions.iter().any(|instr| matches!(
             instr,
@@ -5842,7 +5988,7 @@ mod tests {
             )],
         };
 
-        fixup_instructions(&mut func, 0, &[]);
+        fixup_instructions(&mut func, 0, &[]).unwrap();
 
         assert!(!func.instructions.iter().any(|instr| matches!(
             instr,
@@ -5852,5 +5998,17 @@ mod tests {
                 AsmOperand::Stack(-4)
             )
         )));
+    }
+
+    #[test]
+    fn x86_64_fixup_rejects_stack_frame_size_overflow() {
+        let mut func = AsmFunction {
+            name: "f".to_string(),
+            global: false,
+            instructions: Vec::new(),
+        };
+        let error = fixup_instructions(&mut func, i64::MAX, &[])
+            .expect_err("overflowing stack frame size should be rejected");
+        assert!(error.contains("stack frame size overflow"), "{error}");
     }
 }

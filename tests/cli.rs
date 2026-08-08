@@ -151,6 +151,28 @@ fn preprocesses_to_stdout() {
 }
 
 #[test]
+fn multi_input_assembly_failure_preserves_completed_outputs() {
+    let first = TempPath::new("multi-assembly-first", "c");
+    let first_asm = TempPath(first.path().with_extension("s"));
+    let second = TempPath::new("multi-assembly-second", "c");
+    let second_asm = TempPath(second.path().with_extension("s"));
+    std::fs::write(first.path(), "int first(void) { return 1; }\n")
+        .expect("failed to write first source");
+    std::fs::write(second.path(), "int second(\n").expect("failed to write second source");
+
+    let output = Command::new(rnqcc())
+        .arg("-S")
+        .arg(first.path())
+        .arg(second.path())
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(!output.status.success());
+    assert!(first_asm.path().exists());
+    assert!(!second_asm.path().exists());
+}
+
+#[test]
 fn rejects_output_for_ir_stage() {
     let output = Command::new(rnqcc())
         .args([
@@ -425,6 +447,68 @@ fn fuzz_smoke_rejects_nonpositive_case_count() -> Result<(), String> {
 }
 
 #[test]
+fn fuzz_smoke_reports_missing_compiler_without_traceback() -> Result<(), String> {
+    let output = match Command::new("python3")
+        .args([
+            "scripts/fuzz_smoke.py",
+            "--seed",
+            "29",
+            "--cases",
+            "1",
+            "--rnqcc",
+            "/definitely/missing/rnqcc",
+        ])
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run fuzz smoke script: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("could not run /definitely/missing/rnqcc"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("Traceback"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn fuzz_smoke_reports_invalid_work_directory_without_traceback() -> Result<(), String> {
+    let work_dir = TempPath::new("fuzz-smoke-work-file", "tmp");
+    std::fs::write(work_dir.path(), b"not a directory")
+        .map_err(|err| format!("failed to create work-directory fixture: {err}"))?;
+    let output = match Command::new("python3")
+        .args([
+            "scripts/fuzz_smoke.py",
+            "--seed",
+            "31",
+            "--cases",
+            "1",
+            "--emit-only",
+            "--work-dir",
+        ])
+        .arg(work_dir.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run fuzz smoke script: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("could not prepare fuzz smoke work directory"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("Traceback"), "{stderr}");
+    Ok(())
+}
+
+#[test]
 fn fuzz_smoke_parallel_default_workdirs_do_not_collide() -> Result<(), String> {
     let first = match Command::new("python3")
         .arg("scripts/fuzz_smoke.py")
@@ -606,6 +690,40 @@ fn llvm_c_regression_smoke_rejects_invalid_numeric_args() -> Result<(), String> 
     Ok(())
 }
 
+#[test]
+fn llvm_c_regression_smoke_rejects_directory_compiler_without_traceback() -> Result<(), String> {
+    let compiler_dir = TempPath::new("llvm-c-directory-rnqcc", "dir");
+    std::fs::create_dir_all(compiler_dir.path())
+        .map_err(|err| format!("failed to create compiler directory: {err}"))?;
+    let suite = TempPath::new("llvm-c-directory-rnqcc-suite", "dir");
+    std::fs::create_dir_all(suite.path())
+        .map_err(|err| format!("failed to create LLVM suite: {err}"))?;
+    std::fs::write(
+        suite.path().join("test.c"),
+        "int main(void) { return 0; }\n",
+    )
+    .map_err(|err| format!("failed to write LLVM source: {err}"))?;
+
+    let output = match Command::new("python3")
+        .arg("scripts/llvm_c_regression_smoke.py")
+        .arg("--rnqcc")
+        .arg(compiler_dir.path())
+        .arg("--suite")
+        .arg(suite.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run LLVM C smoke script: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("--rnqcc path is not a file"), "{stderr}");
+    assert!(!stderr.contains("Traceback"), "{stderr}");
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn llvm_c_regression_smoke_passes_extra_rnqcc_args() -> Result<(), String> {
@@ -726,6 +844,36 @@ fn real_project_corpus_reports_timeouts_cleanly() -> Result<(), String> {
     assert!(stderr.contains("slow.c: unexpected failure"), "{stderr}");
     assert!(stderr.contains("timed out after 0.1s"), "{stderr}");
     assert!(!stderr.contains("None"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn real_project_corpus_reports_missing_manifest_without_traceback() -> Result<(), String> {
+    let manifest = TempPath::new("real-project-missing-manifest", "txt");
+    std::fs::write(manifest.path(), b"temporary manifest")
+        .map_err(|err| format!("failed to create manifest fixture: {err}"))?;
+    std::fs::remove_file(manifest.path())
+        .map_err(|err| format!("failed to remove manifest fixture: {err}"))?;
+    let output = match Command::new("python3")
+        .arg("scripts/real_project_corpus.py")
+        .arg("--rnqcc")
+        .arg(rnqcc())
+        .arg("--manifest")
+        .arg(manifest.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run real project corpus script: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(
+        stderr.contains("could not read corpus manifest"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("Traceback"), "{stderr}");
     Ok(())
 }
 
@@ -879,6 +1027,28 @@ chmod +x "$out"
     let stderr = stderr(output);
     assert!(stderr.contains("timed out after 0.1s"), "{stderr}");
     assert!(!stderr.contains("None"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn layout_oracle_rejects_directory_compiler_without_traceback() -> Result<(), String> {
+    let compiler_dir = TempPath::new("layout-directory-rnqcc", "dir");
+    std::fs::create_dir_all(compiler_dir.path())
+        .map_err(|err| format!("failed to create compiler directory: {err}"))?;
+    let output = match Command::new("python3")
+        .arg("scripts/layout_oracle.py")
+        .env("RNQCC", compiler_dir.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run layout oracle script: {err}")),
+    };
+
+    assert!(!output.status.success());
+    let stderr = stderr(output);
+    assert!(stderr.contains("RNQCC path is not a file"), "{stderr}");
+    assert!(!stderr.contains("Traceback"), "{stderr}");
     Ok(())
 }
 
@@ -2380,6 +2550,8 @@ fn gcc_torture_xfail_reporter_rejects_nonrelative_expected_test_path() -> Result
         "/tmp/raw.c",
         "../execute/raw.c",
         r"C:\tmp\raw.c",
+        r"C:tmp\raw.c",
+        r"\tmp\raw.c",
         r"..\execute\raw.c",
     ] {
         let expected = TempPath::new("gcc-nonrelative-expected-test-report", "txt");
@@ -2789,6 +2961,8 @@ fn gcc_torture_xfail_reporter_rejects_nonrelative_failure_log_test_path() -> Res
         "/tmp/raw.c",
         "../execute/raw.c",
         r"C:\tmp\raw.c",
+        r"C:tmp\raw.c",
+        r"\tmp\raw.c",
         r"..\execute\raw.c",
     ] {
         let expected = TempPath::new("gcc-nonrelative-failure-log-report-expected", "txt");
@@ -2955,6 +3129,8 @@ fn gcc_torture_triage_rejects_nonrelative_expected_test_path() -> Result<(), Str
         "/tmp/raw.c",
         "../execute/raw.c",
         r"C:\tmp\raw.c",
+        r"C:tmp\raw.c",
+        r"\tmp\raw.c",
         r"..\execute\raw.c",
     ] {
         let expected = TempPath::new("gcc-nonrelative-triage-expected-test", "txt");
@@ -9477,6 +9653,39 @@ fn emits_aarch64_assembly_for_double_struct_argument_and_return() {
 }
 
 #[test]
+fn emits_aarch64_assembly_for_float_struct_argument_and_return() {
+    let src = temp_file("aarch64-float-struct-call", "i");
+    let out = temp_file("aarch64-float-struct-call", "s");
+    std::fs::write(
+        &src,
+        "struct box { float x; };\n\
+         struct box id(struct box b) { return b; }\n\
+         float main(void) { struct box b = {1.5f}; struct box c = id(b); return c.x; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "aarch64-linux", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly output");
+    // Aggregate SSE eightbytes are materialized through the compiler's
+    // double-width temporary representation; the physical FP register is
+    // still the correct ABI channel for the float aggregate.
+    assert!(asm.contains("str d0, [sp]"));
+    assert!(asm.contains("ldr d0, [sp"));
+    assert!(asm.contains("bl id"));
+    assert!(asm.contains("str d0, [sp"));
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
 fn emits_aarch64_assembly_for_large_stack_struct_argument() {
     let src = temp_file("aarch64-large-stack-struct-arg", "i");
     let out = temp_file("aarch64-large-stack-struct-arg", "s");
@@ -14492,6 +14701,153 @@ fn assembly_output_overwrites_existing_file() {
     assert!(!asm.contains("stale"));
 
     let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn preprocess_output_atomically_replaces_existing_file() {
+    let input = temp_file("preprocess-copy-input", "i");
+    let out = temp_file("preprocess-copy-output", "i");
+    std::fs::write(&input, "int main(void) { return 42; }\n")
+        .expect("failed to write preprocessed input");
+    std::fs::write(&out, "stale\n").expect("failed to seed preprocess output");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&out)
+            .expect("failed to stat preprocess output")
+            .permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&out, permissions)
+            .expect("failed to set preprocess output permissions");
+    }
+
+    let output = Command::new(rnqcc())
+        .arg("-E")
+        .arg("-o")
+        .arg(&out)
+        .arg(&input)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let preprocessed = std::fs::read_to_string(&out).expect("failed to read preprocess output");
+    assert!(preprocessed.contains("return 42"));
+    assert!(!preprocessed.contains("stale"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&out)
+                .expect("failed to stat final preprocess output")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    let _ = std::fs::remove_file(input);
+    let _ = std::fs::remove_file(out);
+}
+
+#[cfg(unix)]
+#[test]
+fn preprocess_output_preserves_input_permissions_for_new_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let input = temp_file("preprocess-new-mode-input", "i");
+    let out = temp_file("preprocess-new-mode-output", "i");
+    std::fs::write(&input, "int main(void) { return 42; }\n")
+        .expect("failed to write preprocessed input");
+    let mut permissions = std::fs::metadata(&input)
+        .expect("failed to stat preprocessed input")
+        .permissions();
+    permissions.set_mode(0o640);
+    std::fs::set_permissions(&input, permissions)
+        .expect("failed to set preprocessed input permissions");
+
+    let output = Command::new(rnqcc())
+        .arg("-E")
+        .arg("-o")
+        .arg(&out)
+        .arg(&input)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    assert_eq!(
+        std::fs::metadata(&out)
+            .expect("failed to stat new preprocess output")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o640
+    );
+
+    let _ = std::fs::remove_file(input);
+    let _ = std::fs::remove_file(out);
+}
+
+#[cfg(unix)]
+#[test]
+fn preprocess_output_follows_existing_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let input = temp_file("preprocess-symlink-input", "i");
+    let target = temp_file("preprocess-symlink-target", "i");
+    let link = temp_file("preprocess-symlink-output", "i");
+    std::fs::write(&input, "int main(void) { return 42; }\n")
+        .expect("failed to write preprocessed input");
+    std::fs::write(&target, "stale\n").expect("failed to seed symlink target");
+    symlink(&target, &link).expect("failed to create output symlink");
+
+    let output = Command::new(rnqcc())
+        .arg("-E")
+        .arg("-o")
+        .arg(&link)
+        .arg(&input)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    assert!(std::fs::symlink_metadata(&link)
+        .expect("failed to stat output symlink")
+        .file_type()
+        .is_symlink());
+    assert!(std::fs::read_to_string(&target)
+        .expect("failed to read symlink target")
+        .contains("return 42"));
+
+    let _ = std::fs::remove_file(input);
+    let _ = std::fs::remove_file(link);
+    let _ = std::fs::remove_file(target);
+}
+
+#[cfg(unix)]
+#[test]
+fn preprocess_output_detects_existing_hard_link() {
+    let input = temp_file("preprocess-hard-link-input", "i");
+    let link = temp_file("preprocess-hard-link-output", "i");
+    std::fs::write(&input, "int main(void) { return 42; }\n")
+        .expect("failed to write preprocessed input");
+    std::fs::hard_link(&input, &link).expect("failed to create output hard link");
+
+    let output = Command::new(rnqcc())
+        .arg("-E")
+        .arg("-o")
+        .arg(&link)
+        .arg(&input)
+        .output()
+        .expect("failed to run rnqcc");
+
+    assert!(output.status.success(), "{}", stderr(output));
+    assert_eq!(
+        std::fs::read_to_string(&input).expect("failed to read original input"),
+        "int main(void) { return 42; }\n"
+    );
+
+    let _ = std::fs::remove_file(input);
+    let _ = std::fs::remove_file(link);
 }
 
 #[test]

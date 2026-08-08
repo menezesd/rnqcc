@@ -8,14 +8,21 @@ programs from a seed and invokes the rnqcc CLI through its public stages.
 from __future__ import annotations
 
 import argparse
+import atexit
 import os
 import random
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-from smoke_utils import env_timeout, timeout_text
+try:
+    from smoke_utils import env_timeout, is_positive_finite, run_with_timeout
+except ModuleNotFoundError as err:
+    if err.name != "smoke_utils":
+        raise
+    from scripts.smoke_utils import env_timeout, is_positive_finite, run_with_timeout
 
 
 STAGES = ("lex", "parse", "validate", "tacky", "codegen")
@@ -71,10 +78,12 @@ class ProgramGenerator:
             "int main(void) {",
             f"    int a = {self.const()};",
             f"    int b = {self.const()};",
-            f"    int c = helper(a, b);",
+            "    int c = helper(a, b);",
             "    int i = 0;",
             f"    while (i < {loop_limit}) {{",
-            f"        {self.assignment(vars, 2)}",
+            # Keep the loop-control variable monotonic so runtime differential
+            # tests cannot accidentally generate an unbounded loop.
+            f"        {self.assignment(['a', 'b', 'c'], 2)}",
             "        i = i + 1;",
             "    }",
             f"    if ({self.expr(vars, 2)}) {{",
@@ -157,26 +166,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def run(cmd: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(
-            cmd,
-            cwd=cwd,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return subprocess.CompletedProcess(
-            cmd,
-            124,
-            stdout=timeout_text(exc.stdout),
-            stderr=(timeout_text(exc.stderr) + f"\ntimed out after {timeout:.1f}s").lstrip(),
-        )
+    return run_with_timeout(cmd, cwd=cwd, timeout=timeout)
 
 
 def discover_targets(rnqcc: str, cwd: Path, timeout: float) -> list[str]:
-    result = run([rnqcc, "--print-targets"], cwd, timeout)
+    try:
+        result = run([rnqcc, "--print-targets"], cwd, timeout)
+    except OSError as exc:
+        raise RuntimeError(f"could not run {rnqcc}: {exc}") from exc
     if result.returncode != 0:
         raise RuntimeError(
             "could not discover targets with --print-targets\n"
@@ -258,19 +255,43 @@ def main(argv: list[str]) -> int:
     if args.cases <= 0:
         print("--cases must be positive", file=sys.stderr)
         return 1
-    if args.timeout <= 0:
+    if not is_positive_finite(args.timeout):
         print("--timeout must be positive", file=sys.stderr)
         return 1
     repo = Path.cwd()
+    owns_work_dir = args.work_dir is None
     work_dir = args.work_dir or Path(tempfile.mkdtemp(prefix=f"rnqcc-fuzz-smoke-{args.seed}-"))
-    work_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        work_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"could not prepare fuzz smoke work directory {work_dir}: {exc}", file=sys.stderr)
+        return 1
+    if owns_work_dir and not args.keep_successes and not args.emit_only:
+        # Register cleanup before target discovery or compilation so failures
+        # cannot strand generated sources and binaries in the system temp dir.
+        atexit.register(shutil.rmtree, work_dir, ignore_errors=True)
 
     rnqcc = args.rnqcc
-    targets = args.targets or ([] if args.emit_only else discover_targets(rnqcc, repo, args.timeout))
+    try:
+        targets = args.targets or (
+            [] if args.emit_only else discover_targets(rnqcc, repo, args.timeout)
+        )
+    except RuntimeError as exc:
+        print(exc, file=sys.stderr)
+        return 1
 
     for case in range(args.cases):
         src = work_dir / f"seed_{args.seed}_case_{case}.i"
         src.write_text(ProgramGenerator(args.seed, case).generate(), encoding="utf-8")
+        generated_paths = [src]
+        generated_paths.extend(src.with_suffix(f".{target}.s") for target in targets)
+        if args.compare_runtime:
+            generated_paths.extend(
+                [
+                    work_dir / f"{src.stem}.host",
+                    work_dir / f"{src.stem}.rnqcc",
+                ]
+            )
 
         try:
             if not args.emit_only:
@@ -285,23 +306,14 @@ def main(argv: list[str]) -> int:
                         repo,
                         args.timeout,
                     )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - report the failing seed and continue cleanly
             print(f"FAIL seed={args.seed} case={case} src={src}", file=sys.stderr)
             print(exc, file=sys.stderr)
             return 1
 
         if not args.keep_successes and not args.emit_only:
-            src.unlink(missing_ok=True)
-            for asm in work_dir.glob(f"{src.stem}.*.s"):
-                asm.unlink(missing_ok=True)
-            for exe in work_dir.glob(f"{src.stem}.*"):
-                exe.unlink(missing_ok=True)
-
-    if not args.keep_successes and not args.emit_only:
-        try:
-            work_dir.rmdir()
-        except OSError:
-            pass
+            for generated in generated_paths:
+                generated.unlink(missing_ok=True)
 
     print(f"ok seed={args.seed} cases={args.cases} targets={','.join(targets) if targets else 'none'}")
     return 0

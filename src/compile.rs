@@ -7,6 +7,7 @@ use crate::resolve;
 use crate::tacky;
 use crate::types::*;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DumpOptions {
@@ -80,20 +81,52 @@ fn val_is_assignable(val: &TackyVal) -> bool {
 }
 
 pub fn validate_tacky_program(program: &TackyProgram) -> Result<(), String> {
+    let mut all_labels = HashSet::new();
     for item in &program.top_level {
         let TackyTopLevel::Function(function) = item else {
             continue;
         };
-        let labels: HashSet<&str> = function
-            .body
-            .iter()
-            .filter_map(|instr| match instr {
-                TackyInstr::Label(label) => Some(label.as_str()),
-                _ => None,
-            })
-            .collect();
+        for instr in &function.body {
+            if let TackyInstr::Label(label) = instr {
+                if !all_labels.insert(label.as_str()) {
+                    return Err(format!(
+                        "function '{}' has duplicate TACKY label '{}'",
+                        function.name, label
+                    ));
+                }
+            }
+        }
+    }
+
+    for item in &program.top_level {
+        let TackyTopLevel::Function(function) = item else {
+            continue;
+        };
+        let mut labels = HashSet::new();
+        for instr in &function.body {
+            if let TackyInstr::Label(label) = instr {
+                if !labels.insert(label.as_str()) {
+                    return Err(format!(
+                        "function '{}' has duplicate TACKY label '{}'",
+                        function.name, label
+                    ));
+                }
+            }
+        }
 
         for instr in &function.body {
+            match instr {
+                TackyInstr::NonlocalJump(label) | TackyInstr::LoadLabelAddress(label, _)
+                    if !all_labels.contains(label.as_str()) =>
+                {
+                    return Err(format!(
+                        "function '{}' references undefined TACKY label '{}'",
+                        function.name, label
+                    ));
+                }
+                _ => {}
+            }
+
             match instr {
                 TackyInstr::Unary { dst, .. }
                 | TackyInstr::Binary { dst, .. }
@@ -111,6 +144,13 @@ pub fn validate_tacky_program(program: &TackyProgram) -> Result<(), String> {
                 | TackyInstr::FloatToUInt { dst, .. }
                 | TackyInstr::FloatToDouble { dst, .. }
                 | TackyInstr::DoubleToFloat { dst, .. }
+                | TackyInstr::FrameAddress { dst }
+                | TackyInstr::LoadLabelAddress(_, dst)
+                | TackyInstr::VaStart { dst }
+                | TackyInstr::AtomicFetch { dst, .. }
+                | TackyInstr::AtomicExchange { dst, .. }
+                | TackyInstr::AtomicCompareExchange { dst, .. }
+                | TackyInstr::AtomicCompareSwap { dst, .. }
                 | TackyInstr::GetAddress { dst, .. }
                 | TackyInstr::Load { dst, .. }
                 | TackyInstr::CopyFromOffset { dst, .. }
@@ -182,7 +222,9 @@ pub fn validate_tacky_program(program: &TackyProgram) -> Result<(), String> {
                         ));
                     }
                     for (start, count, classes) in struct_arg_groups {
-                        if *start + *count > args.len() || classes.len() != *count {
+                        let range_exceeds_args =
+                            *start > args.len() || *count > args.len().saturating_sub(*start);
+                        if range_exceeds_args || classes.len() != *count {
                             return Err(format!(
                                 "function '{}' has invalid struct argument group {:?}",
                                 function.name,
@@ -217,19 +259,135 @@ fn asm_operand_has_pseudo(operand: &AsmOperand) -> bool {
     matches!(operand, AsmOperand::Pseudo(_) | AsmOperand::PseudoMem(_, _))
 }
 
+fn asm_operands_have_pseudo(operands: &[&AsmOperand]) -> bool {
+    operands.iter().copied().any(asm_operand_has_pseudo)
+}
+
+fn asm_instr_has_pseudo(instr: &AsmInstr) -> bool {
+    match instr {
+        AsmInstr::Mov(_, src, dst)
+        | AsmInstr::Movsx(_, _, src, dst)
+        | AsmInstr::MovZeroExtend(_, _, src, dst)
+        | AsmInstr::Binary(_, _, src, dst)
+        | AsmInstr::Cmp(_, src, dst)
+        | AsmInstr::Lea(src, dst)
+        | AsmInstr::And(_, src, dst)
+        | AsmInstr::Or(_, src, dst)
+        | AsmInstr::Xor(_, src, dst)
+        | AsmInstr::Test(_, src, dst)
+        | AsmInstr::Shl(_, src, dst)
+        | AsmInstr::Shr(_, src, dst)
+        | AsmInstr::Sar(_, src, dst)
+        | AsmInstr::Ror(_, src, dst)
+        | AsmInstr::Rol(_, src, dst)
+        | AsmInstr::Cvtss2sd(src, dst)
+        | AsmInstr::Cvtsd2ss(src, dst)
+        | AsmInstr::AArch64FloatToDouble(src, dst)
+        | AsmInstr::AArch64DoubleToFloat(src, dst) => asm_operands_have_pseudo(&[src, dst]),
+        AsmInstr::Unary(_, _, operand)
+        | AsmInstr::Idiv(_, operand)
+        | AsmInstr::Div(_, operand)
+        | AsmInstr::SetCC(_, operand)
+        | AsmInstr::Push(operand)
+        | AsmInstr::JmpIndirect(operand)
+        | AsmInstr::LoadLabelAddress(_, operand)
+        | AsmInstr::Fld(_, operand)
+        | AsmInstr::Fstp(_, operand)
+        | AsmInstr::Fisttp(_, operand)
+        | AsmInstr::FldQ(operand)
+        | AsmInstr::X87Push(_, operand)
+        | AsmInstr::X87Pop(_, operand)
+        | AsmInstr::X87Load(_, operand)
+        | AsmInstr::X87Store(operand)
+        | AsmInstr::X87StoreFloat(_, operand)
+        | AsmInstr::X87StoreInt(_, operand) => asm_operand_has_pseudo(operand),
+        AsmInstr::Cvtsi2sd(_, _, dst)
+        | AsmInstr::Cvtsi2ss(_, _, dst)
+        | AsmInstr::Cvttsd2si(_, _, dst)
+        | AsmInstr::Cvttss2si(_, _, dst) => asm_operand_has_pseudo(dst),
+        AsmInstr::MulFull(_, operand)
+        | AsmInstr::LoadIndirect(_, _, operand)
+        | AsmInstr::StoreIndirect(_, operand, _)
+        | AsmInstr::AArch64LoadAdjusted(_, operand, _, _)
+        | AsmInstr::AArch64StoreOutgoingArg(_, operand, _, _)
+        | AsmInstr::AtomicRmw(_, _, _, operand)
+        | AsmInstr::AtomicExchange(_, operand)
+        | AsmInstr::AtomicCompareExchange(_, operand)
+        | AsmInstr::AtomicCompareSwap(_, _, operand) => asm_operand_has_pseudo(operand),
+        AsmInstr::X87LoadIndirect(_, _) | AsmInstr::X87StoreIndirect(_) => false,
+        AsmInstr::AArch64Umulh(left, right, dst) => asm_operands_have_pseudo(&[left, right, dst]),
+        AsmInstr::AArch64AddPtr(ptr, index, _, dst)
+        | AsmInstr::AArch64Rem(_, _, ptr, index, dst) => {
+            asm_operands_have_pseudo(&[ptr, index, dst])
+        }
+        AsmInstr::AArch64Extr(left, right, _, dst) => asm_operands_have_pseudo(&[left, right, dst]),
+        AsmInstr::AArch64UIntToDouble(_, src, dst)
+        | AsmInstr::AArch64UIntToFloat(_, src, dst)
+        | AsmInstr::AArch64DoubleToUInt(_, src, dst)
+        | AsmInstr::AArch64FloatToUInt(_, src, dst) => asm_operands_have_pseudo(&[src, dst]),
+        AsmInstr::BuiltinSetjmp { buf, dst, .. } => asm_operands_have_pseudo(&[buf, dst]),
+        AsmInstr::BuiltinLongjmp { buf, value } => asm_operands_have_pseudo(&[buf, value]),
+        AsmInstr::CopyToStackArg { src_ptr, .. } => asm_operand_has_pseudo(src_ptr),
+        AsmInstr::CopyFromStackArg { dst, .. } => asm_operand_has_pseudo(dst),
+        AsmInstr::X87Binary(_)
+        | AsmInstr::Fxch
+        | AsmInstr::FstpQ
+        | AsmInstr::Jmp(_)
+        | AsmInstr::NonlocalJmp(_)
+        | AsmInstr::JmpCC(_, _)
+        | AsmInstr::Label(_)
+        | AsmInstr::Call(_, _, _, _, _)
+        | AsmInstr::Pop(_)
+        | AsmInstr::Cdq(_)
+        | AsmInstr::Unreachable
+        | AsmInstr::Ret
+        | AsmInstr::AllocateStack(_)
+        | AsmInstr::DeallocateStack(_)
+        | AsmInstr::AArch64SaveLink(_)
+        | AsmInstr::AArch64RestoreLink(_)
+        | AsmInstr::AArch64AllocateLargeStack(_)
+        | AsmInstr::AArch64DeallocateLargeStack(_)
+        | AsmInstr::AArch64StoreLargeLocalBase { .. }
+        | AsmInstr::X86SetVarargsXmmCount(_)
+        | AsmInstr::AtomicFence
+        | AsmInstr::X87Compare
+        | AsmInstr::X87UnaryNeg => false,
+    }
+}
+
 pub fn validate_asm_program(program: &AsmProgram) -> Result<(), String> {
+    let mut all_labels = HashSet::new();
     for item in &program.top_level {
         let AsmTopLevel::Function(function) = item else {
             continue;
         };
-        let labels: HashSet<&str> = function
-            .instructions
-            .iter()
-            .filter_map(|instr| match instr {
-                AsmInstr::Label(label) => Some(label.as_str()),
-                _ => None,
-            })
-            .collect();
+        for instr in &function.instructions {
+            if let AsmInstr::Label(label) = instr {
+                if !all_labels.insert(label.as_str()) {
+                    return Err(format!(
+                        "function '{}' has duplicate assembly label '{}'",
+                        function.name, label
+                    ));
+                }
+            }
+        }
+    }
+
+    for item in &program.top_level {
+        let AsmTopLevel::Function(function) = item else {
+            continue;
+        };
+        let mut labels = HashSet::new();
+        for instr in &function.instructions {
+            if let AsmInstr::Label(label) = instr {
+                if !labels.insert(label.as_str()) {
+                    return Err(format!(
+                        "function '{}' has duplicate assembly label '{}'",
+                        function.name, label
+                    ));
+                }
+            }
+        }
         for instr in &function.instructions {
             match instr {
                 AsmInstr::Jmp(label) | AsmInstr::JmpCC(_, label)
@@ -240,76 +398,13 @@ pub fn validate_asm_program(program: &AsmProgram) -> Result<(), String> {
                         function.name, label
                     ));
                 }
-                AsmInstr::Mov(_, src, dst)
-                | AsmInstr::Movsx(_, _, src, dst)
-                | AsmInstr::MovZeroExtend(_, _, src, dst)
-                | AsmInstr::Binary(_, _, src, dst)
-                | AsmInstr::Cmp(_, src, dst)
-                | AsmInstr::Cvtsi2sd(_, src, dst)
-                | AsmInstr::Cvtsi2ss(_, src, dst)
-                | AsmInstr::Cvttsd2si(_, src, dst)
-                | AsmInstr::Cvttss2si(_, src, dst)
-                | AsmInstr::AArch64UIntToDouble(_, src, dst)
-                | AsmInstr::AArch64UIntToFloat(_, src, dst)
-                | AsmInstr::AArch64DoubleToUInt(_, src, dst)
-                | AsmInstr::AArch64FloatToUInt(_, src, dst)
-                | AsmInstr::Lea(src, dst)
-                    if asm_operand_has_pseudo(src) || asm_operand_has_pseudo(dst) =>
-                {
+                AsmInstr::LoadLabelAddress(label, _) if !all_labels.contains(label.as_str()) => {
                     return Err(format!(
-                        "function '{}' has unresolved pseudo operand in {:?}",
-                        function.name, instr
+                        "function '{}' references undefined assembly label '{}'",
+                        function.name, label
                     ));
                 }
-                AsmInstr::Cvtss2sd(src, dst)
-                | AsmInstr::Cvtsd2ss(src, dst)
-                | AsmInstr::AArch64FloatToDouble(src, dst)
-                | AsmInstr::AArch64DoubleToFloat(src, dst)
-                    if asm_operand_has_pseudo(src) || asm_operand_has_pseudo(dst) =>
-                {
-                    return Err(format!(
-                        "function '{}' has unresolved pseudo operand in {:?}",
-                        function.name, instr
-                    ));
-                }
-                AsmInstr::AArch64AddPtr(ptr, index, _, dst)
-                    if asm_operand_has_pseudo(ptr)
-                        || asm_operand_has_pseudo(index)
-                        || asm_operand_has_pseudo(dst) =>
-                {
-                    return Err(format!(
-                        "function '{}' has unresolved pseudo operand in {:?}",
-                        function.name, instr
-                    ));
-                }
-                AsmInstr::AArch64Rem(_, _, left, right, dst)
-                    if asm_operand_has_pseudo(left)
-                        || asm_operand_has_pseudo(right)
-                        || asm_operand_has_pseudo(dst) =>
-                {
-                    return Err(format!(
-                        "function '{}' has unresolved pseudo operand in {:?}",
-                        function.name, instr
-                    ));
-                }
-                AsmInstr::LoadIndirect(_, _, dst)
-                | AsmInstr::StoreIndirect(_, dst, _)
-                | AsmInstr::AArch64LoadAdjusted(_, dst, _, _)
-                | AsmInstr::AArch64StoreOutgoingArg(_, dst, _, _)
-                    if asm_operand_has_pseudo(dst) =>
-                {
-                    return Err(format!(
-                        "function '{}' has unresolved pseudo operand in {:?}",
-                        function.name, instr
-                    ));
-                }
-                AsmInstr::Unary(_, _, operand)
-                | AsmInstr::Idiv(_, operand)
-                | AsmInstr::Div(_, operand)
-                | AsmInstr::SetCC(_, operand)
-                | AsmInstr::Push(operand)
-                    if asm_operand_has_pseudo(operand) =>
-                {
+                _ if asm_instr_has_pseudo(instr) => {
                     return Err(format!(
                         "function '{}' has unresolved pseudo operand in {:?}",
                         function.name, instr
@@ -431,18 +526,112 @@ pub fn compile(stage: &Stage, src_file: &str, options: CompileOptions<'_>) -> Re
         .with_extension("s")
         .to_string_lossy()
         .into_owned();
-    backend::emit(&asm_filename, &asm_program, target)?;
-    if dumps.source_comments {
-        prepend_source_comment(&asm_filename, src_file)?;
-    }
+    let temporary_asm_filename = temporary_assembly_filename(&asm_filename)?;
+    let temporary_asm_guard = crate::tempfile::TempFile::new(&temporary_asm_filename);
+    let emit_result = (|| -> Result<(), String> {
+        backend::emit(&temporary_asm_filename, &asm_program, target)?;
+        if dumps.source_comments {
+            prepend_source_comment(&temporary_asm_filename, src_file)?;
+        }
+        publish_assembly(&temporary_asm_filename, &asm_filename)?;
+        Ok(())
+    })();
+    drop(temporary_asm_guard);
+    emit_result?;
     Ok(())
+}
+
+fn temporary_assembly_filename(assembly_filename: &str) -> Result<String, String> {
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let path = std::path::Path::new(assembly_filename);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("assembly.s");
+    loop {
+        let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate = path
+            .with_file_name(format!(
+                ".{name}.rnqcc-{}-{counter}.tmp",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .into_owned();
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => {
+                drop(file);
+                return Ok(candidate);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "could not create temporary assembly {}: {}",
+                    candidate, error
+                ));
+            }
+        }
+    }
+}
+
+fn publish_assembly(temporary_filename: &str, assembly_filename: &str) -> Result<(), String> {
+    let existing_permissions = match std::fs::metadata(assembly_filename) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!(
+                "could not inspect existing assembly {}: {}",
+                assembly_filename, error
+            ));
+        }
+    };
+    if let Some(permissions) = existing_permissions {
+        std::fs::set_permissions(temporary_filename, permissions).map_err(|error| {
+            format!(
+                "could not preserve permissions for {}: {}",
+                assembly_filename, error
+            )
+        })?;
+    }
+    match std::fs::rename(temporary_filename, assembly_filename) {
+        Ok(()) => Ok(()),
+        Err(rename_error) => {
+            #[cfg(windows)]
+            {
+                if std::fs::symlink_metadata(assembly_filename).is_ok() {
+                    std::fs::remove_file(assembly_filename).map_err(|remove_error| {
+                        format!(
+                            "could not replace existing assembly {}: {}; initial rename failed: {}",
+                            assembly_filename, remove_error, rename_error
+                        )
+                    })?;
+                    return std::fs::rename(temporary_filename, assembly_filename).map_err(
+                        |retry_error| {
+                            format!(
+                                "could not publish {} as {} after replacing the existing file: {}",
+                                temporary_filename, assembly_filename, retry_error
+                            )
+                        },
+                    );
+                }
+            }
+
+            Err(format!(
+                "could not publish {} as {}: {}",
+                temporary_filename, assembly_filename, rename_error
+            ))
+        }
+    }
 }
 
 /// C source is byte-oriented. Valid UTF-8 spelling should survive for extended
 /// identifiers, while raw non-UTF-8 bytes from preprocessors still need stable
 /// single-byte code points for legacy escape handling.
 pub fn decode_c_source_bytes(bytes: &[u8]) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(bytes.len());
     let mut rest = bytes;
     while !rest.is_empty() {
         match std::str::from_utf8(rest) {
@@ -557,7 +746,7 @@ fn parse_preprocessor_line_marker(trimmed_line: &str) -> Option<PreprocessorLine
 }
 
 fn parse_line_marker_filename(rest: &str) -> Option<LineMarkerFilename> {
-    let mut file = String::new();
+    let mut file = String::with_capacity(rest.len());
     let mut escaped = false;
     for ch in rest.chars() {
         if escaped {
@@ -601,7 +790,10 @@ fn prepend_source_comment(asm_filename: &str, src_file: &str) -> Result<(), Stri
     let body = std::fs::read_to_string(asm_filename)
         .map_err(|err| format!("could not read {}: {}", asm_filename, err))?;
     let comment = format!("# rnqcc source: {}\n", src_file);
-    std::fs::write(asm_filename, format!("{}{}", comment, body))
+    let mut output = String::with_capacity(comment.len() + body.len());
+    output.push_str(&comment);
+    output.push_str(&body);
+    std::fs::write(asm_filename, output)
         .map_err(|err| format!("could not write {}: {}", asm_filename, err))
 }
 
@@ -610,11 +802,63 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    static PUBLICATION_TEST_ID: AtomicUsize = AtomicUsize::new(0);
+
     fn require_err<T>(result: Result<T, String>, context: &str) -> Result<String, String> {
         match result {
             Ok(_) => Err(format!("{context} unexpectedly succeeded")),
             Err(err) => Ok(err),
         }
+    }
+
+    #[test]
+    fn assembly_publication_reserves_unique_temporary_paths() -> Result<(), String> {
+        let id = PUBLICATION_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let assembly = std::env::temp_dir().join(format!(
+            "rnqcc-assembly-publication-{}-{id}.s",
+            std::process::id()
+        ));
+        let assembly = assembly.to_string_lossy().into_owned();
+        let first = temporary_assembly_filename(&assembly)?;
+        let second = temporary_assembly_filename(&assembly)?;
+        assert_ne!(first, second);
+
+        let first_guard = crate::tempfile::TempFile::new(&first);
+        let second_guard = crate::tempfile::TempFile::new(&second);
+        std::fs::write(&first, "new assembly\n").map_err(|err| err.to_string())?;
+        std::fs::write(&assembly, "old assembly\n").map_err(|err| err.to_string())?;
+        let assembly_guard = crate::tempfile::TempFile::new(&assembly);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&assembly)
+                .map_err(|err| err.to_string())?
+                .permissions();
+            permissions.set_mode(0o600);
+            std::fs::set_permissions(&assembly, permissions).map_err(|err| err.to_string())?;
+        }
+        publish_assembly(&first, &assembly)?;
+        assert_eq!(
+            std::fs::read_to_string(&assembly).map_err(|err| err.to_string())?,
+            "new assembly\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&assembly)
+                    .map_err(|err| err.to_string())?
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        assert!(!std::path::Path::new(&first).exists());
+        drop(first_guard);
+        drop(second_guard);
+        drop(assembly_guard);
+        Ok(())
     }
 
     #[test]
@@ -648,24 +892,319 @@ mod tests {
     }
 
     #[test]
+    fn tacky_validator_rejects_duplicate_labels() -> Result<(), String> {
+        let program = TackyProgram {
+            top_level: vec![TackyTopLevel::Function(TackyFunction {
+                name: "main".to_string(),
+                return_type: CType::Int,
+                params: Vec::new(),
+                global: true,
+                body: vec![
+                    TackyInstr::Label("duplicate".to_string()),
+                    TackyInstr::Label("duplicate".to_string()),
+                ],
+                stack_params: HashSet::new(),
+                memory_param_blocks: Vec::new(),
+                struct_param_groups: Vec::new(),
+            })],
+            global_vars: HashSet::new(),
+            thread_local_vars: HashSet::new(),
+            symbol_types: Default::default(),
+            symbol_alignments: Default::default(),
+            array_sizes: Default::default(),
+            struct_defs: Default::default(),
+            var_struct_tags: Default::default(),
+        };
+
+        let err = require_err(
+            validate_tacky_program(&program),
+            "validator should reject duplicate TACKY labels",
+        )?;
+        assert!(err.contains("duplicate TACKY label"));
+        Ok(())
+    }
+
+    #[test]
+    fn tacky_validator_rejects_duplicate_labels_across_functions() -> Result<(), String> {
+        let function = |name: &str| {
+            TackyTopLevel::Function(TackyFunction {
+                name: name.to_string(),
+                return_type: CType::Int,
+                params: Vec::new(),
+                global: true,
+                body: vec![TackyInstr::Label("shared".to_string())],
+                stack_params: HashSet::new(),
+                memory_param_blocks: Vec::new(),
+                struct_param_groups: Vec::new(),
+            })
+        };
+        let program = TackyProgram {
+            top_level: vec![function("first"), function("second")],
+            global_vars: HashSet::new(),
+            thread_local_vars: HashSet::new(),
+            symbol_types: Default::default(),
+            symbol_alignments: Default::default(),
+            array_sizes: Default::default(),
+            struct_defs: Default::default(),
+            var_struct_tags: Default::default(),
+        };
+
+        let err = require_err(
+            validate_tacky_program(&program),
+            "validator should reject cross-function duplicate TACKY labels",
+        )?;
+        assert!(err.contains("duplicate TACKY label"));
+        Ok(())
+    }
+
+    #[test]
+    fn tacky_validator_rejects_undefined_nonlocal_label_references() -> Result<(), String> {
+        let instructions = vec![
+            TackyInstr::NonlocalJump("missing".to_string()),
+            TackyInstr::LoadLabelAddress(
+                "missing".to_string(),
+                TackyVal::Var("target".to_string()),
+            ),
+        ];
+
+        for instruction in instructions {
+            let program = TackyProgram {
+                top_level: vec![TackyTopLevel::Function(TackyFunction {
+                    name: "main".to_string(),
+                    return_type: CType::Int,
+                    params: Vec::new(),
+                    global: true,
+                    body: vec![instruction],
+                    stack_params: HashSet::new(),
+                    memory_param_blocks: Vec::new(),
+                    struct_param_groups: Vec::new(),
+                })],
+                global_vars: HashSet::new(),
+                thread_local_vars: HashSet::new(),
+                symbol_types: Default::default(),
+                symbol_alignments: Default::default(),
+                array_sizes: Default::default(),
+                struct_defs: Default::default(),
+                var_struct_tags: Default::default(),
+            };
+            let err = require_err(
+                validate_tacky_program(&program),
+                "validator should reject undefined nonlocal label reference",
+            )?;
+            assert!(err.contains("undefined TACKY label"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn tacky_validator_rejects_overflowing_argument_group_ranges() -> Result<(), String> {
+        let program = TackyProgram {
+            top_level: vec![TackyTopLevel::Function(TackyFunction {
+                name: "main".to_string(),
+                return_type: CType::Int,
+                params: Vec::new(),
+                global: true,
+                body: vec![TackyInstr::FunCall {
+                    name: "callee".to_string(),
+                    args: Vec::new(),
+                    dst: TackyVal::Var("result".to_string()),
+                    stack_arg_indices: HashSet::new(),
+                    memory_arg_blocks: Vec::new(),
+                    struct_arg_groups: vec![(usize::MAX, 1, vec![false])],
+                    variadic: false,
+                    fixed_flat_arg_count: 0,
+                    hidden_return: false,
+                    indirect: false,
+                }],
+                stack_params: HashSet::new(),
+                memory_param_blocks: Vec::new(),
+                struct_param_groups: Vec::new(),
+            })],
+            global_vars: HashSet::new(),
+            thread_local_vars: HashSet::new(),
+            symbol_types: Default::default(),
+            symbol_alignments: Default::default(),
+            array_sizes: Default::default(),
+            struct_defs: Default::default(),
+            var_struct_tags: Default::default(),
+        };
+
+        let err = require_err(
+            validate_tacky_program(&program),
+            "validator should reject overflowing argument range",
+        )?;
+        assert!(err.contains("invalid struct argument group"));
+        Ok(())
+    }
+
+    #[test]
+    fn tacky_validator_rejects_nonassignable_special_destinations() -> Result<(), String> {
+        let invalid_destination = TackyVal::Constant(0);
+        let instructions = vec![
+            TackyInstr::FrameAddress {
+                dst: invalid_destination.clone(),
+            },
+            TackyInstr::LoadLabelAddress("label".to_string(), invalid_destination.clone()),
+            TackyInstr::VaStart {
+                dst: invalid_destination.clone(),
+            },
+            TackyInstr::AtomicFetch {
+                op: TackyBinaryOp::Add,
+                ptr: TackyVal::Constant(0),
+                arg: TackyVal::Constant(1),
+                return_old: false,
+                dst: invalid_destination.clone(),
+            },
+            TackyInstr::AtomicExchange {
+                ptr: TackyVal::Constant(0),
+                value: TackyVal::Constant(1),
+                dst: invalid_destination.clone(),
+            },
+            TackyInstr::AtomicCompareExchange {
+                ptr: TackyVal::Constant(0),
+                expected: TackyVal::Constant(1),
+                desired: TackyVal::Constant(2),
+                dst: invalid_destination.clone(),
+            },
+            TackyInstr::AtomicCompareSwap {
+                ptr: TackyVal::Constant(0),
+                expected: TackyVal::Constant(1),
+                desired: TackyVal::Constant(2),
+                return_old: false,
+                dst: invalid_destination,
+            },
+        ];
+
+        for instruction in instructions {
+            let program = TackyProgram {
+                top_level: vec![TackyTopLevel::Function(TackyFunction {
+                    name: "main".to_string(),
+                    return_type: CType::Int,
+                    params: Vec::new(),
+                    global: true,
+                    body: vec![TackyInstr::Label("label".to_string()), instruction],
+                    stack_params: HashSet::new(),
+                    memory_param_blocks: Vec::new(),
+                    struct_param_groups: Vec::new(),
+                })],
+                global_vars: HashSet::new(),
+                thread_local_vars: HashSet::new(),
+                symbol_types: Default::default(),
+                symbol_alignments: Default::default(),
+                array_sizes: Default::default(),
+                struct_defs: Default::default(),
+                var_struct_tags: Default::default(),
+            };
+            let err = require_err(
+                validate_tacky_program(&program),
+                "validator should reject non-assignable special destination",
+            )?;
+            assert!(err.contains("non-assignable TACKY destination"));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn asm_validator_rejects_unresolved_pseudos() -> Result<(), String> {
+        let instructions = vec![
+            AsmInstr::Mov(
+                AsmType::Longword,
+                AsmOperand::Pseudo("tmp".to_string()),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            AsmInstr::JmpIndirect(AsmOperand::Pseudo("jump_target".to_string())),
+            AsmInstr::CopyToStackArg {
+                src_ptr: AsmOperand::Pseudo("src_ptr".to_string()),
+                dst_offset: 0,
+                size: 8,
+            },
+            AsmInstr::AtomicExchange(
+                AsmType::Quadword,
+                AsmOperand::Pseudo("atomic_value".to_string()),
+            ),
+            AsmInstr::Fld(AsmType::Double, AsmOperand::Pseudo("floating".to_string())),
+        ];
+
+        for instruction in instructions {
+            let program = AsmProgram {
+                top_level: vec![AsmTopLevel::Function(AsmFunction {
+                    name: "main".to_string(),
+                    global: true,
+                    instructions: vec![instruction],
+                })],
+            };
+            let err = require_err(
+                validate_asm_program(&program),
+                "validator should reject pseudos",
+            )?;
+            assert!(err.contains("unresolved pseudo operand"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn asm_validator_rejects_undefined_label_addresses() -> Result<(), String> {
+        let instructions = vec![AsmInstr::LoadLabelAddress(
+            "missing".to_string(),
+            AsmOperand::Reg(Reg::AX),
+        )];
+
+        for instruction in instructions {
+            let program = AsmProgram {
+                top_level: vec![AsmTopLevel::Function(AsmFunction {
+                    name: "main".to_string(),
+                    global: true,
+                    instructions: vec![instruction],
+                })],
+            };
+            let err = require_err(
+                validate_asm_program(&program),
+                "validator should reject an undefined assembly label reference",
+            )?;
+            assert!(err.contains("undefined assembly label"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn asm_validator_rejects_duplicate_labels() -> Result<(), String> {
         let program = AsmProgram {
             top_level: vec![AsmTopLevel::Function(AsmFunction {
                 name: "main".to_string(),
                 global: true,
-                instructions: vec![AsmInstr::Mov(
-                    AsmType::Longword,
-                    AsmOperand::Pseudo("tmp".to_string()),
-                    AsmOperand::Reg(Reg::AX),
-                )],
+                instructions: vec![
+                    AsmInstr::Label("duplicate".to_string()),
+                    AsmInstr::Label("duplicate".to_string()),
+                ],
             })],
         };
 
         let err = require_err(
             validate_asm_program(&program),
-            "validator should reject pseudos",
+            "validator should reject duplicate assembly labels",
         )?;
-        assert!(err.contains("unresolved pseudo operand"));
+        assert!(err.contains("duplicate assembly label"));
+        Ok(())
+    }
+
+    #[test]
+    fn asm_validator_rejects_duplicate_labels_across_functions() -> Result<(), String> {
+        let function = |name: &str| {
+            AsmTopLevel::Function(AsmFunction {
+                name: name.to_string(),
+                global: true,
+                instructions: vec![AsmInstr::Label("shared".to_string())],
+            })
+        };
+        let program = AsmProgram {
+            top_level: vec![function("first"), function("second")],
+        };
+
+        let err = require_err(
+            validate_asm_program(&program),
+            "validator should reject cross-function duplicate assembly labels",
+        )?;
+        assert!(err.contains("duplicate assembly label"));
         Ok(())
     }
 

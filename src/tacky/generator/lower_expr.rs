@@ -243,7 +243,12 @@ impl TackyGen {
                 self.emit(TackyInstr::CopyToOffset {
                     src: lane_val,
                     dst_name: result_name.clone(),
-                    offset: (lane * elem_size) as i64,
+                    offset: Self::checked_offset(
+                        0,
+                        lane.checked_mul(elem_size)
+                            .ok_or_else(|| "vector lane offset is too large".to_string())?,
+                        "vector lane",
+                    )?,
                 });
             }
             return Ok((result, src_ft.to_ctype()));
@@ -386,11 +391,16 @@ impl TackyGen {
                 self.emit_struct_copy_to(slot_ptr.clone(), dst_name, struct_size);
             }
             let next = self.fresh_tmp(CType::Pointer);
-            let slot_size = struct_size.next_multiple_of(8);
+            let slot_size = struct_size
+                .checked_add(7)
+                .map(|rounded| rounded / 8 * 8)
+                .ok_or_else(|| "__builtin_va_arg struct slot size overflow".to_string())?;
+            let slot_size = i64::try_from(slot_size)
+                .map_err(|_| "__builtin_va_arg struct slot size is too large".to_string())?;
             self.emit(TackyInstr::Binary {
                 op: TackyBinaryOp::Add,
                 left: slot_ptr,
-                right: TackyVal::Constant(slot_size as i64),
+                right: TackyVal::Constant(slot_size),
                 dst: next.clone(),
             });
             match args[0] {
@@ -1244,7 +1254,13 @@ impl TackyGen {
                             struct_arg_groups.push((group_start, classes.len(), is_sse_vec));
                         }
                         for (eb_idx, class) in classes.iter().enumerate() {
-                            let eb_offset = (eb_idx * 8) as i64;
+                            let eb_offset =
+                                i64::try_from(eb_idx.checked_mul(8).ok_or_else(|| {
+                                    "aggregate argument offset is too large".to_string()
+                                })?)
+                                .map_err(|_| {
+                                    "aggregate argument offset is too large".to_string()
+                                })?;
                             match class {
                                 ParamClass::Sse => {
                                     let tmp = self.fresh_tmp(CType::Double);
@@ -1659,7 +1675,13 @@ impl TackyGen {
                             struct_arg_groups.push((group_start, classes.len(), is_sse_vec));
                         }
                         for (eb_idx, class) in classes.iter().enumerate() {
-                            let eb_offset = (eb_idx * 8) as i64;
+                            let eb_offset =
+                                i64::try_from(eb_idx.checked_mul(8).ok_or_else(|| {
+                                    "aggregate argument offset is too large".to_string()
+                                })?)
+                                .map_err(|_| {
+                                    "aggregate argument offset is too large".to_string()
+                                })?;
                             match class {
                                 ParamClass::Sse => {
                                     let tmp = self.fresh_tmp(CType::Double);
@@ -2080,11 +2102,15 @@ impl TackyGen {
                 FullType::Struct(t) => t.clone(),
                 FullType::Pointer(inner) => match inner.as_ref() {
                     FullType::Struct(t) => t.clone(),
-                    _ => String::new(),
+                    _ => return Err("conditional struct arm has invalid type".to_string()),
                 },
-                _ => String::new(),
+                _ => return Err("conditional struct arm has invalid type".to_string()),
             };
-            let struct_size = self.struct_defs.get(&tag).map(|d| d.size).unwrap_or(0);
+            let struct_size = self
+                .struct_defs
+                .get(&tag)
+                .map(|d| d.size)
+                .ok_or_else(|| format!("missing struct definition `{tag}`"))?;
             let result = self.fresh_tmp_full(&FullType::Struct(tag.clone()));
             if let TackyVal::Var(ref rn) = result {
                 self.array_sizes.insert(rn.clone(), struct_size);
@@ -2212,7 +2238,7 @@ impl TackyGen {
         op: UnaryOp,
         inner: Exp,
     ) -> TackyResult<(TackyVal, CType)> {
-        let lane = match op {
+        let lane: usize = match op {
             UnaryOp::RealPart => 0,
             UnaryOp::ImagPart => 1,
             _ => return Err("internal error: expected complex component operator".to_string()),
@@ -2244,7 +2270,7 @@ impl TackyGen {
         inner: Exp,
         right: Exp,
     ) -> TackyResult<(TackyVal, CType)> {
-        let lane = match op {
+        let lane: usize = match op {
             UnaryOp::RealPart => 0,
             UnaryOp::ImagPart => 1,
             _ => return Err("internal error: expected complex component operator".to_string()),
@@ -2266,7 +2292,12 @@ impl TackyGen {
         let rhs_ft = self.val_full_type(&rhs);
         self.assert_assignable_exp_full_type(&elem, &rhs_ft, &right_for_type, "assignment")?;
         let rhs_conv = self.convert_to(rhs, rhs_type, elem_type);
-        let offset = (lane * elem_size) as i64;
+        let offset = Self::checked_offset(
+            0,
+            lane.checked_mul(elem_size)
+                .ok_or_else(|| "complex lane offset is too large".to_string())?,
+            "complex lane",
+        )?;
 
         if let Exp::Var(name) = inner {
             self.emit(TackyInstr::CopyToOffset {
@@ -2304,7 +2335,7 @@ impl TackyGen {
         inner: Exp,
         right: Exp,
     ) -> TackyResult<(TackyVal, CType)> {
-        let lane = match component_op {
+        let lane: usize = match component_op {
             UnaryOp::RealPart => 0,
             UnaryOp::ImagPart => 1,
             _ => return Err("internal error: expected complex component operator".to_string()),
@@ -2321,7 +2352,12 @@ impl TackyGen {
         };
         let elem_type = elem.to_ctype();
         let elem_size = elem.byte_size_with(&self.struct_defs);
-        let offset = (lane * elem_size) as i64;
+        let offset = Self::checked_offset(
+            0,
+            lane.checked_mul(elem_size)
+                .ok_or_else(|| "complex lane offset is too large".to_string())?,
+            "complex lane",
+        )?;
 
         let (current, dst_ptr, dst_name) = if let Exp::Var(name) = inner {
             let current = self.fresh_tmp(elem_type);
@@ -2386,7 +2422,7 @@ impl TackyGen {
         op: UnaryOp,
         inner: Exp,
     ) -> TackyResult<(TackyVal, CType)> {
-        let lane = match op {
+        let lane: usize = match op {
             UnaryOp::RealPart => 0,
             UnaryOp::ImagPart => 1,
             _ => return Err("internal error: expected complex component operator".to_string()),
@@ -2402,7 +2438,12 @@ impl TackyGen {
             return Err("internal error: expected complex vector type".to_string());
         };
         let elem_size = elem.byte_size_with(&self.struct_defs);
-        let offset = (lane * elem_size) as i64;
+        let offset = Self::checked_offset(
+            0,
+            lane.checked_mul(elem_size)
+                .ok_or_else(|| "complex lane offset is too large".to_string())?,
+            "complex lane",
+        )?;
         let ptr_ft = FullType::Pointer(elem);
         let mut ptr = match inner {
             Exp::Var(name) => {
@@ -2488,7 +2529,7 @@ impl TackyGen {
         self.emit(TackyInstr::CopyToOffset {
             src: imag,
             dst_name: dst_name.to_string(),
-            offset: offset + elem_size as i64,
+            offset: Self::checked_offset(offset, elem_size, "complex value")?,
         });
         Ok(())
     }
@@ -2511,7 +2552,7 @@ impl TackyGen {
         self.emit(TackyInstr::Binary {
             op: TackyBinaryOp::Add,
             left: dst_ptr,
-            right: TackyVal::Constant(elem_size as i64),
+            right: TackyVal::Constant(Self::checked_offset(0, elem_size, "complex value")?),
             dst: imag_ptr.clone(),
         });
         self.emit(TackyInstr::Store {
@@ -2607,7 +2648,7 @@ impl TackyGen {
                     self.emit(TackyInstr::CopyToOffset {
                         src: neg_imag,
                         dst_name: result_name.clone(),
-                        offset: elem_size as i64,
+                        offset: Self::checked_offset(0, elem_size, "complex unary")?,
                     });
                     return Ok((result, value_ft.to_ctype()));
                 }
@@ -2642,7 +2683,7 @@ impl TackyGen {
                     self.emit(TackyInstr::CopyToOffset {
                         src: neg_imag,
                         dst_name: result_name.clone(),
-                        offset: elem_size as i64,
+                        offset: Self::checked_offset(0, elem_size, "complex unary")?,
                     });
                     return Ok((result, value_ft.to_ctype()));
                 }
@@ -2715,7 +2756,12 @@ impl TackyGen {
             self.emit(TackyInstr::CopyToOffset {
                 src: stored,
                 dst_name: result_name.clone(),
-                offset: (lane * elem_size) as i64,
+                offset: Self::checked_offset(
+                    0,
+                    lane.checked_mul(elem_size)
+                        .ok_or_else(|| "vector lane offset is too large".to_string())?,
+                    "vector lane",
+                )?,
             });
         }
         Ok((result, value_ft.to_ctype()))
@@ -2844,7 +2890,10 @@ impl TackyGen {
             });
             let increment = if pt == CType::Pointer {
                 let elem_size = match &pt_ft {
-                    FullType::Pointer(inner) => inner.byte_size_with(&self.struct_defs) as i64,
+                    FullType::Pointer(inner) => inner
+                        .checked_byte_size_with(&self.struct_defs)
+                        .and_then(|size| i64::try_from(size).ok())
+                        .ok_or_else(|| "pointer increment size is too large".to_string())?,
                     _ => 1,
                 };
                 TackyVal::Constant(elem_size)
@@ -2887,7 +2936,10 @@ impl TackyGen {
             });
             let increment = if pt == CType::Pointer {
                 let elem_size = match &elem_ft {
-                    FullType::Pointer(inner) => inner.byte_size_with(&self.struct_defs) as i64,
+                    FullType::Pointer(inner) => inner
+                        .checked_byte_size_with(&self.struct_defs)
+                        .and_then(|size| i64::try_from(size).ok())
+                        .ok_or_else(|| "pointer increment size is too large".to_string())?,
                     _ => 1,
                 };
                 TackyVal::Constant(elem_size)
@@ -2920,7 +2972,10 @@ impl TackyGen {
             });
             let increment = if var_type == CType::Pointer {
                 let elem_size = match &var_ft {
-                    FullType::Pointer(inner) => inner.byte_size_with(&self.struct_defs) as i64,
+                    FullType::Pointer(inner) => inner
+                        .checked_byte_size_with(&self.struct_defs)
+                        .and_then(|size| i64::try_from(size).ok())
+                        .ok_or_else(|| "pointer increment size is too large".to_string())?,
                     _ => 1,
                 };
                 TackyVal::Constant(elem_size)
@@ -2948,7 +3003,7 @@ impl TackyGen {
         if is_pre {
             let increment = if var_type == CType::Pointer {
                 let elem_size = if let TackyVal::Var(ref n) = var {
-                    self.ptr_elem_size(n)
+                    self.ptr_elem_size(n)?
                 } else {
                     1
                 };
@@ -2994,7 +3049,7 @@ impl TackyGen {
         });
         let increment = if var_type == CType::Pointer {
             let elem_size = if let TackyVal::Var(ref n) = var {
-                self.ptr_elem_size(n)
+                self.ptr_elem_size(n)?
             } else {
                 1
             };
@@ -3050,12 +3105,14 @@ impl TackyGen {
                         }
                     };
                     let m = self.struct_member(&tag, mem)?;
+                    let member_offset = i64::try_from(m.offset)
+                        .map_err(|_| "struct member offset is too large".to_string())?;
                     let result = self.fresh_tmp(CType::Pointer);
-                    if m.offset > 0 {
+                    if member_offset > 0 {
                         self.emit(TackyInstr::Binary {
                             op: TackyBinaryOp::Add,
                             left: ptr,
-                            right: TackyVal::Constant(m.offset as i64),
+                            right: TackyVal::Constant(member_offset),
                             dst: result.clone(),
                         });
                     } else {
@@ -3091,12 +3148,14 @@ impl TackyGen {
                 // Get the struct tag using typeof_exp
                 let tag = self.dot_inner_tag(inner)?;
                 let mem = self.struct_member(&tag, member)?;
+                let member_offset = i64::try_from(mem.offset)
+                    .map_err(|_| "struct member offset is too large".to_string())?;
                 let result = self.fresh_tmp(CType::Pointer);
-                if mem.offset > 0 {
+                if member_offset > 0 {
                     self.emit(TackyInstr::Binary {
                         op: TackyBinaryOp::Add,
                         left: base_addr,
-                        right: TackyVal::Constant(mem.offset as i64),
+                        right: TackyVal::Constant(member_offset),
                         dst: result.clone(),
                     });
                 } else {
@@ -3137,12 +3196,14 @@ impl TackyGen {
                     }
                 };
                 let mem = self.struct_member(&tag, member)?;
+                let member_offset = i64::try_from(mem.offset)
+                    .map_err(|_| "struct member offset is too large".to_string())?;
                 let result = self.fresh_tmp(CType::Pointer);
-                if mem.offset > 0 {
+                if member_offset > 0 {
                     self.emit(TackyInstr::Binary {
                         op: TackyBinaryOp::Add,
                         left: ptr,
-                        right: TackyVal::Constant(mem.offset as i64),
+                        right: TackyVal::Constant(member_offset),
                         dst: result.clone(),
                     });
                 } else {
@@ -3388,7 +3449,9 @@ impl TackyGen {
         mem: &StructMember,
         rhs: TackyVal,
     ) -> TackyResult<TackyVal> {
-        self.store_bit_field_to_absolute_offset(dst_name, mem, mem.offset as i64, rhs)
+        let offset = i64::try_from(mem.offset)
+            .map_err(|_| "bit-field member offset is too large".to_string())?;
+        self.store_bit_field_to_absolute_offset(dst_name, mem, offset, rhs)
     }
 
     pub(super) fn store_bit_field_to_absolute_offset(
@@ -3532,7 +3595,8 @@ impl TackyGen {
     ) -> TackyResult<(TackyVal, CType)> {
         let mem = self.struct_member(&tag, member)?;
         let mem_type = mem.member_type;
-        let mem_offset = mem.offset;
+        let mem_offset = i64::try_from(mem.offset)
+            .map_err(|_| "struct member offset is too large".to_string())?;
         let mem_ft = mem.member_full_type.clone();
 
         let mem_ptr = self.fresh_tmp(CType::Pointer);
@@ -3540,7 +3604,7 @@ impl TackyGen {
             self.emit(TackyInstr::Binary {
                 op: TackyBinaryOp::Add,
                 left: struct_addr,
-                right: TackyVal::Constant(mem_offset as i64),
+                right: TackyVal::Constant(mem_offset),
                 dst: mem_ptr.clone(),
             });
         } else {
@@ -3616,7 +3680,7 @@ impl TackyGen {
         struct_size: usize,
     ) {
         let mut off = 0usize;
-        while off + 8 <= struct_size {
+        while off <= struct_size.saturating_sub(8) {
             let ptr = self.fresh_tmp(CType::Pointer);
             self.emit(TackyInstr::Binary {
                 op: TackyBinaryOp::Add,
@@ -3636,7 +3700,7 @@ impl TackyGen {
             });
             off += 8;
         }
-        while off + 4 <= struct_size {
+        while off <= struct_size.saturating_sub(4) {
             let ptr = self.fresh_tmp(CType::Pointer);
             self.emit(TackyInstr::Binary {
                 op: TackyBinaryOp::Add,
@@ -3686,7 +3750,7 @@ impl TackyGen {
         struct_size: usize,
     ) {
         let mut off = 0usize;
-        while off + 8 <= struct_size {
+        while off <= struct_size.saturating_sub(8) {
             let src_ptr = self.fresh_tmp(CType::Pointer);
             self.emit(TackyInstr::Binary {
                 op: TackyBinaryOp::Add,
@@ -3709,7 +3773,7 @@ impl TackyGen {
             self.emit(TackyInstr::Store { src: tmp, dst_ptr });
             off += 8;
         }
-        while off + 4 <= struct_size {
+        while off <= struct_size.saturating_sub(4) {
             let src_ptr = self.fresh_tmp(CType::Pointer);
             self.emit(TackyInstr::Binary {
                 op: TackyBinaryOp::Add,
@@ -3774,6 +3838,10 @@ impl TackyGen {
             let elem_full = elem.as_ref().clone();
             let elem_type = elem_full.to_ctype();
             let idx_long = self.convert_to(second_val, second_type, CType::Long);
+            let scale = elem_full
+                .checked_byte_size_with(&self.struct_defs)
+                .and_then(|size| i64::try_from(size).ok())
+                .ok_or_else(|| "vector subscript element size is too large".to_string())?;
             let base_ptr = self.fresh_tmp_full(&FullType::Pointer(Box::new(elem_full.clone())));
             self.emit(TackyInstr::GetAddress {
                 src: first_val,
@@ -3783,7 +3851,7 @@ impl TackyGen {
             self.emit(TackyInstr::AddPtr {
                 ptr: base_ptr,
                 index: idx_long,
-                scale: elem_full.byte_size_with(&self.struct_defs) as i64,
+                scale,
                 dst: ptr.clone(),
             });
             return Ok((ptr, elem_type, elem_full));
@@ -3796,10 +3864,14 @@ impl TackyGen {
                 (second_val, first_val, first_type, second_full)
             };
         let (elem_full, scale) = match &arr_full {
-            FullType::Pointer(inner) => (
-                inner.as_ref().clone(),
-                inner.byte_size_with(&self.struct_defs) as i64,
-            ),
+            FullType::Pointer(inner) => {
+                let elem_full = inner.as_ref().clone();
+                let scale = elem_full
+                    .checked_byte_size_with(&self.struct_defs)
+                    .and_then(|size| i64::try_from(size).ok())
+                    .ok_or_else(|| "pointer subscript element size is too large".to_string())?;
+                (elem_full, scale)
+            }
             _ => {
                 // Fallback to old approach
                 let elem_type = if let TackyVal::Var(ref name) = arr_val {
@@ -3892,7 +3964,12 @@ impl TackyGen {
                 let lane_value = self.fresh_tmp(elem_type);
                 self.emit(TackyInstr::CopyFromOffset {
                     src_name: name,
-                    offset: (lane * elem_size) as i64,
+                    offset: Self::checked_offset(
+                        0,
+                        lane.checked_mul(elem_size)
+                            .ok_or_else(|| "vector lane offset is too large".to_string())?,
+                        "vector lane",
+                    )?,
                     dst: lane_value.clone(),
                 });
                 return Ok(lane_value);
@@ -3906,7 +3983,8 @@ impl TackyGen {
             self.emit(TackyInstr::AddPtr {
                 ptr: addr,
                 index: TackyVal::Constant(lane as i64),
-                scale: elem_size as i64,
+                scale: i64::try_from(elem_size)
+                    .map_err(|_| "vector lane size is too large".to_string())?,
                 dst: ptr.clone(),
             });
             let lane_value = self.fresh_tmp(elem_type);
@@ -3936,11 +4014,18 @@ impl TackyGen {
                 return Err("internal error: expected complex vector type".to_string());
             };
             let source_elem_type = elem.to_ctype();
-            let source_elem_size = elem.byte_size_with(&self.struct_defs);
+            let source_elem_size = elem
+                .checked_byte_size_with(&self.struct_defs)
+                .ok_or_else(|| "complex component size is too large".to_string())?;
             let dst = self.fresh_tmp(source_elem_type);
             self.emit(TackyInstr::CopyFromOffset {
                 src_name: name,
-                offset: (lane * source_elem_size) as i64,
+                offset: Self::checked_offset(
+                    0,
+                    lane.checked_mul(source_elem_size)
+                        .ok_or_else(|| "complex component offset is too large".to_string())?,
+                    "complex component",
+                )?,
                 dst: dst.clone(),
             });
             Ok(self.convert_to(dst, source_elem_type, elem_type))
@@ -4044,7 +4129,7 @@ impl TackyGen {
                     self.emit(TackyInstr::CopyToOffset {
                         src: imag,
                         dst_name: result_name.clone(),
-                        offset: elem_size as i64,
+                        offset: Self::checked_offset(0, elem_size, "complex multiplication")?,
                     });
                     return Ok((result, elem_type));
                 }
@@ -4099,7 +4184,7 @@ impl TackyGen {
                     self.emit(TackyInstr::CopyToOffset {
                         src: imag,
                         dst_name: result_name.clone(),
-                        offset: elem_size as i64,
+                        offset: Self::checked_offset(0, elem_size, "complex multiplication")?,
                     });
                     return Ok((result, elem_type));
                 }
@@ -4189,7 +4274,7 @@ impl TackyGen {
                     self.emit(TackyInstr::CopyToOffset {
                         src: imag,
                         dst_name: result_name.clone(),
-                        offset: elem_size as i64,
+                        offset: Self::checked_offset(0, elem_size, "complex division")?,
                     });
                     return Ok((result, elem_type));
                 }
@@ -4281,7 +4366,12 @@ impl TackyGen {
                 self.emit(TackyInstr::CopyToOffset {
                     src: lane_mask,
                     dst_name: result_name.clone(),
-                    offset: (lane * elem_size) as i64,
+                    offset: Self::checked_offset(
+                        0,
+                        lane.checked_mul(elem_size)
+                            .ok_or_else(|| "vector lane offset is too large".to_string())?,
+                        "vector lane",
+                    )?,
                 });
             }
             return Ok((result, vector_ft.to_ctype()));
@@ -4337,7 +4427,12 @@ impl TackyGen {
                 self.emit(TackyInstr::CopyToOffset {
                     src: stored,
                     dst_name: result_name.clone(),
-                    offset: (lane * elem_size) as i64,
+                    offset: Self::checked_offset(
+                        0,
+                        lane.checked_mul(elem_size)
+                            .ok_or_else(|| "vector lane offset is too large".to_string())?,
+                        "vector lane",
+                    )?,
                 });
             }
             return Ok((result, vector_ft.to_ctype()));
@@ -4347,7 +4442,7 @@ impl TackyGen {
             let (is_ptr_arith, ptr_val, int_val, elem_size, int_type) =
                 if l_type == CType::Pointer && !r_type.is_pointer() {
                     let es = if let TackyVal::Var(ref n) = l {
-                        self.ptr_elem_size(n)
+                        self.ptr_elem_size(n)?
                     } else {
                         1
                     };
@@ -4357,7 +4452,7 @@ impl TackyGen {
                     && matches!(op, BinaryOp::Add)
                 {
                     let es = if let TackyVal::Var(ref n) = r {
-                        self.ptr_elem_size(n)
+                        self.ptr_elem_size(n)?
                     } else {
                         1
                     };
@@ -4422,7 +4517,7 @@ impl TackyGen {
                     dst: raw_diff.clone(),
                 });
                 let es = if let TackyVal::Var(ref n) = ptr_val {
-                    self.ptr_elem_size(n)
+                    self.ptr_elem_size(n)?
                 } else {
                     1
                 };
@@ -4598,74 +4693,65 @@ impl TackyGen {
                     } else if let Some(ref ret_ptr) = self.hidden_ret_ptr.clone() {
                         // Large struct return via hidden pointer
                         let ret_ptr_val = TackyVal::Var(ret_ptr.clone());
-                        let ret_ft = self.func_full_types.get(&self.current_function).cloned();
+                        let ret_ft = self
+                            .func_full_types
+                            .get(&self.current_function)
+                            .cloned()
+                            .ok_or_else(|| {
+                                "internal error: missing full type for hidden return".to_string()
+                            })?;
                         let val_ft = self.val_full_type(&val);
-                        let src_addr = if let Some(ref ret_ft) = ret_ft {
-                            if ret_ft.is_complex() {
-                                if val_ft.is_complex() {
-                                    self.get_struct_addr(val)
-                                } else {
-                                    let tmp = self.fresh_tmp_full(ret_ft);
-                                    let TackyVal::Var(ref tmp_name) = tmp else {
-                                        return Err(
-                                            "internal error: hidden return value must be addressable"
-                                                .to_string(),
-                                        );
-                                    };
-                                    self.zero_init_local(
-                                        tmp_name,
-                                        ret_ft.byte_size_with(&self.struct_defs),
+                        let src_addr = if ret_ft.is_complex() {
+                            if val_ft.is_complex() {
+                                self.get_struct_addr(val)
+                            } else {
+                                let tmp = self.fresh_tmp_full(&ret_ft);
+                                let TackyVal::Var(ref tmp_name) = tmp else {
+                                    return Err(
+                                        "internal error: hidden return value must be addressable"
+                                            .to_string(),
                                     );
-                                    let FullType::Vector { elem, .. } = ret_ft.clone() else {
-                                        return Err("internal error: expected complex return type"
-                                            .to_string());
-                                    };
-                                    let elem_type = elem.to_ctype();
-                                    let real = self.convert_to(val, val_type, elem_type);
-                                    self.emit(TackyInstr::CopyToOffset {
-                                        src: real,
-                                        dst_name: tmp_name.clone(),
-                                        offset: 0,
+                                };
+                                self.zero_init_local(
+                                    tmp_name,
+                                    ret_ft
+                                        .checked_byte_size_with(&self.struct_defs)
+                                        .ok_or_else(|| {
+                                            "hidden return object is too large".to_string()
+                                        })?,
+                                );
+                                let FullType::Vector { elem, .. } = ret_ft.clone() else {
+                                    return Err(
+                                        "internal error: expected complex return type".to_string()
+                                    );
+                                };
+                                let real = self.convert_to(val, val_type, elem.to_ctype());
+                                self.emit(TackyInstr::CopyToOffset {
+                                    src: real,
+                                    dst_name: tmp_name.clone(),
+                                    offset: 0,
+                                });
+                                self.get_struct_addr(tmp)
+                            }
+                        } else if val_type == CType::Struct {
+                            if let TackyVal::Var(ref name) = val {
+                                if self.array_sizes.contains_key(name) {
+                                    let a = self.fresh_tmp(CType::Pointer);
+                                    self.emit(TackyInstr::GetAddress {
+                                        src: val,
+                                        dst: a.clone(),
                                     });
-                                    self.get_struct_addr(tmp)
-                                }
-                            } else if val_type == CType::Struct {
-                                if let TackyVal::Var(ref name) = val {
-                                    if self.array_sizes.contains_key(name) {
-                                        let a = self.fresh_tmp(CType::Pointer);
-                                        self.emit(TackyInstr::GetAddress {
-                                            src: val,
-                                            dst: a.clone(),
-                                        });
-                                        a
-                                    } else {
-                                        val
-                                    }
+                                    a
                                 } else {
                                     val
                                 }
                             } else {
-                                if let FullType::Struct(ret_tag) = ret_ft {
-                                    if let FullType::Pointer(pointee) = &val_ft {
-                                        if matches!(pointee.as_ref(), FullType::Struct(src_tag) if src_tag == ret_tag)
-                                        {
-                                            val
-                                        } else {
-                                            let a = self.fresh_tmp(CType::Pointer);
-                                            self.emit(TackyInstr::GetAddress {
-                                                src: val,
-                                                dst: a.clone(),
-                                            });
-                                            a
-                                        }
-                                    } else {
-                                        let a = self.fresh_tmp(CType::Pointer);
-                                        self.emit(TackyInstr::GetAddress {
-                                            src: val,
-                                            dst: a.clone(),
-                                        });
-                                        a
-                                    }
+                                val
+                            }
+                        } else {
+                            if let FullType::Pointer(pointee) = &val_ft {
+                                if matches!(pointee.as_ref(), FullType::Struct(_)) {
+                                    val
                                 } else {
                                     let a = self.fresh_tmp(CType::Pointer);
                                     self.emit(TackyInstr::GetAddress {
@@ -4674,15 +4760,19 @@ impl TackyGen {
                                     });
                                     a
                                 }
+                            } else {
+                                let a = self.fresh_tmp(CType::Pointer);
+                                self.emit(TackyInstr::GetAddress {
+                                    src: val,
+                                    dst: a.clone(),
+                                });
+                                a
                             }
-                        } else {
-                            val
                         };
                         // Copy aggregate/complex result to hidden return pointer location
                         let ret_size = ret_ft
-                            .as_ref()
-                            .map(|ft| ft.byte_size_with(&self.struct_defs))
-                            .unwrap_or(0);
+                            .checked_byte_size_with(&self.struct_defs)
+                            .ok_or_else(|| "hidden return object is too large".to_string())?;
                         self.emit_struct_copy_ptr_to_ptr(src_addr, ret_ptr_val.clone(), ret_size);
                         self.emit(TackyInstr::Return(ret_ptr_val));
                     } else {
@@ -4700,7 +4790,9 @@ impl TackyGen {
                                     .struct_defs
                                     .get(ret_tag)
                                     .map(|def| def.size)
-                                    .unwrap_or(0);
+                                    .ok_or_else(|| {
+                                        format!("missing struct definition `{ret_tag}`")
+                                    })?;
                                 let result = self.fresh_tmp_full(&ret_ft);
                                 if let TackyVal::Var(ref result_name) = result {
                                     self.array_sizes.insert(result_name.clone(), struct_size);

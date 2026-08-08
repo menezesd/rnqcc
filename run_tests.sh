@@ -6,6 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TESTDIR="${TESTDIR:-$ROOT/../writing-a-c-compiler-tests/tests}"
 COMPILER="${COMPILER:-$ROOT/target/debug/rnqcc}"
 REF_CC="${REF_CC:-gcc}"
+TEST_TIMEOUT="${RNQCC_TEST_TIMEOUT:-10}"
+TIMEOUT_EXIT=124
 RUNNER=()
 GCC_ARCH=()
 COMPILER_TARGET=()
@@ -21,7 +23,7 @@ FAIL=0
 ERRORS=""
 
 if [ ! -x "$COMPILER" ]; then
-    cargo build --manifest-path "$ROOT/Cargo.toml" || exit 1
+    cargo build --locked --manifest-path "$ROOT/Cargo.toml" || exit 1
 fi
 
 if [ ! -d "$TESTDIR" ]; then
@@ -30,6 +32,11 @@ if [ ! -d "$TESTDIR" ]; then
     exit 1
 fi
 TESTDIR="$(cd "$TESTDIR" && pwd)"
+
+run_limited() {
+    PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/run_command_timeout.py" \
+        --timeout "$TEST_TIMEOUT" -- "$@"
+}
 
 case "$COMPILER" in
     /*) ;;
@@ -97,11 +104,17 @@ run_single_test() {
     esac
 
     if [ ${#helpers[@]} -gt 0 ]; then
-        "$COMPILER" "${COMPILER_TARGET[@]}" -o "$WORKDIR/$name" "$src" "${helpers[@]}" > /dev/null 2>&1
+        run_limited "$COMPILER" "${COMPILER_TARGET[@]}" -o "$WORKDIR/$name" "$src" "${helpers[@]}" > /dev/null 2>&1
     else
-        "$COMPILER" "${COMPILER_TARGET[@]}" -o "$WORKDIR/$name" "$src" > /dev/null 2>&1
+        run_limited "$COMPILER" "${COMPILER_TARGET[@]}" -o "$WORKDIR/$name" "$src" > /dev/null 2>&1
     fi
-    if [ $? -ne 0 ]; then
+    local compiler_exit=$?
+    if [ "$compiler_exit" -eq "$TIMEOUT_EXIT" ]; then
+        FAIL=$((FAIL + 1))
+        ERRORS="$ERRORS\nFAIL (compile timeout after ${TEST_TIMEOUT}s): $src"
+        return
+    fi
+    if [ "$compiler_exit" -ne 0 ]; then
         FAIL=$((FAIL + 1))
         ERRORS="$ERRORS\nFAIL (compile): $src"
         return
@@ -113,18 +126,34 @@ run_single_test() {
         return
     fi
 
-    "${RUNNER[@]}" "$WORKDIR/$name" > /dev/null 2>&1
+    run_limited "${RUNNER[@]}" "$WORKDIR/$name" > /dev/null 2>&1
     local actual_exit=$?
+    if [ "$actual_exit" -eq "$TIMEOUT_EXIT" ]; then
+        FAIL=$((FAIL + 1))
+        ERRORS="$ERRORS\nFAIL (timeout after ${TEST_TIMEOUT}s): $src"
+        return
+    fi
 
     # Get reference result from gcc
-    "$REF_CC" "${GCC_ARCH[@]}" -w -o "$WORKDIR/${name}_ref" "$src" "${helpers[@]}" 2>/dev/null
-    if [ $? -ne 0 ]; then
+    run_limited "$REF_CC" "${GCC_ARCH[@]}" -w -o "$WORKDIR/${name}_ref" "$src" "${helpers[@]}" 2>/dev/null
+    local reference_compile_exit=$?
+    if [ "$reference_compile_exit" -eq "$TIMEOUT_EXIT" ]; then
+        FAIL=$((FAIL + 1))
+        ERRORS="$ERRORS\nFAIL (reference compile timeout after ${TEST_TIMEOUT}s): $src"
+        return
+    fi
+    if [ "$reference_compile_exit" -ne 0 ]; then
         [ "$actual_exit" -lt 128 ] && PASS=$((PASS + 1)) || { FAIL=$((FAIL + 1)); ERRORS="$ERRORS\nFAIL (crash): $src"; }
         return
     fi
 
-    "${RUNNER[@]}" "$WORKDIR/${name}_ref" > /dev/null 2>&1
+    run_limited "${RUNNER[@]}" "$WORKDIR/${name}_ref" > /dev/null 2>&1
     local expected_exit=$?
+    if [ "$expected_exit" -eq "$TIMEOUT_EXIT" ]; then
+        FAIL=$((FAIL + 1))
+        ERRORS="$ERRORS\nFAIL (reference timeout after ${TEST_TIMEOUT}s): $src"
+        return
+    fi
 
     if [ "$actual_exit" = "$expected_exit" ]; then
         PASS=$((PASS + 1))
@@ -156,25 +185,47 @@ run_library_test() {
 
     # Compile both files together
     local binary="${name}_client"
-    "$COMPILER" "${COMPILER_TARGET[@]}" -o "$WORKDIR/$binary" "$client_src" "$lib_src" > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
+    run_limited "$COMPILER" "${COMPILER_TARGET[@]}" -o "$WORKDIR/$binary" "$client_src" "$lib_src" > /dev/null 2>&1
+    local compiler_exit=$?
+    if [ "$compiler_exit" -eq "$TIMEOUT_EXIT" ]; then
+        FAIL=$((FAIL + 1))
+        ERRORS="$ERRORS\nFAIL (compile timeout after ${TEST_TIMEOUT}s): $client_src"
+        return
+    fi
+    if [ "$compiler_exit" -ne 0 ]; then
         FAIL=$((FAIL + 1))
         ERRORS="$ERRORS\nFAIL (compile): $client_src"
         return
     fi
 
-    "${RUNNER[@]}" "$WORKDIR/$binary" > /dev/null 2>&1
+    run_limited "${RUNNER[@]}" "$WORKDIR/$binary" > /dev/null 2>&1
     local actual_exit=$?
+    if [ "$actual_exit" -eq "$TIMEOUT_EXIT" ]; then
+        FAIL=$((FAIL + 1))
+        ERRORS="$ERRORS\nFAIL (timeout after ${TEST_TIMEOUT}s): $client_src"
+        return
+    fi
 
     # Reference
-    "$REF_CC" "${GCC_ARCH[@]}" -w -o "$WORKDIR/${name}_ref" "$client_src" "$lib_src" 2>/dev/null
-    if [ $? -ne 0 ]; then
+    run_limited "$REF_CC" "${GCC_ARCH[@]}" -w -o "$WORKDIR/${name}_ref" "$client_src" "$lib_src" 2>/dev/null
+    local reference_compile_exit=$?
+    if [ "$reference_compile_exit" -eq "$TIMEOUT_EXIT" ]; then
+        FAIL=$((FAIL + 1))
+        ERRORS="$ERRORS\nFAIL (reference compile timeout after ${TEST_TIMEOUT}s): $client_src"
+        return
+    fi
+    if [ "$reference_compile_exit" -ne 0 ]; then
         [ "$actual_exit" -lt 128 ] && PASS=$((PASS + 1)) || { FAIL=$((FAIL + 1)); ERRORS="$ERRORS\nFAIL (crash): $client_src"; }
         return
     fi
 
-    "${RUNNER[@]}" "$WORKDIR/${name}_ref" > /dev/null 2>&1
+    run_limited "${RUNNER[@]}" "$WORKDIR/${name}_ref" > /dev/null 2>&1
     local expected_exit=$?
+    if [ "$expected_exit" -eq "$TIMEOUT_EXIT" ]; then
+        FAIL=$((FAIL + 1))
+        ERRORS="$ERRORS\nFAIL (reference timeout after ${TEST_TIMEOUT}s): $client_src"
+        return
+    fi
 
     if [ "$actual_exit" = "$expected_exit" ]; then
         PASS=$((PASS + 1))
@@ -227,7 +278,9 @@ for ch in $chapters; do
         [ $? -eq 1 ] && continue
         count=$((count + 1))
         [ $PASS -gt $old_pass ] && ch_pass=$((ch_pass + 1))
-    done < <(find "$valid_dir" -mindepth 2 -name "*.c" -print0 | sort -z)
+    # Keep paths NUL-delimited so spaces and shell metacharacters are safe.
+    # Do not rely on GNU sort -z; this runner also supports macOS/BSD tools.
+    done < <(find "$valid_dir" -mindepth 2 -name "*.c" -print0)
 
     echo "$ch_pass/$count passed"
 done

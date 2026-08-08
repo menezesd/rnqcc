@@ -1624,8 +1624,27 @@ fn static_init_size(init: &StaticInit) -> usize {
     }
 }
 
-fn alignment_log2(alignment: usize) -> usize {
-    alignment.next_power_of_two().trailing_zeros() as usize
+fn static_init_total_size(init_values: &[StaticInit]) -> io::Result<usize> {
+    init_values.iter().try_fold(0usize, |size, init| {
+        size.checked_add(static_init_size(init)).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "static initializer size overflows",
+            )
+        })
+    })
+}
+
+fn alignment_log2(alignment: usize) -> io::Result<usize> {
+    alignment
+        .checked_next_power_of_two()
+        .map(|value| value.trailing_zeros() as usize)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "alignment is too large for assembly emission",
+            )
+        })
 }
 
 fn emit_macho_tls_static_var(
@@ -1636,7 +1655,7 @@ fn emit_macho_tls_static_var(
 ) -> std::io::Result<()> {
     let label = platform.show_symbol(&sv.name);
     let init_label = format!("{}$tlv$init", label);
-    let size: usize = sv.init_values.iter().map(static_init_size).sum();
+    let size = static_init_total_size(&sv.init_values)?;
 
     if all_zero {
         writeln!(
@@ -1644,7 +1663,7 @@ fn emit_macho_tls_static_var(
             "\t.tbss {},{},{}",
             init_label,
             size,
-            alignment_log2(sv.alignment)
+            alignment_log2(sv.alignment)?
         )?;
     } else {
         writeln!(w, "\t.section __DATA,__thread_data,thread_local_regular")?;
@@ -1702,7 +1721,7 @@ fn emit_static_var(w: &mut dyn Write, sv: &AsmStaticVar, platform: &Target) -> s
 }
 
 fn escape_string_for_asm(s: &str) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(s.len());
     for b in c_string_bytes(s) {
         match b {
             b'\\' => out.push_str("\\\\"),
@@ -1714,7 +1733,10 @@ fn escape_string_for_asm(s: &str) -> String {
             // Use octal for control chars that assembler may not support
             b if (0x20..0x7f).contains(&b) => out.push(b as char),
             b => {
-                out.push_str(&format!("\\{:03o}", b));
+                out.push('\\');
+                out.push(char::from(b'0' + (b >> 6)));
+                out.push(char::from(b'0' + ((b >> 3) & 0x7)));
+                out.push(char::from(b'0' + (b & 0x7)));
             }
         }
     }
@@ -1860,7 +1882,7 @@ fn emit_static_constant(
 ) -> std::io::Result<()> {
     let label = platform.show_symbol(&sc.name);
     match platform.os {
-        TargetOs::MacOs if matches!(&sc.init, StaticInit::StringInit(s, _) if !c_string_bytes(s).contains(&0)) => {
+        TargetOs::MacOs if matches!(&sc.init, StaticInit::StringInit(s, _) if !c_string_contains_zero(s)) => {
             writeln!(w, "\t.section __TEXT,__cstring")?
         }
         TargetOs::MacOs => writeln!(w, "\t.section __TEXT,__const")?,
@@ -1897,7 +1919,8 @@ fn emit_stack_note(w: &mut dyn Write, platform: &Target) -> std::io::Result<()> 
 }
 
 pub fn emit(assembly_file: &str, program: &AsmProgram, platform: &Target) -> std::io::Result<()> {
-    let mut w = std::fs::File::create(assembly_file)?;
+    let file = std::fs::File::create(assembly_file)?;
+    let mut w = std::io::BufWriter::new(file);
     for tl in &program.top_level {
         match tl {
             AsmTopLevel::Function(func) => emit_function(&mut w, func, platform)?,
@@ -1907,12 +1930,19 @@ pub fn emit(assembly_file: &str, program: &AsmProgram, platform: &Target) -> std
         }
     }
     emit_stack_note(&mut w, platform)?;
-    Ok(())
+    w.flush()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn static_initializer_size_and_alignment_overflow_are_reported() {
+        let initializers = vec![StaticInit::ZeroInit(usize::MAX), StaticInit::CharInit(0)];
+        assert!(static_init_total_size(&initializers).is_err());
+        assert!(alignment_log2(usize::MAX).is_err());
+    }
 
     fn emit_one(instr: AsmInstr) -> String {
         let mut out = Vec::new();

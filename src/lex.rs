@@ -231,7 +231,7 @@ impl Lexer {
                 }
                 pos += 1;
                 let mut depth = 1;
-                let mut expression = String::new();
+                let mut expression = String::with_capacity(text.len());
                 while pos < chars.len() {
                     match chars[pos] {
                         '(' => {
@@ -393,7 +393,7 @@ impl Lexer {
                     return Some(None);
                 }
                 pos += 1;
-                let mut message = String::new();
+                let mut message = String::with_capacity(text.len());
                 while pos < chars.len() {
                     match chars[pos] {
                         '"' => return Some(Some(message)),
@@ -968,7 +968,10 @@ impl Lexer {
                             break;
                         };
                         self.advance();
-                        value = (value << 4) | digit;
+                        value = value
+                            .checked_mul(16)
+                            .and_then(|value| value.checked_add(digit))
+                            .ok_or_else(|| "hexadecimal escape value is too large".to_string())?;
                         digits += 1;
                     }
                     if digits == 0 {
@@ -1054,7 +1057,10 @@ impl Lexer {
             let c = self.unescape_char()?;
             let ch = c as u32;
             chars.push(ch);
-            value = (value << 8) | i64::from(ch);
+            // Multi-character constants are implementation-defined; retain
+            // the existing low-64-bit behavior explicitly instead of making
+            // debug and release builds disagree on overflow.
+            value = value.wrapping_shl(8) | i64::from(ch);
             saw_char = true;
         }
         if !saw_char {
@@ -2093,9 +2099,31 @@ mod tests {
     }
 
     #[test]
+    fn multi_character_constants_wrap_without_panicking() -> Result<(), String> {
+        let tokens = lex("int x = '123456789';")?;
+        assert!(tokens
+            .iter()
+            .any(|token| matches!(token, Token::CharLiteral(_))));
+        Ok(())
+    }
+
+    #[test]
     fn reports_missing_hex_escape_digits() -> Result<(), String> {
         let err = require_err(lex("char *s = \"\\x\";"), "lexing should fail")?;
         assert!(err.contains("expected hexadecimal digits"));
+        Ok(())
+    }
+
+    #[test]
+    fn reports_overflowing_hex_escape_without_panicking() -> Result<(), String> {
+        let err = require_err(
+            lex("char *s = \"\\xFFFFFFFFFFFFFFFFFFFFFFFF\";"),
+            "lexing should fail",
+        )?;
+        assert!(
+            err.contains("hexadecimal escape value is too large"),
+            "{err}"
+        );
         Ok(())
     }
 

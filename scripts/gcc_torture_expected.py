@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EXPECTED = ROOT / "tests" / "fixtures" / "gcc_torture_expected_failures.txt"
 DEFAULT_EXPECTED_SKIPS = ROOT / "tests" / "fixtures" / "gcc_torture_expected_skips.txt"
@@ -21,6 +20,8 @@ def validate_test_path(path: Path, line_no: int, test: str) -> None:
     if (
         posix_path.is_absolute()
         or windows_path.is_absolute()
+        or windows_path.drive
+        or windows_path.root
         or ".." in posix_path.parts
         or ".." in windows_path.parts
     ):

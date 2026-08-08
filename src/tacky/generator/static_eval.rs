@@ -5,6 +5,14 @@
 
 use super::*;
 
+fn static_integer_constant_is_true(value: StaticIntegerConstant) -> bool {
+    if value.is_double {
+        f64::from_bits(value.value as u64) != 0.0
+    } else {
+        value.value != 0
+    }
+}
+
 /// Truncate/convert a constant value to the target type's bit width
 pub(super) fn convert_init_value(init_value: StaticScalarValue, target: CType) -> i64 {
     let val = init_value.value;
@@ -275,19 +283,25 @@ pub(super) fn eval_static_integer_constant_exp_with_context_and_values(
         }),
         Exp::SizeOf(inner) => {
             let ft = eval_static_expr_full_type(inner, full_types)?;
+            if ft.contains_vla_placeholder_with(struct_defs) {
+                return None;
+            }
             Some(static_integer_constant(
-                ft.byte_size_with(struct_defs) as i64,
+                i64::try_from(ft.checked_byte_size_with(struct_defs)?).ok()?,
                 false,
                 true,
             ))
         }
-        Exp::SizeOfType(_, ft) => Some(static_integer_constant(
-            ft.byte_size_with(struct_defs) as i64,
-            false,
-            true,
-        )),
+        Exp::SizeOfType(_, ft) if !ft.contains_vla_placeholder_with(struct_defs) => {
+            Some(static_integer_constant(
+                i64::try_from(ft.checked_byte_size_with(struct_defs)?).ok()?,
+                false,
+                true,
+            ))
+        }
+        Exp::SizeOfType(_, _) => None,
         Exp::AlignOfType(ft) => Some(static_integer_constant(
-            ft.alignment_with(struct_defs) as i64,
+            i64::try_from(ft.alignment_with(struct_defs)).ok()?,
             false,
             true,
         )),
@@ -408,6 +422,12 @@ pub(super) fn eval_static_integer_constant_exp_with_context_and_values(
                 full_types,
                 static_const_values,
             )?;
+            let left_true = static_integer_constant_is_true(left);
+            if (matches!(op, BinaryOp::LogicalAnd) && !left_true)
+                || (matches!(op, BinaryOp::LogicalOr) && left_true)
+            {
+                return Some(static_integer_constant(left_true as i64, false, false));
+            }
             let right = eval_static_integer_constant_exp_with_context_and_values(
                 right_exp,
                 struct_defs,
@@ -736,17 +756,23 @@ pub(super) fn eval_static_wide_integer_constant_exp_with_context_and_values(
         }),
         Exp::SizeOf(inner) => {
             let ft = eval_static_expr_full_type(inner, full_types)?;
+            if ft.contains_vla_placeholder_with(struct_defs) {
+                return None;
+            }
             Some(StaticWideIntegerConstant::new(
-                ft.byte_size_with(struct_defs) as i128,
+                i128::try_from(ft.checked_byte_size_with(struct_defs)?).ok()?,
                 true,
             ))
         }
-        Exp::SizeOfType(_, ft) => Some(StaticWideIntegerConstant::new(
-            ft.byte_size_with(struct_defs) as i128,
-            true,
-        )),
+        Exp::SizeOfType(_, ft) if !ft.contains_vla_placeholder_with(struct_defs) => {
+            Some(StaticWideIntegerConstant::new(
+                i128::try_from(ft.checked_byte_size_with(struct_defs)?).ok()?,
+                true,
+            ))
+        }
+        Exp::SizeOfType(_, _) => None,
         Exp::AlignOfType(ft) => Some(StaticWideIntegerConstant::new(
-            ft.alignment_with(struct_defs) as i128,
+            i128::try_from(ft.alignment_with(struct_defs)).ok()?,
             true,
         )),
         Exp::Cast(target, _, inner) => {
@@ -819,6 +845,14 @@ pub(super) fn eval_static_wide_integer_constant_exp_with_context_and_values(
                 static_const_values,
                 static_wide_const_values,
             )?;
+            if (matches!(op, BinaryOp::LogicalAnd) && left.is_zero())
+                || (matches!(op, BinaryOp::LogicalOr) && !left.is_zero())
+            {
+                return Some(StaticWideIntegerConstant::new(
+                    (!left.is_zero()) as i128,
+                    false,
+                ));
+            }
             let right = eval_static_wide_integer_constant_exp_with_context_and_values(
                 right_exp,
                 struct_defs,
@@ -938,5 +972,33 @@ pub(super) fn eval_static_wide_integer_constant_exp_with_context_and_values(
             }
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alignof_rejects_values_that_do_not_fit_the_constant_type() {
+        let mut struct_defs = IndexMap::new();
+        struct_defs.insert(
+            "HugeAlign".to_string(),
+            StructDef {
+                tag: "HugeAlign".to_string(),
+                members: Vec::new(),
+                size: 0,
+                alignment: i64::MAX as usize + 1,
+                is_union: false,
+            },
+        );
+        let expression = Exp::AlignOfType(FullType::Struct("HugeAlign".to_string()));
+
+        assert!(eval_static_integer_constant_exp_with_context(
+            &expression,
+            &struct_defs,
+            &IndexMap::new(),
+        )
+        .is_none());
     }
 }

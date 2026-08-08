@@ -196,6 +196,7 @@ fn build_asm_cfg(instrs: &[AsmInstr]) -> Vec<AsmBlock> {
             | AsmInstr::NonlocalJmp(_)
             | AsmInstr::JmpCC(_, _)
             | AsmInstr::JmpIndirect(_)
+            | AsmInstr::BuiltinLongjmp { .. }
             | AsmInstr::Ret
             | AsmInstr::Unreachable
                 if i + 1 < instrs.len() && leader_set.insert(i + 1) =>
@@ -257,11 +258,27 @@ fn build_asm_cfg(instrs: &[AsmInstr]) -> Vec<AsmBlock> {
                 }
                 // Fall-through
                 if bi + 1 < num {
-                    blocks[bi].succs.push(bi + 1);
-                    blocks[bi + 1].preds.push(bi);
+                    // A conditional branch may target the immediately
+                    // following block.  Keep the CFG edge set unique so
+                    // liveness worklists and predecessor walks do not repeat
+                    // the same block for that common shape.
+                    if !blocks[bi].succs.contains(&(bi + 1)) {
+                        blocks[bi].succs.push(bi + 1);
+                        blocks[bi + 1].preds.push(bi);
+                    }
                 }
             }
             AsmInstr::JmpIndirect(_) => {
+                for ti in label_to_block.values().copied() {
+                    blocks[bi].succs.push(ti);
+                    blocks[ti].preds.push(bi);
+                }
+            }
+            AsmInstr::BuiltinLongjmp { .. } => {
+                // The saved target is produced by BuiltinSetjmp and is not
+                // represented as a label operand here.  Conservatively treat
+                // every local label as a possible target, while excluding the
+                // normal fall-through path just as the frontend CFG does.
                 for ti in label_to_block.values().copied() {
                     blocks[bi].succs.push(ti);
                     blocks[ti].preds.push(bi);
@@ -907,9 +924,13 @@ fn build_interference_graph(
 
 fn color_graph(graph: &mut Graph, hard_reg_ids: &[RegId], k: usize) {
     // Collect pseudo nodes
+    // This membership check runs once per interference-graph node.  Keep the
+    // fixed hard-register set hashed so large generated functions do not pay
+    // a linear scan for every node.
+    let hard_reg_set: HashSet<RegId> = hard_reg_ids.iter().cloned().collect();
     let mut pseudo_nodes = Vec::with_capacity(graph.adj.len().saturating_sub(hard_reg_ids.len()));
     for id in graph.adj.keys() {
-        if !hard_reg_ids.contains(id) {
+        if !hard_reg_set.contains(id) {
             pseudo_nodes.push(id.clone());
         }
     }
@@ -1892,6 +1913,42 @@ mod tests {
         let live_after = liveness_analysis(&instrs, &HashSet::new());
 
         assert!(live_after[1].contains(&RegId::Pseudo("base".to_string())));
+    }
+
+    #[test]
+    fn conditional_branch_to_fallthrough_has_one_cfg_edge() {
+        let instrs = vec![
+            AsmInstr::JmpCC(CondCode::E, "next".to_string()),
+            AsmInstr::Label("next".to_string()),
+            AsmInstr::Ret,
+        ];
+
+        let blocks = build_asm_cfg(&instrs);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].succs, vec![1]);
+        assert_eq!(blocks[1].preds, vec![0]);
+    }
+
+    #[test]
+    fn builtin_longjmp_has_no_fallthrough_cfg_edge() {
+        let instrs = vec![
+            AsmInstr::BuiltinLongjmp {
+                buf: AsmOperand::Stack(0),
+                value: AsmOperand::Imm(1),
+            },
+            AsmInstr::Mov(
+                AsmType::Longword,
+                AsmOperand::Imm(0),
+                AsmOperand::Reg(Reg::AX),
+            ),
+            AsmInstr::Label("resume".to_string()),
+            AsmInstr::Ret,
+        ];
+
+        let blocks = build_asm_cfg(&instrs);
+        assert_eq!(blocks.len(), 3);
+        assert!(blocks[0].succs.contains(&2));
+        assert!(!blocks[0].succs.contains(&1));
     }
 
     #[test]

@@ -7,7 +7,7 @@ pub fn lex(input: &str) -> Result<Vec<PpToken>, String> {
 
 pub fn replace_trigraphs(input: &str) -> String {
     let chars: Vec<char> = input.chars().collect();
-    let mut out = String::new();
+    let mut out = String::with_capacity(input.len());
     let mut index = 0usize;
     while index < chars.len() {
         if chars.get(index) == Some(&'?') && chars.get(index + 1) == Some(&'?') {
@@ -36,7 +36,7 @@ pub fn replace_trigraphs(input: &str) -> String {
 }
 
 fn splice_continued_lines(input: &str) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\\' {
@@ -326,7 +326,7 @@ impl Lexer {
             if ch.is_ascii_alphanumeric()
                 || matches!(ch, '_' | '.' | '\'')
                 || matches!(ch, '+' | '-')
-                    && matches!(text.chars().last(), Some('e' | 'E' | 'p' | 'P'))
+                    && matches!(text.as_bytes().last(), Some(b'e' | b'E' | b'p' | b'P'))
             {
                 text.push(ch);
                 self.advance();
@@ -344,9 +344,8 @@ impl Lexer {
             "<%", "%>", "[", "]", "(", ")", "{", "}", ".", "&", "*", "+", "-", "~", "!", "/", "%",
             "<", ">", "^", "|", "?", ":", ";", "=", ",", "#",
         ];
-        let rest: String = self.chars[self.pos..].iter().collect();
         for punct in PUNCTS {
-            if rest.starts_with(punct) {
+            if self.starts_with(punct) {
                 for _ in punct.chars() {
                     self.advance();
                 }
@@ -356,6 +355,12 @@ impl Lexer {
         Ok(PpTokenKind::Punct(
             self.advance_required("punctuator")?.to_string(),
         ))
+    }
+
+    fn starts_with(&self, text: &str) -> bool {
+        text.chars()
+            .enumerate()
+            .all(|(offset, expected)| self.peek_ahead(offset) == Some(expected))
     }
 }
 

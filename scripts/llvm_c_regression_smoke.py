@@ -9,7 +9,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-from smoke_utils import timeout_text
+try:
+    from smoke_utils import is_positive_finite, run_with_timeout
+except ModuleNotFoundError as err:
+    if err.name != "smoke_utils":
+        raise
+    from scripts.smoke_utils import is_positive_finite, run_with_timeout
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,21 +23,7 @@ DEFAULT_SUITE = Path("/tmp/rnqcc-llvm-test-suite/SingleSource/Regression/C")
 
 
 def run(cmd: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return subprocess.CompletedProcess(
-            cmd,
-            124,
-            stdout=timeout_text(exc.stdout),
-            stderr=(timeout_text(exc.stderr) + f"\ntimed out after {timeout:.1f}s").lstrip(),
-        )
+    return run_with_timeout(cmd, timeout=timeout)
 
 
 def short_failure(result: subprocess.CompletedProcess[str]) -> str:
@@ -80,13 +71,30 @@ def main() -> int:
         raise SystemExit("--start must be non-negative")
     if args.limit <= 0:
         raise SystemExit("--limit must be positive")
-    if args.timeout <= 0:
+    if not is_positive_finite(args.timeout):
         raise SystemExit("--timeout must be positive")
 
     rnqcc = Path(args.rnqcc)
     suite = Path(args.suite)
-    if not rnqcc.exists():
-        subprocess.run(["cargo", "build"], cwd=ROOT, check=True)
+    if rnqcc.exists() and not rnqcc.is_file():
+        raise SystemExit(f"--rnqcc path is not a file: {rnqcc}")
+    if not rnqcc.is_file():
+        try:
+            build = run_with_timeout(
+                ["cargo", "build", "--locked"],
+                cwd=ROOT,
+                timeout=max(args.timeout, 60.0),
+            )
+        except OSError as exc:
+            raise SystemExit(f"could not build rnqcc: {exc}") from exc
+        if build.returncode != 0:
+            output = (build.stderr or build.stdout).strip()
+            raise SystemExit(
+                "could not build rnqcc"
+                + (f": {output}" if output else f" (exit {build.returncode})")
+            )
+        if not rnqcc.is_file():
+            raise SystemExit(f"--rnqcc not found after build: {rnqcc}")
 
     tests = sorted(suite.glob("*.c"))
     selected = tests[args.start : args.start + args.limit]

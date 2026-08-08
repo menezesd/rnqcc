@@ -104,8 +104,10 @@ that target.
 
 ## Verification
 
-- `scripts/ci.sh` runs `cargo check`, unit tests, CLI tests, a build, and the
-  local real-project smoke runner.
+- `scripts/ci.sh` runs formatting, `cargo check`, Clippy, the Rust and CLI test
+  suites, deterministic fuzzing, layout and real-project corpus checks,
+  cross-target assembly smoke tests, the local real-project runner, and the
+  optional external Writing a C Compiler suite when it is available.
 - `scripts/real_project_smoke.sh` exercises project-shaped local builds with
   multiple translation units, dependency files, static libraries, and nested
   response files.

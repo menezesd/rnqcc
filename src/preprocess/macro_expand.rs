@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use super::lexer::{is_ident_continue, is_ident_start, lex};
 use super::token::{PpToken, PpTokenKind};
 
+const MAX_MACRO_EXPANSION_DEPTH: usize = 256;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MacroDef {
     Object(Vec<PpToken>),
@@ -72,8 +74,8 @@ impl MacroExpansionStats {
         if !self.enabled {
             return;
         }
-        self.calls += 1;
-        self.input_tokens += tokens.len();
+        self.calls = self.calls.saturating_add(1);
+        self.input_tokens = self.input_tokens.saturating_add(tokens.len());
         self.max_disabled_depth = self.max_disabled_depth.max(disabled_depth);
     }
 
@@ -81,14 +83,14 @@ impl MacroExpansionStats {
         if !self.enabled {
             return;
         }
-        self.output_tokens += tokens.len();
+        self.output_tokens = self.output_tokens.saturating_add(tokens.len());
     }
 
     fn record_object_macro(&mut self, name: &str) {
         if !self.enabled {
             return;
         }
-        self.object_expansions += 1;
+        self.object_expansions = self.object_expansions.saturating_add(1);
         self.record_macro(name);
     }
 
@@ -96,7 +98,7 @@ impl MacroExpansionStats {
         if !self.enabled {
             return;
         }
-        self.function_expansions += 1;
+        self.function_expansions = self.function_expansions.saturating_add(1);
         self.record_macro(name);
     }
 
@@ -104,7 +106,7 @@ impl MacroExpansionStats {
         if !self.enabled {
             return;
         }
-        self.hook_expansions += 1;
+        self.hook_expansions = self.hook_expansions.saturating_add(1);
         self.record_macro(name);
     }
 
@@ -112,12 +114,15 @@ impl MacroExpansionStats {
         if !self.enabled {
             return;
         }
-        *self.by_name.entry(name.to_string()).or_insert(0) += 1;
+        let count = self.by_name.entry(name.to_string()).or_insert(0);
+        *count = count.saturating_add(1);
         self.maybe_report_progress();
     }
 
     fn expansion_count(&self) -> usize {
-        self.object_expansions + self.function_expansions + self.hook_expansions
+        self.object_expansions
+            .saturating_add(self.function_expansions)
+            .saturating_add(self.hook_expansions)
     }
 
     fn maybe_report_progress(&mut self) {
@@ -130,7 +135,11 @@ impl MacroExpansionStats {
         }
         self.report_with_prefix("progress");
         while self.next_progress <= expansions {
-            self.next_progress += self.progress_interval;
+            let Some(next_progress) = self.next_progress.checked_add(self.progress_interval) else {
+                self.next_progress = usize::MAX;
+                break;
+            };
+            self.next_progress = next_progress;
         }
     }
 
@@ -175,7 +184,7 @@ pub fn expand_macros_with_hooks(
 ) -> Result<Vec<PpToken>, String> {
     let stats_enabled = std::env::var_os("RNQCC_INTERNAL_CPP_STATS").is_some();
     let mut stats = MacroExpansionStats::new(stats_enabled);
-    let expanded = expand_macros_inner(tokens, macros, hooks, &mut Vec::new(), &mut stats)?;
+    let expanded = expand_macros_inner(tokens, macros, hooks, &mut Vec::new(), &mut stats, 0)?;
     if stats_enabled {
         stats.report();
     }
@@ -188,7 +197,14 @@ fn expand_macros_inner(
     hooks: &mut dyn MacroExpansionHooks,
     disabled: &mut Vec<String>,
     stats: &mut MacroExpansionStats,
+    depth: usize,
 ) -> Result<Vec<PpToken>, String> {
+    if depth >= MAX_MACRO_EXPANSION_DEPTH {
+        return Err(format!(
+            "macro expansion nested too deeply (limit {})",
+            MAX_MACRO_EXPANSION_DEPTH
+        ));
+    }
     stats.record_call(tokens, disabled.len());
     let mut out = Vec::new();
     let mut index = 0usize;
@@ -215,6 +231,7 @@ fn expand_macros_inner(
                     hooks,
                     disabled,
                     stats,
+                    depth + 1,
                 )?);
                 disabled.pop();
                 index += 1;
@@ -229,8 +246,6 @@ fn expand_macros_inner(
                     index += 1;
                     continue;
                 };
-                stats.function_expansions += 1;
-                stats.record_macro(name);
                 let args = if invocation.args.is_empty() && !*variadic && params.len() == 1 {
                     vec![Vec::new()]
                 } else {
@@ -245,7 +260,7 @@ fn expand_macros_inner(
                 }
                 stats.record_function_macro(name);
                 let replacement = substitute_function_macro(
-                    body, params, *variadic, &args, macros, hooks, stats,
+                    body, params, *variadic, &args, macros, hooks, stats, depth,
                 )?;
                 disabled.push(name.clone());
                 out.extend(expand_macros_inner(
@@ -254,6 +269,7 @@ fn expand_macros_inner(
                     hooks,
                     disabled,
                     stats,
+                    depth + 1,
                 )?);
                 disabled.pop();
                 index = invocation.next_index;
@@ -267,6 +283,7 @@ fn expand_macros_inner(
                         hooks,
                         disabled,
                         stats,
+                        depth + 1,
                     )?);
                 } else {
                     out.push(token.clone());
@@ -318,6 +335,7 @@ fn parse_invocation_args(
     Err("missing ')' in function-like macro invocation".to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn substitute_function_macro(
     body: &[PpToken],
     params: &[String],
@@ -326,6 +344,7 @@ fn substitute_function_macro(
     macros: &MacroTable,
     hooks: &mut dyn MacroExpansionHooks,
     stats: &mut MacroExpansionStats,
+    depth: usize,
 ) -> Result<Vec<PpToken>, String> {
     let fixed_args = &args[..params.len()];
     let variadic_args = if variadic {
@@ -353,6 +372,7 @@ fn substitute_function_macro(
                     hooks,
                     &mut Vec::new(),
                     stats,
+                    depth + 1,
                 )?);
             }
             index = arg_index + 1;
@@ -405,6 +425,7 @@ fn substitute_function_macro(
                     hooks,
                     &mut Vec::new(),
                     stats,
+                    depth + 1,
                 )?);
             }
             index += 1;
@@ -462,7 +483,7 @@ fn collect_balanced(tokens: &[PpToken], open_index: usize) -> Option<BalancedTok
 }
 
 fn paste_tokens(tokens: &[PpToken]) -> Result<Vec<PpToken>, String> {
-    let mut out: Vec<PpToken> = Vec::new();
+    let mut out: Vec<PpToken> = Vec::with_capacity(tokens.len());
     let mut index = 0usize;
     while index < tokens.len() {
         if is_punct(tokens.get(index), "##") {
@@ -481,7 +502,10 @@ fn paste_tokens(tokens: &[PpToken]) -> Result<Vec<PpToken>, String> {
                 out.push(left);
                 break;
             };
-            let pasted = format!("{}{}", left.text(), right.text());
+            let pasted_len = left.text().len().saturating_add(right.text().len());
+            let mut pasted = String::with_capacity(pasted_len);
+            pasted.push_str(left.text());
+            pasted.push_str(right.text());
             out.push(lex_pasted_token(&left, &pasted)?);
             index = right_index + 1;
         } else {
@@ -703,6 +727,49 @@ mod tests {
         let mut macros = MacroTable::new();
         macros.insert("A".to_string(), MacroDef::Object(lex("42")?));
         assert_eq!(text(&expand_macros(&lex("A")?, &macros)?), "42");
+        Ok(())
+    }
+
+    #[test]
+    fn macro_stats_count_only_successful_function_expansions() -> Result<(), String> {
+        let mut macros = MacroTable::new();
+        macros.insert(
+            "F".to_string(),
+            MacroDef::Function {
+                params: vec!["value".to_string()],
+                variadic: false,
+                body: lex("value")?,
+            },
+        );
+        let tokens = lex("F(1, 2) F(3)")?;
+        let mut hooks = NoMacroExpansionHooks;
+        let mut stats = MacroExpansionStats::new(true);
+        let expanded =
+            expand_macros_inner(&tokens, &macros, &mut hooks, &mut Vec::new(), &mut stats, 0)?;
+        assert_eq!(text(&expanded), "F(1, 2) 3");
+        assert_eq!(stats.function_expansions, 1);
+        assert_eq!(stats.by_name.get("F"), Some(&1));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_excessively_deep_macro_expansion() -> Result<(), String> {
+        let mut macros = MacroTable::new();
+        for index in 0..=MAX_MACRO_EXPANSION_DEPTH {
+            let name = format!("M{index}");
+            let replacement = format!("M{}", index + 1);
+            macros.insert(name, MacroDef::Object(lex(&replacement)?));
+        }
+        macros.insert(
+            format!("M{}", MAX_MACRO_EXPANSION_DEPTH + 1),
+            MacroDef::Object(lex("0")?),
+        );
+
+        let error = expand_macros(&lex("M0")?, &macros).expect_err("deep expansion should fail");
+        assert!(
+            error.contains("macro expansion nested too deeply"),
+            "{error}"
+        );
         Ok(())
     }
 

@@ -10,6 +10,8 @@ jobs:
   test:
     name: Rust and compiler smoke tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -18,10 +20,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+
+      - name: Dependency audit
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -30,10 +42,10 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test
+        run: cargo test --locked
 
       - name: Optimized fuzz smoke
         run: python3 scripts/fuzz_smoke.py --seed 31337 --cases 12 --rnqcc target/debug/rnqcc --target x86_64-linux --target aarch64-linux --rnqcc-arg=--optimize
@@ -59,10 +71,55 @@ jobs:
         env:
           CI_ARTIFACT_DIR: target/ci-artifacts
 
+      - name: CMake build-system smoke
+        run: sh scripts/cmake_smoke.sh
+        env:
+          CI_ARTIFACT_DIR: target/ci-artifacts
+
       - name: Upload failure artifacts
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: rnqcc-ci-failure-artifacts-${{ matrix.os }}
           path: target/ci-artifacts
+          if-no-files-found: ignore
+
+  msrv:
+    name: Rust MSRV (1.87)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.87
+
+      - name: Check declared MSRV
+        run: cargo check --locked --all-targets
+
+  benchmarks:
+    name: Compiler benchmark baseline
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Record benchmark baseline
+        run: >-
+          cargo bench --locked --bench compiler --
+          --noplot --save-baseline ci --sample-size 20
+          --warm-up-time 1 --measurement-time 2
+
+      - name: Upload Criterion results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rnqcc-criterion-${{ github.sha }}
+          path: target/criterion
           if-no-files-found: ignore

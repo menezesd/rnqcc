@@ -1412,6 +1412,62 @@ fn licm_hoists_inlined_loop_invariant_temp_to_preheader() {
 }
 
 #[test]
+fn licm_does_not_hoist_from_conditional_loop_block() {
+    let invariant = TackyInstr::Binary {
+        op: TackyBinaryOp::Add,
+        left: v("a"),
+        right: TackyVal::Constant(1),
+        dst: v("__rnqcc_tmp.0"),
+    };
+    let mut func = empty_function(vec![
+        TackyInstr::Copy {
+            src: TackyVal::Constant(0),
+            dst: v("i"),
+        },
+        TackyInstr::Jump("header".to_string()),
+        TackyInstr::Label("header".to_string()),
+        TackyInstr::JumpIfNotZero(v("cond"), "body".to_string()),
+        TackyInstr::Jump("latch".to_string()),
+        TackyInstr::Label("body".to_string()),
+        invariant.clone(),
+        TackyInstr::Binary {
+            op: TackyBinaryOp::Add,
+            left: v("i"),
+            right: v("__rnqcc_tmp.0"),
+            dst: v("__rnqcc_tmp.1"),
+        },
+        TackyInstr::Copy {
+            src: v("__rnqcc_tmp.1"),
+            dst: v("i"),
+        },
+        TackyInstr::Label("latch".to_string()),
+        TackyInstr::Binary {
+            op: TackyBinaryOp::LessThan,
+            left: v("i"),
+            right: v("n"),
+            dst: v("__rnqcc_tmp.2"),
+        },
+        TackyInstr::JumpIfNotZero(v("__rnqcc_tmp.2"), "header".to_string()),
+        TackyInstr::Return(v("i")),
+    ]);
+    let types = int_types(&[
+        "a",
+        "cond",
+        "i",
+        "n",
+        "__rnqcc_tmp.0",
+        "__rnqcc_tmp.1",
+        "__rnqcc_tmp.2",
+    ]);
+
+    optimize_function(&mut func, &flags_with_licm(), &types, &HashSet::new());
+
+    let invariant_index = instr_index(&func.body, &invariant);
+    let body_label_index = instr_index(&func.body, &TackyInstr::Label("body".to_string()));
+    assert!(invariant_index > body_label_index);
+}
+
+#[test]
 fn licm_hoists_loop_invariant_get_address_after_source_value_write() {
     let invariant = TackyInstr::GetAddress {
         src: v("a"),
@@ -1557,6 +1613,36 @@ fn licm_hoists_loop_invariant_frame_address() {
 }
 
 #[test]
+fn optimizer_treats_function_parameters_as_potentially_aliased() {
+    let mut func = empty_function(vec![
+        TackyInstr::Copy {
+            src: v("a"),
+            dst: v("tmp"),
+        },
+        TackyInstr::Store {
+            src: TackyVal::Constant(1),
+            dst_ptr: v("p"),
+        },
+        TackyInstr::Return(v("tmp")),
+    ]);
+    func.params = vec!["a".to_string(), "p".to_string()];
+    let types = typed_vars(&[
+        ("a", CType::Int),
+        ("tmp", CType::Int),
+        ("p", CType::Pointer),
+    ]);
+
+    optimize_function(
+        &mut func,
+        &flags_with_copy_propagation_and_licm(),
+        &types,
+        &HashSet::new(),
+    );
+
+    assert!(func.body.contains(&TackyInstr::Return(v("tmp"))));
+}
+
+#[test]
 fn licm_hoists_loop_invariant_copy_from_offset() {
     let invariant = TackyInstr::CopyFromOffset {
         src_name: "s".to_string(),
@@ -1640,6 +1726,53 @@ fn licm_does_not_hoist_copy_from_offset_after_aggregate_write() {
         TackyInstr::Return(v("i")),
     ]);
     let types = typed_vars(&[
+        ("s", CType::Struct),
+        ("i", CType::Int),
+        ("__rnqcc_tmp.0", CType::Int),
+        ("__rnqcc_tmp.1", CType::Int),
+    ]);
+
+    optimize_function(&mut func, &flags_with_licm(), &types, &HashSet::new());
+
+    let field_read_index = instr_index(&func.body, &field_read);
+    let loop_label_index = instr_index(&func.body, &TackyInstr::Label("loop".to_string()));
+    assert!(field_read_index > loop_label_index);
+}
+
+#[test]
+fn licm_does_not_hoist_copy_from_offset_across_unknown_store() {
+    let field_read = TackyInstr::CopyFromOffset {
+        src_name: "s".to_string(),
+        offset: 8,
+        dst: v("__rnqcc_tmp.0"),
+    };
+    let mut func = empty_function(vec![
+        TackyInstr::Copy {
+            src: TackyVal::Constant(0),
+            dst: v("i"),
+        },
+        TackyInstr::Jump("loop".to_string()),
+        TackyInstr::Label("loop".to_string()),
+        TackyInstr::Store {
+            src: TackyVal::Constant(7),
+            dst_ptr: v("p"),
+        },
+        field_read.clone(),
+        TackyInstr::Binary {
+            op: TackyBinaryOp::Add,
+            left: v("i"),
+            right: v("__rnqcc_tmp.0"),
+            dst: v("__rnqcc_tmp.1"),
+        },
+        TackyInstr::Copy {
+            src: v("__rnqcc_tmp.1"),
+            dst: v("i"),
+        },
+        TackyInstr::JumpIfNotZero(v("i"), "loop".to_string()),
+        TackyInstr::Return(v("i")),
+    ]);
+    let types = typed_vars(&[
+        ("p", CType::Pointer),
         ("s", CType::Struct),
         ("i", CType::Int),
         ("__rnqcc_tmp.0", CType::Int),

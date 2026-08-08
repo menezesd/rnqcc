@@ -123,7 +123,7 @@ fn optimize_function(
     run_post_transform_cleanup(func, flags, types);
 
     if flags.propagate_copies && !func.body.is_empty() {
-        let aliased_vars = crate::cfg::find_aliased_vars(&func.body, &static_vars);
+        let aliased_vars = function_aliased_vars(func, &static_vars);
         run_copy_propagation(func, types, &aliased_vars);
         func.body = cse_copy_from_offset(std::mem::take(&mut func.body));
 
@@ -131,33 +131,33 @@ fn optimize_function(
     }
 
     if flags.eliminate_common_subexpressions && !func.body.is_empty() {
-        let aliased_vars = crate::cfg::find_aliased_vars(&func.body, &static_vars);
+        let aliased_vars = function_aliased_vars(func, &static_vars);
         let mut cfg = crate::cfg::Cfg::build(std::mem::take(&mut func.body));
         common_subexpression_elimination(&mut cfg, types, &aliased_vars, &static_vars);
         func.body = cfg.into_instructions();
 
         if flags.propagate_copies && !func.body.is_empty() {
-            let aliased_vars = crate::cfg::find_aliased_vars(&func.body, &static_vars);
+            let aliased_vars = function_aliased_vars(func, &static_vars);
             run_copy_propagation(func, types, &aliased_vars);
         }
         run_post_transform_cleanup(func, flags, types);
     }
 
     if flags.licm && !func.body.is_empty() {
-        let aliased_vars = crate::cfg::find_aliased_vars(&func.body, &static_vars);
+        let aliased_vars = function_aliased_vars(func, &static_vars);
         let mut cfg = crate::cfg::Cfg::build(std::mem::take(&mut func.body));
         loop_invariant_code_motion(&mut cfg, types, &aliased_vars, &static_vars);
         func.body = cfg.into_instructions();
 
         if flags.propagate_copies && !func.body.is_empty() {
-            let aliased_vars = crate::cfg::find_aliased_vars(&func.body, &static_vars);
+            let aliased_vars = function_aliased_vars(func, &static_vars);
             run_copy_propagation(func, types, &aliased_vars);
         }
         run_post_transform_cleanup(func, flags, types);
     }
 
     if flags.eliminate_dead_stores && !func.body.is_empty() {
-        let aliased_vars = crate::cfg::find_aliased_vars(&func.body, &static_vars);
+        let aliased_vars = function_aliased_vars(func, &static_vars);
         let dse_changed = run_dead_store_elimination(func, &aliased_vars, &static_vars);
         if dse_changed && (flags.fold_constants || flags.eliminate_unreachable_code) {
             run_post_transform_cleanup(func, flags, types);
@@ -165,13 +165,23 @@ fn optimize_function(
     }
 
     if flags.propagate_copies && !func.body.is_empty() {
-        let aliased_vars = crate::cfg::find_aliased_vars(&func.body, &static_vars);
+        let aliased_vars = function_aliased_vars(func, &static_vars);
         run_copy_propagation(func, types, &aliased_vars);
 
         if flags.fold_constants || flags.eliminate_unreachable_code {
             run_post_transform_cleanup(func, flags, types);
         }
     }
+}
+
+fn function_aliased_vars(func: &TackyFunction, static_vars: &HashSet<String>) -> HashSet<String> {
+    let mut aliased = crate::cfg::find_aliased_vars(&func.body, static_vars);
+    // Function parameters may alias one another at the call site (for
+    // example, an aggregate parameter and a pointer parameter can refer to
+    // the same object). Keep memory-sensitive optimizations conservative even
+    // when the callee contains no direct GetAddress instruction.
+    aliased.extend(func.params.iter().cloned());
+    aliased
 }
 
 fn run_post_transform_cleanup(

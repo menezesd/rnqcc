@@ -375,12 +375,25 @@ fn data_label(target: &Target, name: &str) -> String {
     target.show_symbol(name)
 }
 
-fn offset_data_name(name: &str, add: i32) -> String {
+fn offset_data_name(name: &str, add: i32) -> io::Result<String> {
     if let Some(data_offset) = split_data_offset(name) {
-        let offset = data_offset.offset + i64::from(add);
-        format!("{}{}", data_offset.base, assembly_offset_suffix(offset))
+        let offset = data_offset
+            .offset
+            .checked_add(i64::from(add))
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "AArch64 data offset overflow")
+            })?;
+        Ok(format!(
+            "{}{}",
+            data_offset.base,
+            assembly_offset_suffix(offset)
+        ))
     } else {
-        format!("{}{}", name, assembly_offset_suffix(i64::from(add)))
+        Ok(format!(
+            "{}{}",
+            name,
+            assembly_offset_suffix(i64::from(add))
+        ))
     }
 }
 
@@ -394,8 +407,16 @@ fn data_label_expr(target: &Target, name: &str) -> String {
 
 fn offset_operand(op: &AsmOperand, add: i32) -> std::io::Result<AsmOperand> {
     match op {
-        AsmOperand::Stack(offset) => Ok(AsmOperand::Stack(*offset + i64::from(add))),
-        AsmOperand::Data(name) => Ok(AsmOperand::Data(offset_data_name(name, add))),
+        AsmOperand::Stack(offset) => offset
+            .checked_add(i64::from(add))
+            .map(AsmOperand::Stack)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "AArch64 stack operand offset overflow",
+                )
+            }),
+        AsmOperand::Data(name) => Ok(AsmOperand::Data(offset_data_name(name, add)?)),
         AsmOperand::Reg(Reg::AX) if add == 8 => Ok(AsmOperand::Reg(Reg::DI)),
         AsmOperand::Reg(reg) if add == 0 => Ok(AsmOperand::Reg(*reg)),
         other => invalid_input(format!(
@@ -882,6 +903,14 @@ fn emit_load_immediate(
         value as u64
     };
 
+    // The instruction width truncates the source value.  Check the encoded
+    // bits, rather than the original i64, so a 32-bit value such as 2^32 is
+    // handled as the zero immediate it actually becomes.
+    if bits == 0 {
+        let zero_reg = zero_register_for_type(ty)?;
+        return writeln!(w, "\tmov {}, {}", reg, zero_reg);
+    }
+
     let mut chunk_storage = [0u16; 4];
     for (index, shift) in (0..width).step_by(16).enumerate() {
         chunk_storage[index] = ((bits >> shift) & 0xffff) as u16;
@@ -896,10 +925,12 @@ fn emit_load_immediate(
             .position(|&chunk| chunk != u16::MAX)
             .unwrap_or(0)
     } else {
-        chunks
-            .iter()
-            .position(|&chunk| chunk != 0)
-            .expect("nonzero immediate must have a nonzero chunk")
+        chunks.iter().position(|&chunk| chunk != 0).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "nonzero immediate has no encodable nonzero chunk",
+            )
+        })?
     };
     let base_shift = base * 16;
     let base_chunk = chunks[base];
@@ -2254,7 +2285,14 @@ fn load_operand_rebased(
                 w,
                 ty,
                 reg,
-                stack_offset_i32(*offset + i64::from(stack_rebase))?,
+                stack_offset_i32(offset.checked_add(i64::from(stack_rebase)).ok_or_else(
+                    || {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "AArch64 stack rebase offset overflow",
+                        )
+                    },
+                )?)?,
             )?;
             Ok(reg)
         }
@@ -2686,7 +2724,7 @@ fn emit_function(
 }
 
 fn escape_string_for_asm(s: &str) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(s.len());
     for b in c_string_bytes(s) {
         match b {
             b'\\' => out.push_str("\\\\"),
@@ -2696,7 +2734,12 @@ fn escape_string_for_asm(s: &str) -> String {
             b'\r' => out.push_str("\\r"),
             0 => out.push_str("\\0"),
             b if (0x20..0x7f).contains(&b) => out.push(b as char),
-            b => out.push_str(&format!("\\{:03o}", b)),
+            b => {
+                out.push('\\');
+                out.push(char::from(b'0' + (b >> 6)));
+                out.push(char::from(b'0' + ((b >> 3) & 0x7)));
+                out.push(char::from(b'0' + (b & 0x7)));
+            }
         }
     }
     out
@@ -2752,8 +2795,27 @@ fn static_init_size(init: &StaticInit) -> usize {
     }
 }
 
-fn alignment_log2(alignment: usize) -> usize {
-    alignment.next_power_of_two().trailing_zeros() as usize
+fn static_init_total_size(init_values: &[StaticInit]) -> io::Result<usize> {
+    init_values.iter().try_fold(0usize, |size, init| {
+        size.checked_add(static_init_size(init)).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "static initializer size overflows",
+            )
+        })
+    })
+}
+
+fn alignment_log2(alignment: usize) -> io::Result<usize> {
+    alignment
+        .checked_next_power_of_two()
+        .map(|value| value.trailing_zeros() as usize)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "alignment is too large for assembly emission",
+            )
+        })
 }
 
 fn data_alignment(alignment: usize) -> usize {
@@ -2768,7 +2830,7 @@ fn emit_macho_tls_static_var(
 ) -> std::io::Result<()> {
     let label = target.show_symbol(&sv.name);
     let init_label = format!("{}$tlv$init", label);
-    let size: usize = sv.init_values.iter().map(static_init_size).sum();
+    let size = static_init_total_size(&sv.init_values)?;
 
     if all_zero {
         writeln!(
@@ -2776,7 +2838,7 @@ fn emit_macho_tls_static_var(
             "\t.tbss {},{},{}",
             init_label,
             size,
-            alignment_log2(sv.alignment)
+            alignment_log2(sv.alignment)?
         )?;
     } else {
         writeln!(w, "\t.section __DATA,__thread_data,thread_local_regular")?;
@@ -2911,13 +2973,13 @@ fn emit_static_var(w: &mut dyn Write, sv: &AsmStaticVar, target: &Target) -> std
         if sv.global {
             writeln!(w, "\t.globl {}", label)?;
         }
-        let size: usize = sv.init_values.iter().map(static_init_size).sum();
+        let size = static_init_total_size(&sv.init_values)?;
         return writeln!(
             w,
             "\t.zerofill __DATA,__bss,{},{},{}",
             label,
             size,
-            alignment_log2(alignment)
+            alignment_log2(alignment)?
         );
     }
 
@@ -2944,7 +3006,7 @@ fn emit_static_constant(
 ) -> std::io::Result<()> {
     match target.os {
         TargetOs::Linux => writeln!(w, "\t.section .rodata")?,
-        TargetOs::MacOs if matches!(&sc.init, StaticInit::StringInit(s, _) if !c_string_bytes(s).contains(&0)) => {
+        TargetOs::MacOs if matches!(&sc.init, StaticInit::StringInit(s, _) if !c_string_contains_zero(s)) => {
             writeln!(w, "\t.section __TEXT,__cstring,cstring_literals")?
         }
         TargetOs::MacOs => writeln!(w, "\t.section __TEXT,__const")?,
@@ -2979,7 +3041,8 @@ fn emit_stack_note(w: &mut dyn Write, target: &Target) -> std::io::Result<()> {
 }
 
 pub fn emit(assembly_file: &str, program: &AsmProgram, target: &Target) -> std::io::Result<()> {
-    let mut file = std::fs::File::create(assembly_file)?;
+    let file = std::fs::File::create(assembly_file)?;
+    let mut file = std::io::BufWriter::new(file);
     for item in &program.top_level {
         match item {
             AsmTopLevel::Function(function) => emit_function(&mut file, function, target)?,
@@ -2991,12 +3054,20 @@ pub fn emit(assembly_file: &str, program: &AsmProgram, target: &Target) -> std::
             } => emit_alias(&mut file, name, alias_target, target)?,
         }
     }
-    emit_stack_note(&mut file, target)
+    emit_stack_note(&mut file, target)?;
+    file.flush()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn static_initializer_size_and_alignment_overflow_are_reported() {
+        let initializers = vec![StaticInit::ZeroInit(usize::MAX), StaticInit::CharInit(0)];
+        assert!(static_init_total_size(&initializers).is_err());
+        assert!(alignment_log2(usize::MAX).is_err());
+    }
 
     #[test]
     fn aggregate_copy_uses_exact_width_moves_for_small_sizes() -> Result<(), String> {
@@ -3613,6 +3684,18 @@ mod tests {
     }
 
     #[test]
+    fn truncated_32_bit_zero_immediate_does_not_panic() -> Result<(), String> {
+        let mut out = Vec::new();
+        emit_load_immediate(&mut out, AsmType::Longword, "w9", 1_i64 << 32)
+            .map_err(|err| err.to_string())?;
+        assert_eq!(
+            String::from_utf8(out).map_err(|err| err.to_string())?,
+            "\tmov w9, wzr\n"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn float_zero_immediate_uses_fmov_from_zero_register() -> Result<(), String> {
         let mut out = Vec::new();
         emit_instruction(
@@ -3917,5 +4000,19 @@ mod tests {
         assert!(asm.contains("mov w15, wzr"), "{asm}");
         assert!(!asm.contains("mov w15, #0"), "{asm}");
         Ok(())
+    }
+
+    #[test]
+    fn stack_operand_offset_rejects_overflow() {
+        let err = offset_operand(&AsmOperand::Stack(i64::MAX), 1)
+            .expect_err("stack offset overflow should be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn data_operand_offset_rejects_overflow() {
+        let err = offset_data_name("value+9223372036854775807", 1)
+            .expect_err("data offset overflow should be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 }

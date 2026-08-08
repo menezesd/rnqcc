@@ -65,7 +65,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build rnqcc
-        run: cargo build
+        run: cargo build --locked
 
       - name: Fetch GCC torture corpus
         run: |

@@ -75,7 +75,11 @@ impl Cfg {
                     }
                 }
                 Some(TackyInstr::JumpIndirect(_)) => {
-                    for target_id in 0..num_blocks {
+                    // Indirect gotos are formed from GNU label addresses, so
+                    // only blocks beginning with a label can be targets.
+                    // Avoiding edges to ordinary blocks keeps dataflow facts
+                    // from being needlessly weakened across the function.
+                    for &target_id in label_to_block.values() {
                         blocks[i].successors.push(NodeId::Block(target_id));
                         blocks[target_id].predecessors.push(NodeId::Block(i));
                     }
@@ -87,9 +91,11 @@ impl Cfg {
                         blocks[target_id].predecessors.push(NodeId::Block(i));
                     }
                     // Fall-through to next block
-                    blocks[i].successors.push(next_id);
-                    if let NodeId::Block(j) = next_id {
-                        blocks[j].predecessors.push(NodeId::Block(i));
+                    if !blocks[i].successors.contains(&next_id) {
+                        blocks[i].successors.push(next_id);
+                        if let NodeId::Block(j) = next_id {
+                            blocks[j].predecessors.push(NodeId::Block(i));
+                        }
                     }
                 }
                 _ => {
@@ -306,7 +312,7 @@ pub fn copy_propagation(
     // Rewrite instructions using reaching copies
     for block_id in 0..cfg.blocks.len() {
         let mut reaching = meet_copies(&cfg.blocks[block_id], &block_out);
-        let mut new_instrs = Vec::new();
+        let mut new_instrs = Vec::with_capacity(cfg.blocks[block_id].instructions.len());
         for instr in &cfg.blocks[block_id].instructions {
             if let Some(rewritten) = rewrite_instruction(instr, &reaching, types) {
                 transfer_copy_instr(&rewritten, &mut reaching, aliased_vars, types);
@@ -494,7 +500,11 @@ fn transfer_copy_instr(
             }
         }
         TackyInstr::Store { .. } => {
-            kill_copies_involving_aliased_vars(current, aliased);
+            // A pointer parameter may alias any addressable local or another
+            // parameter even when no GetAddress appears in this function.
+            // Without clearing all copies, propagation can reuse a value that
+            // the store has just overwritten through an unknown pointer.
+            current.clear();
         }
         TackyInstr::AtomicFetch { dst, .. }
         | TackyInstr::AtomicExchange { dst, .. }
@@ -1102,6 +1112,29 @@ pub fn dead_store_elimination(
         return false;
     }
 
+    // An unknown pointer store or call can alias an aggregate parameter even
+    // when this function contains no direct GetAddress for that aggregate.
+    // Treat aggregates present in the function as externally observable in
+    // that case, while retaining precise elimination for read-only functions.
+    let mut effective_aliased_vars = aliased_vars.clone();
+    if cfg
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .any(is_unknown_memory_write)
+    {
+        for instr in cfg.blocks.iter().flat_map(|block| &block.instructions) {
+            match instr {
+                TackyInstr::CopyToOffset { dst_name, .. }
+                | TackyInstr::CopyStruct { dst_name, .. } => {
+                    effective_aliased_vars.insert(dst_name.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    let aliased_vars = &effective_aliased_vars;
+
     // Liveness analysis (backward data-flow)
     let mut block_live_in: Vec<HashSet<String>> = vec![HashSet::new(); cfg.blocks.len()];
 
@@ -1346,6 +1379,22 @@ fn aggregate_write_can_be_dead(
         && !static_vars.contains(dst_name)
 }
 
+fn is_unknown_memory_write(instr: &TackyInstr) -> bool {
+    matches!(
+        instr,
+        TackyInstr::FunCall { .. }
+            | TackyInstr::Store { .. }
+            | TackyInstr::AtomicFence
+            | TackyInstr::AtomicFetch { .. }
+            | TackyInstr::AtomicExchange { .. }
+            | TackyInstr::AtomicCompareExchange { .. }
+            | TackyInstr::AtomicCompareSwap { .. }
+            | TackyInstr::BuiltinSetjmp { .. }
+            | TackyInstr::BuiltinLongjmp { .. }
+            | TackyInstr::VaStart { .. }
+    )
+}
+
 fn is_dead_store(
     instr: &TackyInstr,
     live_after: &HashSet<String>,
@@ -1363,6 +1412,9 @@ fn is_dead_store(
             | TackyInstr::AtomicExchange { .. }
             | TackyInstr::AtomicCompareExchange { .. }
             | TackyInstr::AtomicCompareSwap { .. }
+            | TackyInstr::BuiltinSetjmp { .. }
+            | TackyInstr::BuiltinLongjmp { .. }
+            | TackyInstr::VaStart { .. }
     ) {
         return false;
     }
@@ -1435,6 +1487,36 @@ mod tests {
 
         assert_eq!(cfg.blocks.len(), 2);
         assert_eq!(cfg.blocks[0].successors, vec![NodeId::Exit]);
+        assert!(cfg.blocks[1].predecessors.is_empty());
+    }
+
+    #[test]
+    fn conditional_jump_to_fallthrough_has_one_edge() {
+        let cfg = Cfg::build(vec![
+            TackyInstr::JumpIfZero(TackyVal::Constant(0), "next".to_string()),
+            TackyInstr::Label("next".to_string()),
+            TackyInstr::Return(TackyVal::Constant(0)),
+        ]);
+
+        assert_eq!(cfg.blocks.len(), 2);
+        assert_eq!(cfg.blocks[0].successors, vec![NodeId::Block(1)]);
+        assert_eq!(cfg.blocks[1].predecessors, vec![NodeId::Block(0)]);
+    }
+
+    #[test]
+    fn indirect_jump_targets_only_label_blocks() {
+        let cfg = Cfg::build(vec![
+            TackyInstr::JumpIndirect(TackyVal::Var("target".to_string())),
+            TackyInstr::Copy {
+                src: TackyVal::Constant(1),
+                dst: TackyVal::Var("ordinary".to_string()),
+            },
+            TackyInstr::Label("target".to_string()),
+            TackyInstr::Return(TackyVal::Constant(0)),
+        ]);
+
+        assert_eq!(cfg.blocks.len(), 3);
+        assert_eq!(cfg.blocks[0].successors, vec![NodeId::Block(2)]);
         assert!(cfg.blocks[1].predecessors.is_empty());
     }
 
@@ -1825,6 +1907,32 @@ mod tests {
     }
 
     #[test]
+    fn copy_propagation_clears_reaching_copies_after_unknown_store() {
+        let mut cfg = Cfg::build(vec![
+            TackyInstr::Copy {
+                src: v("a"),
+                dst: v("tmp"),
+            },
+            TackyInstr::Store {
+                src: TackyVal::Constant(1),
+                dst_ptr: v("p"),
+            },
+            TackyInstr::Return(v("tmp")),
+        ]);
+        let types = typed_vars(&[
+            ("a", CType::Int),
+            ("tmp", CType::Int),
+            ("p", CType::Pointer),
+        ]);
+
+        copy_propagation(&mut cfg, &HashSet::new(), &types);
+
+        assert!(cfg
+            .to_instructions()
+            .contains(&TackyInstr::Return(v("tmp"))));
+    }
+
+    #[test]
     fn copy_propagation_rewrites_int128_constant_in_typed_comparison() {
         let mut cfg = Cfg::build(vec![
             TackyInstr::Copy {
@@ -2059,6 +2167,21 @@ mod tests {
     }
 
     #[test]
+    fn dead_store_elimination_keeps_setjmp_with_unused_result() {
+        let setjmp = TackyInstr::BuiltinSetjmp {
+            buf: v("env"),
+            dst: v("unused_result"),
+            label: "resume".to_string(),
+            end_label: "done".to_string(),
+        };
+        let mut cfg = Cfg::build(vec![setjmp.clone(), TackyInstr::Return(v("value"))]);
+
+        dead_store_elimination(&mut cfg, &HashSet::new(), &HashSet::new());
+
+        assert!(cfg.to_instructions().contains(&setjmp));
+    }
+
+    #[test]
     fn dead_store_elimination_removes_dead_copy_to_offset_and_source() {
         let mut cfg = Cfg::build(vec![
             TackyInstr::Copy {
@@ -2135,6 +2258,27 @@ mod tests {
         let statics = HashSet::from(["agg".to_string()]);
 
         dead_store_elimination(&mut cfg, &HashSet::new(), &statics);
+
+        assert!(cfg.to_instructions().contains(&write));
+    }
+
+    #[test]
+    fn dead_store_elimination_keeps_aggregate_write_before_unknown_store() {
+        let write = TackyInstr::CopyToOffset {
+            src: TackyVal::Constant(1),
+            dst_name: "agg".to_string(),
+            offset: 0,
+        };
+        let mut cfg = Cfg::build(vec![
+            write.clone(),
+            TackyInstr::Store {
+                src: TackyVal::Constant(2),
+                dst_ptr: v("p"),
+            },
+            TackyInstr::Return(TackyVal::Constant(0)),
+        ]);
+
+        dead_store_elimination(&mut cfg, &HashSet::new(), &HashSet::new());
 
         assert!(cfg.to_instructions().contains(&write));
     }

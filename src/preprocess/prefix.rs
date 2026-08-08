@@ -11,7 +11,7 @@ pub fn is_ident_continue(ch: char) -> bool {
 
 /// Splits physical lines joined by backslash-newline (or backslash-CR, backslash-CR-LF).
 pub fn splice_continued_lines(source: &str) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(source.len());
     let mut chars = source.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\\' {
@@ -37,13 +37,13 @@ pub fn splice_continued_lines(source: &str) -> String {
 
 /// Strips C comments (// and /* */) from source text, respecting string/char literals.
 pub fn strip_comments(source: &str) -> Result<String, String> {
-    let mut out = String::new();
+    let mut out = String::with_capacity(source.len());
     let mut chars = source.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
             '\'' if out
                 .chars()
-                .last()
+                .next_back()
                 .is_some_and(|previous| previous.is_ascii_hexdigit())
                 && chars.peek().is_some_and(|next| next.is_ascii_hexdigit()) =>
             {
@@ -67,8 +67,8 @@ pub fn strip_comments(source: &str) -> Result<String, String> {
             '/' if matches!(chars.peek(), Some('/')) => {
                 chars.next();
                 for inner in chars.by_ref() {
-                    if inner == '\n' {
-                        out.push('\n');
+                    if matches!(inner, '\n' | '\r') {
+                        out.push(inner);
                         break;
                     }
                 }
@@ -78,8 +78,8 @@ pub fn strip_comments(source: &str) -> Result<String, String> {
                 let mut closed = false;
                 let mut previous = '\0';
                 for inner in chars.by_ref() {
-                    if inner == '\n' {
-                        out.push('\n');
+                    if matches!(inner, '\n' | '\r') {
+                        out.push(inner);
                     } else if previous == '*' && inner == '/' {
                         closed = true;
                         break;
@@ -99,7 +99,7 @@ pub fn strip_comments(source: &str) -> Result<String, String> {
 
 /// Escape a string for use as a C string literal (for __FILE__ etc.).
 pub fn escape_c_string(value: &str) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
             '\\' => out.push_str("\\\\"),
@@ -120,6 +120,19 @@ mod tests {
         assert_eq!(
             strip_comments("int value = 0xca'fe /* ignored */;\n")?,
             "int value = 0xca'fe  ;\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn strip_comments_handles_bare_carriage_return_lines() -> Result<(), String> {
+        assert_eq!(
+            strip_comments("int first; // comment\rint second;\r")?,
+            "int first; \rint second;\r"
+        );
+        assert_eq!(
+            strip_comments("int first; /* comment\rstill comment */ int second;")?,
+            "int first; \r  int second;"
         );
         Ok(())
     }

@@ -4,11 +4,16 @@ set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 COMPILER="${COMPILER:-$ROOT/target/debug/rnqcc}"
 AR="${AR:-ar}"
-WORKDIR="${WORKDIR:-$(mktemp -d "${TMPDIR:-/tmp}/rnqcc-real-smoke.XXXXXX")}"
+WORKDIR="${WORKDIR:-}"
 KEEP_WORKDIR="${KEEP_WORKDIR:-0}"
 CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-}"
 REAL_PROJECT_DIR="${REAL_PROJECT_DIR:-}"
 REAL_PROJECT_CFLAGS="${REAL_PROJECT_CFLAGS:-}"
+WORKDIR_CREATED=0
+if [ -z "${WORKDIR:-}" ]; then
+    WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/rnqcc-real-smoke.XXXXXX")"
+    WORKDIR_CREATED=1
+fi
 
 cleanup() {
     status=$?
@@ -16,7 +21,7 @@ cleanup() {
         mkdir -p "$CI_ARTIFACT_DIR"
         cp -R "$WORKDIR" "$CI_ARTIFACT_DIR/real_project_smoke"
     fi
-    if [ "$KEEP_WORKDIR" != "1" ]; then
+    if [ "$WORKDIR_CREATED" = "1" ] && [ "$KEEP_WORKDIR" != "1" ]; then
         rm -rf "$WORKDIR"
     fi
     exit "$status"
@@ -24,7 +29,7 @@ cleanup() {
 trap cleanup EXIT
 
 if [ ! -x "$COMPILER" ]; then
-    cargo build --manifest-path "$ROOT/Cargo.toml" >/dev/null
+    cargo build --locked --manifest-path "$ROOT/Cargo.toml" >/dev/null
 fi
 
 INCLUDE="$ROOT/tests/fixtures/smoke/include"
@@ -76,20 +81,28 @@ if [ -n "$REAL_PROJECT_DIR" ]; then
         exit 1
     fi
     mkdir -p "$WORKDIR/real-project"
-    sources="$WORKDIR/real-project/sources.list"
-    find "$REAL_PROJECT_DIR" -name '*.c' -type f > "$sources"
-    if [ ! -s "$sources" ]; then
+    if ! find "$REAL_PROJECT_DIR" -name '*.c' -type f -print -quit | grep -q .; then
         echo "REAL_PROJECT_DIR contains no .c files: $REAL_PROJECT_DIR" >&2
         exit 1
     fi
-    count=0
-    while IFS= read -r source; do
-        count=$((count + 1))
-        object="$WORKDIR/real-project/$count.o"
-        # shellcheck disable=SC2086
-        "$COMPILER" --internal-cpp $REAL_PROJECT_CFLAGS -c "$source" -o "$object"
-        test -s "$object"
-    done < "$sources"
+    if ! find "$REAL_PROJECT_DIR" -name '*.c' -type f -exec sh -c '
+        compiler=$1
+        output_dir=$2
+        flags=$3
+        shift 3
+        for source do
+            # cksum supplies a stable, path-derived name without interpreting
+            # whitespace or newlines in the source path.
+            key=$(printf "%s" "$source" | cksum | awk "{print \$1 \"_\" \$2}") || exit 1
+            object="$output_dir/$key.o"
+            # shellcheck disable=SC2086
+            "$compiler" --internal-cpp $flags -c "$source" -o "$object" || exit 1
+            test -s "$object" || exit 1
+        done
+    ' sh "$COMPILER" "$WORKDIR/real-project" "$REAL_PROJECT_CFLAGS" {} +; then
+        echo "failed to compile one or more .c files in REAL_PROJECT_DIR: $REAL_PROJECT_DIR" >&2
+        exit 1
+    fi
 fi
 
 echo "real project smoke passed"

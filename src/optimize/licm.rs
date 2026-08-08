@@ -51,6 +51,12 @@ fn licm_once(
             continue;
         };
         let def_counts = collect_loop_def_counts(cfg, &loop_blocks);
+        let loop_writes_memory = loop_blocks.iter().any(|block_id| {
+            cfg.blocks[*block_id]
+                .instructions
+                .iter()
+                .any(is_memory_write)
+        });
         let hoisted_capacity: usize = loop_blocks
             .iter()
             .map(|block_id| cfg.blocks[*block_id].instructions.len())
@@ -62,6 +68,17 @@ fn licm_once(
             if !loop_blocks.contains(&block_id) {
                 continue;
             }
+            // Hoisting executes an instruction once before the loop, so the
+            // instruction must have executed on every path through the loop
+            // originally.  Without this dominance check, an invariant load
+            // or conversion in a conditional loop block could be evaluated on
+            // iterations that never reached that block.
+            if !loop_blocks
+                .iter()
+                .all(|loop_block| dominators[*loop_block].contains(&block_id))
+            {
+                continue;
+            }
             let mut kept = Vec::with_capacity(cfg.blocks[block_id].instructions.len());
             for instr in std::mem::take(&mut cfg.blocks[block_id].instructions) {
                 if is_loop_invariant_candidate(
@@ -71,6 +88,7 @@ fn licm_once(
                     types,
                     aliased_vars,
                     static_vars,
+                    loop_writes_memory,
                 ) {
                     if let Some(dst) = licm_candidate_dst(&instr) {
                         hoisted_defs.insert(dst.to_string());
@@ -88,8 +106,10 @@ fn licm_once(
         }
 
         let preheader_instrs = &mut cfg.blocks[preheader].instructions;
-        if matches!(preheader_instrs.last(), Some(TackyInstr::Jump(_))) {
-            let jump = preheader_instrs.pop().unwrap();
+        if let Some(TackyInstr::Jump(_)) = preheader_instrs.last() {
+            let Some(jump) = preheader_instrs.pop() else {
+                unreachable!("preheader jump disappeared while inserting loop-invariant code");
+            };
             preheader_instrs.extend(hoisted_instrs);
             preheader_instrs.push(jump);
         } else {
@@ -225,6 +245,7 @@ fn is_loop_invariant_candidate(
     types: &indexmap::IndexMap<String, CType>,
     aliased_vars: &HashSet<String>,
     static_vars: &HashSet<String>,
+    loop_writes_memory: bool,
 ) -> bool {
     if !is_pure_licm_instr(instr) {
         return false;
@@ -246,6 +267,9 @@ fn is_loop_invariant_candidate(
         types.get(dst),
         Some(CType::Struct | CType::Void | CType::LongDouble)
     ) {
+        return false;
+    }
+    if loop_writes_memory && matches!(instr, TackyInstr::CopyFromOffset { .. }) {
         return false;
     }
 
@@ -380,4 +404,22 @@ fn is_pure_licm_instr(instr: &TackyInstr) -> bool {
         TackyInstr::Binary { op, .. } => !matches!(op, TackyBinaryOp::Div | TackyBinaryOp::Mod),
         _ => false,
     }
+}
+
+fn is_memory_write(instr: &TackyInstr) -> bool {
+    matches!(
+        instr,
+        TackyInstr::FunCall { .. }
+            | TackyInstr::Store { .. }
+            | TackyInstr::CopyToOffset { .. }
+            | TackyInstr::CopyStruct { .. }
+            | TackyInstr::AtomicFence
+            | TackyInstr::AtomicFetch { .. }
+            | TackyInstr::AtomicExchange { .. }
+            | TackyInstr::AtomicCompareExchange { .. }
+            | TackyInstr::AtomicCompareSwap { .. }
+            | TackyInstr::BuiltinSetjmp { .. }
+            | TackyInstr::BuiltinLongjmp { .. }
+            | TackyInstr::VaStart { .. }
+    )
 }

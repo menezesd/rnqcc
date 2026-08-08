@@ -12,7 +12,6 @@ use static_eval::*;
 
 type BuiltinFunctionInfo = (&'static str, CType, FullType, Vec<CType>, Option<PtrInfo>);
 
-const VLA_STATIC_SCALE_FALLBACK: usize = 16;
 const INLINE_ZERO_INIT_LIMIT: usize = 128;
 
 #[derive(Copy, Clone)]
@@ -169,29 +168,36 @@ impl StaticInitBuilder {
         if size == 0 {
             return Ok(());
         }
-        let end = offset + size;
+        let end = offset
+            .checked_add(size)
+            .ok_or_else(|| "static initializer offset is too large".to_string())?;
         if let Some(pos) = self.pieces.iter().position(|piece| {
             piece.offset == offset && TackyGen::static_init_size(&piece.init) == size
         }) {
             self.pieces[pos] = StaticInitPiece { offset, init };
             return Ok(());
         }
-        if self.pieces.iter().any(|piece| {
-            let existing_end = piece.offset + TackyGen::static_init_size(&piece.init);
-            offset < existing_end && piece.offset < end
-        }) {
-            return Err("overlapping static initializer designators".to_string());
+        for piece in &self.pieces {
+            let existing_end = piece
+                .offset
+                .checked_add(TackyGen::static_init_size(&piece.init))
+                .ok_or_else(|| "static initializer offset is too large".to_string())?;
+            if offset < existing_end && piece.offset < end {
+                return Err("overlapping static initializer designators".to_string());
+            }
         }
         self.pieces.push(StaticInitPiece { offset, init });
         Ok(())
     }
 
-    fn required_bytes(&self) -> usize {
-        self.pieces
-            .iter()
-            .map(|piece| piece.offset + TackyGen::static_init_size(&piece.init))
-            .max()
-            .unwrap_or(0)
+    fn required_bytes(&self) -> TackyResult<usize> {
+        self.pieces.iter().try_fold(0usize, |max_end, piece| {
+            piece
+                .offset
+                .checked_add(TackyGen::static_init_size(&piece.init))
+                .map(|end| max_end.max(end))
+                .ok_or_else(|| "static initializer offset is too large".to_string())
+        })
     }
 
     fn init_to_u8(init: &StaticInit) -> Option<u8> {
@@ -248,7 +254,10 @@ impl StaticInitBuilder {
             let width = field_end_in_byte - field_start_in_byte;
             let mask = (((1u16 << width) - 1) << field_start_in_byte) as u8;
             let byte_value = ((shifted >> byte_start_bit) & 0xff) as u8;
-            self.put_byte_masked(offset + byte_index, byte_value, mask)?;
+            let byte_offset = offset
+                .checked_add(byte_index)
+                .ok_or_else(|| "static initializer offset is too large".to_string())?;
+            self.put_byte_masked(byte_offset, byte_value, mask)?;
         }
         Ok(())
     }
@@ -266,11 +275,14 @@ impl StaticInitBuilder {
                 cursor = piece.offset;
             }
             let size = TackyGen::static_init_size(&piece.init);
-            if cursor + size > total_bytes {
+            let end = cursor
+                .checked_add(size)
+                .ok_or_else(|| "static initializer size is too large".to_string())?;
+            if end > total_bytes {
                 return Err("static initializer exceeds object size".to_string());
             }
             out.push(piece.init);
-            cursor += size;
+            cursor = end;
         }
         if cursor < total_bytes {
             out.push(StaticInit::ZeroInit(total_bytes - cursor));
@@ -634,18 +646,18 @@ impl TackyGen {
                     return None;
                 }
                 let elem_size = match self.static_exp_full_type(left) {
-                    Some(FullType::Pointer(pointee)) => {
-                        pointee.byte_size_with(&self.struct_defs) as i64
-                    }
-                    Some(FullType::Array { elem, .. }) => {
-                        elem.byte_size_with(&self.struct_defs) as i64
-                    }
+                    Some(FullType::Pointer(pointee)) => pointee
+                        .checked_byte_size_with(&self.struct_defs)
+                        .and_then(|size| i64::try_from(size).ok())?,
+                    Some(FullType::Array { elem, .. }) => elem
+                        .checked_byte_size_with(&self.struct_defs)
+                        .and_then(|size| i64::try_from(size).ok())?,
                     _ => 1,
                 };
                 if elem_size == 0 {
                     return None;
                 }
-                let byte_diff = left_address.offset - right_address.offset;
+                let byte_diff = left_address.offset.checked_sub(right_address.offset)?;
                 (byte_diff % elem_size == 0).then_some(byte_diff / elem_size)
             }
             _ => None,
@@ -679,7 +691,7 @@ impl TackyGen {
                     FullType::Scalar(CType::Int).byte_size_with(&self.struct_defs) as i64;
                 Some(StaticStringLiteralElementAddress {
                     literal_key: format!("w:{s}"),
-                    offset: index * elem_size,
+                    offset: index.checked_mul(elem_size)?,
                     elem_size,
                 })
             }
@@ -688,7 +700,7 @@ impl TackyGen {
                     FullType::Scalar(CType::UShort).byte_size_with(&self.struct_defs) as i64;
                 Some(StaticStringLiteralElementAddress {
                     literal_key: format!("u16:{s}"),
-                    offset: index * elem_size,
+                    offset: index.checked_mul(elem_size)?,
                     elem_size,
                 })
             }
@@ -697,7 +709,7 @@ impl TackyGen {
                     FullType::Scalar(CType::UInt).byte_size_with(&self.struct_defs) as i64;
                 Some(StaticStringLiteralElementAddress {
                     literal_key: format!("u32:{s}"),
-                    offset: index * elem_size,
+                    offset: index.checked_mul(elem_size)?,
                     elem_size,
                 })
             }
@@ -796,13 +808,19 @@ impl TackyGen {
         )?
         .value;
         let scale = match self.static_exp_full_type(address) {
-            Some(FullType::Array { elem, .. }) => elem.byte_size_with(&self.struct_defs) as i64,
-            Some(FullType::Pointer(pointee)) => pointee.byte_size_with(&self.struct_defs) as i64,
+            Some(FullType::Array { elem, .. }) => {
+                i64::try_from(elem.checked_byte_size_with(&self.struct_defs)?).ok()?
+            }
+            Some(FullType::Pointer(pointee)) => {
+                i64::try_from(pointee.checked_byte_size_with(&self.struct_defs)?).ok()?
+            }
             _ => 1,
         };
+        let scaled = value.checked_mul(scale)?;
+        let signed_scaled = scaled.checked_mul(sign)?;
         Some(StaticAddressConstant {
             base: address_constant.base,
-            offset: address_constant.offset + sign * value * scale,
+            offset: address_constant.offset.checked_add(signed_scaled)?,
         })
     }
 
@@ -905,16 +923,18 @@ impl TackyGen {
                     FullType::Struct(tag) => tag,
                     _ => return None,
                 };
-                let member_offset = self
-                    .struct_defs
-                    .get(&tag)?
-                    .members
-                    .iter()
-                    .find(|m| m.name == *member)?
-                    .offset as i64;
+                let member_offset = i64::try_from(
+                    self.struct_defs
+                        .get(&tag)?
+                        .members
+                        .iter()
+                        .find(|m| m.name == *member)?
+                        .offset,
+                )
+                .ok()?;
                 Some(StaticAddressConstant {
                     base: address.base,
-                    offset: address.offset + member_offset,
+                    offset: address.offset.checked_add(member_offset)?,
                 })
             }
             Exp::Arrow(inner, member) => {
@@ -930,16 +950,18 @@ impl TackyGen {
                     },
                     _ => return None,
                 };
-                let member_offset = self
-                    .struct_defs
-                    .get(&tag)?
-                    .members
-                    .iter()
-                    .find(|m| m.name == *member)?
-                    .offset as i64;
+                let member_offset = i64::try_from(
+                    self.struct_defs
+                        .get(&tag)?
+                        .members
+                        .iter()
+                        .find(|m| m.name == *member)?
+                        .offset,
+                )
+                .ok()?;
                 Some(StaticAddressConstant {
                     base: address.base,
-                    offset: address.offset + member_offset,
+                    offset: address.offset.checked_add(member_offset)?,
                 })
             }
             Exp::Subscript(arr, idx) => {
@@ -947,19 +969,25 @@ impl TackyGen {
                     .static_address_constant(arr)
                     .or_else(|| self.static_lvalue_address_constant(arr))?;
                 let elem_size = match self.static_exp_full_type(arr)? {
-                    FullType::Array { elem, .. } => elem.byte_size_with(&self.struct_defs),
-                    FullType::Pointer(pointee) => pointee.byte_size_with(&self.struct_defs),
+                    FullType::Array { elem, .. } => {
+                        elem.checked_byte_size_with(&self.struct_defs)?
+                    }
+                    FullType::Pointer(pointee) => {
+                        pointee.checked_byte_size_with(&self.struct_defs)?
+                    }
                     _ => return None,
-                } as i64;
+                };
+                let elem_size = i64::try_from(elem_size).ok()?;
                 let index = eval_static_integer_constant_exp_with_context(
                     idx,
                     &self.struct_defs,
                     &self.full_types,
                 )?
                 .value;
+                let offset = index.checked_mul(elem_size)?;
                 Some(StaticAddressConstant {
                     base: address.base,
-                    offset: address.offset + index * elem_size,
+                    offset: address.offset.checked_add(offset)?,
                 })
             }
             Exp::Unary(UnaryOp::Deref, inner) => self.static_address_constant(inner),
@@ -1037,7 +1065,7 @@ impl TackyGen {
         }
 
         let mut off = 0usize;
-        while off + 8 <= total_bytes {
+        while off <= total_bytes.saturating_sub(8) {
             let z = self.fresh_tmp(CType::Long);
             self.emit(TackyInstr::Copy {
                 src: TackyVal::Constant(0),
@@ -1050,7 +1078,7 @@ impl TackyGen {
             });
             off += 8;
         }
-        while off + 4 <= total_bytes {
+        while off <= total_bytes.saturating_sub(4) {
             let z = self.fresh_tmp(CType::Int);
             self.emit(TackyInstr::Copy {
                 src: TackyVal::Constant(0),
@@ -1984,14 +2012,17 @@ impl TackyGen {
     }
 
     /// Get the byte size of the element a pointer points to (using FullType)
-    fn ptr_elem_size(&self, name: &str) -> i64 {
+    fn ptr_elem_size(&self, name: &str) -> TackyResult<i64> {
         if let Some(ft) = self.full_types.get(name) {
             match ft {
-                FullType::Pointer(inner) => inner.byte_size_with(&self.struct_defs) as i64,
-                _ => self.deref_type(name).size() as i64,
+                FullType::Pointer(inner) => inner
+                    .checked_byte_size_with(&self.struct_defs)
+                    .and_then(|size| i64::try_from(size).ok())
+                    .ok_or_else(|| "pointer element size is too large".to_string()),
+                _ => Ok(self.deref_type(name).size() as i64),
             }
         } else {
-            self.deref_type(name).size() as i64
+            Ok(self.deref_type(name).size() as i64)
         }
     }
 
@@ -2892,7 +2923,10 @@ impl TackyGen {
                 Ok((dst, CType::Double))
             }
             Exp::SizeOfType(_ct, ft) => {
-                let size = ft.byte_size_with(&self.struct_defs) as i64;
+                let size = ft
+                    .checked_byte_size_with(&self.struct_defs)
+                    .and_then(|size| i64::try_from(size).ok())
+                    .ok_or_else(|| "sizeof operand is too large".to_string())?;
                 let dst = self.fresh_tmp(CType::ULong);
                 self.emit(TackyInstr::Copy {
                     src: TackyVal::Constant(size),
@@ -2901,7 +2935,8 @@ impl TackyGen {
                 Ok((dst, CType::ULong))
             }
             Exp::AlignOfType(ft) => {
-                let alignment = ft.alignment_with(&self.struct_defs) as i64;
+                let alignment = i64::try_from(ft.alignment_with(&self.struct_defs))
+                    .map_err(|_| "alignment operand is too large".to_string())?;
                 let dst = self.fresh_tmp(CType::ULong);
                 self.emit(TackyInstr::Copy {
                     src: TackyVal::Constant(alignment),
@@ -2910,7 +2945,8 @@ impl TackyGen {
                 Ok((dst, CType::ULong))
             }
             Exp::SizeOf(inner) => {
-                let size = self.sizeof_exp(&inner) as i64;
+                let size = i64::try_from(self.sizeof_exp(&inner))
+                    .map_err(|_| "sizeof operand is too large".to_string())?;
                 let dst = self.fresh_tmp(CType::ULong);
                 self.emit(TackyInstr::Copy {
                     src: TackyVal::Constant(size),
@@ -3223,7 +3259,7 @@ impl TackyGen {
                             rhs.clone(),
                             rhs_type,
                             rhs_ft,
-                            mem.offset as i64,
+                            Self::checked_offset(0, mem.offset, "member initializer")?,
                         )?;
                         return Ok((rhs, mem.member_type));
                     }
@@ -3231,7 +3267,7 @@ impl TackyGen {
                     self.emit(TackyInstr::CopyToOffset {
                         src: rhs_conv.clone(),
                         dst_name: struct_name,
-                        offset: mem.offset as i64,
+                        offset: Self::checked_offset(0, mem.offset, "member initializer")?,
                     });
                     Ok((rhs_conv, mem.member_type))
                 } else {
@@ -3341,14 +3377,15 @@ impl TackyGen {
                     _ => return Err(format!("Arrow on non-pointer: {:?}", ptr_ft)),
                 };
                 let mem_type = mem.member_type;
-                let mem_offset = mem.offset;
+                let mem_offset = i64::try_from(mem.offset)
+                    .map_err(|_| "struct member offset is too large".to_string())?;
                 let mem_ft = mem.member_full_type.clone();
                 let mem_ptr = self.fresh_tmp(CType::Pointer);
                 if mem_offset > 0 {
                     self.emit(TackyInstr::Binary {
                         op: TackyBinaryOp::Add,
                         left: ptr_val,
-                        right: TackyVal::Constant(mem_offset as i64),
+                        right: TackyVal::Constant(mem_offset),
                         dst: mem_ptr.clone(),
                     });
                 } else {
@@ -3551,7 +3588,10 @@ impl TackyGen {
                 });
                 if elem_type == CType::Pointer && matches!(op, BinaryOp::Add | BinaryOp::Sub) {
                     let elem_size = match &elem_full {
-                        FullType::Pointer(inner) => inner.byte_size_with(&self.struct_defs) as i64,
+                        FullType::Pointer(inner) => inner
+                            .checked_byte_size_with(&self.struct_defs)
+                            .and_then(|size| i64::try_from(size).ok())
+                            .ok_or_else(|| "pointer element size is too large".to_string())?,
                         _ => 1,
                     };
                     let rhs_long = self.convert_to(rhs, rhs_type, CType::Long);
@@ -3712,7 +3752,10 @@ impl TackyGen {
                 });
                 if lhs_type == CType::Pointer && matches!(op, BinaryOp::Add | BinaryOp::Sub) {
                     let elem_size = match &lhs_ft {
-                        FullType::Pointer(inner) => inner.byte_size_with(&self.struct_defs) as i64,
+                        FullType::Pointer(inner) => inner
+                            .checked_byte_size_with(&self.struct_defs)
+                            .and_then(|size| i64::try_from(size).ok())
+                            .ok_or_else(|| "pointer element size is too large".to_string())?,
                         _ => 1,
                     };
                     let rhs_long = self.convert_to(rhs, rhs_type, CType::Long);
@@ -3784,7 +3827,7 @@ impl TackyGen {
 
                 if lhs_type == CType::Pointer && matches!(op, BinaryOp::Add | BinaryOp::Sub) {
                     let elem_size = if let TackyVal::Var(ref n) = lhs {
-                        self.ptr_elem_size(n)
+                        self.ptr_elem_size(n)?
                     } else {
                         1
                     };
@@ -3897,7 +3940,11 @@ impl TackyGen {
                             self.emit(TackyInstr::Binary {
                                 op: TackyBinaryOp::Add,
                                 left: addr,
-                                right: TackyVal::Constant(mem.offset as i64),
+                                right: TackyVal::Constant(Self::checked_offset(
+                                    0,
+                                    mem.offset,
+                                    "member address",
+                                )?),
                                 dst: ptr.clone(),
                             });
                         } else {
@@ -3915,7 +3962,7 @@ impl TackyGen {
                     };
                     self.emit(TackyInstr::CopyFromOffset {
                         src_name: n.clone(),
-                        offset: mem.offset as i64,
+                        offset: Self::checked_offset(0, mem.offset, "member access")?,
                         dst: result.clone(),
                     });
                     let result = self.extract_bit_field(result, &mem)?;
@@ -4172,7 +4219,7 @@ impl TackyGen {
                         self.emit(TackyInstr::CopyToOffset {
                             src: imag,
                             dst_name: result_name.clone(),
-                            offset: elem_size as i64,
+                            offset: Self::checked_offset(0, elem_size, "complex cast")?,
                         });
                     }
                 }
@@ -4299,7 +4346,9 @@ impl TackyGen {
 
         if ft.is_vector() {
             let result = self.fresh_tmp_full(&ft);
-            let total_bytes = ft.byte_size_with(&self.struct_defs);
+            let total_bytes = ft
+                .checked_byte_size_with(&self.struct_defs)
+                .ok_or_else(|| "vector initializer size is too large".to_string())?;
             if let TackyVal::Var(ref name) = result {
                 self.zero_init_local(name, total_bytes);
             }
@@ -4309,7 +4358,9 @@ impl TackyGen {
                     _ => FullType::Scalar(target_type),
                 };
                 let elem_type = elem_ft.to_ctype();
-                let elem_size = elem_ft.byte_size_with(&self.struct_defs);
+                let elem_size = elem_ft
+                    .checked_byte_size_with(&self.struct_defs)
+                    .ok_or_else(|| "vector element size is too large".to_string())?;
                 if let TackyVal::Var(ref name) = result {
                     if ft.is_complex() && elems.len() == 1 {
                         let Some(elem) = elems.into_iter().next() else {
@@ -4333,10 +4384,17 @@ impl TackyGen {
                     for (index, elem) in elems.into_iter().enumerate() {
                         let (val, from_type) = self.emit_exp(elem)?;
                         let converted = self.convert_to(val, from_type, elem_type);
+                        let offset = Self::checked_offset(
+                            0,
+                            index.checked_mul(elem_size).ok_or_else(|| {
+                                "vector initializer offset is too large".to_string()
+                            })?,
+                            "vector initializer",
+                        )?;
                         self.emit(TackyInstr::CopyToOffset {
                             src: converted,
                             dst_name: name.clone(),
-                            offset: (index * elem_size) as i64,
+                            offset,
                         });
                     }
                 }
@@ -4357,7 +4415,7 @@ impl TackyGen {
             let size = ft.byte_size_with(&self.struct_defs);
             self.array_sizes.insert(tmp_name.clone(), size);
             self.zero_init_local(&tmp_name, size);
-            let elem_sizes = Self::compute_elem_sizes(&ft, &self.struct_defs);
+            let elem_sizes = Self::compute_elem_sizes(&ft, &self.struct_defs)?;
             let inner_scalar = {
                 let mut t = &ft;
                 while let FullType::Array { elem, .. } = t {
@@ -5072,7 +5130,7 @@ fn push_raw_byte(out: &mut String, byte: u8) {
 }
 
 fn wide_string_bytes_with_null(s: &str) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(s.len().saturating_mul(4).saturating_add(4));
     for ch in s.chars() {
         for byte in (ch as u32).to_le_bytes() {
             push_raw_byte(&mut out, byte);
@@ -5085,7 +5143,7 @@ fn wide_string_bytes_with_null(s: &str) -> String {
 }
 
 fn utf16_string_bytes_with_null(s: &str) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(s.len().saturating_mul(2).saturating_add(2));
     for unit in s.encode_utf16() {
         for byte in unit.to_le_bytes() {
             push_raw_byte(&mut out, byte);
@@ -5098,7 +5156,7 @@ fn utf16_string_bytes_with_null(s: &str) -> String {
 }
 
 fn utf32_string_bytes_with_null(s: &str) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(s.len().saturating_mul(4).saturating_add(4));
     for ch in s.chars() {
         for byte in (ch as u32).to_le_bytes() {
             push_raw_byte(&mut out, byte);
@@ -5141,14 +5199,15 @@ pub fn generate_with_target_options_and_warnings(
     let mut gen = TackyGen::new_for_target(target);
     gen.instrument_functions = instrument_functions;
     gen.permissive = permissive;
-    let mut top_level = Vec::new();
-    let mut global_vars = std::collections::HashSet::new();
-    let mut thread_local_vars = std::collections::HashSet::new();
+    let declaration_count = program.declarations.len();
+    let mut top_level = Vec::with_capacity(declaration_count);
+    let mut global_vars = std::collections::HashSet::with_capacity(declaration_count);
+    let mut thread_local_vars = std::collections::HashSet::with_capacity(declaration_count);
 
     use std::collections::HashMap;
 
     // Determine linkage
-    let mut linkage: HashMap<String, bool> = HashMap::new();
+    let mut linkage: HashMap<String, bool> = HashMap::with_capacity(declaration_count);
     for decl in &program.declarations {
         let (name, sc) = match decl {
             Declaration::FunDecl(fd) => (fd.name.clone(), &fd.storage_class),
@@ -5533,13 +5592,18 @@ pub fn generate_with_target_options_and_warnings(
             ) {
                 let base_type = vd.var_type;
                 if !matches!(base_type, CType::Char | CType::SChar | CType::UChar) {
-                    let requested_elems: usize = dims.iter().product();
+                    let requested_elems = dims
+                        .iter()
+                        .try_fold(1usize, |count, dimension| count.checked_mul(*dimension))
+                        .ok_or_else(|| format!("array '{}' is too large", vd.name))?;
                     let total_elems = if requested_elems == 0 {
                         s.chars().count() + 1
                     } else {
                         requested_elems
                     };
-                    let total_bytes = total_elems * base_type.size() as usize;
+                    let total_bytes = total_elems
+                        .checked_mul(base_type.size() as usize)
+                        .ok_or_else(|| format!("array '{}' is too large", vd.name))?;
                     let align = vd.alignment.map_or(base_type.size() as usize, |a| {
                         a.get().max(base_type.size() as usize)
                     });
@@ -5576,8 +5640,13 @@ pub fn generate_with_target_options_and_warnings(
                     gen.array_sizes.insert(vd.name.clone(), total_bytes);
                     continue;
                 }
-                let total_elems: usize = dims.iter().product();
-                let total_bytes = total_elems * base_type.size() as usize;
+                let total_elems = dims
+                    .iter()
+                    .try_fold(1usize, |count, dimension| count.checked_mul(*dimension))
+                    .ok_or_else(|| format!("array '{}' is too large", vd.name))?;
+                let total_bytes = total_elems
+                    .checked_mul(base_type.size() as usize)
+                    .ok_or_else(|| format!("array '{}' is too large", vd.name))?;
                 let align = if total_bytes >= 16 {
                     16
                 } else {
@@ -5620,15 +5689,12 @@ pub fn generate_with_target_options_and_warnings(
                 continue;
             }
             // Global pointer initialized with string literal: char *p = "hello";
-            if let (None, Some(Exp::StringLiteral(ref s))) = (&vd.array_dims, &vd.init) {
+            if let (None, Some(init @ Exp::StringLiteral(ref s))) = (&vd.array_dims, &vd.init) {
                 let target_ft = vd
                     .decl_full_type
                     .clone()
                     .unwrap_or_else(|| FullType::from_decl(vd.var_type, vd.ptr_info, &None));
-                gen.assert_static_pointer_initializer_assignable(
-                    &target_ft,
-                    vd.init.as_ref().expect("string initializer exists"),
-                )?;
+                gen.assert_static_pointer_initializer_assignable(&target_ft, init)?;
                 let str_label = gen.make_string_constant(s);
                 let is_global = *linkage.get(&vd.name).unwrap_or(&true);
                 let align = std::cmp::max(vd.var_type.size() as usize, 1);
@@ -5702,8 +5768,10 @@ pub fn generate_with_target_options_and_warnings(
                 let is_global = *linkage.get(&vd.name).unwrap_or(&true);
 
                 let mut init_values = gen.build_static_initializer(&ft, init_exp)?;
-                let initialized_bytes: usize =
-                    init_values.iter().map(TackyGen::static_init_size).sum();
+                let initialized_bytes = init_values.iter().try_fold(0usize, |size, init| {
+                    size.checked_add(TackyGen::static_init_size(init))
+                        .ok_or_else(|| "static initializer size is too large".to_string())
+                })?;
                 if initialized_bytes < total_bytes {
                     init_values.push(StaticInit::ZeroInit(total_bytes - initialized_bytes));
                 }

@@ -9,7 +9,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-from smoke_utils import env_timeout, timeout_text
+try:
+    from smoke_utils import env_timeout, is_positive_finite, run_with_timeout
+except ModuleNotFoundError as err:
+    if err.name != "smoke_utils":
+        raise
+    from scripts.smoke_utils import env_timeout, is_positive_finite, run_with_timeout
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -142,31 +147,24 @@ CASES: list[tuple[str, str]] = [
 
 
 def run(cmd: list[str], timeout: float = DEFAULT_TIMEOUT) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(
-            cmd,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return subprocess.CompletedProcess(
-            cmd,
-            124,
-            stdout=timeout_text(exc.stdout),
-            stderr=(timeout_text(exc.stderr) + f"\ntimed out after {timeout:.1f}s").lstrip(),
-        )
+    return run_with_timeout(cmd, timeout=timeout)
 
 
 def build_rnqcc() -> None:
-    if RNQCC.exists():
+    if RNQCC.is_file():
         return
-    result = run(["cargo", "build", "--manifest-path", str(ROOT / "Cargo.toml")])
+    if RNQCC.exists():
+        raise SystemExit(f"RNQCC path is not a file: {RNQCC}")
+    try:
+        result = run(["cargo", "build", "--locked", "--manifest-path", str(ROOT / "Cargo.toml")])
+    except OSError as exc:
+        raise SystemExit(f"could not build rnqcc: {exc}") from exc
     if result.returncode != 0:
         sys.stderr.write(result.stdout)
         sys.stderr.write(result.stderr)
         raise SystemExit(result.returncode)
+    if not RNQCC.is_file():
+        raise SystemExit(f"RNQCC not found after build: {RNQCC}")
 
 
 def compile_and_run(compiler: list[str], source: Path, output: Path) -> int:
@@ -184,7 +182,7 @@ def compile_and_run(compiler: list[str], source: Path, output: Path) -> int:
 
 
 def main() -> int:
-    if DEFAULT_TIMEOUT <= 0:
+    if not is_positive_finite(DEFAULT_TIMEOUT):
         print("LAYOUT_ORACLE_TIMEOUT must be positive", file=sys.stderr)
         return 1
     build_rnqcc()

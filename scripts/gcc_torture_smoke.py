@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import signal
 import shlex
 import subprocess
 import sys
@@ -35,6 +34,13 @@ except ModuleNotFoundError as err:
         normalize_test_path,
         validate_test_path,
     )
+
+try:
+    from smoke_utils import is_positive_finite, run_with_timeout
+except ModuleNotFoundError as err:
+    if err.name != "smoke_utils":
+        raise
+    from scripts.smoke_utils import is_positive_finite, run_with_timeout
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,43 +95,8 @@ def resolve_suite(path: Path | None) -> Path:
     raise SystemExit(f"gcc.c-torture suite not found; searched: {searched}")
 
 
-def timeout_text(value: str | bytes | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode(errors="replace")
-    return value
-
-
 def run(cmd: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
-    use_process_group = hasattr(os, "killpg")
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=use_process_group,
-    )
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-        return subprocess.CompletedProcess(cmd, process.returncode, stdout=stdout, stderr=stderr)
-    except subprocess.TimeoutExpired as exc:
-        if use_process_group:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        else:
-            process.kill()
-        stdout, stderr = process.communicate()
-        return subprocess.CompletedProcess(
-            cmd,
-            124,
-            stdout=timeout_text(exc.stdout) + (stdout or ""),
-            stderr=(
-                timeout_text(exc.stderr) + (stderr or "") + f"\ntimed out after {timeout:.1f}s"
-            ).lstrip(),
-        )
+    return run_with_timeout(cmd, timeout=timeout)
 
 
 def tests_for_mode(suite: Path, mode: str) -> list[Path]:
@@ -501,10 +472,20 @@ def validate_output_dir(path: Path | None, label: str) -> None:
         raise SystemExit(f"{label} parent path is not a directory: {path.parent}")
 
 
-def ensure_rnqcc(path: Path) -> None:
+def ensure_rnqcc(path: Path, timeout: float) -> None:
     if not path.exists():
         if path == DEFAULT_RNQCC:
-            subprocess.run(["cargo", "build"], cwd=ROOT, check=True)
+            build = run_with_timeout(
+                ["cargo", "build", "--locked"],
+                cwd=ROOT,
+                timeout=max(timeout, 60.0),
+            )
+            if build.returncode != 0:
+                output = (build.stderr or build.stdout).strip()
+                raise SystemExit(
+                    "could not build rnqcc"
+                    + (f": {output}" if output else f" (exit {build.returncode})")
+                )
         else:
             raise SystemExit(f"--rnqcc not found: {path}")
     if not path.exists():
@@ -518,7 +499,7 @@ def validate_numeric_args(args: argparse.Namespace) -> None:
         raise SystemExit("--start must be non-negative")
     if args.limit <= 0:
         raise SystemExit("--limit must be positive")
-    if args.timeout <= 0:
+    if not is_positive_finite(args.timeout):
         raise SystemExit("--timeout must be positive")
     if args.max_failures < 0:
         raise SystemExit("--max-failures must be non-negative")
@@ -649,7 +630,7 @@ def main() -> int:
     validate_output_path(args.failure_log, "--failure-log")
     validate_output_path(args.skip_log, "--skip-log")
     validate_output_dir(args.artifact_dir, "--artifact-dir")
-    ensure_rnqcc(rnqcc)
+    ensure_rnqcc(rnqcc, args.timeout)
 
     tests = tests_for_mode(suite, args.mode)
     selected = tests[args.start : args.start + args.limit]
@@ -679,8 +660,10 @@ def main() -> int:
                     failures.append(
                         (
                             src,
-                            "expected skip reason changed: "
-                            f"fixture has `{expected_skip_reason}`, runner produced `{reason}`",
+                            (
+                                "expected skip reason changed: "
+                                f"fixture has `{expected_skip_reason}`, runner produced `{reason}`"
+                            ),
                         )
                     )
                 elif expected_skip_reason is None and args.expected_skips is not None:

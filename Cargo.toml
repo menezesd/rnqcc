@@ -8,12 +8,12 @@ repository = "https://github.com/menezesd/rnqcc"
 license = "MIT"
 
 [dependencies]
-clap = "3.0"
-unicode-ident = "1.0"
-indexmap = "2.0"
+clap = "4.6"
+indexmap = "2.14"
+unicode-ident = "1.0.24"
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "compiler"

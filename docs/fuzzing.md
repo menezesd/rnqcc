@@ -15,7 +15,7 @@ internals. It generates small preprocessed C inputs from a seed, then invokes th
 Run it after building rnqcc:
 
 ```sh
-cargo build
+cargo build --locked
 python3 scripts/fuzz_smoke.py --seed 1234 --cases 16
 ```
 

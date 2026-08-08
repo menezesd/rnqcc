@@ -7,7 +7,6 @@ mod stmt_expr;
 
 type ParseResult<T> = Result<T, String>;
 const MAX_SUPPORTED_ALIGNMENT: usize = 1 << 30;
-const VLA_STATIC_SCALE_FALLBACK: usize = 16;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct AggregateAttributes {
@@ -195,6 +194,11 @@ pub struct Parser {
     last_type_was_enum: bool,
     /// Last nonconstant array bound parsed for minimal automatic VLA lowering.
     pending_vla_bound: Option<Exp>,
+    /// Number of enclosing array dimensions around the pending VLA dimension.
+    /// This disambiguates a VLA marker from a legitimate fixed-size `[16]`.
+    pending_vla_array_depth: Option<usize>,
+    /// Whether the most recently parsed array bound was actually dynamic.
+    last_array_size_was_vla: bool,
     vla_bound_counter: usize,
     param_parse_depth: usize,
     /// True when the most recent declarator contained a syntactic flexible array bound `[]`.
@@ -360,6 +364,8 @@ impl Parser {
             pending_inline: false,
             last_type_was_enum: false,
             pending_vla_bound: None,
+            pending_vla_array_depth: None,
+            last_array_size_was_vla: false,
             vla_bound_counter: 0,
             param_parse_depth: 0,
             pending_flexible_array_bound: false,
@@ -534,20 +540,28 @@ impl Parser {
             None
         };
         let full_type = self.infer_unsized_array_type(full_type.clone(), init.as_ref())?;
+        let object_size = full_type
+            .checked_byte_size_with(&self.struct_defs)
+            .ok_or_else(|| self.format_error("declared object size is too large"))?;
+        if object_size > i64::MAX as usize {
+            return Err(self.format_error("declared object size exceeds i64 offset range"));
+        }
         let array_dims = Self::extract_array_dims(&full_type);
         if let (Some(bound), Some(_)) = (self.pending_vla_bound.take(), array_dims.as_ref()) {
+            let vla_array_depth = self.pending_vla_array_depth.take().unwrap_or(0);
             let elem = match &full_type {
                 FullType::Array { elem, .. } => elem.as_ref().clone(),
                 other => other.clone(),
             };
-            let size_exp = Self::vla_size_expr_from_bound(bound.clone(), &full_type)
-                .unwrap_or_else(|| {
-                    Exp::Binary(
-                        BinaryOp::Mul,
-                        Box::new(bound),
-                        Box::new(Exp::SizeOfType(elem.to_ctype(), elem.clone())),
-                    )
-                });
+            let size_exp =
+                Self::vla_size_expr_from_bound(bound.clone(), &full_type, vla_array_depth)
+                    .unwrap_or_else(|| {
+                        Exp::Binary(
+                            BinaryOp::Mul,
+                            Box::new(bound),
+                            Box::new(Exp::SizeOfType(elem.to_ctype(), elem.clone())),
+                        )
+                    });
             let ptr_ft = FullType::Pointer(Box::new(elem));
             let ptr_info = match &ptr_ft {
                 FullType::Pointer(inner) => Some(ptr_info_from_full(inner)),
@@ -696,7 +710,8 @@ impl Parser {
                         if value < 0 {
                             return Err(self.format_error("array designator must be non-negative"));
                         }
-                        value as usize
+                        usize::try_from(value)
+                            .map_err(|_| self.format_error("array designator index is too large"))?
                     }
                     Some(Designator::IndexRange(_, end_exp)) => {
                         let value = self
@@ -707,15 +722,19 @@ impl Parser {
                         if value < 0 {
                             return Err(self.format_error("array designator must be non-negative"));
                         }
-                        value as usize
+                        usize::try_from(value)
+                            .map_err(|_| self.format_error("array designator index is too large"))?
                     }
                     _ => next,
                 }
             } else {
                 next
             };
-            max_len = max_len.max(index + 1);
-            next = index + 1;
+            let next_index = index
+                .checked_add(1)
+                .ok_or_else(|| self.format_error("array designator index is too large"))?;
+            max_len = max_len.max(next_index);
+            next = next_index;
         }
         Ok(max_len)
     }
@@ -748,7 +767,8 @@ impl Parser {
                             return Err(self.format_error("array designator must be non-negative"));
                         }
                         member_index = 0;
-                        value as usize
+                        usize::try_from(value)
+                            .map_err(|_| self.format_error("array designator index is too large"))?
                     }
                     Some(Designator::IndexRange(_, end_exp)) => {
                         let value = self
@@ -760,21 +780,25 @@ impl Parser {
                             return Err(self.format_error("array designator must be non-negative"));
                         }
                         member_index = 0;
-                        value as usize
+                        usize::try_from(value)
+                            .map_err(|_| self.format_error("array designator index is too large"))?
                     }
                     _ => next,
                 }
             } else {
                 next
             };
-            max_len = max_len.max(index + 1);
+            let next_index = index
+                .checked_add(1)
+                .ok_or_else(|| self.format_error("array designator index is too large"))?;
+            max_len = max_len.max(next_index);
             if matches!(elem, Exp::ArrayInit(_)) {
-                next = index + 1;
+                next = next_index;
                 member_index = 0;
             } else {
                 member_index += 1;
                 if member_index >= max_members {
-                    next = index + 1;
+                    next = next_index;
                     member_index = 0;
                 } else {
                     next = index;
@@ -938,7 +962,13 @@ impl Parser {
         let first_member = self.parse_identifier()?;
         let (member_offset, member_dynamic_elem_size) =
             self.offsetof_member_step(&mut current_type, &first_member)?;
-        offset = Self::add_offset_exp(offset, Exp::ULongConstant(member_offset as i64));
+        offset = Self::add_offset_exp(
+            offset,
+            Exp::ULongConstant(
+                i64::try_from(member_offset)
+                    .map_err(|_| self.format_error("offsetof result is too large"))?,
+            ),
+        );
         let mut dynamic_elem_size = member_dynamic_elem_size;
 
         loop {
@@ -946,7 +976,13 @@ impl Parser {
                 let member = self.parse_identifier()?;
                 let (member_offset, member_dynamic_elem_size) =
                     self.offsetof_member_step(&mut current_type, &member)?;
-                offset = Self::add_offset_exp(offset, Exp::ULongConstant(member_offset as i64));
+                offset = Self::add_offset_exp(
+                    offset,
+                    Exp::ULongConstant(
+                        i64::try_from(member_offset)
+                            .map_err(|_| self.format_error("offsetof result is too large"))?,
+                    ),
+                );
                 dynamic_elem_size = member_dynamic_elem_size;
             } else if self.eat(&Token::OpenBracket) {
                 let index_exp = self.parse_expression()?;
@@ -958,9 +994,15 @@ impl Parser {
                 let FullType::Array { elem, .. } = current_type.clone() else {
                     return Err(self.format_error("offsetof array index requires an array member"));
                 };
-                let elem_size = dynamic_elem_size.take().unwrap_or_else(|| {
-                    Exp::ULongConstant(elem.byte_size_with(&self.struct_defs) as i64)
-                });
+                let elem_size = if let Some(dynamic_elem_size) = dynamic_elem_size.take() {
+                    dynamic_elem_size
+                } else {
+                    let size = elem
+                        .checked_byte_size_with(&self.struct_defs)
+                        .and_then(|size| i64::try_from(size).ok())
+                        .ok_or_else(|| self.format_error("offsetof element size is too large"))?;
+                    Exp::ULongConstant(size)
+                };
                 offset = Self::add_offset_exp(
                     offset,
                     Exp::Binary(BinaryOp::Mul, Box::new(index_exp), Box::new(elem_size)),
@@ -1110,8 +1152,11 @@ impl Parser {
         match exp {
             Exp::SizeOf(inner) => {
                 let ft = self.typeof_expression(inner).ok()?;
+                if ft.contains_vla_placeholder_with(&self.struct_defs) {
+                    return None;
+                }
                 Some(IntegerConstantValue::unsigned(
-                    ft.byte_size_with(&self.struct_defs) as i64,
+                    i64::try_from(ft.checked_byte_size_with(&self.struct_defs)?).ok()?,
                 ))
             }
             Exp::Cast(target, _, inner) => {
@@ -1122,7 +1167,11 @@ impl Parser {
                 let value = self.eval_integer_constant_value_with_layout(inner)?;
                 match op {
                     UnaryOp::Negate => Some(IntegerConstantValue {
-                        value: value.value.wrapping_neg(),
+                        value: if value.is_unsigned {
+                            value.value.wrapping_neg()
+                        } else {
+                            value.value.checked_neg()?
+                        },
                         is_unsigned: value.is_unsigned,
                     }),
                     UnaryOp::Complement => {
@@ -1147,6 +1196,14 @@ impl Parser {
             }
             Exp::Binary(op, left, right) => {
                 let left_value = self.eval_integer_constant_value_with_layout(left)?;
+                if matches!(op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr) {
+                    let left_true = left_value.value != 0;
+                    if (matches!(op, BinaryOp::LogicalAnd) && !left_true)
+                        || (matches!(op, BinaryOp::LogicalOr) && left_true)
+                    {
+                        return Some(IntegerConstantValue::signed(left_true as i64));
+                    }
+                }
                 let right_value = self.eval_integer_constant_value_with_layout(right)?;
                 let op_type = self.binary_constant_operand_type(op, left, right);
                 let use_unsigned = op_type.is_some_and(|ctype| !ctype.is_signed())
@@ -1252,13 +1309,16 @@ impl Parser {
             | Exp::ULongConstant(c) => Some(*c),
             Exp::Int128Constant(c) => i64::try_from(*c).ok(),
             Exp::UInt128Constant(c) => i64::try_from(*c).ok(),
-            Exp::SizeOfType(_, ft) => Some(ft.byte_size_with(struct_defs) as i64),
-            Exp::AlignOfType(ft) => Some(ft.alignment_with(struct_defs) as i64),
+            Exp::SizeOfType(_, ft) if !ft.contains_vla_placeholder_with(struct_defs) => ft
+                .checked_byte_size_with(struct_defs)
+                .and_then(|size| i64::try_from(size).ok()),
+            Exp::SizeOfType(_, _) => None,
+            Exp::AlignOfType(ft) => i64::try_from(ft.alignment_with(struct_defs)).ok(),
             Exp::Cast(_, _, inner) => Self::eval_integer_constant_exp_with_defs(inner, struct_defs),
             Exp::Unary(op, inner) => {
                 let value = Self::eval_integer_constant_exp_with_defs(inner, struct_defs)?;
                 match op {
-                    UnaryOp::Negate => Some(-value),
+                    UnaryOp::Negate => value.checked_neg(),
                     UnaryOp::Complement => Some(!value),
                     UnaryOp::LogicalNot => Some((value == 0) as i64),
                     _ => None,
@@ -1266,6 +1326,11 @@ impl Parser {
             }
             Exp::Binary(op, left, right) => {
                 let left = Self::eval_integer_constant_exp_with_defs(left, struct_defs)?;
+                if (matches!(op, BinaryOp::LogicalAnd) && left == 0)
+                    || (matches!(op, BinaryOp::LogicalOr) && left != 0)
+                {
+                    return Some((left != 0) as i64);
+                }
                 let right = Self::eval_integer_constant_exp_with_defs(right, struct_defs)?;
                 match op {
                     BinaryOp::Add => Some(left.wrapping_add(right)),
@@ -1556,7 +1621,9 @@ impl Parser {
         self.expect_token(Token::OpenParen)?;
         let alignment = if self.peek().is_some_and(|tok| self.is_type_keyword(tok)) {
             let ft = self.parse_type_name_full()?;
-            Self::validate_alignment_value(ft.alignment_with(&self.struct_defs) as i64)?
+            let alignment = i64::try_from(ft.alignment_with(&self.struct_defs))
+                .map_err(|_| "alignment is too large".to_string())?;
+            Self::validate_alignment_value(alignment)?
         } else {
             let exp = self.parse_assignment()?;
             let value = self
@@ -1624,7 +1691,7 @@ impl Parser {
         if value <= 0 {
             return Err(self.format_error("vector_size must be positive"));
         }
-        Ok(value as usize)
+        usize::try_from(value).map_err(|_| self.format_error("vector_size is too large"))
     }
 
     fn ctype_for_gnu_mode(mode: &str, unsigned: bool) -> Option<CType> {
@@ -1856,7 +1923,7 @@ impl Parser {
             FullType::Vector { elem, .. } => *elem,
             other => other,
         };
-        let lane_size = elem.byte_size().max(1);
+        let lane_size = elem.byte_size_with(&self.struct_defs).max(1);
         FullType::Vector {
             elem: Box::new(elem),
             lanes: std::cmp::max(vector_size / lane_size, 1),
@@ -2099,6 +2166,7 @@ impl Parser {
     }
 
     fn parse_array_size(&mut self, allow_empty: bool) -> ParseResult<usize> {
+        self.last_array_size_was_vla = false;
         while matches!(
             self.peek(),
             Some(Token::KWConst)
@@ -2151,28 +2219,32 @@ impl Parser {
                 exp
             };
             self.pending_vla_bound = Some(bound);
+            self.last_array_size_was_vla = true;
             return Ok(VLA_STATIC_SCALE_FALLBACK);
         };
         if value < 0 {
             return Err(self.format_error("array size must be non-negative"));
         }
-        Ok(value as usize)
+        usize::try_from(value).map_err(|_| self.format_error("array size is too large"))
     }
 
-    fn vla_size_expr_from_bound(bound: Exp, full_type: &FullType) -> Option<Exp> {
+    fn vla_size_expr_from_bound(
+        bound: Exp,
+        full_type: &FullType,
+        vla_array_depth: usize,
+    ) -> Option<Exp> {
         match full_type {
+            FullType::Array { elem, size: _ } if vla_array_depth == 0 => Some(Exp::Binary(
+                BinaryOp::Mul,
+                Box::new(bound),
+                Box::new(Exp::SizeOfType(elem.to_ctype(), elem.as_ref().clone())),
+            )),
             FullType::Array { elem, size } => {
-                if *size == VLA_STATIC_SCALE_FALLBACK {
-                    return Some(Exp::Binary(
-                        BinaryOp::Mul,
-                        Box::new(bound),
-                        Box::new(Exp::SizeOfType(elem.to_ctype(), elem.as_ref().clone())),
-                    ));
-                }
-                let inner = Self::vla_size_expr_from_bound(bound, elem)?;
+                let inner = Self::vla_size_expr_from_bound(bound, elem, vla_array_depth - 1)?;
+                let size = i64::try_from(*size).ok()?;
                 Some(Exp::Binary(
                     BinaryOp::Mul,
-                    Box::new(Exp::ULongConstant(*size as i64)),
+                    Box::new(Exp::ULongConstant(size)),
                     Box::new(inner),
                 ))
             }
@@ -2183,7 +2255,10 @@ impl Parser {
 
     fn pending_vla_size_expr_for_type(&mut self, full_type: &FullType) -> Option<Exp> {
         let bound = self.pending_vla_bound.take()?;
-        if let Some(size) = Self::vla_size_expr_from_bound(bound.clone(), full_type) {
+        let vla_array_depth = self.pending_vla_array_depth.take().unwrap_or(0);
+        if let Some(size) =
+            Self::vla_size_expr_from_bound(bound.clone(), full_type, vla_array_depth)
+        {
             return Some(size);
         }
         match full_type {
@@ -2198,13 +2273,14 @@ impl Parser {
                         }
                     ) || matches!(mem.member_full_type, FullType::Array { .. })
                 })?;
-                let size = Self::vla_size_expr_from_bound(bound, &mem.member_full_type)?;
+                let size = Self::vla_size_expr_from_bound(bound, &mem.member_full_type, 0)?;
                 if mem.offset == 0 {
                     Some(size)
                 } else {
+                    let offset = i64::try_from(mem.offset).ok()?;
                     Some(Exp::Binary(
                         BinaryOp::Add,
-                        Box::new(Exp::ULongConstant(mem.offset as i64)),
+                        Box::new(Exp::ULongConstant(offset)),
                         Box::new(size),
                     ))
                 }
@@ -2219,10 +2295,11 @@ impl Parser {
                 Some(Exp::SizeOfType(elem.to_ctype(), elem.as_ref().clone()))
             }
             FullType::Array { elem, size } => {
+                let size = i64::try_from(*size).ok()?;
                 self.dynamic_size_expr_for_full_type(elem).map(|inner| {
                     Exp::Binary(
                         BinaryOp::Mul,
-                        Box::new(Exp::ULongConstant(*size as i64)),
+                        Box::new(Exp::ULongConstant(size)),
                         Box::new(inner),
                     )
                 })
@@ -2246,9 +2323,10 @@ impl Parser {
                         return Some(if mem.offset == 0 {
                             size.clone()
                         } else {
+                            let offset = i64::try_from(mem.offset).ok()?;
                             Exp::Binary(
                                 BinaryOp::Add,
-                                Box::new(Exp::ULongConstant(mem.offset as i64)),
+                                Box::new(Exp::ULongConstant(offset)),
                                 Box::new(size.clone()),
                             )
                         });
@@ -3428,9 +3506,17 @@ impl Parser {
                 Box::new(decl),
             );
         }
+        let mut array_suffixes_before_vla = 0usize;
         while self.eat(&Token::OpenBracket) {
             let size = self.parse_array_size(true)?;
             self.expect_token(Token::CloseBracket)?;
+            if self.last_array_size_was_vla {
+                if self.pending_vla_bound.is_some() {
+                    self.pending_vla_array_depth = Some(array_suffixes_before_vla);
+                }
+            } else {
+                array_suffixes_before_vla += 1;
+            }
             decl = Declarator::Array(Box::new(decl), size);
         }
 
@@ -3488,9 +3574,17 @@ impl Parser {
         }
 
         // Trailing array dims
+        let mut array_suffixes_before_vla = 0usize;
         while self.eat(&Token::OpenBracket) {
             let size = self.parse_array_size(true)?;
             self.expect_token(Token::CloseBracket)?;
+            if self.last_array_size_was_vla {
+                if self.pending_vla_bound.is_some() {
+                    self.pending_vla_array_depth = Some(array_suffixes_before_vla);
+                }
+            } else {
+                array_suffixes_before_vla += 1;
+            }
             decl = AbstractDecl::Array(Box::new(decl), size);
         }
 
@@ -3593,6 +3687,103 @@ mod tests {
         Ok(Parser::new(lex::lex(source)?))
     }
 
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn rejects_vla_size_multipliers_that_do_not_fit_signed_constants() {
+        let oversized = FullType::Array {
+            elem: Box::new(FullType::Scalar(CType::Int)),
+            size: i64::MAX as usize + 1,
+        };
+        assert!(Parser::vla_size_expr_from_bound(Exp::LongConstant(1), &oversized, 1).is_none());
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn rejects_fixed_objects_larger_than_signed_offset_range() -> Result<(), String> {
+        let mut parser = parser_source("")?;
+        let oversized = FullType::Array {
+            elem: Box::new(FullType::Scalar(CType::Char)),
+            size: i64::MAX as usize + 1,
+        };
+        let error = parser
+            .make_var_decl(
+                "oversized".to_string(),
+                &oversized,
+                CType::Char,
+                None,
+                None,
+                None,
+            )
+            .expect_err("object larger than i64 offsets should be rejected");
+        assert!(error.contains("exceeds i64 offset range"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn vector_size_uses_complete_struct_element_size() -> Result<(), String> {
+        let mut parser = parser_source("")?;
+        let member = MemberDeclaration {
+            name: "value".to_string(),
+            member_type: CType::Int,
+            member_full_type: FullType::Scalar(CType::Int),
+            bit_width: None,
+            flexible_array: false,
+            alignment: None,
+            packed: false,
+        };
+        let definition = StructDef::from_members("Element", &[member], &IndexMap::new())?;
+        parser.struct_defs.insert("Element".to_string(), definition);
+
+        let vector =
+            parser.apply_vector_size_attr(FullType::Struct("Element".to_string()), Some(8));
+        assert_eq!(
+            vector,
+            FullType::Vector {
+                elem: Box::new(FullType::Struct("Element".to_string())),
+                lanes: 2,
+                complex: false,
+            }
+        );
+        Ok(())
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn alignof_constant_evaluation_rejects_values_above_i64() {
+        let mut struct_defs = IndexMap::new();
+        struct_defs.insert(
+            "HugeAlign".to_string(),
+            StructDef {
+                tag: "HugeAlign".to_string(),
+                members: Vec::new(),
+                size: 0,
+                alignment: i64::MAX as usize + 1,
+                is_union: false,
+            },
+        );
+        let expression = Exp::AlignOfType(FullType::Struct("HugeAlign".to_string()));
+
+        assert!(Parser::eval_integer_constant_exp_with_defs(&expression, &struct_defs).is_none());
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn alignof_function_rejects_values_above_i64() -> Result<(), String> {
+        let mut parser = parser_source("__alignof__(f)")?;
+        parser
+            .function_alignments
+            .insert("f".to_string(), i64::MAX as usize + 1);
+
+        let error = parser
+            .parse_expression()
+            .expect_err("oversized function alignment should be rejected");
+        assert!(
+            error.contains("function alignment exceeds i64 range"),
+            "{error}"
+        );
+        Ok(())
+    }
+
     fn require_err<T>(result: ParseResult<T>, context: &str) -> ParseResult<String> {
         match result {
             Ok(_) => Err(format!("{context} unexpectedly succeeded")),
@@ -3620,6 +3811,30 @@ mod tests {
             return Err("expected VLA declaration".to_string());
         };
         assert_eq!(vd.var_type, CType::Pointer);
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_fixed_sixteen_dimension_around_vla() -> Result<(), String> {
+        let program = parse_source("void f(long n) { int a[16][n]; }\n")?;
+        let Declaration::FunDecl(func) = &program.declarations[0] else {
+            return Err("expected function".to_string());
+        };
+        let body = func.body.as_ref().ok_or("expected function body")?;
+        let declaration = body.iter().find_map(|item| match item {
+            BlockItem::Declaration(Declaration::VarDecl(declaration))
+                if declaration.name == "a" =>
+            {
+                Some(declaration)
+            }
+            _ => None,
+        });
+        let declaration = declaration.ok_or("expected VLA declaration")?;
+        assert!(matches!(
+            declaration.dynamic_size.as_deref(),
+            Some(Exp::Binary(BinaryOp::Mul, left, _))
+                if matches!(left.as_ref(), Exp::ULongConstant(16))
+        ));
         Ok(())
     }
 
@@ -3765,6 +3980,79 @@ mod tests {
             let mut parser = parser_source(source)?;
             let err = require_err(parser.parse_expression(), "expression should fail")?;
             assert!(err.contains(expected), "{source}: {err}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn object_size_builtin_requires_valid_constant_mode() -> Result<(), String> {
+        for (source, expected) in [
+            (
+                "__builtin_object_size(0, 4)",
+                "mode must be between 0 and 3",
+            ),
+            (
+                "__builtin_object_size(0, x)",
+                "mode argument must be an integer constant",
+            ),
+            (
+                "__builtin_object_size(0, 0, 1)",
+                "requires exactly two arguments",
+            ),
+        ] {
+            let mut parser = parser_source(source)?;
+            let err = require_err(
+                parser.parse_expression(),
+                "object-size expression should fail",
+            )?;
+            assert!(err.contains(expected), "{source}: {err}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn builtin_folding_handlers_reject_extra_arguments() -> Result<(), String> {
+        for (source, expected) in [
+            (
+                "__builtin_constant_p(1, 2)",
+                "requires exactly one argument",
+            ),
+            (
+                "__builtin_strlen(\"x\", 1)",
+                "requires exactly one argument",
+            ),
+            ("__builtin_expect(1, 1, 0)", "requires exactly 2 arguments"),
+        ] {
+            let mut parser = parser_source(source)?;
+            let err = require_err(parser.parse_expression(), "builtin expression should fail")?;
+            assert!(err.contains(expected), "{source}: {err}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn builtin_side_effect_handlers_validate_arity() -> Result<(), String> {
+        for (source, expected) in [
+            ("__builtin_va_end()", "requires exactly one argument"),
+            ("__sync_synchronize(1)", "requires no arguments"),
+            ("__builtin_prefetch()", "requires one to three arguments"),
+        ] {
+            let mut parser = parser_source(source)?;
+            let err = require_err(parser.parse_expression(), "builtin expression should fail")?;
+            assert!(err.contains(expected), "{source}: {err}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn integer_constant_evaluation_short_circuits_logical_operators() -> Result<(), String> {
+        for (source, expected) in [("0 && (1 / 0)", 0), ("1 || (1 / 0)", 1)] {
+            let mut parser = parser_source(source)?;
+            let exp = parser.parse_expression()?;
+            let value = parser
+                .eval_integer_constant_value_with_layout(&exp)
+                .ok_or_else(|| "expected a constant expression".to_string())?;
+            assert_eq!(value.value, expected, "{source}");
         }
         Ok(())
     }

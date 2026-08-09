@@ -1849,6 +1849,8 @@ pub enum TackyTopLevel {
 pub struct TackyProgram {
     pub top_level: Vec<TackyTopLevel>,
     pub global_vars: std::collections::HashSet<String>,
+    /// Globals referenced but not defined in this translation unit
+    pub extern_vars: std::collections::HashSet<String>,
     pub thread_local_vars: std::collections::HashSet<String>,
     pub symbol_types: IndexMap<String, CType>,
     pub symbol_alignments: IndexMap<String, usize>,

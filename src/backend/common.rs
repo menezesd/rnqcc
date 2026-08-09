@@ -115,6 +115,11 @@ pub enum AsmOperand {
     Stack(i64),
     StackArg(i32),
     Data(String),
+    /// Reference to a global defined in another translation unit. Needs
+    /// GOT-indirect access on macOS.
+    ExternData(String),
+    /// Register-indirect memory operand with displacement
+    Indirect(Reg, i64),
     TlsData(String, i32),
     /// Indexed addressing: base_reg + index_reg * scale
     Indexed(Reg, Reg, i32),

@@ -45,6 +45,7 @@ TackyProgram {
         ),
     ],
     global_vars: {},
+    extern_vars: {},
     thread_local_vars: {},
     symbol_types: {
         "x.0": Int,

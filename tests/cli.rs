@@ -5050,6 +5050,148 @@ fn x86_64_typedef_alignment_applies_to_static_object() {
 }
 
 #[test]
+fn x86_64_macos_bridges_va_list_to_libc_like_linux() {
+    let src = temp_file("x86-macos-valist-bridge", "c");
+    std::fs::write(
+        &src,
+        "int vprintf(const char *, __builtin_va_list);\n\
+         int f(const char *fmt, ...) {\n\
+         __builtin_va_list ap;\n\
+         __builtin_va_start(ap, fmt);\n\
+         int r = vprintf(fmt, ap);\n\
+         __builtin_va_end(ap);\n\
+         return r;\n\
+         }\n",
+    )
+    .expect("failed to write input");
+
+    // macOS and Linux both use the SysV __va_list_tag, so handing rnqcc's
+    // ordered shadow area straight to libc (as macOS used to) makes vprintf
+    // read the four header fields out of raw argument memory.
+    for target in ["x86_64-linux", "x86_64-macos"] {
+        let out = temp_file(&format!("x86-valist-bridge-{target}"), "s");
+        let output = Command::new(rnqcc())
+            .args(["--target", target, "-S", "-o"])
+            .arg(&out)
+            .arg(&src)
+            .output()
+            .expect("failed to run rnqcc");
+        assert!(output.status.success(), "{}", stderr(output));
+        let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+        // gp_offset/fp_offset saturated, overflow_arg_area set, reg_save_area null.
+        assert!(asm.contains("movl $48, "), "{target}: {asm}");
+        assert!(asm.contains("movl $304, "), "{target}: {asm}");
+        let _ = std::fs::remove_file(out);
+    }
+
+    let _ = std::fs::remove_file(src);
+}
+
+#[test]
+fn x86_64_macos_extern_store_address_survives_the_value_fixup() {
+    let src = temp_file("x86-macos-extern-store", "c");
+    let out = temp_file("x86-macos-extern-store", "s");
+    std::fs::write(
+        &src,
+        "extern long ext_target;\n\
+         long local_src;\n\
+         void f(void) { ext_target = local_src; }\n",
+    )
+    .expect("failed to write input");
+
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-macos", "-S", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+    assert!(output.status.success(), "{}", stderr(output));
+    let asm = std::fs::read_to_string(&out).expect("failed to read assembly");
+
+    // The written address must not land in the register the operand fixup
+    // uses to carry the stored value, or `movq value, %r10` overwrites it and
+    // the store goes to whatever the value happened to be.
+    let addr_reg = asm
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("movq _ext_target@GOTPCREL(%rip), ")
+        })
+        .unwrap_or_else(|| panic!("no GOT load for ext_target: {asm}"))
+        .trim()
+        .to_string();
+    let store = asm
+        .lines()
+        .find(|line| line.contains(&format!(", 0({addr_reg})")))
+        .unwrap_or_else(|| panic!("no store through {addr_reg}: {asm}"));
+    let value_reg = store
+        .trim()
+        .strip_prefix("movq ")
+        .and_then(|rest| rest.split(',').next())
+        .unwrap_or_else(|| panic!("unexpected store form: {store}"));
+    assert_ne!(
+        value_reg.trim(),
+        addr_reg,
+        "store reads and writes the same register: {asm}"
+    );
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(out);
+}
+
+#[test]
+fn x86_64_macos_loads_undefined_data_symbols_through_the_got() {
+    let src = temp_file("x86-macos-extern-got", "c");
+    let mac_out = temp_file("x86-macos-extern-got-mac", "s");
+    let linux_out = temp_file("x86-macos-extern-got-linux", "s");
+    std::fs::write(
+        &src,
+        "extern int undefined_elsewhere;\n\
+         int defined_here;\n\
+         int f(void) { return undefined_elsewhere + defined_here; }\n",
+    )
+    .expect("failed to write input");
+
+    // ld64 rejects a direct RIP-relative reference to an undefined symbol
+    // ("target does not have address"), so it has to go through the GOT.
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-macos", "-S", "-o"])
+        .arg(&mac_out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+    assert!(output.status.success(), "{}", stderr(output));
+    let mac_asm = std::fs::read_to_string(&mac_out).expect("failed to read assembly");
+    assert!(
+        mac_asm.contains("_undefined_elsewhere@GOTPCREL(%rip)"),
+        "{mac_asm}"
+    );
+    // A symbol defined in this unit is still addressed directly.
+    assert!(!mac_asm.contains("_defined_here@GOTPCREL"), "{mac_asm}");
+    assert!(mac_asm.contains("_defined_here(%rip)"), "{mac_asm}");
+
+    // ELF resolves the direct reference with a copy relocation, so the extra
+    // indirection would only cost an instruction there.
+    let output = Command::new(rnqcc())
+        .args(["--target", "x86_64-linux", "-S", "-o"])
+        .arg(&linux_out)
+        .arg(&src)
+        .output()
+        .expect("failed to run rnqcc");
+    assert!(output.status.success(), "{}", stderr(output));
+    let linux_asm = std::fs::read_to_string(&linux_out).expect("failed to read assembly");
+    assert!(!linux_asm.contains("GOTPCREL"), "{linux_asm}");
+    assert!(
+        linux_asm.contains("undefined_elsewhere(%rip)"),
+        "{linux_asm}"
+    );
+
+    let _ = std::fs::remove_file(src);
+    let _ = std::fs::remove_file(mac_out);
+    let _ = std::fs::remove_file(linux_out);
+}
+
+#[test]
 fn x86_64_stack_memory_param_copy_preserves_register_params() {
     let src = temp_file("x86-memory-param-preserves-register", "c");
     let out = temp_file("x86-memory-param-preserves-register", "s");

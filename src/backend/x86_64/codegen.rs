@@ -1034,7 +1034,6 @@ impl StackArgLayout {
 struct InstructionContext<'a> {
     function_name: &'a str,
     return_type: CType,
-    target: &'a Target,
     types: &'a IndexMap<String, CType>,
     out: &'a mut Vec<AsmInstr>,
     static_doubles: &'a mut Vec<(String, f64)>,
@@ -1055,7 +1054,6 @@ fn pseudo_mem_offset(offset: i64, extra: i64) -> Result<i32, String> {
 
 fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> Result<(), String> {
     let function_name = ctx.function_name;
-    let target = ctx.target;
     let types = ctx.types;
     let out = &mut *ctx.out;
     let static_doubles = &mut *ctx.static_doubles;
@@ -2841,7 +2839,6 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                 var_struct_tags,
                 struct_defs,
                 local_function_names,
-                target,
                 variadic: *variadic,
                 fixed_flat_arg_count: *fixed_flat_arg_count,
                 hidden_return: *hidden_return,
@@ -2868,7 +2865,6 @@ struct FuncallContext<'a> {
     var_struct_tags: &'a HashMap<String, String>,
     struct_defs: &'a IndexMap<String, StructDef>,
     local_function_names: &'a std::collections::HashSet<String>,
-    target: &'a Target,
     variadic: bool,
     fixed_flat_arg_count: usize,
     hidden_return: bool,
@@ -2884,7 +2880,10 @@ struct FuncallArgs<'a> {
     indirect: bool,
 }
 
-fn x86_64_linux_libc_va_list_arg(name: &str) -> Option<usize> {
+/// libc entry points that take a `va_list`, and the 1-based index of that
+/// argument. Both x86-64 System V platforms (Linux and macOS) use the same
+/// `__va_list_tag` layout, so the bridge below applies to either.
+fn x86_64_libc_va_list_arg(name: &str) -> Option<usize> {
     match name {
         "vprintf" => Some(1),
         "vfprintf" => Some(2),
@@ -2911,11 +2910,8 @@ fn convert_funcall(call: &FuncallArgs<'_>, ctx: &mut FuncallContext<'_>) -> Resu
     let var_struct_tags = ctx.var_struct_tags;
     let struct_defs = ctx.struct_defs;
     let use_shadow_varargs = ctx.variadic && !indirect && ctx.local_function_names.contains(name);
-    let libc_va_list_arg = if !indirect
-        && ctx.target.os == TargetOs::Linux
-        && !ctx.local_function_names.contains(name)
-    {
-        x86_64_linux_libc_va_list_arg(name)
+    let libc_va_list_arg = if !indirect && !ctx.local_function_names.contains(name) {
+        x86_64_libc_va_list_arg(name)
     } else {
         None
     };
@@ -4216,7 +4212,6 @@ const XMM_ARG_REGISTERS: [XmmReg; 8] = [
 ];
 
 struct X86FunctionContext<'a> {
-    target: &'a Target,
     types: &'a IndexMap<String, CType>,
     var_struct_tags: &'a HashMap<String, String>,
     struct_defs: &'a IndexMap<String, StructDef>,
@@ -4467,7 +4462,6 @@ fn convert_function(
         let mut instruction_ctx = InstructionContext {
             function_name: &func.name,
             return_type: func.return_type,
-            target: ctx.target,
             types: ctx.types,
             out: &mut instructions,
             static_doubles,
@@ -4560,6 +4554,7 @@ fn fuse_setcc_branches(func: &mut AsmFunction) {
 
 struct ReplacePseudoContext<'a> {
     statics: &'a std::collections::HashSet<String>,
+    externs: &'a std::collections::HashSet<String>,
     tls_vars: &'a std::collections::HashSet<String>,
     types: &'a IndexMap<String, CType>,
     arr_sizes: &'a IndexMap<String, usize>,
@@ -4645,6 +4640,8 @@ fn replace_pseudos(func: &mut AsmFunction, ctx: &ReplacePseudoContext<'_>) -> Re
                 let name = name.clone();
                 if ctx.tls_vars.contains(&name) {
                     *op = AsmOperand::TlsData(name, 0);
+                } else if ctx.externs.contains(&name) {
+                    *op = AsmOperand::ExternData(name);
                 } else if ctx.statics.contains(&name) {
                     *op = AsmOperand::Data(name);
                 } else {
@@ -4657,6 +4654,16 @@ fn replace_pseudos(func: &mut AsmFunction, ctx: &ReplacePseudoContext<'_>) -> Re
                 let mem_off = *mem_offset;
                 if ctx.tls_vars.contains(&name) {
                     *op = AsmOperand::TlsData(name, mem_off);
+                } else if ctx.externs.contains(&name) {
+                    if mem_off != 0 {
+                        *op = AsmOperand::ExternData(format!(
+                            "{}{}",
+                            name,
+                            assembly_offset_suffix(i64::from(mem_off))
+                        ));
+                    } else {
+                        *op = AsmOperand::ExternData(name);
+                    }
                 } else if ctx.statics.contains(&name) {
                     if mem_off != 0 {
                         *op = AsmOperand::Data(format!(
@@ -4783,6 +4790,8 @@ fn is_memory(op: &AsmOperand) -> bool {
         op,
         AsmOperand::Stack(_)
             | AsmOperand::Data(_)
+            | AsmOperand::ExternData(_)
+            | AsmOperand::Indirect(_, _)
             | AsmOperand::TlsData(_, _)
             | AsmOperand::StackArg(_)
     )
@@ -4813,6 +4822,220 @@ fn materialize_stack_address(out: &mut Vec<AsmInstr>, offset: i64, scratch: Reg)
     ));
 }
 
+fn instruction_has_extern(instr: &AsmInstr) -> bool {
+    match instr {
+        AsmInstr::Mov(_, src, dst)
+        | AsmInstr::Cmp(_, src, dst)
+        | AsmInstr::Binary(_, _, src, dst)
+        | AsmInstr::And(_, src, dst)
+        | AsmInstr::Or(_, src, dst)
+        | AsmInstr::Xor(_, src, dst)
+        | AsmInstr::Test(_, src, dst)
+        | AsmInstr::Shl(_, src, dst)
+        | AsmInstr::Shr(_, src, dst)
+        | AsmInstr::Sar(_, src, dst)
+        | AsmInstr::Ror(_, src, dst)
+        | AsmInstr::Rol(_, src, dst)
+        | AsmInstr::Lea(src, dst)
+        | AsmInstr::Cvtss2sd(src, dst)
+        | AsmInstr::Cvtsd2ss(src, dst) => {
+            matches!(src, AsmOperand::ExternData(_)) || matches!(dst, AsmOperand::ExternData(_))
+        }
+        AsmInstr::Movsx(_, _, src, dst) | AsmInstr::MovZeroExtend(_, _, src, dst) => {
+            matches!(src, AsmOperand::ExternData(_)) || matches!(dst, AsmOperand::ExternData(_))
+        }
+        AsmInstr::Unary(_, _, op)
+        | AsmInstr::MulFull(_, op)
+        | AsmInstr::Idiv(_, op)
+        | AsmInstr::Div(_, op)
+        | AsmInstr::SetCC(_, op)
+        | AsmInstr::Push(op)
+        | AsmInstr::JmpIndirect(op)
+        | AsmInstr::Fld(_, op)
+        | AsmInstr::Fstp(_, op)
+        | AsmInstr::Fisttp(_, op)
+        | AsmInstr::FldQ(op)
+        | AsmInstr::X87Push(_, op)
+        | AsmInstr::X87Pop(_, op)
+        | AsmInstr::X87Load(_, op)
+        | AsmInstr::X87Store(op)
+        | AsmInstr::X87StoreFloat(_, op)
+        | AsmInstr::X87StoreInt(_, op) => matches!(op, AsmOperand::ExternData(_)),
+        AsmInstr::Cvtsi2sd(_, src, dst)
+        | AsmInstr::Cvtsi2ss(_, src, dst)
+        | AsmInstr::Cvttsd2si(_, src, dst)
+        | AsmInstr::Cvttss2si(_, src, dst) => {
+            matches!(src, AsmOperand::ExternData(_)) || matches!(dst, AsmOperand::ExternData(_))
+        }
+        AsmInstr::LoadLabelAddress(_, dst) => matches!(dst, AsmOperand::ExternData(_)),
+        AsmInstr::AtomicRmw(_, _, _, dst)
+        | AsmInstr::AtomicExchange(_, dst)
+        | AsmInstr::AtomicCompareExchange(_, dst)
+        | AsmInstr::AtomicCompareSwap(_, _, dst) => matches!(dst, AsmOperand::ExternData(_)),
+        AsmInstr::LoadIndirect(_, _, dst) => matches!(dst, AsmOperand::ExternData(_)),
+        AsmInstr::CopyToStackArg { src_ptr, .. } => {
+            matches!(src_ptr, AsmOperand::ExternData(_))
+        }
+        AsmInstr::CopyFromStackArg { dst, .. } => matches!(dst, AsmOperand::ExternData(_)),
+        AsmInstr::StoreIndirect(_, src, _) => matches!(src, AsmOperand::ExternData(_)),
+        AsmInstr::BuiltinSetjmp { buf, dst, .. } => {
+            matches!(buf, AsmOperand::ExternData(_)) || matches!(dst, AsmOperand::ExternData(_))
+        }
+        AsmInstr::BuiltinLongjmp { buf, value } => {
+            matches!(buf, AsmOperand::ExternData(_)) || matches!(value, AsmOperand::ExternData(_))
+        }
+        _ => false,
+    }
+}
+
+fn materialize_extern_operand(
+    op: &mut AsmOperand,
+    scratch: Reg,
+    pre: &mut Vec<AsmInstr>,
+) -> Result<(), String> {
+    if let AsmOperand::ExternData(name) = op {
+        let (base, offset) =
+            split_data_offset(name).map_or((name.clone(), 0), |d| (d.base.to_string(), d.offset));
+        pre.push(AsmInstr::Mov(
+            AsmType::Quadword,
+            AsmOperand::ExternData(base),
+            AsmOperand::Reg(scratch),
+        ));
+        *op = AsmOperand::Indirect(scratch, offset);
+    }
+    Ok(())
+}
+
+/// Holds the GOT address of an extern operand the instruction only reads.
+///
+/// The fixups move values through R10, so a read may share it: the fixup loads
+/// *through* the address (`movq 0(%r10), %r10`) before overwriting the
+/// register, so the clobber happens after the last use.
+const EXTERN_READ_ADDR: Reg = Reg::R10;
+
+/// Holds the GOT address of an extern operand the instruction writes, and of a
+/// second read in the same instruction.
+///
+/// A written address must outlive the fixup that computes the stored value, so
+/// it cannot be R10: `movq value, %r10` would clobber the address before
+/// `movq %r10, 0(%r10)` ever ran. An instruction has at most two operands and
+/// a written one is always in destination position, so a read taking R10 and a
+/// write taking R11 never collide.
+const EXTERN_WRITE_ADDR: Reg = Reg::R11;
+
+fn materialize_externs(instr: &mut AsmInstr) -> Result<Vec<AsmInstr>, String> {
+    let mut pre = Vec::new();
+    // Assign the scratch by operand role, not by the order operands happen to
+    // be visited: whether an address survives depends on which side of the
+    // instruction it sits on, not on how many externs precede it.
+    let mut reads_seen = 0;
+    let mut materialize_read = |op: &mut AsmOperand, pre: &mut Vec<AsmInstr>| {
+        if matches!(op, AsmOperand::ExternData(_)) {
+            let addr = if reads_seen == 0 {
+                EXTERN_READ_ADDR
+            } else {
+                EXTERN_WRITE_ADDR
+            };
+            reads_seen += 1;
+            materialize_extern_operand(op, addr, pre)
+        } else {
+            Ok(())
+        }
+    };
+    let materialize_write = |op: &mut AsmOperand, pre: &mut Vec<AsmInstr>| {
+        if matches!(op, AsmOperand::ExternData(_)) {
+            materialize_extern_operand(op, EXTERN_WRITE_ADDR, pre)
+        } else {
+            Ok(())
+        }
+    };
+    match instr {
+        // src is read, dst is read-modify-written.
+        AsmInstr::Mov(_, src, dst)
+        | AsmInstr::Binary(_, _, src, dst)
+        | AsmInstr::And(_, src, dst)
+        | AsmInstr::Or(_, src, dst)
+        | AsmInstr::Xor(_, src, dst)
+        | AsmInstr::Shl(_, src, dst)
+        | AsmInstr::Shr(_, src, dst)
+        | AsmInstr::Sar(_, src, dst)
+        | AsmInstr::Ror(_, src, dst)
+        | AsmInstr::Rol(_, src, dst)
+        | AsmInstr::Lea(src, dst)
+        | AsmInstr::Cvtss2sd(src, dst)
+        | AsmInstr::Cvtsd2ss(src, dst) => {
+            materialize_read(src, &mut pre)?;
+            materialize_write(dst, &mut pre)?;
+        }
+        // Both operands are read; neither is written.
+        AsmInstr::Cmp(_, src, dst) | AsmInstr::Test(_, src, dst) => {
+            materialize_read(src, &mut pre)?;
+            materialize_read(dst, &mut pre)?;
+        }
+        AsmInstr::Movsx(_, _, src, dst) | AsmInstr::MovZeroExtend(_, _, src, dst) => {
+            materialize_read(src, &mut pre)?;
+            materialize_write(dst, &mut pre)?;
+        }
+        AsmInstr::Unary(_, _, op)
+        | AsmInstr::SetCC(_, op)
+        | AsmInstr::Fstp(_, op)
+        | AsmInstr::Fisttp(_, op)
+        | AsmInstr::X87Pop(_, op)
+        | AsmInstr::X87Store(op)
+        | AsmInstr::X87StoreFloat(_, op)
+        | AsmInstr::X87StoreInt(_, op) => {
+            materialize_write(op, &mut pre)?;
+        }
+        AsmInstr::MulFull(_, op)
+        | AsmInstr::Idiv(_, op)
+        | AsmInstr::Div(_, op)
+        | AsmInstr::Push(op)
+        | AsmInstr::JmpIndirect(op)
+        | AsmInstr::Fld(_, op)
+        | AsmInstr::FldQ(op)
+        | AsmInstr::X87Push(_, op)
+        | AsmInstr::X87Load(_, op) => {
+            materialize_read(op, &mut pre)?;
+        }
+        AsmInstr::Cvtsi2sd(_, src, dst)
+        | AsmInstr::Cvtsi2ss(_, src, dst)
+        | AsmInstr::Cvttsd2si(_, src, dst)
+        | AsmInstr::Cvttss2si(_, src, dst) => {
+            materialize_read(src, &mut pre)?;
+            materialize_write(dst, &mut pre)?;
+        }
+        AsmInstr::LoadLabelAddress(_, dst) => {
+            materialize_write(dst, &mut pre)?;
+        }
+        AsmInstr::AtomicRmw(_, _, _, dst)
+        | AsmInstr::AtomicExchange(_, dst)
+        | AsmInstr::AtomicCompareExchange(_, dst)
+        | AsmInstr::AtomicCompareSwap(_, _, dst)
+        | AsmInstr::LoadIndirect(_, _, dst) => {
+            materialize_write(dst, &mut pre)?;
+        }
+        AsmInstr::CopyToStackArg { src_ptr, .. } => {
+            materialize_read(src_ptr, &mut pre)?;
+        }
+        AsmInstr::CopyFromStackArg { dst, .. } => {
+            materialize_write(dst, &mut pre)?;
+        }
+        AsmInstr::StoreIndirect(_, src, _) => {
+            materialize_read(src, &mut pre)?;
+        }
+        AsmInstr::BuiltinSetjmp { buf, dst, .. } => {
+            materialize_read(buf, &mut pre)?;
+            materialize_write(dst, &mut pre)?;
+        }
+        AsmInstr::BuiltinLongjmp { buf, value } => {
+            materialize_read(buf, &mut pre)?;
+            materialize_read(value, &mut pre)?;
+        }
+        _ => {}
+    }
+    Ok(pre)
+}
+
 fn fixup_instructions(
     func: &mut AsmFunction,
     stack_size: i64,
@@ -4841,7 +5064,10 @@ fn fixup_instructions(
         new_instructions.push(AsmInstr::Push(AsmOperand::Reg(*reg)));
     }
 
-    for instr in old_instructions {
+    for mut instr in old_instructions {
+        if instruction_has_extern(&instr) {
+            new_instructions.extend(materialize_externs(&mut instr)?);
+        }
         match instr {
             AsmInstr::Lea(AsmOperand::Stack(offset), ref dst)
                 if stack_offset_exceeds_disp32(&AsmOperand::Stack(offset)).is_some() =>
@@ -5606,6 +5832,16 @@ pub fn gen(
     let types = &program.symbol_types;
     let array_sizes = &program.array_sizes;
     let alignments = &program.symbol_alignments;
+    // Only Mach-O needs GOT indirection for undefined data symbols: the ELF
+    // linker resolves a direct RIP-relative reference with a copy relocation,
+    // while ld64 rejects it ("target does not have address"). Leaving the set
+    // empty elsewhere keeps every other target's addressing untouched.
+    let empty_externs = std::collections::HashSet::new();
+    let extern_vars = if target.os == TargetOs::MacOs {
+        &program.extern_vars
+    } else {
+        &empty_externs
+    };
     let mut local_function_names: std::collections::HashSet<String> =
         std::collections::HashSet::with_capacity(program.top_level.len());
     for tl in &program.top_level {
@@ -5617,7 +5853,6 @@ pub fn gen(
     let mut static_doubles = Vec::with_capacity(program.top_level.len());
     let mut static_floats = Vec::with_capacity(program.top_level.len());
     let function_ctx = X86FunctionContext {
-        target,
         types,
         var_struct_tags: &program.var_struct_tags,
         struct_defs: &program.struct_defs,
@@ -5652,6 +5887,7 @@ pub fn gen(
                 // Phase 2: replace remaining pseudos with stack slots
                 let replace_ctx = ReplacePseudoContext {
                     statics: static_vars,
+                    externs: extern_vars,
                     tls_vars: &program.thread_local_vars,
                     types,
                     arr_sizes: array_sizes,

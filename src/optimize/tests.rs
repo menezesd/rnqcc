@@ -169,6 +169,7 @@ fn program_with_functions(
     TackyProgram {
         top_level: functions.into_iter().map(TackyTopLevel::Function).collect(),
         global_vars: HashSet::new(),
+        extern_vars: HashSet::new(),
         thread_local_vars: HashSet::new(),
         symbol_types: symbols,
         symbol_alignments: IndexMap::new(),

@@ -5926,10 +5926,35 @@ pub fn generate_with_target_options_and_warnings(
         }
     }
 
+    // Globals referenced but not defined in this unit
+    let mut defined_names = std::collections::HashSet::new();
+    for tl in &top_level {
+        match tl {
+            TackyTopLevel::Function(f) => {
+                defined_names.insert(f.name.clone());
+            }
+            TackyTopLevel::StaticVar(sv) => {
+                defined_names.insert(sv.name.clone());
+            }
+            TackyTopLevel::StaticConstant(sc) => {
+                defined_names.insert(sc.name.clone());
+            }
+            TackyTopLevel::Alias { name, .. } => {
+                defined_names.insert(name.clone());
+            }
+        }
+    }
+    let extern_vars = global_vars
+        .iter()
+        .filter(|name| !defined_names.contains(*name))
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+
     Ok(TackyOutput {
         program: TackyProgram {
             top_level,
             global_vars,
+            extern_vars,
             thread_local_vars,
             symbol_types: gen.symbol_types,
             symbol_alignments: gen.symbol_alignments,

@@ -127,6 +127,10 @@ fn show_operand(op: &AsmOperand, t: AsmType, target: &Target) -> io::Result<Stri
         AsmOperand::Stack(offset) => Ok(format!("{}(%rbp)", offset)),
         AsmOperand::StackArg(offset) => Ok(format!("{}(%rsp)", offset)),
         AsmOperand::Data(name) => Ok(format!("{}(%rip)", target.show_data_label_expr(name))),
+        AsmOperand::ExternData(name) => show_extern_operand(name, target),
+        AsmOperand::Indirect(reg, offset) => {
+            Ok(format!("{}({})", offset, reg_name(reg, AsmType::Quadword)?))
+        }
         AsmOperand::TlsData(name, offset) => show_tls_operand(name, *offset, target),
         AsmOperand::Indexed(base, index, scale) => Ok(format!(
             "({}, {}, {})",
@@ -137,12 +141,33 @@ fn show_operand(op: &AsmOperand, t: AsmType, target: &Target) -> io::Result<Stri
     }
 }
 
+/// Renders the GOT slot holding `name`'s address, not the object itself.
+///
+/// `materialize_externs` splits any displacement off before emitting the load,
+/// so a surviving offset means the operand reached here unmaterialized and the
+/// displacement would be silently applied to the GOT slot instead of the
+/// object. `@GOTPCREL` is spelled the same way on both targets, so the operand
+/// keeps one meaning everywhere even though only Mach-O currently needs it.
+fn show_extern_operand(name: &str, target: &Target) -> io::Result<String> {
+    let (base, offset) = split_data_offset(name).map_or((name, 0), |d| (d.base, d.offset));
+    if offset != 0 {
+        return invalid_input(format!(
+            "extern symbol `{base}` reached emission at non-zero offset {offset}"
+        ));
+    }
+    Ok(format!("{}@GOTPCREL(%rip)", target.show_symbol(base)))
+}
+
 fn show_operand_byte(op: &AsmOperand, target: &Target) -> io::Result<String> {
     match op {
         AsmOperand::Reg(reg) => Ok(reg_name(reg, AsmType::Byte)?.to_string()),
         AsmOperand::Stack(offset) => Ok(format!("{}(%rbp)", offset)),
         AsmOperand::StackArg(offset) => Ok(format!("{}(%rsp)", offset)),
         AsmOperand::Data(name) => Ok(format!("{}(%rip)", target.show_data_label_expr(name))),
+        AsmOperand::ExternData(name) => show_extern_operand(name, target),
+        AsmOperand::Indirect(reg, offset) => {
+            Ok(format!("{}({})", offset, reg_name(reg, AsmType::Quadword)?))
+        }
         AsmOperand::TlsData(name, offset) => show_tls_operand(name, *offset, target),
         other => invalid_input(format!("Cannot get byte-sized version of {:?}", other)),
     }

@@ -156,11 +156,18 @@ struct StaticInitPiece {
 
 struct StaticInitBuilder {
     pieces: Vec<StaticInitPiece>,
+    /// Invariant: every piece ends at or before `last_end`. A piece starting
+    /// at or after this offset therefore cannot overlap or replace any piece
+    /// already in `pieces`, so those paths can skip the linear scans.
+    last_end: usize,
 }
 
 impl StaticInitBuilder {
     fn new() -> Self {
-        Self { pieces: Vec::new() }
+        Self {
+            pieces: Vec::new(),
+            last_end: 0,
+        }
     }
 
     fn put(&mut self, offset: usize, init: StaticInit) -> TackyResult<()> {
@@ -171,6 +178,11 @@ impl StaticInitBuilder {
         let end = offset
             .checked_add(size)
             .ok_or_else(|| "static initializer offset is too large".to_string())?;
+        if offset >= self.last_end {
+            self.pieces.push(StaticInitPiece { offset, init });
+            self.last_end = end;
+            return Ok(());
+        }
         if let Some(pos) = self.pieces.iter().position(|piece| {
             piece.offset == offset && TackyGen::static_init_size(&piece.init) == size
         }) {
@@ -187,6 +199,7 @@ impl StaticInitBuilder {
             }
         }
         self.pieces.push(StaticInitPiece { offset, init });
+        self.last_end = self.last_end.max(end);
         Ok(())
     }
 
@@ -213,13 +226,15 @@ impl StaticInitBuilder {
         if mask == 0 {
             return Ok(());
         }
-        if let Some(pos) = self.pieces.iter().position(|piece| {
-            piece.offset == offset && TackyGen::static_init_size(&piece.init) == 1
-        }) {
-            let current = Self::init_to_u8(&self.pieces[pos].init)
-                .ok_or_else(|| "cannot merge byte static initializer".to_string())?;
-            self.pieces[pos].init = StaticInit::UCharInit((current & !mask) | (value & mask));
-            return Ok(());
+        if offset < self.last_end {
+            if let Some(pos) = self.pieces.iter().position(|piece| {
+                piece.offset == offset && TackyGen::static_init_size(&piece.init) == 1
+            }) {
+                let current = Self::init_to_u8(&self.pieces[pos].init)
+                    .ok_or_else(|| "cannot merge byte static initializer".to_string())?;
+                self.pieces[pos].init = StaticInit::UCharInit((current & !mask) | (value & mask));
+                return Ok(());
+            }
         }
         self.put(offset, StaticInit::UCharInit(value & mask))
     }

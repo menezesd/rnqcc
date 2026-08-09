@@ -71,6 +71,14 @@ def main() -> int:
         action="store_true",
         help="exit non-zero when expected failures are absent from the artifact",
     )
+    parser.add_argument(
+        "--mode",
+        choices=("compile", "execute"),
+        help=(
+            "gcc.c-torture subdirectory this artifact covers; restricts the "
+            "absent-expected check to fixture entries from that subdirectory"
+        ),
+    )
     args = parser.parse_args()
 
     expected = load_expected_failures(args.expected)
@@ -81,10 +89,15 @@ def main() -> int:
     unmarked_expected = {test: reason for test, reason in fail.items() if test in expected}
     still_expected = {test: reason for test, reason in xfail.items() if test in expected}
     unexpected_xfail = {test: reason for test, reason in xfail.items() if test not in expected}
+    # A run only ever reports on its own gcc.c-torture subdirectory, so
+    # entries from the other mode are absent by construction, not by regression.
+    in_mode = (
+        (lambda test: test.startswith(f"{args.mode}/")) if args.mode else (lambda _test: True)
+    )
     absent_expected = {
         test: reason
         for test, reason in expected.items()
-        if test not in stale_expected and test not in xfail and test not in fail
+        if in_mode(test) and test not in stale_expected and test not in xfail and test not in fail
     }
 
     print(f"expected failures: {len(expected)}")

@@ -1253,6 +1253,70 @@ fn gcc_torture_xfail_reporter_strict_mode_fails_on_absent_expected() -> Result<(
 }
 
 #[test]
+fn gcc_torture_xfail_reporter_scopes_absent_expected_to_the_run_mode() -> Result<(), String> {
+    let expected = TempPath::new("gcc-mode-xfail-report-expected", "txt");
+    let failures = TempPath::new("gcc-mode-xfail-report-failures", "txt");
+    std::fs::write(
+        expected.path(),
+        "compile/slow.c | timed out after 80.0s\nexecute/absent.c | exit status -6\n",
+    )
+    .map_err(|err| format!("failed to write expected fixture: {err}"))?;
+    std::fs::write(failures.path(), "execute/absent.c\tXFAIL: exit status -6\n")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+
+    // An execute artifact never reports on compile/ tests, so the compile
+    // entry must not count as a regression for this run.
+    let output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--mode")
+        .arg("execute")
+        .arg("--fail-on-absent-expected")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run xfail reporter: {err}")),
+    };
+
+    assert!(output.status.success(), "{}", stderr(output));
+    let scoped_stdout = stdout(output);
+    assert!(
+        scoped_stdout.contains("expected entries absent from artifact: 0"),
+        "{scoped_stdout}"
+    );
+
+    // A same-mode entry that vanished from the artifact is still a regression.
+    std::fs::write(failures.path(), "")
+        .map_err(|err| format!("failed to write failure artifact: {err}"))?;
+    let strict_output = match Command::new("python3")
+        .arg("scripts/report_gcc_torture_xfails.py")
+        .arg("--mode")
+        .arg("execute")
+        .arg("--fail-on-absent-expected")
+        .arg("--expected")
+        .arg(expected.path())
+        .arg(failures.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("failed to run strict xfail reporter: {err}")),
+    };
+
+    assert!(!strict_output.status.success());
+    let strict_stdout = stdout(strict_output);
+    assert!(
+        strict_stdout.contains("execute/absent.c | exit status -6"),
+        "{strict_stdout}"
+    );
+    assert!(!strict_stdout.contains("compile/slow.c"), "{strict_stdout}");
+    Ok(())
+}
+
+#[test]
 fn gcc_torture_xfail_reporter_truncates_long_display_reasons() -> Result<(), String> {
     let expected = TempPath::new("gcc-long-reason-xfail-report-expected", "txt");
     let failures = TempPath::new("gcc-long-reason-xfail-report-failures", "txt");

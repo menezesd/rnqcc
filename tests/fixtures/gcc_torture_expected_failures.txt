@@ -6,29 +6,3 @@
 # Keep this file as small as possible. By default the runner fails if an
 # expected failure starts passing, so entries can be removed as rnqcc improves.
 compile/limits-externdecl.c | timed out after 80.0s
-execute/20000113-1.c | exit status -6
-execute/20030224-2.c | exit status -6
-execute/20040218-1.c | exit status -6
-execute/20040709-1.c | exit status -11
-execute/20040709-2.c | exit status -11
-execute/20040709-3.c | exit status -11
-execute/20041124-1.c | exit status -6
-execute/20041201-1.c | exit status 1
-execute/20050121-1.c | exit status -6
-execute/20170401-1.c | exit status -6
-execute/920908-1.c | exit status -11
-execute/921204-1.c | exit status -6
-execute/930126-1.c | exit status -6
-execute/bswap-2.c | exit status -6
-execute/mayalias-3.c | exit status -11
-execute/pr22141-1.c | exit status -11
-execute/pr22141-2.c | exit status -11
-execute/pr39339.c | exit status -6
-execute/pr41919.c | exit status -6
-execute/pr44164.c | exit status -11
-execute/pr45070.c | exit status -6
-execute/pr60960.c | exit status -8
-execute/pr93213.c | exit status -11
-execute/pr93249.c | exit status -11
-execute/strlen-6.c | exit status -6
-execute/zero-struct-1.c | exit status -11

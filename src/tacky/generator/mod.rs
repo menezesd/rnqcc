@@ -1065,7 +1065,7 @@ impl TackyGen {
         }
 
         let mut off = 0usize;
-        while off <= total_bytes.saturating_sub(8) {
+        while off + 8 <= total_bytes {
             let z = self.fresh_tmp(CType::Long);
             self.emit(TackyInstr::Copy {
                 src: TackyVal::Constant(0),
@@ -1078,7 +1078,7 @@ impl TackyGen {
             });
             off += 8;
         }
-        while off <= total_bytes.saturating_sub(4) {
+        while off + 4 <= total_bytes {
             let z = self.fresh_tmp(CType::Int);
             self.emit(TackyInstr::Copy {
                 src: TackyVal::Constant(0),

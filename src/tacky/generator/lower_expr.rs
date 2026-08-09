@@ -3680,7 +3680,7 @@ impl TackyGen {
         struct_size: usize,
     ) {
         let mut off = 0usize;
-        while off <= struct_size.saturating_sub(8) {
+        while off + 8 <= struct_size {
             let ptr = self.fresh_tmp(CType::Pointer);
             self.emit(TackyInstr::Binary {
                 op: TackyBinaryOp::Add,
@@ -3700,7 +3700,7 @@ impl TackyGen {
             });
             off += 8;
         }
-        while off <= struct_size.saturating_sub(4) {
+        while off + 4 <= struct_size {
             let ptr = self.fresh_tmp(CType::Pointer);
             self.emit(TackyInstr::Binary {
                 op: TackyBinaryOp::Add,
@@ -3750,7 +3750,7 @@ impl TackyGen {
         struct_size: usize,
     ) {
         let mut off = 0usize;
-        while off <= struct_size.saturating_sub(8) {
+        while off + 8 <= struct_size {
             let src_ptr = self.fresh_tmp(CType::Pointer);
             self.emit(TackyInstr::Binary {
                 op: TackyBinaryOp::Add,
@@ -3773,7 +3773,7 @@ impl TackyGen {
             self.emit(TackyInstr::Store { src: tmp, dst_ptr });
             off += 8;
         }
-        while off <= struct_size.saturating_sub(4) {
+        while off + 4 <= struct_size {
             let src_ptr = self.fresh_tmp(CType::Pointer);
             self.emit(TackyInstr::Binary {
                 op: TackyBinaryOp::Add,

@@ -2348,7 +2348,7 @@ fn copy_bytes(
         (AsmType::Word, 2),
         (AsmType::Byte, 1),
     ] {
-        while offset <= size.saturating_sub(width) {
+        while offset + width <= size {
             emit_aggregate_copy_chunk(
                 instructions,
                 src_name,

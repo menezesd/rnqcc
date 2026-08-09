@@ -1211,7 +1211,7 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                 ));
             }
             let mut off = 0i32;
-            while (off as usize) <= struct_size.saturating_sub(8) {
+            while (off as usize) + 8 <= struct_size {
                 out.push(AsmInstr::Mov(
                     AsmType::Quadword,
                     AsmOperand::PseudoMem(src_name.clone(), off),
@@ -1224,7 +1224,7 @@ fn convert_instruction(instr: &TackyInstr, ctx: &mut InstructionContext<'_>) -> 
                 ));
                 off += 8;
             }
-            while (off as usize) <= struct_size.saturating_sub(4) {
+            while (off as usize) + 4 <= struct_size {
                 out.push(AsmInstr::Mov(
                     AsmType::Longword,
                     AsmOperand::PseudoMem(src_name.clone(), off),

@@ -104,15 +104,18 @@ impl TempFile {
     /// Creates a guard for an existing temporary file path.
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        #[cfg(any(unix, windows))]
-        let identity = file_identity(&path);
         #[cfg(unix)]
         let file = File::open(&path).ok();
+        // Prefer the open descriptor: it identifies the exact inode that was
+        // guarded at creation time, and holding it open prevents that inode
+        // from being recycled before the guard is dropped.
         #[cfg(unix)]
         let identity = file
             .as_ref()
             .and_then(file_identity_for_file)
             .or_else(|| file_identity(&path));
+        #[cfg(windows)]
+        let identity = file_identity(&path);
         Self {
             path,
             #[cfg(any(unix, windows))]
@@ -125,7 +128,34 @@ impl TempFile {
 
 impl Drop for TempFile {
     fn drop(&mut self) {
-        #[cfg(any(unix, windows))]
+        #[cfg(unix)]
+        {
+            if let Some(file) = &self.file {
+                // Verify the path still names the exact file we are holding;
+                // a replacement file or symlink will not match.
+                let Some(held_identity) = file_identity_for_file(file) else {
+                    return;
+                };
+                let Some(current_identity) = file_identity(&self.path) else {
+                    return;
+                };
+                if held_identity != current_identity {
+                    return;
+                }
+            } else if let Some(identity) = self.identity {
+                // No descriptor was held; fall back to the identity captured
+                // at creation time.
+                let Some(current_identity) = file_identity(&self.path) else {
+                    return;
+                };
+                if identity != current_identity {
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
+        #[cfg(windows)]
         {
             let Some(identity) = self.identity else {
                 return;

@@ -1,5 +1,8 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use std::fs::File;
+
 #[cfg(any(unix, windows))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileIdentity {
@@ -11,9 +14,18 @@ struct FileIdentity {
 
 #[cfg(unix)]
 fn file_identity(path: &Path) -> Option<FileIdentity> {
+    file_identity_from_metadata(std::fs::symlink_metadata(path).ok()?)
+}
+
+#[cfg(unix)]
+fn file_identity_for_file(file: &File) -> Option<FileIdentity> {
+    file_identity_from_metadata(file.metadata().ok()?)
+}
+
+#[cfg(unix)]
+fn file_identity_from_metadata(metadata: std::fs::Metadata) -> Option<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
 
-    let metadata = std::fs::symlink_metadata(path).ok()?;
     Some(FileIdentity {
         volume_or_device: metadata.dev(),
         file_index_or_inode: metadata.ino(),
@@ -84,6 +96,8 @@ pub struct TempFile {
     path: PathBuf,
     #[cfg(any(unix, windows))]
     identity: Option<FileIdentity>,
+    #[cfg(unix)]
+    file: Option<File>,
 }
 
 impl TempFile {
@@ -92,10 +106,19 @@ impl TempFile {
         let path = path.into();
         #[cfg(any(unix, windows))]
         let identity = file_identity(&path);
+        #[cfg(unix)]
+        let file = File::open(&path).ok();
+        #[cfg(unix)]
+        let identity = file
+            .as_ref()
+            .and_then(file_identity_for_file)
+            .or_else(|| file_identity(&path));
         Self {
             path,
             #[cfg(any(unix, windows))]
             identity,
+            #[cfg(unix)]
+            file,
         }
     }
 }

@@ -1133,10 +1133,13 @@ impl TackyGen {
 
     fn return_requires_hidden_pointer(&self, ft: &FullType) -> bool {
         match ft {
+            // Memory-class structs (oversized or containing unaligned fields,
+            // such as packed bit-fields) are returned through a hidden pointer,
+            // regardless of size.
             FullType::Struct(tag) => self
                 .struct_defs
                 .get(tag)
-                .map(|def| def.size > 16)
+                .map(|def| matches!(def.classify_with(&self.struct_defs).as_slice(), [ParamClass::Memory]))
                 .unwrap_or(false),
             _ => ft.is_complex() || self.vector_requires_memory_abi(ft),
         }

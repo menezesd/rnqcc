@@ -526,7 +526,17 @@ impl StructDef {
 
     fn has_unaligned_fields(&self, struct_defs: &IndexMap<String, StructDef>) -> bool {
         self.members.iter().any(|mem| {
-            let alignment = mem.member_full_type.alignment_with(struct_defs).max(1);
+            // Bit-fields are addressed by their storage unit, and layout has
+            // already rounded each unit to its own alignment. The declared
+            // type of a bit-field can be wider than its storage (for example
+            // `unsigned long long a : 8` is stored in an aligned 4-byte
+            // unit), so it must not be used to judge field alignment here.
+            let alignment = if mem.bit_width.is_some() {
+                mem.member_type.size() as usize
+            } else {
+                mem.member_full_type.alignment_with(struct_defs).max(1)
+            }
+            .max(1);
             mem.offset % alignment != 0
                 || Self::type_contains_unaligned_fields(&mem.member_full_type, struct_defs)
         })

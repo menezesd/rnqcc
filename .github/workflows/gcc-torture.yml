@@ -36,20 +36,35 @@ on:
 
 jobs:
   smoke:
-    name: GCC torture ${{ matrix.mode }} ${{ matrix.preprocessor }} smoke
-    runs-on: ubuntu-latest
+    name: GCC torture ${{ matrix.mode }} ${{ matrix.preprocessor }} smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - mode: compile
+          - os: ubuntu-latest
+            mode: compile
             preprocessor: external
-          - mode: execute
+          - os: ubuntu-latest
+            mode: execute
             preprocessor: external
-          - mode: compile
+          - os: ubuntu-latest
+            mode: compile
             preprocessor: internal-cpp
-          - mode: execute
+          - os: ubuntu-latest
+            mode: execute
             preprocessor: internal-cpp
+          # GitHub's macos-latest runners are arm64, so these two jobs are the
+          # only coverage aarch64-macos gets: the Ubuntu jobs above target
+          # x86_64-linux, and run_tests.sh pins Darwin to x86_64-macos under
+          # Rosetta. The preprocessor dimension is target-agnostic, so macOS
+          # exercises the backend through the external preprocessor only.
+          - os: macos-latest
+            mode: compile
+            preprocessor: external
+          - os: macos-latest
+            mode: execute
+            preprocessor: external
     env:
       GCC_TORTURE_ROOT: /tmp/rnqcc-gcc-torture/gcc
       GCC_TORTURE_SUITE: /tmp/rnqcc-gcc-torture/gcc/gcc/testsuite/gcc.c-torture
@@ -126,6 +141,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: rnqcc-gcc-torture-${{ matrix.mode }}-${{ matrix.preprocessor }}-artifacts
+          name: rnqcc-gcc-torture-${{ matrix.os }}-${{ matrix.mode }}-${{ matrix.preprocessor }}-artifacts
           path: target/ci-artifacts
           if-no-files-found: ignore

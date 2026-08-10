@@ -8,7 +8,7 @@ cargo fmt -- --check
 cargo check --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
-python3 scripts/fuzz_smoke.py --seed 31337 --cases 12 --rnqcc target/debug/rnqcc --target x86_64-linux --target aarch64-linux --rnqcc-arg=--optimize
+python3 scripts/fuzz_smoke.py --seed 31337 --cases 12 --rnqcc target/debug/rnqcc --target x86_64-linux --target aarch64-linux --target x86_64-macos --target aarch64-macos --rnqcc-arg=--optimize
 RNQCC_AARCH64_REGALLOC=1 python3 scripts/fuzz_smoke.py --seed 31337 --cases 6 --rnqcc target/debug/rnqcc --target aarch64-linux --rnqcc-arg=--optimize
 for opt in --licm --cse --inline-functions --ipcp; do
     python3 scripts/fuzz_smoke.py --seed 31337 --cases 6 --rnqcc target/debug/rnqcc --target x86_64-linux --rnqcc-arg="$opt"
